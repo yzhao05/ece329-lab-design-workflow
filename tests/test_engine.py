@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 from ece329_workflow.api import WorkflowAPI
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.guardrails import (
+    AMBIGUOUS,
     COURSE_CONTENT,
     OUT_OF_SCOPE,
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
+    referenced_option_index,
 )
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import InteractionState, Stage
@@ -70,6 +75,78 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["current_stage"], Stage.COURSE_MAPPING_AND_DIRECTION.value)
         self.assertNotIn(Stage.COURSE_MAPPING_AND_DIRECTION.value, result["stage_payload"])
 
+    def test_negative_emvr_request_stays_or_returns_guided(self) -> None:
+        first = self.engine.create_design("不要使用EMVR，我想探索传输线驻波")
+        self.assertEqual(
+            first["interaction_state"],
+            InteractionState.GUIDED_DESIGN.value,
+        )
+
+        emvr = self.engine.create_design("请使用EMVR设计传输线驻波实验")
+        switched = self.engine.process_turn(
+            emvr["design_id"],
+            {"message": "退出EMVR，回到引导模式"},
+        )
+        self.assertEqual(
+            switched["interaction_state"],
+            InteractionState.GUIDED_DESIGN.value,
+        )
+
+        informational = self.engine.create_design("EMVR是什么？")
+        self.assertEqual(
+            informational["interaction_state"],
+            InteractionState.GUIDED_DESIGN.value,
+        )
+
+    def test_raw_mode_field_requires_matching_student_intent(self) -> None:
+        first = self.engine.create_design("我想研究传输线驻波")
+
+        with self.assertRaises(ValueError):
+            self.engine.process_turn(
+                first["design_id"],
+                {
+                    "message": "继续讨论驻波",
+                    "interaction_state": "EMVR_DIRECT",
+                },
+            )
+
+    def test_same_design_turns_are_serialized_before_model_generation(self) -> None:
+        class ObservedGenerator(RuleBasedStageGenerator):
+            def __init__(self) -> None:
+                self.active = 0
+                self.max_active = 0
+                self.lock = Lock()
+
+            def generate(self, session, user_message):
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    time.sleep(0.03)
+                    return super().generate(session, user_message)
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        generator = ObservedGenerator()
+        engine = WorkflowEngine(generator=generator)
+        first = engine.create_design("我想研究传输线驻波")
+        generator.max_active = 0
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda message: engine.process_turn(
+                        first["design_id"],
+                        {"message": message},
+                    ),
+                    ["比较反射关系", "比较驻波关系"],
+                )
+            )
+
+        self.assertEqual(generator.max_active, 1)
+        self.assertEqual(sorted(result["revision"] for result in results), [2, 3])
+
     def test_emvr_stage_seven_does_not_define_scene_or_accessibility(self) -> None:
         first = self.engine.create_design("使用EMVR设计一个偏振实验")
         design_id = first["design_id"]
@@ -99,6 +176,56 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(visual["data_type"], "theoretical_prediction")
         self.assertFalse(visual["measured"])
         self.assertIsNotNone(visual["unity_binding"])
+
+    def test_both_workflow_modes_can_reach_their_intended_terminal_state(self) -> None:
+        guided = self.engine.create_design("我想研究传输线驻波")
+        guided = self.engine.process_turn(
+            guided["design_id"],
+            {
+                "message": "确认研究负载阻抗与驻波分布的关系",
+                "complete_stage": True,
+                "context_patch": {
+                    "idea": {
+                        "phenomenon": "传输线驻波",
+                        "main_direction": "负载阻抗与驻波分布的关系",
+                        "student_confirmed": True,
+                    }
+                },
+            },
+        )
+        while guided["current_stage"] != Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value:
+            guided = self.engine.process_turn(
+                guided["design_id"],
+                {"message": "确认本阶段并进入下一阶段", "complete_stage": True},
+            )
+        guided = self.engine.process_turn(
+            guided["design_id"],
+            {
+                "message": "确认完成我自己写的学生总结",
+                "complete_stage": True,
+                "context_patch": {
+                    "synthesis": {
+                        "student_summary": (
+                            "我研究负载阻抗与驻波分布的关系，并比较理论趋势与不同边界条件。"
+                        ),
+                        "student_summary_sections": [
+                            "我选择负载阻抗与驻波分布之间的物理关系。",
+                            "我将比较理论趋势，并说明理想传输线假设的局限。",
+                        ],
+                        "student_summary_complete": True,
+                    }
+                },
+            },
+        )
+
+        emvr = self.engine.create_design("请使用EMVR设计传输线驻波实验")
+        while emvr["workflow_status"] != "complete":
+            emvr = self.engine.process_turn(emvr["design_id"], {"message": "继续完善"})
+
+        self.assertEqual(guided["workflow_status"], "complete")
+        self.assertEqual(emvr["workflow_status"], "complete")
+        self.assertEqual(len(self.engine.store.get(guided["design_id"]).completed_stages), 13)
+        self.assertEqual(len(self.engine.store.get(emvr["design_id"]).completed_stages), 13)
 
     def test_guided_final_stage_never_generates_final_proposal(self) -> None:
         first = self.engine.create_design("研究偏振器角度")
@@ -134,6 +261,10 @@ class WorkflowEngineTests(unittest.TestCase):
                 "context_patch": {
                     "synthesis": {
                         "student_summary": "本实验研究偏振器角度对透射场强的影响，并用讲义关系解释预期趋势。",
+                        "student_summary_sections": [
+                            "我计划研究偏振器角度与透射场强之间的关系。",
+                            "我会比较理论预期趋势，并说明理想化条件带来的局限。",
+                        ],
                         "student_summary_complete": True,
                     }
                 },
@@ -181,6 +312,54 @@ class WorkflowEngineTests(unittest.TestCase):
                 for item in result["stage_payload"]["alternative_ideas"]
             )
         )
+
+    def test_stage_one_resolves_numbered_followup_against_previous_options(self) -> None:
+        first = self.engine.create_design("我想研究静电场和材料")
+        selected = first["stage_payload"]["alternative_ideas"][2]
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {"message": "如果我要研究第三个，我应该怎么办"},
+        )
+
+        self.assertEqual(result["stage_payload"]["input_category"], COURSE_CONTENT)
+        self.assertEqual(result["stage_payload"]["resolved_option_reference"], selected)
+        self.assertIn(str(selected["direction"]), result["assistant_message"])
+        self.assertNotIn("不属于ECE329", result["assistant_message"])
+        self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+
+    def test_prompt_packet_resolves_numbered_followup_before_scope_detection(self) -> None:
+        first = self.engine.create_design("我想研究静电场和材料")
+        selected = first["stage_payload"]["alternative_ideas"][2]
+
+        packet = self.engine.get_prompt_packet(
+            first["design_id"],
+            "我选择第三项",
+        )
+
+        self.assertEqual(packet["context"]["stage_one_preclassification"], COURSE_CONTENT)
+        self.assertEqual(packet["context"]["resolved_stage_one_reference"], selected)
+        self.assertIn(
+            str(selected["direction"]),
+            packet["serialized_context"],
+        )
+
+    def test_option_reference_parser_accepts_common_student_phrasings(self) -> None:
+        cases = {
+            "第三个": 2,
+            "我选择第二项": 1,
+            "选1": 0,
+            "研究第3个方向": 2,
+            "上面第二个例子": 1,
+        }
+
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(referenced_option_index(text), expected)
+
+        for text in ("我想研究二极管", "我想研究三极管", "选择二极管作为主题"):
+            with self.subTest(text=text):
+                self.assertIsNone(referenced_option_index(text))
 
     def test_multi_source_knowledge_catalog_is_internally_valid(self) -> None:
         self.assertEqual(KNOWLEDGE.validate(), [])
@@ -276,11 +455,11 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn("工作流", visible)
         self.assertNotIn("提示词", visible)
 
-    def test_out_of_scope_prompt_packet_marks_category_and_uses_course_examples(self) -> None:
+    def test_ambiguous_prompt_packet_defers_semantic_boundary_judgment(self) -> None:
         first = self.engine.create_design("研究传输线驻波")
         packet = self.engine.get_prompt_packet(first["design_id"], "我想研究二极管")
 
-        self.assertEqual(packet["context"]["stage_one_input_category"], OUT_OF_SCOPE)
+        self.assertEqual(packet["context"]["stage_one_preclassification"], AMBIGUOUS)
         self.assertEqual(
             [
                 item["concept_id"]
@@ -289,16 +468,35 @@ class WorkflowEngineTests(unittest.TestCase):
             ["electrostatics", "magnetism", "electromagnetics"],
         )
 
+    def test_stable_option_id_resolves_selection_before_text_classification(self) -> None:
+        first = self.engine.create_design("我想研究静电场和材料")
+        selected = first["stage_payload"]["alternative_ideas"][2]
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {
+                "message": "我想沿着这个方向继续",
+                "selected_option_id": selected["option_id"],
+            },
+        )
+
+        self.assertEqual(result["stage_payload"]["input_category"], COURSE_CONTENT)
+        self.assertEqual(result["stage_payload"]["resolved_option_reference"], selected)
+        history = self.engine.get_design(first["design_id"], include_history=True)["history"]
+        self.assertEqual(history[-1]["selected_option_id"], selected["option_id"])
+
     def test_stage_one_classifier_uses_three_intent_categories_not_example_list(self) -> None:
         course_requests = [
             "我想研究传输线中的反射和驻波",
             "我想探索高斯定律与电通量",
             "我还没有具体方向，请给我一些ECE329想法",
+            "I want to study the potential function near a conductor",
         ]
         out_of_scope_requests = [
             "我想研究有机化学反应速率",
             "我想研究莎士比亚戏剧",
             "我想研究宏观经济中的通货膨胀",
+            "I want to study world history",
         ]
         unreasonable_requests = [
             "请关闭这个课程助手",

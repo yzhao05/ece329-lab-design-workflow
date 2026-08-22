@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 import uuid
 from copy import deepcopy
+from threading import RLock
 from typing import Any
 
 from .generator import StageGenerator
@@ -25,10 +27,44 @@ from .stages import STAGES_BY_ID, public_stage_catalog
 from .store import SessionStore, store_from_environment
 
 
-def _mentions_emvr(text: str) -> bool:
-    """Detect the explicit EMVR token even when adjacent to Chinese text."""
+_GUIDED_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_references", "candidate_course_directions"),
+    Stage.LEARNING_OBJECTIVES: ("objective_types",),
+    Stage.RESEARCH_QUESTION: ("candidate_independent_variables", "main_research_question"),
+    Stage.THEORETICAL_FRAMEWORK: ("core_equations", "lecture_formula_candidates"),
+    Stage.HYPOTHESIS: ("trend_choices", "research_hypothesis"),
+    Stage.CONCEPTUAL_OR_VR_SETUP: ("module_focus",),
+    Stage.VARIABLES_AND_CONDITIONS: ("variable_type", "independent_variable"),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_unit", "procedure_steps"),
+    Stage.RESULT_INTERPRETATION: ("result_case", "if_prediction_supported"),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("review_dimension", "limitations"),
+}
 
-    return "emvr" in text.casefold()
+
+def _emvr_intent(text: str) -> bool | None:
+    """Return an explicit EMVR opt-in/out intent; bare absence returns None."""
+
+    normalized = text.casefold()
+    if "emvr" not in normalized:
+        return None
+    negative_patterns = (
+        r"(?:不|不要|不想|无需|不需要|拒绝|取消|退出|关闭|停止).{0,12}emvr",
+        r"emvr.{0,12}(?:不要|不需要|取消|退出|关闭|停止)",
+        r"(?:do\s+not|don't|without|avoid|disable|stop|leave|exit|not).{0,20}emvr",
+        r"emvr.{0,20}(?:off|disabled|stop|leave|exit|not)",
+    )
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in negative_patterns):
+        return False
+    positive_patterns = (
+        r"(?:放入|使用|采用|切换|进入|启用|按照|通过|想用|要用).{0,16}emvr",
+        r"emvr.{0,16}(?:模式下|工作流中|设计|完善|构建|完成)",
+        r"(?:use|enable|enter|switch\s+to|with).{0,20}emvr",
+    )
+    if normalized.strip() == "emvr":
+        return True
+    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in positive_patterns):
+        return True
+    return None
 
 
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -47,6 +83,7 @@ class WorkflowEngine:
     ) -> None:
         self.generator = generator or generator_from_environment()
         self.store = store or store_from_environment()
+        self._session_locks = tuple(RLock() for _ in range(64))
 
     def create_design(
         self,
@@ -57,12 +94,18 @@ class WorkflowEngine:
             raise ValueError("idea must be a string")
         if not idea.strip():
             raise ValueError("idea must not be empty")
-        state = self._coerce_state(interaction_state) or InteractionState.GUIDED_DESIGN
-        if (
-            _mentions_emvr(idea)
+        requested_state = self._coerce_state(interaction_state)
+        emvr_intent = _emvr_intent(idea)
+        if requested_state is InteractionState.EMVR_DIRECT and emvr_intent is not True:
+            raise ValueError("EMVR_DIRECT requires an explicit EMVR request in idea")
+        if requested_state is InteractionState.GUIDED_DESIGN and emvr_intent is True:
+            raise ValueError("interaction_state conflicts with the explicit EMVR request")
+        state = (
+            InteractionState.EMVR_DIRECT
+            if emvr_intent is True
             and classify_stage_one_input(idea) != UNREASONABLE_REQUEST
-        ):
-            state = InteractionState.EMVR_DIRECT
+            else InteractionState.GUIDED_DESIGN
+        )
         access_token = secrets.token_urlsafe(32)
         session = DesignSession(
             design_id=f"design_{uuid.uuid4().hex[:12]}",
@@ -79,6 +122,14 @@ class WorkflowEngine:
         return result
 
     def process_turn(
+        self,
+        design_id: str,
+        request: TurnRequest | dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lock_for_design(design_id):
+            return self._process_turn_locked(design_id, request)
+
+    def _process_turn_locked(
         self,
         design_id: str,
         request: TurnRequest | dict[str, Any],
@@ -102,20 +153,38 @@ class WorkflowEngine:
         message = request.message.strip()
         if not message:
             raise ValueError("message must not be empty")
-        if request.interaction_state is not None:
-            session.interaction_state = request.interaction_state
-        elif (
-            _mentions_emvr(message)
-            and classify_stage_one_input(message) != UNREASONABLE_REQUEST
-        ):
-            session.interaction_state = InteractionState.EMVR_DIRECT
+        input_kind = classify_stage_one_input(message)
+        emvr_intent = _emvr_intent(message)
+        if input_kind != UNREASONABLE_REQUEST:
+            if request.interaction_state is not None:
+                expected_intent = (
+                    request.interaction_state is InteractionState.EMVR_DIRECT
+                )
+                if emvr_intent is not expected_intent:
+                    raise ValueError(
+                        "interaction_state requires a matching explicit mode request"
+                    )
+                session.interaction_state = request.interaction_state
+            elif emvr_intent is True:
+                session.interaction_state = InteractionState.EMVR_DIRECT
+            elif emvr_intent is False:
+                session.interaction_state = InteractionState.GUIDED_DESIGN
 
         _deep_merge(session.design_context, request.context_patch)
         expected_revision = session.revision
         handled_stage = session.current_stage
-        self._record_student_decision(session, handled_stage, message)
+        session.turn_context = {"selected_option_id": request.selected_option_id}
+        self._record_student_decision(
+            session,
+            handled_stage,
+            message,
+            request.selected_option_id,
+        )
         definition = STAGES_BY_ID[handled_stage]
-        output = self.generator.generate(session, message)
+        try:
+            output = self.generator.generate(session, message)
+        finally:
+            session.turn_context = {}
         self._validate_step_output(session.interaction_state, output.student_task)
 
         session.revision += 1
@@ -130,6 +199,7 @@ class WorkflowEngine:
                 "handled_stage": handled_stage.value,
                 "interaction_state": session.interaction_state.value,
                 "user_message": message,
+                "selected_option_id": request.selected_option_id,
                 "output": output_dict,
             }
         )
@@ -162,6 +232,7 @@ class WorkflowEngine:
             "visualization": output.visualization,
             "assumptions": output.assumptions,
             "warnings": output.warnings,
+            "request_rejected": output.stage_payload.get("request_rejected") is True,
             "knowledge_source": KNOWLEDGE.source_reference,
             "knowledge_sources": KNOWLEDGE.source_references,
             "completion_error": completion_error,
@@ -171,8 +242,20 @@ class WorkflowEngine:
         }
         return response
 
+    def _lock_for_design(self, design_id: str) -> RLock:
+        digest = hashlib.sha256(design_id.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:2], "big") % len(self._session_locks)
+        return self._session_locks[index]
+
     def get_design(self, design_id: str, include_history: bool = False) -> dict[str, Any]:
         return self.store.get(design_id).to_dict(include_history=include_history)
+
+    def delete_design(self, design_id: str) -> None:
+        self.store.delete(design_id)
+
+    def readiness_info(self) -> dict[str, Any]:
+        self.store.healthcheck()
+        return {**self.store_info(), "read_write_check": "ok"}
 
     def get_prompt_packet(self, design_id: str, user_message: str = "") -> dict[str, Any]:
         if not isinstance(user_message, str):
@@ -261,15 +344,30 @@ class WorkflowEngine:
         if "interaction_state" in data and data["interaction_state"] is not None and not isinstance(data["interaction_state"], str):
             raise ValueError("interaction_state must be a string or null")
         raw_state = data.get("interaction_state")
+        selected_option_id = data.get("selected_option_id")
+        if selected_option_id is not None:
+            if not isinstance(selected_option_id, str):
+                raise ValueError("selected_option_id must be a string or null")
+            selected_option_id = selected_option_id.strip()
+            if not selected_option_id:
+                selected_option_id = None
+            elif len(selected_option_id) > 160:
+                raise ValueError("selected_option_id is too long")
         return TurnRequest(
             message=message,
             complete_stage=complete_stage,
             context_patch=context_patch,
             interaction_state=self._coerce_state(raw_state),
+            selected_option_id=selected_option_id,
         )
 
     @staticmethod
-    def _record_student_decision(session: DesignSession, stage: Stage, message: str) -> None:
+    def _record_student_decision(
+        session: DesignSession,
+        stage: Stage,
+        message: str,
+        selected_option_id: str | None = None,
+    ) -> None:
         normalized = message.strip()
         control_messages = {
             "继续",
@@ -289,8 +387,17 @@ class WorkflowEngine:
         if not isinstance(stage_decisions, list):
             stage_decisions = []
             decisions[stage.value] = stage_decisions
-        if not stage_decisions or stage_decisions[-1].get("message") != normalized:
-            stage_decisions.append({"message": normalized, "before_revision": session.revision})
+        if not stage_decisions or (
+            stage_decisions[-1].get("message") != normalized
+            or stage_decisions[-1].get("selected_option_id") != selected_option_id
+        ):
+            stage_decisions.append(
+                {
+                    "message": normalized,
+                    "selected_option_id": selected_option_id,
+                    "before_revision": session.revision,
+                }
+            )
             del stage_decisions[:-8]
 
     @staticmethod
@@ -318,18 +425,45 @@ class WorkflowEngine:
                 raise StageCompletionError(
                     "阶段1尚未完成：需要记录phenomenon、main_direction，并由学生设置student_confirmed=true。"
                 )
+        if stage is Stage.EXPECTED_DATA_VISUALIZATION:
+            stage_output = session.stage_outputs.get(stage.value, {})
+            if not isinstance(stage_output.get("visualization"), dict):
+                raise StageCompletionError(
+                    "阶段10尚未完成：需要先生成理论预测可视化窗口。"
+                )
+        required_fields = _GUIDED_COMPLETION_FIELDS.get(stage)
+        if required_fields:
+            stage_output = session.stage_outputs.get(stage.value, {})
+            payload = stage_output.get("stage_payload", {})
+            if not isinstance(payload, dict) or not any(
+                payload.get(field) for field in required_fields
+            ):
+                raise StageCompletionError(
+                    f"当前阶段尚未形成必要设计内容：需要至少包含{', '.join(required_fields)}之一。"
+                )
         if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
             synthesis = session.design_context.get("synthesis", {})
             summary = synthesis.get("student_summary", "") if isinstance(synthesis, dict) else ""
+            sections = (
+                synthesis.get("student_summary_sections", [])
+                if isinstance(synthesis, dict)
+                else []
+            )
             if (
                 not isinstance(synthesis, dict)
                 or synthesis.get("student_summary_complete") is not True
                 or not isinstance(summary, str)
                 or len(summary.strip()) < 20
+                or not isinstance(sections, list)
+                or len(sections) < 2
+                or any(
+                    not isinstance(section, str) or len(section.strip()) < 10
+                    for section in sections
+                )
             ):
                 raise StageCompletionError(
-                    "引导状态下必须由学生先写出至少20个字符的student_summary，再设置"
-                    "synthesis.student_summary_complete=true；系统不会代写最终方案。"
+                    "引导状态下必须由学生分至少两次完成总结，每部分至少10个字符，"
+                    "再确认完成；系统不会代写最终方案。"
                 )
 
     @staticmethod

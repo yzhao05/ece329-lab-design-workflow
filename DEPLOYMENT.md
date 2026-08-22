@@ -23,7 +23,7 @@ For a local frontend preview, set this value in `.env.production`:
 ECE329_ALLOWED_ORIGINS=http://127.0.0.1:4173
 ```
 
-Check `http://127.0.0.1:8080/health`. A production-ready local response should show `generator.provider=openai` and `storage.provider=sqlite`. The process can report that a host volume is required, but only a restart test can prove that the platform mounted one.
+Check `http://127.0.0.1:8080/ready`. A production-ready local response should show `status=ready`, `generator.provider=openai`, `storage.provider=sqlite`, and `storage.read_write_check=ok`. The process can report that a host volume is required, but only a restart test can prove that the platform mounted one.
 
 ## 2. Deploy the backend container
 
@@ -33,6 +33,8 @@ Use any container host that provides a public HTTPS URL and a persistent disk. C
 OPENAI_API_KEY=<backend secret>
 ECE329_GENERATOR=auto
 OPENAI_MODEL=gpt-5.4-mini
+OPENAI_FINAL_MAX_OUTPUT_TOKENS=5000
+ECE329_OPENAI_STATEFUL=false
 ECE329_ACCESS_CODE=<generate-a-long-random-course-code>
 ECE329_ALLOWED_ORIGINS=https://YOUR_GITHUB_USERNAME.github.io
 ECE329_DATABASE_PATH=/data/ece329.sqlite3
@@ -40,16 +42,21 @@ ECE329_RATE_LIMIT_REQUESTS=30
 ECE329_RATE_LIMIT_WINDOW_SECONDS=60
 ECE329_MAX_BODY_BYTES=65536
 ECE329_MAX_TEXT_CHARS=4000
+ECE329_SESSION_TTL_DAYS=30
+ECE329_ENABLE_PROMPT_DEBUG=false
 ```
 
 Mount a persistent volume at `/data`. Do not put a repository path in `ECE329_ALLOWED_ORIGINS`: for `https://name.github.io/repository/`, the browser origin is only `https://name.github.io`.
 
+`ECE329_OPENAI_STATEFUL=false` is the privacy-preserving default: recent dialogue is assembled from the local session and model calls use `store=false`. Set it to `true` only if you want Responses API continuity through `previous_response_id`; that mode uses `store=true` and persists the latest response ID in the local session database. Local stage state remains authoritative in both modes.
+
 Set `ECE329_TRUST_PROXY=true` only when the hosting platform overwrites and validates `X-Forwarded-For`. Otherwise leave it `false` so clients cannot forge the address used by the limiter.
 
-After deployment, verify:
+After deployment, verify both liveness and readiness:
 
 ```bat
 curl https://YOUR-BACKEND-HOST/health
+curl https://YOUR-BACKEND-HOST/ready
 ```
 
 ## 3. Connect GitHub Pages without editing config.js
@@ -64,14 +71,20 @@ The workflow injects this public URL only into the uploaded Pages artifact. The 
 
 ## 4. Acceptance checks
 
-- The webpage badge says `Agent API 已连接`.
-- Browser developer tools show `/health` and `/v1/designs` requests going to the HTTPS backend.
+- The webpage badge says `课程服务已连接`.
+- Browser developer tools show `/ready` and `/v1/designs` requests going to the HTTPS backend.
 - `/health` reports the expected model, `storage.provider=sqlite`, and `storage.host_volume_required=true`.
 - Creating a design without `X-ECE329-Access-Code` returns HTTP 401 when the access code is configured.
 - The returned one-time `design_access_token` can continue that design; omitting it from design routes returns HTTP 401.
 - Requests from an origin not listed in `ECE329_ALLOWED_ORIGINS` return HTTP 403.
 - Repeated POST requests beyond the configured window return HTTP 429.
 - Restarting the container with the same `/data` volume preserves an existing `design_id`.
+- Clicking “新建设计” sends `DELETE /v1/designs/{design_id}` before clearing the browser session.
+
+Inactive sessions expire after `ECE329_SESSION_TTL_DAYS` (default 30). Keep
+`ECE329_ENABLE_PROMPT_DEBUG=false` in production: the prompt-packet endpoint contains
+internal workflow instructions. If private debugging temporarily requires it, also set
+a separate strong `ECE329_PROMPT_DEBUG_TOKEN` and send it in `X-ECE329-Debug-Token`.
 
 ## Current scaling boundary
 

@@ -59,6 +59,8 @@ class DesignSession:
     design_context: dict[str, Any] = field(default_factory=dict)
     stage_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
+    model_context: dict[str, Any] = field(default_factory=dict)
+    turn_context: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def current_stage(self) -> Stage:
@@ -94,6 +96,7 @@ class TurnRequest:
     complete_stage: bool = False
     context_patch: dict[str, Any] = field(default_factory=dict)
     interaction_state: InteractionState | None = None
+    selected_option_id: str | None = None
 
 
 class WorkflowError(Exception):

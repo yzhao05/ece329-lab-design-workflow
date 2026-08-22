@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from importlib.resources import files
 from typing import Any
 
@@ -46,10 +47,10 @@ class LectureKnowledgeBase:
             score = 0
             for keyword in lecture["keywords"]:
                 keyword_normalized = keyword.casefold()
-                if keyword_normalized and keyword_normalized in normalized:
+                if self._term_matches(keyword_normalized, normalized):
                     score += max(2, len(keyword_normalized.split()))
             for concept in lecture["concepts"]:
-                if concept.casefold() in normalized:
+                if self._term_matches(concept.casefold(), normalized):
                     score += 3
             if score:
                 scored.append((score, lecture))
@@ -70,6 +71,7 @@ class LectureKnowledgeBase:
         }
         return [
             {
+                "option_id": f"course_block:{block['id']}",
                 "direction": labels[block["id"]],
                 "focus": descriptions[block["id"]],
                 "source_pages": overview["pages"],
@@ -78,6 +80,19 @@ class LectureKnowledgeBase:
             }
             for block in overview["course_blocks"]
         ]
+
+    @staticmethod
+    def _term_matches(term: str, text: str) -> bool:
+        """Match Latin catalog terms by token boundary and CJK terms by substring."""
+
+        if not term:
+            return False
+        if re.search(r"[a-z0-9]", term) and not re.search(r"[\u3400-\u9fff]", term):
+            return re.search(
+                rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+                text,
+            ) is not None
+        return term in text
 
     def match_supplemental_concepts(
         self,
@@ -90,10 +105,10 @@ class LectureKnowledgeBase:
             score = 0
             for keyword in concept["keywords"]:
                 keyword_normalized = keyword.casefold()
-                if keyword_normalized and keyword_normalized in normalized:
+                if self._term_matches(keyword_normalized, normalized):
                     score += max(2, len(keyword_normalized.split()))
             for label in concept["concepts"]:
-                if label.casefold() in normalized:
+                if self._term_matches(label.casefold(), normalized):
                     score += 3
             if score:
                 scored.append((score, concept))
@@ -113,6 +128,9 @@ class LectureKnowledgeBase:
             concept = supplemental_matches[0]
             return [
                 {
+                    "option_id": (
+                        f"supplemental:{concept['supplemental_concept_id']}:{index}"
+                    ),
                     **dict(option),
                     "references": [
                         {
@@ -126,16 +144,20 @@ class LectureKnowledgeBase:
                     "supplemental_concept_id": concept["supplemental_concept_id"],
                     "course_scope_concept_ids": list(concept["course_scope_concept_ids"]),
                 }
-                for option in concept["relationship_examples"][:limit]
+                for index, option in enumerate(
+                    concept["relationship_examples"][:limit],
+                    start=1,
+                )
             ]
         matches = self.match_concepts(text, limit=3)
         if not matches:
             return self.broad_entry_points()[:limit]
         options: list[dict[str, Any]] = []
         for lecture in matches:
-            for axis in lecture["brainstorm_axes"]:
+            for axis_index, axis in enumerate(lecture["brainstorm_axes"], start=1):
                 options.append(
                     {
+                        "option_id": f"lecture:{lecture['id']}:{axis_index}",
                         "direction": lecture["title"],
                         "focus": axis,
                         "concept_id": lecture["id"],

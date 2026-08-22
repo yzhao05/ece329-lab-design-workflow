@@ -79,6 +79,29 @@ class WorkflowAPI:
                         "storage": self.engine.store_info(),
                     },
                 )
+            if method == "GET" and path == "/ready":
+                try:
+                    storage_readiness = self.engine.readiness_info()
+                except Exception:
+                    return self._respond(
+                        start_response,
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {
+                            "status": "not_ready",
+                            "service": "ece329-lab-design-workflow",
+                            "error": "storage_unavailable",
+                        },
+                    )
+                return self._respond(
+                    start_response,
+                    HTTPStatus.OK,
+                    {
+                        "status": "ready",
+                        "service": "ece329-lab-design-workflow",
+                        "storage": storage_readiness,
+                        "generator": self.engine.generator_info(),
+                    },
+                )
             if method == "GET" and path == "/v1/stages":
                 return self._respond(start_response, HTTPStatus.OK, {"stages": self.engine.list_stages()})
             if method == "GET" and path == "/v1/knowledge/source":
@@ -97,6 +120,10 @@ class WorkflowAPI:
                 query = parse_qs(environ.get("QUERY_STRING", "")).get("q", [""])[0].strip()
                 if not query:
                     raise ValueError("q must not be empty")
+                if len(query) > self.settings.max_text_chars:
+                    raise ValueError(
+                        f"q must not exceed {self.settings.max_text_chars} characters"
+                    )
                 return self._respond(start_response, HTTPStatus.OK, self.engine.search_knowledge(query))
             if method == "POST" and path == "/v1/designs":
                 self._require_admission_code(environ)
@@ -113,6 +140,10 @@ class WorkflowAPI:
                 include_history = query.get("include_history", ["false"])[0].lower() == "true"
                 result = self.engine.get_design(design_match.group(1), include_history=include_history)
                 return self._respond(start_response, HTTPStatus.OK, result)
+            if method == "DELETE" and design_match:
+                self._require_design_token(environ, design_match.group(1))
+                self.engine.delete_design(design_match.group(1))
+                return self._respond(start_response, HTTPStatus.NO_CONTENT, None)
 
             turn_match = re.fullmatch(r"/v1/designs/([^/]+)/turns", path)
             if method == "POST" and turn_match:
@@ -124,7 +155,14 @@ class WorkflowAPI:
 
             prompt_match = re.fullmatch(r"/v1/designs/([^/]+)/prompt", path)
             if method == "POST" and prompt_match:
+                if not self.settings.prompt_debug_enabled:
+                    return self._respond(
+                        start_response,
+                        HTTPStatus.NOT_FOUND,
+                        {"error": "route_not_found"},
+                    )
                 self._require_design_token(environ, prompt_match.group(1))
+                self._require_prompt_debug_token(environ)
                 body = self._read_json(environ)
                 message = self._optional_string(body, "message") or ""
                 if len(message) > self.settings.max_text_chars:
@@ -183,6 +221,11 @@ class WorkflowAPI:
         if separator != " " or scheme.casefold() != "bearer" or not self.engine.verify_design_token(design_id, token.strip()):
             raise DesignAccessDenied("A valid design access token is required.")
 
+    def _require_prompt_debug_token(self, environ: dict[str, Any]) -> None:
+        candidate = str(environ.get("HTTP_X_ECE329_DEBUG_TOKEN", ""))
+        if not self.settings.accepts_prompt_debug_token(candidate):
+            raise DesignAccessDenied("A valid prompt debug token is required.")
+
     @staticmethod
     def _required_string(
         body: dict[str, Any],
@@ -220,8 +263,8 @@ class WorkflowAPI:
                 cors_headers.extend(
                     [
                         ("Access-Control-Allow-Origin", allowed_origin),
-                        ("Access-Control-Allow-Headers", "Content-Type, Authorization, X-ECE329-Access-Code"),
-                        ("Access-Control-Allow-Methods", "GET,POST,OPTIONS"),
+                        ("Access-Control-Allow-Headers", "Content-Type, Authorization, X-ECE329-Access-Code, X-ECE329-Debug-Token"),
+                        ("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS"),
                         ("Vary", "Origin"),
                     ]
                 )

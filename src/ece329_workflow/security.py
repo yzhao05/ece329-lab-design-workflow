@@ -65,6 +65,8 @@ class APISettings:
     rate_limit_window_seconds: int = 60
     trust_proxy: bool = False
     access_code: str = ""
+    prompt_debug_enabled: bool = False
+    prompt_debug_token: str = ""
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "APISettings":
@@ -80,6 +82,15 @@ class APISettings:
             )
         else:
             origins = DEFAULT_LOCAL_ORIGINS
+        prompt_debug_enabled = _boolean(
+            env.get("ECE329_ENABLE_PROMPT_DEBUG", "false"),
+            "ECE329_ENABLE_PROMPT_DEBUG",
+        )
+        prompt_debug_token = env.get("ECE329_PROMPT_DEBUG_TOKEN", "").strip()
+        if prompt_debug_enabled and not prompt_debug_token:
+            raise ValueError(
+                "ECE329_PROMPT_DEBUG_TOKEN is required when prompt debug is enabled"
+            )
         return cls(
             allowed_origins=origins,
             max_body_bytes=_positive_int(
@@ -103,6 +114,8 @@ class APISettings:
                 "ECE329_TRUST_PROXY",
             ),
             access_code=env.get("ECE329_ACCESS_CODE", "").strip(),
+            prompt_debug_enabled=prompt_debug_enabled,
+            prompt_debug_token=prompt_debug_token,
         )
 
     def allows_origin(self, origin: str) -> bool:
@@ -111,6 +124,13 @@ class APISettings:
 
     def accepts_access_code(self, candidate: str) -> bool:
         return not self.access_code or hmac.compare_digest(self.access_code, candidate)
+
+    def accepts_prompt_debug_token(self, candidate: str) -> bool:
+        return (
+            self.prompt_debug_enabled
+            and bool(self.prompt_debug_token)
+            and hmac.compare_digest(self.prompt_debug_token, candidate)
+        )
 
 
 class FixedWindowRateLimiter:

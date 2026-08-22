@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .generator import RuleBasedStageGenerator
 from .guardrails import (
+    AMBIGUOUS,
     COURSE_CONTENT,
     OUT_OF_SCOPE,
     UNREASONABLE_REQUEST,
@@ -26,6 +29,81 @@ ALLOWED_VISUALIZATION_TYPES = {
     "theoretical_prediction",
     "illustrative_synthetic_data",
 }
+GUIDED_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_references", "candidate_course_directions"),
+    Stage.LEARNING_OBJECTIVES: ("objective_types",),
+    Stage.RESEARCH_QUESTION: ("candidate_independent_variables", "main_research_question"),
+    Stage.THEORETICAL_FRAMEWORK: ("core_equations", "lecture_formula_candidates"),
+    Stage.HYPOTHESIS: ("trend_choices", "research_hypothesis"),
+    Stage.CONCEPTUAL_OR_VR_SETUP: ("module_focus",),
+    Stage.VARIABLES_AND_CONDITIONS: ("variable_type", "independent_variable"),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_unit", "procedure_steps"),
+    Stage.RESULT_INTERPRETATION: ("result_case", "if_prediction_supported"),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("review_dimension", "limitations"),
+}
+EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.IDEA_BRAINSTORMING: (
+        "original_idea",
+        "target_phenomenon",
+        "possible_vr_interactions",
+    ),
+    Stage.COURSE_MAPPING_AND_DIRECTION: (
+        "course_references",
+        "selected_direction",
+        "vr_suitability",
+    ),
+    Stage.LEARNING_OBJECTIVES: (
+        "conceptual_objective",
+        "calculation_objective",
+        "analysis_objective",
+        "vr_interaction_objective",
+    ),
+    Stage.RESEARCH_QUESTION: (
+        "main_research_question",
+        "adjustable_quantity_in_vr",
+        "observable_quantity_in_vr",
+    ),
+    Stage.THEORETICAL_FRAMEWORK: (
+        "core_equations",
+        "simulation_inputs",
+        "calculated_outputs",
+        "visual_only_elements",
+    ),
+    Stage.HYPOTHESIS: ("research_hypothesis", "expected_trend", "limiting_cases"),
+    Stage.CONCEPTUAL_OR_VR_SETUP: (
+        "unity_objects",
+        "interactions",
+        "physics_layer",
+        "visualization_layer",
+        "measurement_interface",
+    ),
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "independent_variable",
+        "dependent_variable",
+        "controlled_variables",
+        "reference_condition",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps", "comparison_logic"),
+    Stage.EXPECTED_DATA_VISUALIZATION: ("trend_annotation", "unity_update_event"),
+    Stage.RESULT_INTERPRETATION: (
+        "if_prediction_supported",
+        "if_opposite_trend",
+        "if_no_clear_change",
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+        "conceptual_feasibility",
+        "limitations",
+        "teaching_value",
+        "vr_added_value",
+    ),
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: (
+        "proposal_status",
+        "proposal_sections",
+        "final_design",
+        "builder_pack_handoff",
+    ),
+}
+LOGGER = logging.getLogger(__name__)
 
 
 class ModelServiceError(WorkflowError):
@@ -38,6 +116,13 @@ class ModelConfigurationError(ModelServiceError):
 
 class ModelOutputError(ModelServiceError):
     pass
+
+
+class ModelHTTPError(ModelServiceError):
+    def __init__(self, status_code: int, error_code: str | None = None) -> None:
+        super().__init__(f"OpenAI Responses API returned HTTP {status_code}")
+        self.status_code = status_code
+        self.error_code = error_code
 
 
 class ResponsesTransport(Protocol):
@@ -69,9 +154,17 @@ class OpenAIResponsesHTTPTransport:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
-            raise ModelServiceError(
-                f"OpenAI Responses API returned HTTP {exc.code}"
-            ) from exc
+            error_code: str | None = None
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8"))
+                error_object = error_payload.get("error", {})
+                if isinstance(error_object, dict) and isinstance(
+                    error_object.get("code"), str
+                ):
+                    error_code = error_object["code"]
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                pass
+            raise ModelHTTPError(exc.code, error_code) from exc
         except (URLError, TimeoutError, socket.timeout) as exc:
             raise ModelServiceError("OpenAI Responses API is temporarily unavailable") from exc
         except json.JSONDecodeError as exc:
@@ -165,39 +258,53 @@ def _contains_forbidden_key(value: Any, forbidden: set[str]) -> bool:
 def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> None:
     stage = session.current_stage
     visual = output.visualization
-    if (
-        session.interaction_state is InteractionState.GUIDED_DESIGN
-        and stage is Stage.IDEA_BRAINSTORMING
-    ):
-        visible_text = " ".join(
-            [output.assistant_message, output.student_task or "", *output.warnings]
-        ).casefold()
-        forbidden_student_facing_terms = (
-            "knowledge_retrieval",
-            "知识检索",
-            "知识目录",
-            "stage_payload",
-            "结构化字段",
-            "concept_id",
-            "supplemental_concept_id",
-            "pdf",
-            "讲义第",
-            "内部阶段",
-            "系统指令",
-            "提示词",
-            "内部指令",
-            "模型服务",
-            "api",
-            "前端",
-            "后端",
-            "服务器",
-            "部署",
-            "源代码",
-        )
-        if any(term in visible_text for term in forbidden_student_facing_terms):
+    if session.interaction_state is InteractionState.GUIDED_DESIGN:
+        required_fields = GUIDED_REQUIRED_PAYLOAD_FIELDS.get(stage)
+        if required_fields and not any(
+            output.stage_payload.get(field) for field in required_fields
+        ):
             raise ModelOutputError(
-                "Guided Stage 1 contains implementation terms in student-facing text"
+                f"Guided stage {stage.value} is missing its required design artifact"
             )
+    else:
+        required_fields = EMVR_REQUIRED_PAYLOAD_FIELDS.get(stage, ())
+        missing_fields = [
+            field for field in required_fields if not output.stage_payload.get(field)
+        ]
+        if missing_fields:
+            raise ModelOutputError(
+                f"EMVR stage {stage.value} is missing required fields: "
+                + ", ".join(missing_fields)
+            )
+    visible_text = " ".join(
+        [output.assistant_message, output.student_task or "", *output.warnings]
+    ).casefold()
+    forbidden_student_facing_terms = (
+        "knowledge_retrieval",
+        "知识检索",
+        "知识目录",
+        "stage_payload",
+        "结构化字段",
+        "concept_id",
+        "supplemental_concept_id",
+        "pdf",
+        "讲义第",
+        "内部阶段",
+        "系统指令",
+        "提示词",
+        "内部指令",
+        "模型服务",
+        "api",
+        "前端",
+        "后端",
+        "服务器",
+        "部署",
+        "源代码",
+    )
+    if any(term in visible_text for term in forbidden_student_facing_terms):
+        raise ModelOutputError(
+            "Student-facing text contains internal implementation terminology"
+        )
     if stage is Stage.EXPECTED_DATA_VISUALIZATION:
         if visual is None:
             raise ModelOutputError("Stage 10 requires a visualization object")
@@ -205,6 +312,23 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
             raise ModelOutputError("Stage 10 visualization has an invalid data_type")
         if visual.get("measured") is not False:
             raise ModelOutputError("Stage 10 visualization must set measured=false")
+        if not isinstance(visual.get("x_axis"), dict) or not isinstance(
+            visual.get("y_axis"), dict
+        ):
+            raise ModelOutputError("Stage 10 visualization requires both axes")
+        series = visual.get("series")
+        if not isinstance(series, list) or not series:
+            raise ModelOutputError("Stage 10 visualization requires at least one series")
+        if not isinstance(visual.get("disclaimer"), str) or not visual[
+            "disclaimer"
+        ].strip():
+            raise ModelOutputError("Stage 10 visualization requires a disclaimer")
+        for item in series:
+            if not isinstance(item, dict):
+                raise ModelOutputError("Stage 10 series entries must be objects")
+            points = item.get("points", [])
+            if not isinstance(points, list) or len(points) > 500:
+                raise ModelOutputError("Stage 10 series points are invalid")
     elif visual is not None:
         raise ModelOutputError("Only Stage 10 may return a visualization object")
 
@@ -330,7 +454,10 @@ def _validate_lecture_grounding(
     if output.visualization is not None:
         validate(output.visualization, ("visualization",))
 
-    if session.current_stage is Stage.IDEA_BRAINSTORMING:
+    if (
+        session.current_stage is Stage.IDEA_BRAINSTORMING
+        and session.interaction_state is InteractionState.GUIDED_DESIGN
+    ):
         input_category = output.stage_payload.get("input_category")
         allowed_input_categories = {
             COURSE_CONTENT,
@@ -342,7 +469,7 @@ def _validate_lecture_grounding(
                 "Stage 1 must classify the request into one supported input category"
             )
         preclassified_category = prompt_packet["context"].get(
-            "stage_one_input_category"
+            "stage_one_preclassification"
         )
         if (
             preclassified_category == UNREASONABLE_REQUEST
@@ -358,13 +485,12 @@ def _validate_lecture_grounding(
             raise ModelOutputError(
                 "A course-content request must remain in the course-content category"
             )
-        if (
-            preclassified_category == OUT_OF_SCOPE
-            and input_category not in {OUT_OF_SCOPE, UNREASONABLE_REQUEST}
-        ):
-            raise ModelOutputError(
-                "An out-of-scope request cannot be upgraded to course content"
-            )
+        if preclassified_category not in {
+            COURSE_CONTENT,
+            UNREASONABLE_REQUEST,
+            AMBIGUOUS,
+        }:
+            raise ModelOutputError("Stage 1 preclassification was invalid")
         alternatives = output.stage_payload.get("alternative_ideas")
         if output.stage_payload.get("brainstorm_activity") != "RELATIONSHIP_DISCOVERY":
             raise ModelOutputError(
@@ -405,6 +531,18 @@ def _validate_lecture_grounding(
             ):
                 raise ModelOutputError(
                     "Unreasonable requests must be explicitly refused"
+                )
+        resolved_reference = prompt_packet["context"].get(
+            "resolved_stage_one_reference"
+        )
+        if isinstance(resolved_reference, dict):
+            selected_direction = str(resolved_reference.get("direction", "")).strip()
+            if (
+                selected_direction
+                and selected_direction not in output.assistant_message
+            ):
+                raise ModelOutputError(
+                    "A contextual option selection must acknowledge the selected direction"
                 )
     if session.current_stage is Stage.COURSE_MAPPING_AND_DIRECTION:
         references = output.stage_payload.get("course_references")
@@ -448,11 +586,21 @@ class OpenAIStageGenerator:
     transport: ResponsesTransport
     model: str = DEFAULT_MODEL
     max_output_tokens: int = 2400
+    final_max_output_tokens: int = 5000
+    stateful: bool = False
+    _api_successes: int = field(default=0, init=False, repr=False)
+    _api_failures: int = field(default=0, init=False, repr=False)
+    _chain_resets: int = field(default=0, init=False, repr=False)
+    _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
             return RuleBasedStageGenerator().generate(session, user_message)
-        packet = build_prompt_packet(session, user_message)
+        packet = build_prompt_packet(
+            session,
+            user_message,
+            include_recent_history=not self.stateful,
+        )
         input_text = (
             f"{packet['user']}\n\n"
             "传输契约说明：把stage_payload对象序列化到stage_payload_json字符串中；"
@@ -461,8 +609,13 @@ class OpenAIStageGenerator:
             "CONTEXT_JSON:\n"
             f"{packet['serialized_context']}"
         )
-        response = self.transport.create(
-            {
+        output_budget = (
+            max(self.max_output_tokens, self.final_max_output_tokens)
+            if session.interaction_state is InteractionState.EMVR_DIRECT
+            and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            else self.max_output_tokens
+        )
+        request_payload: dict[str, Any] = {
                 "model": self.model,
                 "instructions": packet["system"],
                 "input": [
@@ -479,10 +632,45 @@ class OpenAIStageGenerator:
                         "strict": True,
                     }
                 },
-                "max_output_tokens": self.max_output_tokens,
-                "store": False,
+                "max_output_tokens": output_budget,
+                "store": self.stateful,
             }
-        )
+        if self.stateful:
+            previous_response_id = session.model_context.get(
+                "openai_previous_response_id"
+            )
+            if isinstance(previous_response_id, str) and previous_response_id:
+                request_payload["previous_response_id"] = previous_response_id
+        try:
+            response = self.transport.create(request_payload)
+        except ModelHTTPError as exc:
+            can_reset_chain = (
+                self.stateful
+                and "previous_response_id" in request_payload
+                and exc.status_code in {400, 404}
+            )
+            if not can_reset_chain:
+                with self._metrics_lock:
+                    self._api_failures += 1
+                raise
+            session.model_context.pop("openai_previous_response_id", None)
+            request_payload.pop("previous_response_id", None)
+            with self._metrics_lock:
+                self._chain_resets += 1
+            LOGGER.warning(
+                "Resetting invalid OpenAI response chain for design %s",
+                session.design_id,
+            )
+            try:
+                response = self.transport.create(request_payload)
+            except ModelServiceError:
+                with self._metrics_lock:
+                    self._api_failures += 1
+                raise
+        except ModelServiceError:
+            with self._metrics_lock:
+                self._api_failures += 1
+            raise
         try:
             raw_output = json.loads(_extract_output_text(response))
         except json.JSONDecodeError as exc:
@@ -513,13 +701,27 @@ class OpenAIStageGenerator:
         )
         _validate_stage_constraints(session, output)
         _validate_lecture_grounding(session, output, packet)
+        if self.stateful:
+            response_id = response.get("id")
+            if isinstance(response_id, str) and response_id:
+                session.model_context["openai_previous_response_id"] = response_id
+        with self._metrics_lock:
+            self._api_successes += 1
         return output
 
     def runtime_info(self) -> dict[str, Any]:
+        with self._metrics_lock:
+            successes = self._api_successes
+            failures = self._api_failures
+            chain_resets = self._chain_resets
         return {
             "provider": "openai",
             "model": self.model,
             "fallback_enabled": False,
+            "stateful": self.stateful,
+            "api_successes": successes,
+            "api_failures": failures,
+            "response_chain_resets": chain_resets,
         }
 
 
@@ -527,21 +729,37 @@ class OpenAIStageGenerator:
 class FallbackStageGenerator:
     primary: OpenAIStageGenerator
     fallback: RuleBasedStageGenerator
+    _fallback_calls: int = field(default=0, init=False, repr=False)
+    _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         try:
             return self.primary.generate(session, user_message)
-        except ModelServiceError:
+        except ModelServiceError as exc:
+            with self._metrics_lock:
+                self._fallback_calls += 1
+            LOGGER.warning(
+                "Using rule-based fallback after %s",
+                type(exc).__name__,
+            )
             output = self.fallback.generate(session, user_message)
             output.warnings.append("本轮建议依据已整理的ECE329课程资料生成。")
             return output
 
     def runtime_info(self) -> dict[str, Any]:
+        primary_info = self.primary.runtime_info()
+        with self._metrics_lock:
+            fallback_calls = self._fallback_calls
         return {
             "provider": "openai",
             "model": self.primary.model,
             "fallback_enabled": True,
             "fallback_provider": "rule_based",
+            "stateful": self.primary.stateful,
+            "api_successes": primary_info["api_successes"],
+            "api_failures": primary_info["api_failures"],
+            "response_chain_resets": primary_info["response_chain_resets"],
+            "fallback_calls": fallback_calls,
         }
 
 
@@ -563,6 +781,13 @@ def _positive_int(value: str, name: str) -> int:
     if parsed <= 0:
         raise ModelConfigurationError(f"{name} must be greater than zero")
     return parsed
+
+
+def _boolean(value: str, name: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized not in {"true", "false"}:
+        raise ModelConfigurationError(f"{name} must be true or false")
+    return normalized == "true"
 
 
 def generator_from_environment(
@@ -590,14 +815,24 @@ def generator_from_environment(
         env.get("OPENAI_MAX_OUTPUT_TOKENS", "2400"),
         "OPENAI_MAX_OUTPUT_TOKENS",
     )
+    final_max_tokens = _positive_int(
+        env.get("OPENAI_FINAL_MAX_OUTPUT_TOKENS", "5000"),
+        "OPENAI_FINAL_MAX_OUTPUT_TOKENS",
+    )
     primary = OpenAIStageGenerator(
         transport=transport or OpenAIResponsesHTTPTransport(api_key, timeout),
         model=model,
         max_output_tokens=max_tokens,
+        final_max_output_tokens=final_max_tokens,
+        stateful=_boolean(
+            env.get("ECE329_OPENAI_STATEFUL", "false"),
+            "ECE329_OPENAI_STATEFUL",
+        ),
     )
-    fallback_enabled = env.get("ECE329_OPENAI_FALLBACK", "true").strip().casefold()
-    if fallback_enabled not in {"true", "false"}:
-        raise ModelConfigurationError("ECE329_OPENAI_FALLBACK must be true or false")
-    if fallback_enabled == "false":
+    fallback_enabled = _boolean(
+        env.get("ECE329_OPENAI_FALLBACK", "true"),
+        "ECE329_OPENAI_FALLBACK",
+    )
+    if not fallback_enabled:
         return primary
     return FallbackStageGenerator(primary=primary, fallback=RuleBasedStageGenerator())

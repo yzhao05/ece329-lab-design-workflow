@@ -180,8 +180,10 @@ function initialState() {
     visualization: null,
     quickActions: ["传输线驻波", "电磁波偏振", "导体中的衰减"],
     notes: [],
+    pendingOptionId: null,
     pendingDirection: null,
     pendingSummary: null,
+    summarySections: [],
     lastStudentInput: null,
   };
 }
@@ -195,6 +197,7 @@ function loadState() {
           ? { ...message, text: INITIAL_GREETING, tags: ["阶段 1", "ECE329课程相关"] }
           : message
       ));
+      if (!Array.isArray(saved.summarySections)) saved.summarySections = [];
       return { ...initialState(), ...saved };
     }
   } catch (error) {
@@ -242,19 +245,19 @@ async function apiRequest(path, options = {}) {
 
 async function checkConnection() {
   if (!apiBase()) {
-    setConnectionState("demo", "演示模式 · API未连接");
+    setConnectionState("demo", "本地示例 · 课程服务未连接");
     dom.offlineNotice.hidden = false;
     return;
   }
   try {
-    await apiRequest("/health", { method: "GET" });
-    setConnectionState("online", "Agent API 已连接");
+    await apiRequest("/ready", { method: "GET" });
+    setConnectionState("online", "课程服务已连接");
     dom.offlineNotice.hidden = true;
   } catch (error) {
-    setConnectionState("error", "API连接失败");
+    setConnectionState("error", "课程服务连接失败");
     dom.offlineNotice.hidden = false;
     dom.offlineNotice.querySelector("strong").textContent = "离线模式";
-    dom.offlineNotice.querySelector("span").textContent = "无法连接已配置的 API，暂时使用本地演示回答。";
+    dom.offlineNotice.querySelector("span").textContent = "无法连接课程服务，暂时使用本地示例回答。";
   }
 }
 
@@ -364,18 +367,30 @@ function createMessageElement(message) {
 
 function renderQuickActions() {
   dom.quickActions.replaceChildren();
-  (state.quickActions || []).forEach((label) => {
+  (state.quickActions || []).forEach((action) => {
+    const { label, optionId } = normalizeQuickAction(action);
+    if (!label) return;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quick-action";
     button.textContent = label;
     button.addEventListener("click", () => {
       dom.chatInput.value = label;
+      state.pendingOptionId = optionId;
       autoGrowInput();
       dom.chatInput.focus();
     });
     dom.quickActions.append(button);
   });
+}
+
+function normalizeQuickAction(action) {
+  if (typeof action === "string") return { label: action, optionId: null };
+  if (!action || typeof action !== "object") return { label: "", optionId: null };
+  return {
+    label: String(action.label || action.focus || action.direction || "").trim(),
+    optionId: typeof action.option_id === "string" ? action.option_id : null,
+  };
 }
 
 function renderEvidence() {
@@ -477,9 +492,9 @@ async function handleSubmit(event) {
   if (state.stageIndex === 0 && !isAdvanceIntent(message)) {
     state.pendingDirection = message;
   }
-  if (state.stageIndex === STAGES.length - 1 && !isAdvanceIntent(message)) {
-    state.pendingSummary = message;
-  }
+  const isSummaryContribution = (
+    state.stageIndex === STAGES.length - 1 && !isAdvanceIntent(message)
+  );
   state.lastStudentInput = message;
   addMessage("user", message);
   dom.chatInput.value = "";
@@ -489,15 +504,25 @@ async function handleSubmit(event) {
 
   try {
     let response;
-    if (apiBase() && connectionState === "checking") {
+    if (apiBase() && connectionState !== "online") {
       await checkConnection();
     }
     if (apiBase() && connectionState === "online") {
       response = await sendToApi(message);
       response._runtime_source = "api";
-    } else {
+    } else if (!apiBase()) {
       await wait(420);
       response = createDemoResponse(message);
+    } else {
+      throw new ApiError("Backend is not ready", 0, "backend_unavailable");
+    }
+    if (
+      isSummaryContribution
+      && response.request_rejected !== true
+      && response.stage_payload?.request_rejected !== true
+    ) {
+      if (!state.summarySections.includes(message)) state.summarySections.push(message);
+      state.pendingSummary = state.summarySections.join("\n\n");
     }
     hideTyping();
     applyResponse(response, message);
@@ -506,25 +531,49 @@ async function handleSubmit(event) {
     if (error instanceof ApiError && ["session_not_found", "access_denied"].includes(error.code)) {
       const hadDesign = Boolean(state.designId);
       clearApiSession();
-      setConnectionState("online", "Agent API 已连接");
+      setConnectionState("online", "课程服务已连接");
       const guidance = hadDesign
-        ? "之前的设计会话已经失效。请重新输入实验想法，开始一次新的设计。"
+        ? "之前的设计记录已经失效。请重新输入实验想法，开始一次新的设计。"
         : "课程访问码不正确或尚未提供。请再次发送，并输入教师或课程管理员提供的访问码。";
       addMessage("assistant", guidance, ["需要重新连接"], { meta: "ECE329 Agent" });
       state.quickActions = ["传输线驻波", "电磁波偏振", "导体中的衰减"];
-      showToast("未切换演示模式，请按提示重新连接");
+      showToast("未切换为本地示例，请按提示重新连接");
       return;
     }
-    setConnectionState("error", "API连接失败");
+    if (error instanceof ApiError && error.status === 429) {
+      setConnectionState("online", "课程服务已连接");
+      addMessage(
+        "assistant",
+        "请求过于频繁，请等待一会儿后重新发送。当前设计和进度已经保留。",
+        ["稍后重试"],
+        { meta: "ECE329 Agent" },
+      );
+      state.quickActions = [message];
+      return;
+    }
+    if (error instanceof ApiError && error.status === 409) {
+      await reloadApiDesignState();
+      addMessage(
+        "assistant",
+        "设计可能已在另一个窗口更新。我已同步当前设计，请重新发送本轮内容。",
+        ["状态已刷新"],
+        { meta: "ECE329 Agent" },
+      );
+      state.quickActions = [message];
+      return;
+    }
+    setConnectionState("error", "课程服务暂时不可用");
     dom.offlineNotice.hidden = false;
-    dom.offlineNotice.querySelector("strong").textContent = "离线模式";
-    dom.offlineNotice.querySelector("span").textContent = "Agent API请求失败，已自动切换为本地演示回答。";
-    clearApiSession();
-    const fallback = createDemoResponse(message);
-    fallback.assistant_message = `课程助手暂时无法连接，本轮先提供一份ECE329课程范围内的参考回答。\n\n${fallback.assistant_message}`;
-    hideTyping();
-    applyResponse(fallback, message);
-    showToast("API请求失败，已切换到演示模式");
+    dom.offlineNotice.querySelector("strong").textContent = "连接暂时中断";
+    dom.offlineNotice.querySelector("span").textContent = "当前设计仍会保留；恢复连接后可以重新发送本轮内容。";
+    addMessage(
+      "assistant",
+      "课程服务暂时无法完成本轮请求。当前设计已保留，请稍后重试。",
+      ["连接失败"],
+      { meta: "ECE329 Agent" },
+    );
+    state.quickActions = [message];
+    showToast("请求失败，当前设计已保留");
   } finally {
     setBusy(false);
     render();
@@ -575,7 +624,25 @@ function clearApiSession() {
   state.designId = null;
   state.sessionKind = null;
   state.stageIndex = 0;
+  state.pendingOptionId = null;
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
+}
+
+async function reloadApiDesignState() {
+  if (!state.designId) return;
+  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
+  if (!token) return;
+  try {
+    const design = await apiRequest(`/v1/designs/${encodeURIComponent(state.designId)}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    state.mode = design.interaction_state || state.mode;
+    const index = STAGES.findIndex(([id]) => id === design.current_stage);
+    if (index >= 0) state.stageIndex = index;
+  } catch (error) {
+    console.warn("Unable to refresh design state", error);
+  }
 }
 
 function isAdvanceIntent(message) {
@@ -584,6 +651,10 @@ function isAdvanceIntent(message) {
 
 function buildTurnRequest(message) {
   const turn = { message };
+  if (state.pendingOptionId) {
+    turn.selected_option_id = state.pendingOptionId;
+    state.pendingOptionId = null;
+  }
   if (state.mode !== "GUIDED_DESIGN" || !isAdvanceIntent(message)) return turn;
 
   turn.complete_stage = true;
@@ -599,10 +670,14 @@ function buildTurnRequest(message) {
     };
   } else if (state.stageIndex === STAGES.length - 1) {
     const summary = String(state.pendingSummary || "").trim();
-    if (summary.length >= 20) {
+    const sections = (state.summarySections || [])
+      .map((section) => String(section).trim())
+      .filter((section) => section.length >= 10);
+    if (summary.length >= 20 && sections.length >= 2) {
       turn.context_patch = {
         synthesis: {
           student_summary: summary,
+          student_summary_sections: sections,
           student_summary_complete: true,
         },
       };
@@ -614,13 +689,22 @@ function buildTurnRequest(message) {
 }
 
 function createDemoResponse(message) {
-  const lower = message.toLocaleLowerCase();
   const firstTurn = !state.designId;
-  const requestedEmvr = lower.includes("emvr");
+  const emvrIntent = detectDemoEmvrIntent(message);
   const directEvidence = findDemoKnowledge(message);
-  const inputCategory = classifyDemoStageOneInput(message, directEvidence);
+  const selectedPriorOption = !firstTurn && state.stageIndex === 0
+    ? resolveDemoOptionReference(message, state.quickActions, state.pendingOptionId)
+    : null;
+  state.pendingOptionId = null;
+  let inputCategory = classifyDemoStageOneInput(message, directEvidence);
+  if (selectedPriorOption) {
+    inputCategory = "COURSE_CONTENT";
+  }
+  if (emvrIntent !== null && inputCategory !== "UNREASONABLE_REQUEST") {
+    inputCategory = "COURSE_CONTENT";
+  }
   const noDirection = isDemoNoDirectionRequest(message);
-  const emvr = requestedEmvr && inputCategory !== "UNREASONABLE_REQUEST";
+  const emvr = emvrIntent === true && inputCategory !== "UNREASONABLE_REQUEST";
   const evidence = inputCategory === "COURSE_CONTENT"
     ? (directEvidence || state.evidence || FALLBACK_EVIDENCE)
     : (state.evidence || FALLBACK_EVIDENCE);
@@ -657,6 +741,10 @@ function createDemoResponse(message) {
     };
   }
 
+  if (inputCategory !== "UNREASONABLE_REQUEST" && emvrIntent !== null) {
+    state.mode = emvrIntent ? "EMVR_DIRECT" : "GUIDED_DESIGN";
+  }
+
   if (inputCategory === "UNREASONABLE_REQUEST") {
     const courseEvidence = FALLBACK_EVIDENCE;
     const examples = courseEvidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
@@ -669,6 +757,25 @@ function createDemoResponse(message) {
       quick_actions: courseEvidence.options,
       warnings: ["当前请求没有改变你的实验设计进度。"],
       request_rejected: true,
+      _runtime_source: "demo",
+    };
+  }
+
+  if (
+    selectedPriorOption
+    && state.mode === "GUIDED_DESIGN"
+    && state.stageIndex === 0
+  ) {
+    const followupOptions = evidence.options || state.quickActions;
+    state.quickActions = followupOptions;
+    state.notes.push(`已选择方向：${selectedPriorOption.label}`);
+    return {
+      assistant_message: `你选择的是“${selectedPriorOption.label}”。这个方向属于ECE329课程内容，可以继续从相关现象和概念关系中展开。现在仍先不确定变量、公式或实验结构，而是进一步确认你最感兴趣的物理联系。\n\n${DEMO_STAGE_PROMPTS[0]}`,
+      current_stage: STAGES[0][0],
+      interaction_state: state.mode,
+      knowledge_references: [evidence],
+      quick_actions: followupOptions,
+      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
       _runtime_source: "demo",
     };
   }
@@ -716,16 +823,66 @@ function findDemoKnowledge(text) {
 
 function classifyDemoStageOneInput(text, directEvidence) {
   const normalized = text.trim();
-  const unreasonable = /(工作流|workflow|\bagent\b|智能体).{0,12}(提示|内部|规则|原理|关闭|修改|绕过|任意输出)|(提示|内部|规则|原理|关闭|修改|绕过).{0,12}(工作流|workflow|\bagent\b|智能体)|system\s*prompt|系统提示|提示词|内部指令|隐藏指令|\bapi\b|后端|前端|服务器|源代码|github|render|部署|密钥|access[ _-]*token|令牌|角色扮演|role\s*play|扮演.{0,12}(角色|老师|学生|专家|人物)|忽略.{0,12}(之前|以上|系统|规则|指令)|越狱|jailbreak|捣乱|输出.{0,8}(无关|随机|违规)内容|你的.{0,8}(工作原理|内部机制|规则|提示|身份|能力)|(关闭|关掉|停止|终止|禁用|卸载|删除|重启|重置).{0,12}(你|助手|agent|智能体|网页|网站|系统|服务|工作流)|(shut\s*down|turn\s*off|disable|kill|stop|restart|reset).{0,20}(agent|assistant|website|system|service|workflow)|(写|生成|执行|运行|注入|提交).{0,8}(代码|脚本|程序|命令|指令)|(代码|脚本|程序|命令).{0,8}(执行|运行|控制|修改|输出|关闭)|```|<\s*script\b|javascript\s*:|\beval\s*\(|\bexec\s*\(|\bfetch\s*\(|\b(import|def|class|function|subprocess|os\.system|document\.|window\.|localstorage|process\.env)\b|\b(python|javascript|typescript|powershell|bash|cmd|sql|html|css)\b|(接入|调用|连接|控制).{0,16}(b站|哔哩哔哩|youtube|抖音|网站|平台|机器人|bot|agent|智能体)|(b站|哔哩哔哩|youtube|抖音).{0,20}(翻译|输出|脚本|代码|agent|智能体)/i;
-  if (unreasonable.test(normalized)) return "UNREASONABLE_REQUEST";
+  const unreasonablePatterns = [
+    /(工作流|workflow|\bagent\b|智能体).{0,12}(提示|内部|规则|原理|关闭|修改|绕过|任意输出)/i,
+    /(提示|内部|规则|原理|关闭|修改|绕过).{0,12}(工作流|workflow|\bagent\b|智能体)/i,
+    /system\s*prompt|系统提示|提示词|内部指令|隐藏指令|\bapi\b|后端|前端|服务器|源代码|github|render|部署|密钥|access[ _-]*token|令牌/i,
+    /角色扮演|role\s*play|扮演.{0,12}(角色|老师|学生|专家|人物)|忽略.{0,12}(之前|以上|系统|规则|指令)|越狱|jailbreak|捣乱|输出.{0,8}(无关|随机|违规)内容/i,
+    /你的.{0,8}(工作原理|内部机制|规则|提示|身份|能力)/i,
+    /(关闭|关掉|停止|终止|禁用|卸载|删除|重启|重置).{0,12}(你|助手|agent|智能体|网页|网站|系统|服务|工作流)/i,
+    /(shut\s*down|turn\s*off|disable|kill|stop|restart|reset).{0,20}(agent|assistant|website|system|service|workflow)/i,
+    /(写|生成|执行|运行|注入|提交).{0,8}(代码|脚本|程序|命令|指令)|(代码|脚本|程序|命令).{0,8}(执行|运行|控制|修改|输出|关闭)/i,
+    /\b(write|generate|execute|run|inject)\b.{0,20}\b(code|script|command|function|class|import)\b|\b(code|script|command)\b.{0,20}\b(execute|run|control|modify)\b/i,
+    /```|<\s*script\b|javascript\s*:|\beval\s*\(|\bexec\s*\(|\bfetch\s*\(|\b(subprocess|os\.system|document\.|window\.|localstorage|process\.env)\b/i,
+    /(接入|调用|连接|控制).{0,16}(b站|哔哩哔哩|youtube|抖音|网站|平台|机器人|bot|agent|智能体)|(b站|哔哩哔哩|youtube|抖音).{0,20}(翻译|输出|脚本|代码|agent|智能体)/i,
+  ];
+  if (unreasonablePatterns.some((pattern) => pattern.test(normalized))) {
+    return "UNREASONABLE_REQUEST";
+  }
   if (isDemoNoDirectionRequest(normalized)) return "COURSE_CONTENT";
   return directEvidence ? "COURSE_CONTENT" : "OUT_OF_SCOPE";
+}
+
+function detectDemoEmvrIntent(text) {
+  const normalized = text.trim().toLocaleLowerCase();
+  const negative = /(?:不要|不需要|不用|退出|取消|关闭|移除).{0,12}(?:emvr|unity\s*vr)|(?:emvr|unity\s*vr).{0,12}(?:不要|不需要|不用|退出|取消|关闭|移除)|\b(?:do\s*not|don't|without|disable|leave|exit)\b.{0,20}\bemvr\b/i;
+  if (negative.test(normalized)) return false;
+  if (!/\bemvr\b|unity\s*vr/i.test(normalized)) return null;
+  const positive = /(?:放入|使用|采用|切换|进入|启用|按照|通过|需要).{0,16}(?:emvr|unity\s*vr)|(?:emvr|unity\s*vr).{0,16}(?:工作流|模式|设计|实验|完善)|\b(?:use|enable|enter|switch\s+to|with)\b.{0,20}\bemvr\b/i;
+  return positive.test(normalized) || normalized === "emvr" ? true : null;
 }
 
 function isDemoNoDirectionRequest(text) {
   const normalized = text.trim();
   const noDirection = /还没有.{0,6}(方向|想法)|没有.{0,6}(具体|明确).{0,6}(方向|想法)|不知道.{0,10}(研究|选|做什么)|帮我.{0,4}(想|brainstorm)|随便.{0,6}(推荐|举例|给.*方向)/i;
   return !normalized || noDirection.test(normalized);
+}
+
+function resolveDemoOptionReference(text, options, selectedOptionId = null) {
+  if (!Array.isArray(options) || !options.length) return null;
+  const normalizedOptions = options.map(normalizeQuickAction);
+  if (selectedOptionId) {
+    const selected = normalizedOptions.find((option) => option.optionId === selectedOptionId);
+    if (selected) return selected;
+  }
+  const normalized = text.trim();
+  const patterns = [
+    /第\s*([一二三123])\s*(?:个|项|类|条|种|方向|例子)/i,
+    /第\s*([一二三123])\s*$/i,
+    /(?:选|选择|研究|想要|考虑)\s*(?:第\s*)?([一二三123])\s*(?:个|项|类|条|种|方向|例子)/i,
+    /(?:选|选择)\s*([123])\s*$/i,
+    /(?:上面|刚才|之前).{0,6}([一二三123])\s*(?:个|项|类|条|种|方向|例子)/i,
+  ];
+  const ordinalMap = { 一: 0, 二: 1, 三: 2 };
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+    const index = Object.hasOwn(ordinalMap, match[1])
+      ? ordinalMap[match[1]]
+      : Number(match[1]) - 1;
+    return index >= 0 && index < normalizedOptions.length ? normalizedOptions[index] : null;
+  }
+  return null;
 }
 
 function applyResponse(response, userMessage) {
@@ -789,13 +946,17 @@ function deriveQuickActions(response) {
 
   if (state.stageIndex === 0) {
     const alternatives = (response.stage_payload?.alternative_ideas || [])
-      .map((item) => item.focus)
-      .filter(Boolean)
+      .map((item) => ({
+        option_id: item.option_id || null,
+        label: item.focus || item.direction,
+      }))
+      .filter((item) => item.label)
       .slice(0, 3);
     return [...alternatives, "确认当前方向并进入下一阶段"];
   }
   if (state.stageIndex === STAGES.length - 1) {
     return String(state.pendingSummary || "").trim().length >= 20
+      && (state.summarySections || []).filter((section) => String(section).trim().length >= 10).length >= 2
       ? ["确认完成学生总结"]
       : [];
   }
@@ -846,6 +1007,14 @@ function showToast(message) {
 function resetDesign() {
   const confirmed = window.confirm("确定开始一个新的实验设计吗？当前浏览器中的对话记录会被清除。");
   if (!confirmed) return;
+  const designId = state.designId;
+  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
+  if (apiBase() && designId && token && state.sessionKind === "api") {
+    void apiRequest(`/v1/designs/${encodeURIComponent(designId)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    }).catch((error) => console.warn("Unable to delete backend design", error));
+  }
   state = initialState();
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
   saveState();
@@ -878,9 +1047,9 @@ function drawChart() {
   const yAxis = formatAxisLabel(visualization.y_axis, "响应");
 
   canvas.dataset.source = hasApiPoints ? "api" : "demo";
-  dom.chartLegendLabel.textContent = series.label || (hasApiPoints ? "API理论数据" : "理论预测");
+  dom.chartLegendLabel.textContent = series.label || (hasApiPoints ? "本次理论数据" : "理论预测");
   dom.chartParameter.disabled = hasApiPoints;
-  dom.chartParameter.title = hasApiPoints ? "当前曲线使用API返回的数据点，参数调整应由后端重新计算。" : "调整本地示意曲线参数";
+  dom.chartParameter.title = hasApiPoints ? "当前曲线使用本次理论预测的数据点；调整条件后需重新提交才能更新。" : "调整本地示意曲线参数";
   if (visualization.disclaimer) dom.chartDescription.textContent = visualization.disclaimer;
 
   ctx.clearRect(0, 0, width, height);
@@ -908,7 +1077,7 @@ function drawChart() {
   ctx.fillText(xAxis, Math.max(pad.left, width - ctx.measureText(xAxis).width - 4), height - 7);
 
   const parameter = Number(dom.chartParameter.value);
-  dom.parameterValue.value = hasApiPoints ? "API" : parameter.toFixed(2);
+  dom.parameterValue.value = hasApiPoints ? "理论" : parameter.toFixed(2);
   const gradient = ctx.createLinearGradient(pad.left, 0, width - pad.right, 0);
   gradient.addColorStop(0, "#157f78");
   gradient.addColorStop(1, "#74b7d9");
@@ -961,7 +1130,10 @@ function formatAxisLabel(axis, fallback) {
 }
 
 dom.chatForm.addEventListener("submit", handleSubmit);
-dom.chatInput.addEventListener("input", autoGrowInput);
+dom.chatInput.addEventListener("input", () => {
+  state.pendingOptionId = null;
+  autoGrowInput();
+});
 dom.chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();

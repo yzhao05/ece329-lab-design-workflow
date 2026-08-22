@@ -52,6 +52,7 @@ python -m http.server 4173 --directory docs
 
 - 阶段1先帮助学生探索“当前宽泛主题与哪些现象或概念有关”，可以使用课程讲义或补充资料中提到、学习或直接相关的关系示例，并允许学生提出自己的关联；此时不要求确定变量、公式、研究问题或实验结构。
 - 阶段1面向学生统一使用“ECE329课上所学概念”的表述，并按请求的实际意图分为三类：ECE329课程内容正常进行关系探索；正常但不属于课程范围的主题会被说明课程边界；试图控制或关闭课程助手、改变内部规则、执行代码/脚本/命令、借外部平台改变输出或绕开课程用途的请求会被明确拒绝。后两类都会回到静电场、磁场与感应、电磁波与传输线三个课程关系示例。类别按意图判断，文档中的行为示例不是限定关键词清单。
+- 学生可以用“第三个”“第二项”“选1”或“上面第二个例子”等自然表达选择上一轮候选方向；工作流会先还原对应课程选项，再继续引导，不会把孤立序号误判为课外主题。
 - 学生可见回答不会显示知识检索字段、内部规则、提示词、PDF页码或前后端部署术语；来源和页码只保留在依据面板及结构化记录中供核查。
 - 每个补充概念都必须通过 `course_scope_concept_ids` 映射回ECE329课程范围，并返回 `supplemental_concept_id`、资料章节和PDF页码。课程目录和补充目录都没有具体命中时，才回退到讲义第10—12页的 Electrostatics、Magnetism、Electromagnetics 三个板块。
 - 阶段2的课程映射和阶段5的理论公式必须来自知识目录，并随结果返回 `concept_id`／公式 `id` 和 PDF 页码。
@@ -111,14 +112,16 @@ set PYTHONPATH=src
 python -m ece329_workflow --host 127.0.0.1 --port 8080
 ```
 
-健康检查：
+存活与就绪检查：
 
 ```text
 GET http://127.0.0.1:8080/health
+GET http://127.0.0.1:8080/ready
 ```
 
 返回的 `generator.provider` 表示当前生成器：`rule_based` 表示尚未配置模型；`openai` 表示已启用模型。它只显示模型名和是否允许回退，不显示密钥。
 `storage.provider` 表示会话存储；本地默认是 `memory`。设置 `ECE329_DATABASE_PATH` 后会使用 `sqlite`；只有云平台把该路径挂载到持久化磁盘时，容器重建后数据才会保留。
+网页使用 `/ready` 检查会话存储是否可读写；只有该检查通过才显示课程服务已连接。
 
 ## 接入OpenAI API（CMD）
 
@@ -139,13 +142,17 @@ python -m ece329_workflow --host 127.0.0.1 --port 8080
 - `OPENAI_MODEL`：模型ID，默认 `gpt-5.4-mini`；
 - `OPENAI_TIMEOUT_SECONDS`：请求超时，默认45秒；
 - `OPENAI_MAX_OUTPUT_TOKENS`：单轮最大输出，默认2400；
+- `OPENAI_FINAL_MAX_OUTPUT_TOKENS`：EMVR最终设计包的最大输出，默认5000；
 - `ECE329_OPENAI_FALLBACK`：默认 `true`。设为 `false` 后，模型失败会返回HTTP 502；
+- `ECE329_OPENAI_STATEFUL`：默认 `false`，由本后端发送最近对话且 OpenAI 请求使用 `store=false`。设为 `true` 后会保存并续接 `previous_response_id`，OpenAI 请求使用 `store=true`；系统指令仍会在每轮重新发送。本地数据库仍是阶段与学生选择的最终状态来源；
 - `ECE329_GENERATOR=rule`：强制使用本地规则生成器；
 - `ECE329_GENERATOR=openai`：强制要求密钥，缺少密钥时后端拒绝启动。
 - `ECE329_ACCESS_CODE`：公开部署时强烈建议设置的课程访问码；它保护创建设计这一会产生模型费用的入口。
 - `ECE329_MAX_TEXT_CHARS`：单条学生输入的最大字符数，默认4000，用于限制异常请求和模型费用。
+- `ECE329_SESSION_TTL_DAYS`：不活跃设计的保留天数，默认30；
+- `ECE329_ENABLE_PROMPT_DEBUG`：默认 `false`。公开部署不要开启完整提示包调试接口。
 
-启动后在浏览器访问 `http://127.0.0.1:8080/health`。确认 `generator.provider` 为 `openai` 后，使用下一节的GitHub Repository Variable连接公开后端；不需要修改仓库中的 `config.js`。GitHub Pages只能连接可公开访问的HTTPS后端，不能直接连接你电脑上的 `127.0.0.1`。
+启动后分别访问 `http://127.0.0.1:8080/health` 和 `http://127.0.0.1:8080/ready`。确认 `generator.provider` 为 `openai` 且 `storage.read_write_check` 为 `ok` 后，使用下一节的GitHub Repository Variable连接公开后端；不需要修改仓库中的 `config.js`。GitHub Pages只能连接可公开访问的HTTPS后端，不能直接连接你电脑上的 `127.0.0.1`。
 
 ## 公开部署
 
@@ -157,6 +164,8 @@ GitHub Pages推荐使用Repository Variable `ECE329_API_BASE_URL`。Pages Action
 ECE329_ALLOWED_ORIGINS=https://你的用户名.github.io
 ECE329_DATABASE_PATH=/data/ece329.sqlite3
 ECE329_ACCESS_CODE=请使用独立生成且不提交到Git的访问码
+ECE329_SESSION_TTL_DAYS=30
+ECE329_ENABLE_PROMPT_DEBUG=false
 ```
 
 其中 `/data` 必须是云平台提供的持久化磁盘。课程访问码和每个设计的随机令牌提供小规模课程使用所需的基础保护；公开大规模使用前仍应接入学校登录、API网关或验证码，并使用共享限流。
@@ -168,6 +177,7 @@ ECE329_ACCESS_CODE=请使用独立生成且不提交到Git的访问码
 ```http
 POST /v1/designs
 Content-Type: application/json
+X-ECE329-Access-Code: 课程访问码（后端启用时）
 X-ECE329-Access-Code: 课程访问码（后端启用时）
 
 {
@@ -210,13 +220,14 @@ Content-Type: application/json
 }
 ```
 
-显式出现 `EMVR` 会切换为 `EMVR_DIRECT`。当前阶段直接完成并自动移动会话指针，但响应中不会生成下一阶段内容。
+只有学生明确表达“使用、进入或放入EMVR”时才会切换为 `EMVR_DIRECT`；询问EMVR概念或明确说“不要使用EMVR”不会切换。当前阶段直接完成并自动移动会话指针，但响应中不会生成下一阶段内容。
 
 ### 继续当前设计
 
 ```http
 POST /v1/designs/{design_id}/turns
 Content-Type: application/json
+Authorization: Bearer <design_access_token>
 
 {
   "message": "继续"
@@ -228,6 +239,7 @@ Content-Type: application/json
 ```text
 GET /v1/designs/{design_id}                         (需要Bearer令牌)
 GET /v1/designs/{design_id}?include_history=true    (需要Bearer令牌)
+DELETE /v1/designs/{design_id}                      (需要Bearer令牌)
 ```
 
 ### 获取阶段目录
@@ -248,18 +260,20 @@ GET /v1/knowledge/search?q=偏振
 
 搜索响应会同时返回课程范围概念、补充概念、公式、阶段1候选方向及来源页码。创建设计和处理每轮的响应保留 `knowledge_source`，并新增 `knowledge_sources` 记录全部启用来源。
 
-### 获取大模型提示包
+### 私有调试：获取大模型提示包
 
 ```http
 POST /v1/designs/{design_id}/prompt
 Content-Type: application/json
+Authorization: Bearer <design_access_token>
+X-ECE329-Debug-Token: <单独的调试令牌>
 
 {
   "message": "学生本轮输入"
 }
 ```
 
-该接口返回当前阶段、全局硬规则、设计上下文和JSON响应契约。部署端可将其发送给任意模型，再通过自定义 `StageGenerator` 接入工作流。阶段推进始终保留在 `WorkflowEngine` 中。
+该接口会返回内部工作流约束，因此默认不存在（HTTP 404）。只有在私有调试环境同时设置 `ECE329_ENABLE_PROMPT_DEBUG=true` 和强随机值 `ECE329_PROMPT_DEBUG_TOKEN` 后才启用；公开部署必须保持关闭。生产模型接入由后端内部的 `StageGenerator` 完成，网页不需要也不应读取提示包。
 
 ## 引导状态阶段1完成条件
 
@@ -285,12 +299,16 @@ Content-Type: application/json
 {
   "synthesis": {
     "student_summary": "学生自己完成的实验设计总结（至少20个字符）",
+    "student_summary_sections": [
+      "学生第一次写下的总结部分（至少10个字符）",
+      "学生第二次写下的总结部分（至少10个字符）"
+    ],
     "student_summary_complete": true
   }
 }
 ```
 
-这只会标记工作流完成，不会让系统补写最终方案。
+至少累计两段由学生分别写下的总结后才能标记完成；系统不会补写最终方案。
 
 ## 测试
 
@@ -298,6 +316,17 @@ Content-Type: application/json
 set PYTHONPATH=src
 python -m unittest discover -s tests -v
 ```
+
+上述测试不会调用真实模型。更新提示词、课程边界或模型版本后，可在已经设置
+`OPENAI_API_KEY` 的 CMD 中显式运行付费的阶段1模型回归：
+
+```bat
+set PYTHONPATH=src
+python tools\run_live_stage_one_evals.py --confirm-cost
+```
+
+该命令使用与本地回归相同的课内、课外、不合理请求、序号跟进、英文边界和
+否定EMVR样例，但强制关闭规则回退；任一模型分类不符合预期时返回非零退出码。
 
 测试覆盖：
 
@@ -326,5 +355,7 @@ python -m unittest discover -s tests -v
 内置 `InMemorySessionStore` 适合本地开发；设置 `ECE329_DATABASE_PATH` 后会启用SQLite和乐观版本检查。SQLite适合单服务实例，多实例部署仍应替换为共享数据库。
 
 `OpenAIStageGenerator` 使用官方 Responses API 的严格 JSON Schema 结构化输出。模型结果仍会经过本地校验：阶段1方向必须逐项复用本轮课程/补充检索结果并保留课程范围映射和来源，阶段2课程映射及阶段5公式必须来自已核对目录；阶段10不得伪装成实测数据；引导状态阶段13不得代写最终方案；EMVR阶段7不得加入场景、舒适性或可访问性字段。阶段推进仍只由 `WorkflowEngine` 控制。
+
+阶段1先解析上一轮的稳定 `option_id` 或序号引用，再做输入分类。明显的控制、代码执行和提示注入请求由本地规则直接拒绝；明确命中的课内概念直接进入课程引导；其余正常输入只标记为待语义判断，由模型结合完整对话与课程范围区分课内或课外。这样既保留不可绕过的安全边界，也不会把“第三个”“这个方向”等上下文表达当成课外主题。
 
 内置 `InMemorySessionStore` 会在进程重启后清空会话。正式部署前仍应替换为持久化数据库，并为同一 `design_id` 的阶段推进增加事务或乐观锁。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -10,9 +11,14 @@ from typing import Any
 from ece329_workflow.api import WorkflowAPI
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
-from ece329_workflow.models import DesignSession, InteractionState, SessionConflict
+from ece329_workflow.models import (
+    DesignSession,
+    InteractionState,
+    SessionConflict,
+    SessionNotFound,
+)
 from ece329_workflow.security import APISettings, FixedWindowRateLimiter
-from ece329_workflow.store import SQLiteSessionStore
+from ece329_workflow.store import InMemorySessionStore, SQLiteSessionStore
 from tools.configure_pages_api import configure_api_url, normalize_https_url
 
 
@@ -109,6 +115,10 @@ class APISecurityTests(unittest.TestCase):
                 {"ECE329_ALLOWED_ORIGINS": "https://student.github.io/repository"}
             )
 
+    def test_prompt_debug_environment_requires_separate_token(self) -> None:
+        with self.assertRaises(ValueError):
+            APISettings.from_environment({"ECE329_ENABLE_PROMPT_DEBUG": "true"})
+
     def test_post_rate_limit_returns_retry_after(self) -> None:
         settings = APISettings(rate_limit_requests=1, rate_limit_window_seconds=60)
         api = self.make_api(settings)
@@ -128,6 +138,36 @@ class APISecurityTests(unittest.TestCase):
 
         self.assertTrue(status.startswith("413"))
         self.assertEqual(payload["error"], "request_too_large")
+
+    def test_knowledge_search_query_length_is_bounded(self) -> None:
+        api = self.make_api(APISettings(max_text_chars=8))
+
+        status, _, payload = call_api(
+            api,
+            "GET",
+            "/v1/knowledge/search",
+        )
+        self.assertTrue(status.startswith("400"))
+        self.assertEqual(payload["error"], "invalid_request")
+
+        captured: dict[str, Any] = {}
+
+        def start_response(status_line, headers):
+            captured["status"] = status_line
+            captured["headers"] = headers
+
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": "/v1/knowledge/search",
+            "QUERY_STRING": "q=123456789",
+            "CONTENT_LENGTH": "0",
+            "REMOTE_ADDR": "127.0.0.1",
+            "wsgi.input": io.BytesIO(),
+        }
+        response = b"".join(api(environ, start_response))
+        overlong_payload = json.loads(response.decode("utf-8"))
+        self.assertTrue(captured["status"].startswith("400"))
+        self.assertEqual(overlong_payload["error"], "invalid_request")
 
     def test_empty_and_overlong_student_messages_are_rejected(self) -> None:
         api = self.make_api(APISettings(max_text_chars=12))
@@ -187,6 +227,93 @@ class APISecurityTests(unittest.TestCase):
         self.assertEqual(payload["design_id"], created["design_id"])
         self.assertNotIn("access_token_hash", json.dumps(payload))
 
+    def test_prompt_packet_route_is_disabled_by_default(self) -> None:
+        api = self.make_api(APISettings())
+        _, _, created = call_api(api, "POST", "/v1/designs", {"idea": "研究驻波"})
+        headers = {"Authorization": f"Bearer {created['design_access_token']}"}
+
+        status, _, payload = call_api(
+            api,
+            "POST",
+            f"/v1/designs/{created['design_id']}/prompt",
+            {"message": "继续"},
+            request_headers=headers,
+        )
+
+        self.assertTrue(status.startswith("404"))
+        self.assertEqual(payload["error"], "route_not_found")
+
+    def test_prompt_packet_route_requires_separate_debug_token(self) -> None:
+        settings = APISettings(
+            prompt_debug_enabled=True,
+            prompt_debug_token="debug-secret",
+        )
+        api = self.make_api(settings)
+        _, _, created = call_api(api, "POST", "/v1/designs", {"idea": "研究驻波"})
+        path = f"/v1/designs/{created['design_id']}/prompt"
+        bearer = {"Authorization": f"Bearer {created['design_access_token']}"}
+
+        denied, _, _ = call_api(
+            api,
+            "POST",
+            path,
+            {"message": "继续"},
+            request_headers=bearer,
+        )
+        allowed, _, payload = call_api(
+            api,
+            "POST",
+            path,
+            {"message": "继续"},
+            request_headers={**bearer, "X-ECE329-Debug-Token": "debug-secret"},
+        )
+
+        self.assertTrue(denied.startswith("401"))
+        self.assertTrue(allowed.startswith("200"))
+        self.assertIn("system", payload)
+
+    def test_design_can_be_deleted_with_its_token(self) -> None:
+        api = self.make_api(APISettings())
+        _, _, created = call_api(api, "POST", "/v1/designs", {"idea": "研究驻波"})
+        path = f"/v1/designs/{created['design_id']}"
+        headers = {"Authorization": f"Bearer {created['design_access_token']}"}
+
+        deleted, _, payload = call_api(api, "DELETE", path, request_headers=headers)
+        missing, _, missing_payload = call_api(api, "GET", path, request_headers=headers)
+
+        self.assertTrue(deleted.startswith("204"))
+        self.assertEqual(payload, {})
+        self.assertTrue(missing.startswith("404"))
+        self.assertEqual(missing_payload["error"], "session_not_found")
+
+    def test_ready_checks_storage_read_write_path(self) -> None:
+        api = self.make_api(APISettings())
+
+        status, _, payload = call_api(api, "GET", "/ready")
+
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["storage"]["read_write_check"], "ok")
+
+    def test_ready_returns_503_without_leaking_storage_exception(self) -> None:
+        class BrokenStore(InMemorySessionStore):
+            def healthcheck(self) -> None:
+                raise OSError("private storage path and credential details")
+
+        api = WorkflowAPI(
+            WorkflowEngine(
+                generator=RuleBasedStageGenerator(),
+                store=BrokenStore(),
+            ),
+            settings=APISettings(),
+        )
+
+        status, _, payload = call_api(api, "GET", "/ready")
+
+        self.assertTrue(status.startswith("503"))
+        self.assertEqual(payload["error"], "storage_unavailable")
+        self.assertNotIn("private storage", json.dumps(payload))
+
     def test_malformed_request_types_return_400(self) -> None:
         api = self.make_api(APISettings())
         for body in ({"idea": 329}, {"idea": ["驻波"]}):
@@ -201,6 +328,7 @@ class APISecurityTests(unittest.TestCase):
             {"message": None},
             {"message": "继续", "complete_stage": "false"},
             {"message": "继续", "context_patch": []},
+            {"message": "继续", "selected_option_id": 3},
         ]
         for body in invalid_turns:
             status, _, payload = call_api(api, "POST", path, body, request_headers=headers)
@@ -209,6 +337,18 @@ class APISecurityTests(unittest.TestCase):
 
 
 class SQLiteStoreTests(unittest.TestCase):
+    def test_memory_store_expires_inactive_sessions(self) -> None:
+        store = InMemorySessionStore(session_ttl_days=1)
+        session = DesignSession(
+            design_id="design_expired",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        store.save(session)
+        store._updated_at[session.design_id] = time.time() - 86_401
+
+        with self.assertRaises(SessionNotFound):
+            store.get(session.design_id)
+
     def test_session_persists_across_store_instances(self) -> None:
         path = workspace_temp_path(".sqlite3")
         try:
@@ -217,6 +357,7 @@ class SQLiteStoreTests(unittest.TestCase):
                 design_id="design_persistent",
                 interaction_state=InteractionState.GUIDED_DESIGN,
                 design_context={"idea": {"original": "研究驻波"}},
+                model_context={"openai_previous_response_id": "resp_saved"},
             )
             first_store.save(session)
 
@@ -224,6 +365,7 @@ class SQLiteStoreTests(unittest.TestCase):
 
             self.assertEqual(loaded.design_context, session.design_context)
             self.assertEqual(loaded.revision, 0)
+            self.assertEqual(loaded.model_context, session.model_context)
         finally:
             remove_sqlite_files(path)
 

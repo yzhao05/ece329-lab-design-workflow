@@ -37,7 +37,14 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("student_confirmed: true", self.app_js)
         self.assertIn("student_summary_complete: true", self.app_js)
         self.assertIn("student_summary: summary", self.app_js)
+        self.assertIn("response.request_rejected !== true", self.app_js)
         self.assertIn("summary.length >= 20", self.app_js)
+
+    def test_quick_actions_send_stable_option_id(self) -> None:
+        self.assertIn("function normalizeQuickAction(action)", self.app_js)
+        self.assertIn("state.pendingOptionId = optionId", self.app_js)
+        self.assertIn("turn.selected_option_id = state.pendingOptionId", self.app_js)
+        self.assertIn("option_id: item.option_id || null", self.app_js)
 
     def test_stage_one_greeting_and_redirects_use_student_facing_course_language(self) -> None:
         self.assertIn("ECE329课上所学", self.app_js)
@@ -49,18 +56,21 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("不属于ECE329课程的内容范围", self.app_js)
         self.assertIn("我不能执行", self.app_js)
         self.assertIn("classifyDemoStageOneInput", self.app_js)
+        self.assertIn("resolveDemoOptionReference", self.app_js)
+        self.assertIn("你选择的是", self.app_js)
         self.assertIn('return "UNREASONABLE_REQUEST"', self.app_js)
         self.assertIn('return directEvidence ? "COURSE_CONTENT" : "OUT_OF_SCOPE"', self.app_js)
         self.assertIn(
-            'requestedEmvr && inputCategory !== "UNREASONABLE_REQUEST"',
+            'emvrIntent === true && inputCategory !== "UNREASONABLE_REQUEST"',
             self.app_js,
         )
         self.assertIn("当前请求没有改变你的实验设计进度", self.app_js)
         self.assertIn("message.text === LEGACY_INITIAL_GREETING", self.app_js)
 
-    def test_failed_api_request_has_real_demo_fallback(self) -> None:
-        self.assertIn("const fallback = createDemoResponse(message)", self.app_js)
-        self.assertIn("已自动切换为本地演示回答", self.app_js)
+    def test_failed_api_request_preserves_real_session(self) -> None:
+        self.assertIn("当前设计已保留，请稍后重试", self.app_js)
+        self.assertIn("await reloadApiDesignState()", self.app_js)
+        self.assertNotIn("已自动切换为本地演示回答", self.app_js)
 
     def test_api_student_task_and_warnings_are_visible(self) -> None:
         self.assertIn("function composeAssistantText(response)", self.app_js)

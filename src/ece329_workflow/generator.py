@@ -9,6 +9,8 @@ from .guardrails import (
     classify_stage_one_input,
     course_example_options,
     is_no_direction_request,
+    resolve_option_id,
+    resolve_option_reference,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput
@@ -42,6 +44,20 @@ def _idea(session: DesignSession, user_message: str) -> str:
 
 def _topic_options(text: str) -> list[dict[str, Any]]:
     return KNOWLEDGE.brainstorm_options(text)
+
+
+def _latest_stage_one_options(session: DesignSession) -> list[dict[str, Any]]:
+    for history_item in reversed(session.history):
+        output = history_item.get("output")
+        if not isinstance(output, dict):
+            continue
+        payload = output.get("stage_payload")
+        if not isinstance(payload, dict):
+            continue
+        options = payload.get("alternative_ideas")
+        if isinstance(options, list) and all(isinstance(item, dict) for item in options):
+            return [dict(item) for item in options]
+    return []
 
 
 def _course_topics(text: str) -> list[str]:
@@ -112,13 +128,28 @@ class RuleBasedStageGenerator:
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
-            return self._unreasonable_request_output()
+            return self._unreasonable_request_output(session)
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             return self._generate_emvr(session, user_message)
         return self._generate_guided(session, user_message)
 
     @staticmethod
-    def _unreasonable_request_output() -> StepOutput:
+    def _unreasonable_request_output(session: DesignSession) -> StepOutput:
+        if session.current_stage is not Stage.IDEA_BRAINSTORMING:
+            return StepOutput(
+                assistant_message=(
+                    "这个请求与当前的ECE329实验设计无关，或试图改变课程助手的用途，"
+                    "我不能执行。你当前的实验设计内容和进度都已保留，我们可以继续"
+                    "完善正在讨论的课程问题。"
+                ),
+                stage_payload={
+                    "request_rejected": True,
+                    "input_category": UNREASONABLE_REQUEST,
+                    "resume_stage": session.current_stage.value,
+                },
+                student_task="你想继续补充当前阶段中的哪一点？",
+                warnings=["当前请求没有改变你的实验设计进度。"],
+            )
         options = course_example_options()
         examples = "\n".join(
             f"{index}. {item['direction']}——{item['focus']}"
@@ -148,7 +179,20 @@ class RuleBasedStageGenerator:
         options = _topic_options(idea)
 
         if stage is Stage.IDEA_BRAINSTORMING:
+            prior_options = _latest_stage_one_options(session)
+            selected_option = resolve_option_id(
+                session.turn_context.get("selected_option_id"),
+                prior_options,
+            ) or resolve_option_reference(user_message, prior_options)
             input_kind = classify_stage_one_input(user_message)
+            if selected_option is not None:
+                input_kind = COURSE_CONTENT
+                idea = "——".join(
+                    str(selected_option.get(key, "")).strip()
+                    for key in ("direction", "focus")
+                    if str(selected_option.get(key, "")).strip()
+                )
+                options = _topic_options(idea)
             no_direction = is_no_direction_request(user_message)
             if input_kind != COURSE_CONTENT:
                 options = course_example_options()
@@ -173,6 +217,17 @@ class RuleBasedStageGenerator:
                     "因此不适合作为这门课实验设计的核心。"
                     "ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。"
                 )
+            elif selected_option is not None:
+                selected_direction = str(
+                    selected_option.get("direction")
+                    or selected_option.get("focus")
+                    or "上一轮所选方向"
+                )
+                introduction = (
+                    f"你选择的是“{selected_direction}”。这个方向属于ECE329课程内容，"
+                    "可以继续从相关现象和概念关系中展开。现在仍先不确定变量、公式"
+                    "或实验结构，而是进一步确认你最感兴趣的物理联系。"
+                )
             else:
                 introduction = (
                     f"“{idea}”可以继续从不同的ECE329概念关系中展开。"
@@ -186,6 +241,7 @@ class RuleBasedStageGenerator:
                 stage_payload={
                     "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
                     "input_category": input_kind,
+                    "resolved_option_reference": selected_option,
                     "current_idea_summary": idea,
                     "alternative_ideas": options,
                     "course_source": KNOWLEDGE.source_reference,
