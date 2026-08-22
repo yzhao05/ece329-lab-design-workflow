@@ -41,7 +41,7 @@ python -m http.server 4173 --directory docs
 
 工作流有两个交互状态：
 
-- `GUIDED_DESIGN`：默认状态。重点停留在阶段1进行 brainstorming；系统每次只给一个引导任务。阶段13由学生自己总结，系统不代写最终方案。
+- `GUIDED_DESIGN`：默认状态。阶段1采用“了解具体想法 → 一次广度拓展 → 学生描述兴趣点 → 基于描述深度拓展 → 学生确认”的对话节奏。只有广度拓展会显示多个课程方向；学生选定后改用开放式描述，不连续出选择题。系统每次只给一个引导任务。阶段13由学生自己总结，系统不代写最终方案。
 - `EMVR_DIRECT`：用户明确提到 `EMVR` 时触发。系统每次直接完善一个阶段，并把设计面向 Unity VR 模拟实验展开。
 
 两种状态都遵守同一条硬规则：**一次 API 响应只处理一个阶段**。阶段推进由状态机控制，内容生成器不能跳阶段。
@@ -119,7 +119,7 @@ GET http://127.0.0.1:8080/health
 GET http://127.0.0.1:8080/ready
 ```
 
-返回的 `generator.provider` 表示当前生成器：`rule_based` 表示尚未配置模型；`openai` 表示已启用模型。它只显示模型名和是否允许回退，不显示密钥。
+返回的 `generator.provider` 表示当前生成器：`rule_based` 表示尚未配置模型；`openai` 表示已启用模型。它只显示模型名和是否允许回退，不显示密钥。OpenAI模式下还会显示 `api_successes`、`api_failures`、`output_rejections`、`repair_successes` 和 `fallback_calls`；若发生回退，`last_fallback_reason` 会用不含学生内容的类别说明最近原因。这样可以区分网络/API失败与模型回答未通过工作流校验。
 `storage.provider` 表示会话存储；本地默认是 `memory`。设置 `ECE329_DATABASE_PATH` 后会使用 `sqlite`；只有云平台把该路径挂载到持久化磁盘时，容器重建后数据才会保留。
 网页使用 `/ready` 检查会话存储是否可读写；只有该检查通过才显示课程服务已连接。
 
@@ -135,13 +135,14 @@ set PYTHONPATH=src
 python -m ece329_workflow --host 127.0.0.1 --port 8080
 ```
 
-`ECE329_GENERATOR=auto` 是推荐设置：有 `OPENAI_API_KEY` 时使用OpenAI，无密钥时使用本地规则。默认还会在超时、网络错误或模型输出不符合工作流约束时自动回退，并在本轮响应的 `warnings` 中明确说明。
+`ECE329_GENERATOR=auto` 是推荐设置：有 `OPENAI_API_KEY` 时使用OpenAI，无密钥时使用本地规则。模型回答第一次未通过结构或课程约束时会自动重试修正一次；仍不合格，或遇到超时、网络错误时，才回退到课程内置引导。回退不会清空学生此前的实验方向、细化关系或阶段进度。
 
 可选服务器环境变量：
 
 - `OPENAI_MODEL`：模型ID，默认 `gpt-5.4-mini`；
 - `OPENAI_TIMEOUT_SECONDS`：请求超时，默认45秒；
 - `OPENAI_MAX_OUTPUT_TOKENS`：单轮最大输出，默认2400；
+- `OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS`：引导模式阶段1的最大输出，默认3200，用于生成多幅有细节、可组合的课程内物理图景；
 - `OPENAI_FINAL_MAX_OUTPUT_TOKENS`：EMVR最终设计包的最大输出，默认5000；
 - `ECE329_OPENAI_FALLBACK`：默认 `true`。设为 `false` 后，模型失败会返回HTTP 502；
 - `ECE329_OPENAI_STATEFUL`：默认 `false`，由本后端发送最近对话且 OpenAI 请求使用 `store=false`。设为 `true` 后会保存并续接 `previous_response_id`，OpenAI 请求使用 `store=true`；系统指令仍会在每轮重新发送。本地数据库仍是阶段与学生选择的最终状态来源；
@@ -356,6 +357,6 @@ python tools\run_live_stage_one_evals.py --confirm-cost
 
 `OpenAIStageGenerator` 使用官方 Responses API 的严格 JSON Schema 结构化输出。模型结果仍会经过本地校验：阶段1方向必须逐项复用本轮课程/补充检索结果并保留课程范围映射和来源，阶段2课程映射及阶段5公式必须来自已核对目录；阶段10不得伪装成实测数据；引导状态阶段13不得代写最终方案；EMVR阶段7不得加入场景、舒适性或可访问性字段。阶段推进仍只由 `WorkflowEngine` 控制。
 
-阶段1先解析上一轮的稳定 `option_id` 或序号引用，再做输入分类。明显的控制、代码执行和提示注入请求由本地规则直接拒绝；明确命中的课内概念直接进入课程引导；其余正常输入只标记为待语义判断，由模型结合完整对话与课程范围区分课内或课外。这样既保留不可绕过的安全边界，也不会把“第三个”“这个方向”等上下文表达当成课外主题。
+阶段1会在后端持久保存 `topic_anchor`、`current_focus`、`focus_history` 和 `brainstorm_phase`，先解析上一轮的稳定 `option_id`、序号或学生直接输入的选项文字，再结合当前实验关系链做输入分类。明显的控制、代码执行和提示注入请求由本地规则直接拒绝；明确命中的课内概念直接进入课程引导；没有独立命中目录的短回答会优先作为当前方向的细化，只有明确更换主题时才重新判断课程边界。这样即使模型服务暂时失败，也不会把“第三个”“对称性和方向”“先看边界形状”等承接表达误当成新实验。学生选定方向后，`alternative_ideas` 会变为空数组，系统先等待学生描述兴趣，再用 `deepening_connections` 对学生原话作课程范围内的深入拓展；内容达到可确认程度后，网页只显示确认入口，不再重复给出三项选择。
 
 内置 `InMemorySessionStore` 会在进程重启后清空会话。正式部署前仍应替换为持久化数据库，并为同一 `design_id` 的阶段推进增加事务或乐观锁。

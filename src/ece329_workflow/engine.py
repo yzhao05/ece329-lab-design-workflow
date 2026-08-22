@@ -10,7 +10,17 @@ from threading import RLock
 from typing import Any
 
 from .generator import StageGenerator
-from .guardrails import UNREASONABLE_REQUEST, classify_stage_one_input
+from .guardrails import (
+    BREADTH_EXPLORATION,
+    COURSE_CONTENT,
+    INTEREST_DESCRIPTION,
+    UNREASONABLE_REQUEST,
+    build_stage_one_turn_context,
+    classify_stage_one_input,
+    is_no_direction_request,
+    is_stage_one_control_message,
+    latest_stage_one_options,
+)
 from .knowledge_base import KNOWLEDGE
 from .models import (
     STAGE_SEQUENCE,
@@ -170,10 +180,42 @@ class WorkflowEngine:
             elif emvr_intent is False:
                 session.interaction_state = InteractionState.GUIDED_DESIGN
 
+        idea_before_patch = session.design_context.get("idea", {})
+        authoritative_course_scope = bool(
+            isinstance(idea_before_patch, dict)
+            and idea_before_patch.get("course_scope_confirmed") is True
+        )
         _deep_merge(session.design_context, request.context_patch)
+        if (
+            session.current_stage is Stage.IDEA_BRAINSTORMING
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+        ):
+            patched_idea = session.design_context.get("idea", {})
+            if isinstance(patched_idea, dict):
+                if authoritative_course_scope:
+                    patched_idea["course_scope_confirmed"] = True
+                else:
+                    patched_idea.pop("course_scope_confirmed", None)
         expected_revision = session.revision
         handled_stage = session.current_stage
-        session.turn_context = {"selected_option_id": request.selected_option_id}
+        turn_context: dict[str, Any] = {
+            "selected_option_id": request.selected_option_id,
+        }
+        if (
+            handled_stage is Stage.IDEA_BRAINSTORMING
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+        ):
+            self._hydrate_legacy_stage_one_thread(session)
+            idea_context = session.design_context.get("idea", {})
+            turn_context.update(
+                build_stage_one_turn_context(
+                    message,
+                    options=latest_stage_one_options(session.history),
+                    idea_context=idea_context if isinstance(idea_context, dict) else {},
+                    selected_option_id=request.selected_option_id,
+                )
+            )
+        session.turn_context = turn_context
         self._record_student_decision(
             session,
             handled_stage,
@@ -186,6 +228,13 @@ class WorkflowEngine:
         finally:
             session.turn_context = {}
         self._validate_step_output(session.interaction_state, output.student_task)
+        self._commit_stage_one_thread(
+            session,
+            handled_stage,
+            message,
+            turn_context,
+            output,
+        )
 
         session.revision += 1
         output_dict = output.to_dict()
@@ -401,6 +450,115 @@ class WorkflowEngine:
             del stage_decisions[:-8]
 
     @staticmethod
+    def _hydrate_legacy_stage_one_thread(session: DesignSession) -> None:
+        """Backfill idea-thread state for sessions created before this feature."""
+
+        idea = session.design_context.setdefault("idea", {})
+        if not isinstance(idea, dict):
+            return
+        if idea.get("course_scope_confirmed") is True:
+            if not idea.get("brainstorm_phase"):
+                existing_history = idea.get("focus_history", [])
+                idea["brainstorm_phase"] = (
+                    INTEREST_DESCRIPTION
+                    if isinstance(existing_history, list) and len(existing_history) >= 2
+                    else BREADTH_EXPLORATION
+                )
+            return
+        focus_history: list[str] = []
+        for item in session.history:
+            if item.get("handled_stage") != Stage.IDEA_BRAINSTORMING.value:
+                continue
+            output = item.get("output")
+            payload = output.get("stage_payload") if isinstance(output, dict) else None
+            if not isinstance(payload, dict) or payload.get("input_category") != COURSE_CONTENT:
+                continue
+            candidate = str(
+                payload.get("current_focus")
+                or payload.get("current_idea_summary")
+                or item.get("user_message")
+                or ""
+            ).strip()
+            if (
+                candidate
+                and not is_no_direction_request(candidate)
+                and not is_stage_one_control_message(candidate)
+                and (not focus_history or focus_history[-1] != candidate)
+            ):
+                focus_history.append(candidate)
+        if not focus_history:
+            return
+        idea["topic_anchor"] = str(
+            idea.get("topic_anchor") or idea.get("original") or focus_history[0]
+        ).strip()
+        idea["focus_history"] = focus_history[-8:]
+        idea["current_focus"] = " → ".join(focus_history[-4:])
+        idea["course_scope_confirmed"] = True
+        idea["brainstorm_phase"] = (
+            INTEREST_DESCRIPTION
+            if len(focus_history) >= 2
+            else BREADTH_EXPLORATION
+        )
+        idea["stage_one_turns"] = max(
+            int(idea.get("stage_one_turns", 0)),
+            len(focus_history),
+        )
+
+    @staticmethod
+    def _commit_stage_one_thread(
+        session: DesignSession,
+        handled_stage: Stage,
+        message: str,
+        turn_context: dict[str, Any],
+        output: Any,
+    ) -> None:
+        if (
+            handled_stage is not Stage.IDEA_BRAINSTORMING
+            or session.interaction_state is not InteractionState.GUIDED_DESIGN
+            or output.stage_payload.get("request_rejected") is True
+            or output.stage_payload.get("input_category") != COURSE_CONTENT
+        ):
+            return
+        idea = session.design_context.setdefault("idea", {})
+        if not isinstance(idea, dict):
+            idea = {}
+            session.design_context["idea"] = idea
+        topic_anchor = str(turn_context.get("topic_anchor") or "").strip()
+        current_focus = str(turn_context.get("current_focus") or "").strip()
+        focus_history = turn_context.get("focus_history", [])
+        if not current_focus and (
+            not isinstance(focus_history, list) or not focus_history
+        ):
+            idea["course_scope_confirmed"] = True
+            idea["brainstorm_phase"] = BREADTH_EXPLORATION
+            if turn_context.get("control_turn") is not True:
+                idea["stage_one_turns"] = int(idea.get("stage_one_turns", 0)) + 1
+            return
+        if not topic_anchor:
+            topic_anchor = str(idea.get("topic_anchor") or message).strip()
+        if not current_focus:
+            current_focus = message.strip()
+        if not isinstance(focus_history, list) or not focus_history:
+            focus_history = [current_focus]
+        idea.update(
+            {
+                "topic_anchor": topic_anchor,
+                "current_focus": current_focus,
+                "focus_history": deepcopy(focus_history[-8:]),
+                "course_scope_confirmed": True,
+                "brainstorm_phase": str(
+                    turn_context.get("brainstorm_phase") or BREADTH_EXPLORATION
+                ),
+            }
+        )
+        for key in ("selected_focus", "interest_description"):
+            value = str(turn_context.get(key) or "").strip()
+            if value:
+                idea[key] = value
+        if turn_context.get("control_turn") is not True:
+            idea["stage_one_turns"] = int(idea.get("stage_one_turns", 0)) + 1
+
+    @staticmethod
     def _validate_step_output(
         interaction_state: InteractionState,
         student_task: str | None,
@@ -420,10 +578,12 @@ class WorkflowEngine:
                 bool(idea.get("phenomenon")),
                 bool(idea.get("main_direction")),
                 idea.get("student_confirmed") is True,
-            ) if isinstance(idea, dict) else (False, False, False)
+                idea.get("course_scope_confirmed") is True,
+            ) if isinstance(idea, dict) else (False, False, False, False)
             if not all(required):
                 raise StageCompletionError(
-                    "阶段1尚未完成：需要记录phenomenon、main_direction，并由学生设置student_confirmed=true。"
+                    "阶段1尚未完成：需要先形成ECE329课内方向，记录phenomenon、"
+                    "main_direction，并由学生设置student_confirmed=true。"
                 )
         if stage is Stage.EXPECTED_DATA_VISUALIZATION:
             stage_output = session.stage_outputs.get(stage.value, {})

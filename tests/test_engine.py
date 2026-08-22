@@ -45,6 +45,50 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
         self.assertIn("student_confirmed", result["completion_error"])
 
+    def test_out_of_scope_idea_cannot_be_confirmed_as_a_course_direction(self) -> None:
+        first = self.engine.create_design("我想研究有机化学反应速率")
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {
+                "message": "确认当前方向并进入下一阶段",
+                "complete_stage": True,
+                "context_patch": {
+                    "idea": {
+                        "phenomenon": "有机化学反应速率",
+                        "main_direction": "有机化学反应速率",
+                        "student_confirmed": True,
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+        self.assertIn("ECE329课内方向", result["completion_error"])
+
+    def test_client_cannot_spoof_the_authoritative_course_scope_flag(self) -> None:
+        first = self.engine.create_design("我想研究有机化学反应速率")
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {
+                "message": "确认当前方向并进入下一阶段",
+                "complete_stage": True,
+                "context_patch": {
+                    "idea": {
+                        "phenomenon": "有机化学反应速率",
+                        "main_direction": "有机化学反应速率",
+                        "student_confirmed": True,
+                        "course_scope_confirmed": True,
+                    }
+                },
+            },
+        )
+
+        self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+        stored = self.engine.get_design(first["design_id"])["design_context"]["idea"]
+        self.assertNotIn("course_scope_confirmed", stored)
+
     def test_guided_brainstorm_advances_only_after_required_context(self) -> None:
         first = self.engine.create_design("研究传输线驻波")
         result = self.engine.process_turn(
@@ -313,6 +357,195 @@ class WorkflowEngineTests(unittest.TestCase):
             )
         )
 
+    def test_stage_one_moves_from_breadth_to_description_then_depth(self) -> None:
+        breadth = self.engine.create_design("我想探索传输线")
+        breadth_payload = breadth["stage_payload"]
+
+        self.assertEqual(breadth_payload["brainstorm_phase"], "BREADTH_EXPLORATION")
+        self.assertTrue(breadth_payload["alternative_ideas"])
+        scenes = breadth_payload["exploration_scenes"]
+        self.assertEqual(len(scenes), len(breadth_payload["alternative_ideas"]))
+        self.assertEqual(
+            [scene["course_anchor"] for scene in scenes],
+            breadth_payload["alternative_ideas"],
+        )
+        self.assertTrue(all(len(scene["physical_picture"]) >= 35 for scene in scenes))
+        self.assertTrue(
+            all(
+                scene["extension_scope"]
+                == "ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE"
+                for scene in scenes
+            )
+        )
+        self.assertIn("图景", breadth["assistant_message"])
+        self.assertIn("启发性延伸", breadth["assistant_message"])
+        self.assertTrue(
+            any(
+                word in breadth["student_task"]
+                for word in ("组合", "替换", "自己的")
+            )
+        )
+        selected = breadth_payload["alternative_ideas"][0]
+
+        description_prompt = self.engine.process_turn(
+            breadth["design_id"],
+            {
+                "message": str(selected["focus"]),
+                "selected_option_id": selected["option_id"],
+            },
+        )
+        prompt_payload = description_prompt["stage_payload"]
+        self.assertEqual(prompt_payload["brainstorm_phase"], "INTEREST_DESCRIPTION")
+        self.assertEqual(prompt_payload["alternative_ideas"], [])
+        self.assertEqual(prompt_payload["exploration_scenes"], [])
+        self.assertFalse(prompt_payload["ready_for_next_stage"])
+        self.assertIn("用自己的话描述", description_prompt["student_task"])
+        self.assertNotIn("\n1.", description_prompt["assistant_message"])
+
+        student_description = (
+            "我最感兴趣的是波到达负载后为什么会反射，以及反射波和入射波叠加后"
+            "怎样形成沿传输线变化的图样。"
+        )
+        depth = self.engine.process_turn(
+            breadth["design_id"],
+            {"message": student_description},
+        )
+        depth_payload = depth["stage_payload"]
+        self.assertEqual(depth_payload["brainstorm_phase"], "DEPTH_EXPANSION")
+        self.assertEqual(depth_payload["alternative_ideas"], [])
+        self.assertEqual(depth_payload["exploration_scenes"], [])
+        self.assertTrue(depth_payload["deepening_connections"])
+        self.assertTrue(depth_payload["ready_for_next_stage"])
+        self.assertIn("反射", depth["assistant_message"])
+        self.assertNotIn("上面哪一类", depth["student_task"])
+        self.assertNotEqual(
+            breadth["assistant_message"].split("\n", 1)[0],
+            depth["assistant_message"].split("\n", 1)[0],
+        )
+
+    def test_no_direction_stays_in_breadth_until_student_proposes_an_idea(self) -> None:
+        first = self.engine.create_design("我还没有具体方向")
+        result = self.engine.process_turn(
+            first["design_id"],
+            {"message": "我想研究偏振"},
+        )
+
+        self.assertEqual(result["stage_payload"]["brainstorm_phase"], "BREADTH_EXPLORATION")
+        self.assertTrue(result["stage_payload"]["alternative_ideas"])
+
+    def test_stage_one_preserves_the_full_idea_thread_from_user_feedback(self) -> None:
+        first = self.engine.create_design(
+            "我希望探索静电场，尤其是物体周围电场线的分布和它们之间的相互作用"
+        )
+        selected = first["stage_payload"]["alternative_ideas"][0]
+        selected_text = str(selected.get("focus") or selected.get("direction"))
+
+        selection = self.engine.process_turn(
+            first["design_id"],
+            {"message": selected_text},
+        )
+        symmetry = self.engine.process_turn(
+            first["design_id"],
+            {"message": "对称性和方向"},
+        )
+        boundary = self.engine.process_turn(
+            first["design_id"],
+            {"message": "先看边界形状"},
+        )
+
+        self.assertEqual(selection["stage_payload"]["input_category"], COURSE_CONTENT)
+        self.assertEqual(symmetry["stage_payload"]["input_category"], COURSE_CONTENT)
+        self.assertEqual(boundary["stage_payload"]["input_category"], COURSE_CONTENT)
+        self.assertTrue(symmetry["stage_payload"]["contextual_continuation"])
+        self.assertTrue(boundary["stage_payload"]["contextual_continuation"])
+        self.assertNotIn("不属于ECE329", symmetry["assistant_message"])
+        self.assertNotIn("不属于ECE329", boundary["assistant_message"])
+        current_focus = boundary["stage_payload"]["current_focus"]
+        self.assertIn("静电场", current_focus)
+        self.assertIn("对称性和方向", current_focus)
+        self.assertIn("边界形状", current_focus)
+        self.assertTrue(boundary["stage_payload"]["ready_for_next_stage"])
+        self.assertEqual(boundary["stage_payload"]["alternative_ideas"], [])
+        self.assertTrue(
+            all(
+                item.get("supplemental_concept_id")
+                == "supp_field_sources_and_vector_structure"
+                for item in boundary["stage_payload"]["deepening_connections"]
+            )
+        )
+        stored_focus = self.engine.get_design(first["design_id"])["design_context"][
+            "idea"
+        ]["current_focus"]
+        self.assertEqual(stored_focus, current_focus)
+
+    def test_explicit_new_out_of_scope_topic_does_not_inherit_old_course_scope(self) -> None:
+        first = self.engine.create_design("研究传输线驻波")
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {"message": "我想研究二极管"},
+        )
+
+        self.assertEqual(result["stage_payload"]["input_category"], OUT_OF_SCOPE)
+        self.assertIn("不属于ECE329", result["assistant_message"])
+
+    def test_prompt_packet_marks_short_answer_as_contextual_continuation(self) -> None:
+        first = self.engine.create_design("我想研究静电场和材料")
+        selected = first["stage_payload"]["alternative_ideas"][0]
+        self.engine.process_turn(
+            first["design_id"],
+            {"message": str(selected["focus"]), "selected_option_id": selected["option_id"]},
+        )
+
+        packet = self.engine.get_prompt_packet(first["design_id"], "对称性和方向")
+
+        thread = packet["context"]["stage_one_thread"]
+        self.assertEqual(packet["context"]["stage_one_preclassification"], COURSE_CONTENT)
+        self.assertTrue(thread["contextual_continuation"])
+        self.assertIn("静电场", thread["current_focus"])
+        self.assertIn("对称性和方向", thread["current_focus"])
+
+    def test_stage_one_confirmation_does_not_become_part_of_the_idea(self) -> None:
+        first = self.engine.create_design("研究传输线驻波")
+        before = self.engine.get_design(first["design_id"])["design_context"]["idea"][
+            "current_focus"
+        ]
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {
+                "message": "确认当前方向并进入下一阶段",
+                "complete_stage": True,
+                "context_patch": {
+                    "idea": {
+                        "phenomenon": "传输线驻波",
+                        "main_direction": before,
+                        "student_confirmed": True,
+                    }
+                },
+            },
+        )
+
+        stored = self.engine.get_design(first["design_id"])["design_context"]["idea"]
+        self.assertEqual(result["current_stage"], Stage.COURSE_MAPPING_AND_DIRECTION.value)
+        self.assertEqual(stored["current_focus"], before)
+        self.assertNotIn("确认当前方向", stored["current_focus"])
+
+    def test_legacy_stage_one_session_recovers_its_course_idea_thread(self) -> None:
+        first = self.engine.create_design("我想研究静电场和材料")
+        session = self.engine.store.get(first["design_id"])
+        session.design_context["idea"] = {"original": "我想研究静电场和材料"}
+        self.engine.store.save(session)
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {"message": "对称性和方向"},
+        )
+
+        self.assertEqual(result["stage_payload"]["input_category"], COURSE_CONTENT)
+        self.assertTrue(result["stage_payload"]["contextual_continuation"])
+        self.assertIn("静电场", result["stage_payload"]["current_focus"])
+
     def test_stage_one_resolves_numbered_followup_against_previous_options(self) -> None:
         first = self.engine.create_design("我想研究静电场和材料")
         selected = first["stage_payload"]["alternative_ideas"][2]
@@ -409,7 +642,7 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertTrue(all("lecture_27" in item["course_scope_concept_ids"] for item in options))
         self.assertTrue(all(len(item["references"]) >= 2 for item in options))
-        self.assertIn("哪一类关系", result["student_task"])
+        self.assertIn("组合", result["student_task"])
         self.assertNotIn("自变量", result["student_task"])
         self.assertNotIn("公式", result["student_task"])
 

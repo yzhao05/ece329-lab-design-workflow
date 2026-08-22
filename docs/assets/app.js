@@ -5,7 +5,8 @@ const STORAGE_KEY = "ece329-lab-studio-session-v1";
 const DESIGN_TOKEN_KEY = "ece329-design-access-token-v1";
 const ACCESS_CODE_KEY = "ece329-course-access-code-v1";
 const LEGACY_INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们先从讲义中的概念出发探索想法，不急着写完整方案。\n\n请描述一个你感兴趣的电磁现象，或者告诉我你还没有具体方向。";
-const INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们会从ECE329课上所学的电磁场、电磁波和传输线概念出发，一起探索实验想法，不急着写完整方案。\n\n你可以描述一个感兴趣的现象，例如静电场与材料边界、磁场与电磁感应、电磁波的偏振与反射，或传输线中的反射与驻波。如果暂时没有方向，也可以直接告诉我。";
+const PREVIOUS_INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们会从ECE329课上所学的电磁场、电磁波和传输线概念出发，一起探索实验想法，不急着写完整方案。\n\n你可以描述一个感兴趣的现象，例如静电场与材料边界、磁场与电磁感应、电磁波的偏振与反射，或传输线中的反射与驻波。如果暂时没有方向，也可以直接告诉我。";
+const INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们先了解你的想法，再一起把它发展成清晰的实验方向，不急着写完整方案。\n\n请先用自己的话说说：你目前对哪个ECE329现象或概念有兴趣？如果还没有具体思路，也可以直接告诉我，我会先带你浏览课上所学内容的大致方向。";
 
 class ApiError extends Error {
   constructor(message, status = 0, code = "request_failed") {
@@ -178,10 +179,11 @@ function initialState() {
     ],
     evidence: null,
     visualization: null,
-    quickActions: ["传输线驻波", "电磁波偏振", "导体中的衰减"],
+    quickActions: [],
     notes: [],
     pendingOptionId: null,
     pendingDirection: null,
+    stageOnePhase: "BREADTH_EXPLORATION",
     pendingSummary: null,
     summarySections: [],
     lastStudentInput: null,
@@ -193,7 +195,8 @@ function loadState() {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved && Array.isArray(saved.messages) && Number.isInteger(saved.stageIndex)) {
       saved.messages = saved.messages.map((message) => (
-        message.role === "assistant" && message.text === LEGACY_INITIAL_GREETING
+        message.role === "assistant"
+          && [LEGACY_INITIAL_GREETING, PREVIOUS_INITIAL_GREETING].includes(message.text)
           ? { ...message, text: INITIAL_GREETING, tags: ["阶段 1", "ECE329课程相关"] }
           : message
       ));
@@ -489,7 +492,7 @@ async function handleSubmit(event) {
   const message = dom.chatInput.value.trim();
   if (!message || dom.sendButton.disabled) return;
 
-  if (state.stageIndex === 0 && !isAdvanceIntent(message)) {
+  if (state.stageIndex === 0 && !isAdvanceIntent(message) && !state.pendingDirection) {
     state.pendingDirection = message;
   }
   const isSummaryContribution = (
@@ -688,6 +691,56 @@ function buildTurnRequest(message) {
   return turn;
 }
 
+function createDemoExplorationScenes(evidence) {
+  const frames = [
+    {
+      title: "让两个对象逐渐靠近",
+      picture: "想象把两个相关对象从相距很远慢慢移到彼此附近，并从不同方向观察周围的场或波。原先规则的空间图样会在哪里先弯曲、聚集、抵消或重新排列？",
+      extension: "可以把规则外形换成带尖角、弯折或窄缝的结构，看看画面会不会出现新的特征。",
+    },
+    {
+      title: "让材料与边界形成反差",
+      picture: "想象保持整体轮廓相近，却把其中一个区域换成另一种材料、边界或终端状态。从界面的一侧走到另一侧时，场的方向、幅度或传播图样会怎样变化？",
+      extension: "可以设想带开口的外壳、分层材料或不完全封闭的边界，作为进一步联想。",
+    },
+    {
+      title: "让多个来源在空间中相遇",
+      picture: "想象同时存在两个来源或两条传播路径，并缓慢改变它们的相对位置与朝向。在空间中移动观察点，哪里会出现增强、减弱、节点或方向突变？",
+      extension: "可以加入第三个对象或不对称扰动，观察原有图样是否仍保持直观的对称性。",
+    },
+  ];
+  return evidence.options.map((direction, index) => {
+    const frame = frames[index % frames.length];
+    const label = `图景 ${String.fromCharCode(65 + index)}`;
+    const nextLabel = `图景 ${String.fromCharCode(65 + ((index + 1) % evidence.options.length))}`;
+    return {
+      scene_id: `demo_scene_${index + 1}`,
+      label,
+      title: frame.title,
+      course_anchor: direction,
+      physical_picture: `${frame.picture} 这幅图景围绕ECE329课上所学的“${direction}”展开。`,
+      thinking_prompt: "其中哪一种看似反直觉的场或波变化最值得你继续解释？",
+      combination_seed: `也可以把这里的对象、材料或边界与${nextLabel}交换、叠加或重新组合。`,
+      illustrative_extension: frame.extension,
+      extension_scope: "ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE",
+    };
+  });
+}
+
+function formatDemoExplorationScenes(scenes) {
+  return scenes.map((scene) => [
+    `${scene.label}｜${scene.title}`,
+    scene.physical_picture,
+    `启发性延伸：${scene.illustrative_extension}`,
+    `可以继续想：${scene.thinking_prompt}`,
+    `组合提示：${scene.combination_seed}`,
+  ].join("\n")).join("\n\n");
+}
+
+function demoBreadthTask() {
+  return "哪幅图景触发了你的联想，或者你想怎样组合、替换其中的对象，提出一个自己的ECE329课内设想？";
+}
+
 function createDemoResponse(message) {
   const firstTurn = !state.designId;
   const emvrIntent = detectDemoEmvrIntent(message);
@@ -698,6 +751,14 @@ function createDemoResponse(message) {
   state.pendingOptionId = null;
   let inputCategory = classifyDemoStageOneInput(message, directEvidence);
   if (selectedPriorOption) {
+    inputCategory = "COURSE_CONTENT";
+  }
+  if (
+    !firstTurn
+    && state.stageIndex === 0
+    && state.stageOnePhase !== "BREADTH_EXPLORATION"
+    && inputCategory !== "UNREASONABLE_REQUEST"
+  ) {
     inputCategory = "COURSE_CONTENT";
   }
   if (emvrIntent !== null && inputCategory !== "UNREASONABLE_REQUEST") {
@@ -717,7 +778,8 @@ function createDemoResponse(message) {
     state.notes = [`初始想法：${message}`];
     state.quickActions = evidence.options;
     if (emvr) state.stageIndex = 1;
-    const examples = evidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+    const scenes = createDemoExplorationScenes(evidence);
+    const sceneText = formatDemoExplorationScenes(scenes);
     let guidedIntroduction;
     if (inputCategory === "UNREASONABLE_REQUEST") {
       guidedIntroduction = "这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。";
@@ -731,11 +793,18 @@ function createDemoResponse(message) {
     return {
       assistant_message: emvr
         ? `已把你的想法整理为Unity VR模拟实验的设计起点，并将优先保留其中与ECE329课程相关的物理现象。接下来会逐步完善学习目标、理论关系、交互对象和观察反馈。`
-        : `${guidedIntroduction}\n\n例如：\n${examples}\n\n${DEMO_STAGE_PROMPTS[0]}`,
+        : `${guidedIntroduction}\n\n下面不是一组标准答案，而是几幅可以继续改造、交换或组合的物理图景：\n\n${sceneText}\n\n${demoBreadthTask()}`,
       current_stage: STAGES[state.stageIndex][0],
       interaction_state: state.mode,
       knowledge_references: [evidence],
       quick_actions: evidence.options,
+      stage_payload: {
+        input_category: inputCategory,
+        brainstorm_phase: "BREADTH_EXPLORATION",
+        alternative_ideas: evidence.options,
+        exploration_scenes: scenes,
+        ready_for_next_stage: false,
+      },
       warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
       _runtime_source: "demo",
     };
@@ -747,14 +816,22 @@ function createDemoResponse(message) {
 
   if (inputCategory === "UNREASONABLE_REQUEST") {
     const courseEvidence = FALLBACK_EVIDENCE;
-    const examples = courseEvidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+    const scenes = createDemoExplorationScenes(courseEvidence);
+    const sceneText = formatDemoExplorationScenes(scenes);
     state.quickActions = courseEvidence.options;
     return {
-      assistant_message: `这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。\n\n例如：\n${examples}`,
+      assistant_message: `这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。下面的图景不是固定答案，而是帮助你重新产生课程内的物理联想。\n\n${sceneText}`,
       current_stage: STAGES[state.stageIndex][0],
       interaction_state: state.mode,
       knowledge_references: [courseEvidence],
       quick_actions: courseEvidence.options,
+      stage_payload: {
+        request_rejected: true,
+        input_category: "UNREASONABLE_REQUEST",
+        brainstorm_phase: "BREADTH_EXPLORATION",
+        alternative_ideas: courseEvidence.options,
+        exploration_scenes: scenes,
+      },
       warnings: ["当前请求没有改变你的实验设计进度。"],
       request_rejected: true,
       _runtime_source: "demo",
@@ -766,15 +843,56 @@ function createDemoResponse(message) {
     && state.mode === "GUIDED_DESIGN"
     && state.stageIndex === 0
   ) {
-    const followupOptions = evidence.options || state.quickActions;
-    state.quickActions = followupOptions;
+    state.stageOnePhase = "INTEREST_DESCRIPTION";
+    state.quickActions = [];
     state.notes.push(`已选择方向：${selectedPriorOption.label}`);
     return {
-      assistant_message: `你选择的是“${selectedPriorOption.label}”。这个方向属于ECE329课程内容，可以继续从相关现象和概念关系中展开。现在仍先不确定变量、公式或实验结构，而是进一步确认你最感兴趣的物理联系。\n\n${DEMO_STAGE_PROMPTS[0]}`,
+      assistant_message: `你已经把方向收到了“${selectedPriorOption.label}”。我先不继续列出新选项，因为同一个方向对不同学生可能意味着不同的兴趣。你可以描述让你注意到它的现象、最想解释的物理联系，或者目前仍感到疑惑的地方；不需要写成正式的实验问题。`,
+      student_task: "请用自己的话描述：这个方向中什么现象或物理联系最吸引你，以及你最希望进一步弄清什么？",
       current_stage: STAGES[0][0],
       interaction_state: state.mode,
       knowledge_references: [evidence],
-      quick_actions: followupOptions,
+      stage_payload: {
+        input_category: "COURSE_CONTENT",
+        brainstorm_phase: "INTEREST_DESCRIPTION",
+        selected_focus: selectedPriorOption.label,
+        current_focus: selectedPriorOption.label,
+        alternative_ideas: [],
+        exploration_scenes: [],
+        ready_for_next_stage: false,
+      },
+      quick_actions: [],
+      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      _runtime_source: "demo",
+    };
+  }
+
+  if (
+    state.mode === "GUIDED_DESIGN"
+    && state.stageIndex === 0
+    && ["INTEREST_DESCRIPTION", "DEPTH_EXPANSION"].includes(state.stageOnePhase)
+    && inputCategory === "COURSE_CONTENT"
+  ) {
+    state.stageOnePhase = "DEPTH_EXPANSION";
+    state.quickActions = ["确认当前方向并进入下一阶段"];
+    const selectedFocus = state.pendingDirection || evidence.title;
+    return {
+      assistant_message: `你刚才的描述让“${selectedFocus}”变得更具体了。沿着你的表述继续深入，这里值得关注的不是一个孤立现象，而是场的空间分布、边界条件与可观察变化之间怎样相互联系。这个方向已经开始形成清楚的物理内容，但现在仍不需要提前确定变量、公式或实验装置。`,
+      student_task: "请继续用自己的话补充或修正这段理解；如果它已经准确表达你的想法，也可以确认当前方向并进入下一阶段。",
+      current_stage: STAGES[0][0],
+      interaction_state: state.mode,
+      knowledge_references: [evidence],
+      stage_payload: {
+        input_category: "COURSE_CONTENT",
+        brainstorm_phase: "DEPTH_EXPANSION",
+        selected_focus: selectedFocus,
+        interest_description: message,
+        current_focus: `${selectedFocus} → ${message}`,
+        alternative_ideas: [],
+        exploration_scenes: [],
+        ready_for_next_stage: true,
+      },
+      quick_actions: ["确认当前方向并进入下一阶段"],
       warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
       _runtime_source: "demo",
     };
@@ -789,18 +907,47 @@ function createDemoResponse(message) {
   const prompt = DEMO_STAGE_PROMPTS[state.stageIndex];
   if (state.mode === "GUIDED_DESIGN" && state.stageIndex === 0 && inputCategory !== "COURSE_CONTENT") {
     const courseEvidence = FALLBACK_EVIDENCE;
-    const examples = courseEvidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+    const scenes = createDemoExplorationScenes(courseEvidence);
+    const sceneText = formatDemoExplorationScenes(scenes);
     const introduction = inputCategory === "UNREASONABLE_REQUEST"
       ? "这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。"
       : "你提出的主题不属于ECE329课程的内容范围，因此不适合作为这门课实验设计的核心。ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。";
     state.evidence = courseEvidence;
+    state.stageOnePhase = "BREADTH_EXPLORATION";
     state.quickActions = courseEvidence.options;
     return {
-      assistant_message: `${introduction}\n\n例如：\n${examples}\n\n${DEMO_STAGE_PROMPTS[0]}`,
+      assistant_message: `${introduction}\n\n下面不是一组标准答案，而是几幅可以继续改造、交换或组合的物理图景：\n\n${sceneText}\n\n${demoBreadthTask()}`,
       current_stage: STAGES[0][0],
       interaction_state: state.mode,
       knowledge_references: [courseEvidence],
       quick_actions: courseEvidence.options,
+      stage_payload: {
+        input_category: inputCategory,
+        brainstorm_phase: "BREADTH_EXPLORATION",
+        alternative_ideas: courseEvidence.options,
+        exploration_scenes: scenes,
+        ready_for_next_stage: false,
+      },
+      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      _runtime_source: "demo",
+    };
+  }
+  if (state.mode === "GUIDED_DESIGN" && state.stageIndex === 0) {
+    const scenes = createDemoExplorationScenes(evidence);
+    state.quickActions = evidence.options;
+    return {
+      assistant_message: `“${message}”可以继续从不同的ECE329物理关系中展开。现在先不确定变量、公式或实验结构，而是用几幅可以改造和组合的图景寻找真正感兴趣的联系。\n\n${formatDemoExplorationScenes(scenes)}\n\n${demoBreadthTask()}`,
+      current_stage: STAGES[0][0],
+      interaction_state: state.mode,
+      knowledge_references: [evidence],
+      quick_actions: evidence.options,
+      stage_payload: {
+        input_category: "COURSE_CONTENT",
+        brainstorm_phase: "BREADTH_EXPLORATION",
+        alternative_ideas: evidence.options,
+        exploration_scenes: scenes,
+        ready_for_next_stage: false,
+      },
       warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
       _runtime_source: "demo",
     };
@@ -901,6 +1048,19 @@ function applyResponse(response, userMessage) {
 
   const evidence = extractEvidence(response);
   if (evidence.length) state.evidence = evidence;
+  if (state.stageIndex === 0) {
+    const inputCategory = response.stage_payload?.input_category;
+    if (response.stage_payload?.brainstorm_phase) {
+      state.stageOnePhase = response.stage_payload.brainstorm_phase;
+    }
+    if (!inputCategory || inputCategory === "COURSE_CONTENT") {
+      const serverFocus = response.stage_payload?.current_focus
+        || response.stage_payload?.current_idea_summary;
+      if (typeof serverFocus === "string" && serverFocus.trim()) {
+        state.pendingDirection = serverFocus.trim();
+      }
+    }
+  }
   state.quickActions = deriveQuickActions(response);
 
   const text = composeAssistantText(response);
@@ -952,7 +1112,22 @@ function deriveQuickActions(response) {
       }))
       .filter((item) => item.label)
       .slice(0, 3);
-    return [...alternatives, "确认当前方向并进入下一阶段"];
+    const sceneActions = (response.stage_payload?.exploration_scenes || [])
+      .map((scene) => ({
+        option_id: scene.course_anchor?.option_id || null,
+        label: [scene.label, scene.title].filter(Boolean).join("｜"),
+      }))
+      .filter((item) => item.label)
+      .slice(0, 4);
+    const breadthActions = sceneActions.length ? sceneActions : alternatives;
+    const phase = response.stage_payload?.brainstorm_phase || "BREADTH_EXPLORATION";
+    if (response.stage_payload?.input_category !== "COURSE_CONTENT") {
+      return breadthActions;
+    }
+    if (phase === "BREADTH_EXPLORATION") return breadthActions;
+    if (phase === "INTEREST_DESCRIPTION") return [];
+    const confirmation = "确认当前方向并进入下一阶段";
+    return response.stage_payload?.ready_for_next_stage ? [confirmation] : [];
   }
   if (state.stageIndex === STAGES.length - 1) {
     return String(state.pendingSummary || "").trim().length >= 20

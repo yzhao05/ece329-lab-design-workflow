@@ -6,7 +6,8 @@ from copy import deepcopy
 from typing import Any
 
 from ece329_workflow.engine import WorkflowEngine
-from ece329_workflow.generator import RuleBasedStageGenerator
+from ece329_workflow.generator import RuleBasedStageGenerator, build_exploration_scenes
+from ece329_workflow.guardrails import build_stage_one_turn_context
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.openai_generator import (
@@ -66,13 +67,18 @@ def guided_session(stage_index: int = 0) -> DesignSession:
 
 def valid_output(**overrides: Any) -> dict[str, Any]:
     brainstorm = KNOWLEDGE.brainstorm_options("研究传输线驻波", limit=1)
+    scenes = build_exploration_scenes(brainstorm)
     output: dict[str, Any] = {
-        "assistant_message": "我们先比较ECE329课上所学概念之间的关系。",
+        "assistant_message": (
+            "我们先用一幅可改造、可组合的物理图景比较ECE329课上所学概念"
+            "之间的关系。启发性延伸只用于打开思路。"
+        ),
         "stage_payload_json": json.dumps(
             {
                 "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
                 "input_category": "COURSE_CONTENT",
                 "alternative_ideas": brainstorm,
+                "exploration_scenes": scenes,
             },
             ensure_ascii=False,
         ),
@@ -220,6 +226,23 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         self.assertEqual(transport.requests[0]["max_output_tokens"], 5000)
 
+    def test_guided_stage_one_uses_scene_specific_output_budget(self) -> None:
+        transport = FakeTransport(valid_output())
+        generator = OpenAIStageGenerator(
+            transport=transport,
+            max_output_tokens=1200,
+            stage_one_max_output_tokens=3600,
+        )
+
+        output = generator.generate(guided_session(), "研究传输线驻波")
+
+        self.assertEqual(transport.requests[0]["max_output_tokens"], 3600)
+        self.assertTrue(output.stage_payload["exploration_scenes"])
+        self.assertEqual(
+            output.stage_payload["exploration_scenes"][0]["course_anchor"],
+            output.stage_payload["alternative_ideas"][0],
+        )
+
     def test_invalid_model_output_is_rejected(self) -> None:
         transport = FakeTransport({"assistant_message": "missing required fields"})
         generator = OpenAIStageGenerator(transport=transport)
@@ -299,6 +322,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
     def test_out_of_scope_model_response_must_state_boundary(self) -> None:
         broad_options = KNOWLEDGE.broad_entry_points()
+        broad_scenes = build_exploration_scenes(broad_options)
         missing_boundary = FakeTransport(
             valid_output(
                 assistant_message="这里有三个课程方向供你选择。",
@@ -307,6 +331,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                         "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
                         "input_category": "OUT_OF_SCOPE",
                         "alternative_ideas": broad_options,
+                        "exploration_scenes": broad_scenes,
                     },
                     ensure_ascii=False,
                 ),
@@ -320,14 +345,19 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
     def test_ambiguous_preclassification_allows_model_semantic_course_judgment(self) -> None:
         broad_options = KNOWLEDGE.broad_entry_points()
+        broad_scenes = build_exploration_scenes(broad_options)
         transport = FakeTransport(
             valid_output(
-                assistant_message="这个表述可以从ECE329课内的场与材料关系继续辨析。",
+                assistant_message=(
+                    "这个表述可以从ECE329课内的场与材料关系继续辨析。下面用可改造、"
+                    "可组合的物理图景启发思考；其中的启发性延伸不是课程结论。"
+                ),
                 stage_payload_json=json.dumps(
                     {
                         "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
                         "input_category": "COURSE_CONTENT",
                         "alternative_ideas": broad_options,
+                        "exploration_scenes": broad_scenes,
                     },
                     ensure_ascii=False,
                 ),
@@ -341,19 +371,93 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         self.assertEqual(output.stage_payload["input_category"], "COURSE_CONTENT")
 
+    def test_model_selection_turn_removes_choice_list_and_requests_description(self) -> None:
+        session = guided_session()
+        options = KNOWLEDGE.brainstorm_options("研究传输线驻波", limit=3)
+        session.history.append(
+            {
+                "handled_stage": Stage.IDEA_BRAINSTORMING.value,
+                "user_message": "研究传输线驻波",
+                "output": {
+                    "stage_payload": {
+                        "input_category": "COURSE_CONTENT",
+                        "alternative_ideas": options,
+                    }
+                },
+            }
+        )
+        session.design_context["idea"].update(
+            {
+                "topic_anchor": "研究传输线驻波",
+                "current_focus": "研究传输线驻波",
+                "focus_history": ["研究传输线驻波"],
+                "course_scope_confirmed": True,
+                "brainstorm_phase": "BREADTH_EXPLORATION",
+            }
+        )
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                str(options[0]["focus"]),
+                options=options,
+                idea_context=session.design_context["idea"],
+                selected_option_id=str(options[0]["option_id"]),
+            )
+        )
+        transport = FakeTransport(valid_output())
+
+        output = OpenAIStageGenerator(transport=transport).generate(
+            session,
+            str(options[0]["focus"]),
+        )
+
+        self.assertEqual(output.stage_payload["brainstorm_phase"], "INTEREST_DESCRIPTION")
+        self.assertEqual(output.stage_payload["alternative_ideas"], [])
+
+    def test_model_depth_turn_uses_grounded_connections_without_choice_list(self) -> None:
+        session = guided_session()
+        options = KNOWLEDGE.brainstorm_options("研究传输线驻波", limit=3)
+        session.design_context["idea"].update(
+            {
+                "topic_anchor": "研究传输线驻波",
+                "current_focus": "研究传输线驻波 → 反射与驻波",
+                "focus_history": ["研究传输线驻波", "反射与驻波"],
+                "course_scope_confirmed": True,
+                "brainstorm_phase": "INTEREST_DESCRIPTION",
+                "selected_focus": "反射与驻波",
+            }
+        )
+        message = "我想弄清入射波和反射波叠加后为什么形成驻波"
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                message,
+                options=options,
+                idea_context=session.design_context["idea"],
+            )
+        )
+        transport = FakeTransport(valid_output())
+
+        output = OpenAIStageGenerator(transport=transport).generate(session, message)
+
+        self.assertEqual(output.stage_payload["brainstorm_phase"], "DEPTH_EXPANSION")
+        self.assertEqual(output.stage_payload["alternative_ideas"], [])
+        self.assertEqual(output.stage_payload["deepening_connections"], options)
+
     def test_valid_out_of_scope_model_response_keeps_three_course_examples(self) -> None:
         broad_options = KNOWLEDGE.broad_entry_points()
+        broad_scenes = build_exploration_scenes(broad_options)
         transport = FakeTransport(
             valid_output(
                 assistant_message=(
                     "这个主题不属于ECE329课程范围。你可以改从电磁场、电磁波或"
-                    "传输线中的关系开始探索。"
+                    "传输线中的关系开始探索。下面的物理图景可以改造或组合，"
+                    "其中的启发性延伸不是课程结论。"
                 ),
                 stage_payload_json=json.dumps(
                     {
                         "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
                         "input_category": "OUT_OF_SCOPE",
                         "alternative_ideas": broad_options,
+                        "exploration_scenes": broad_scenes,
                     },
                     ensure_ascii=False,
                 ),
@@ -465,8 +569,55 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         output = fallback.generate(guided_session(), "研究传输线驻波")
 
         self.assertTrue(output.stage_payload["alternative_ideas"])
-        self.assertIn("ECE329课程资料", output.warnings[-1])
+        self.assertIn("之前的实验方向和选择已保留", output.warnings[-1])
         self.assertNotIn("生成器", output.warnings[-1])
+        info = fallback.runtime_info()
+        self.assertEqual(info["last_fallback_reason"], "model_transport_error")
+        self.assertEqual(info["fallback_calls"], 1)
+
+    def test_invalid_model_output_is_repaired_once_before_fallback(self) -> None:
+        class SequencedTransport:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, Any]] = []
+                self.outputs = [
+                    {"assistant_message": "invalid"},
+                    valid_output(),
+                ]
+
+            def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+                self.requests.append(deepcopy(payload))
+                output = self.outputs.pop(0)
+                return {
+                    "id": f"resp_{len(self.requests)}",
+                    "output_text": json.dumps(output, ensure_ascii=False),
+                }
+
+        transport = SequencedTransport()
+        generator = OpenAIStageGenerator(transport=transport)
+
+        output = generator.generate(guided_session(), "研究传输线驻波")
+
+        self.assertEqual(output.stage_payload["input_category"], "COURSE_CONTENT")
+        self.assertEqual(len(transport.requests), 2)
+        self.assertNotIn("previous_response_id", transport.requests[1])
+        info = generator.runtime_info()
+        self.assertEqual(info["output_rejections"], 1)
+        self.assertEqual(info["repair_successes"], 1)
+
+    def test_output_rejection_reason_is_visible_in_health_metrics(self) -> None:
+        fallback = FallbackStageGenerator(
+            primary=OpenAIStageGenerator(
+                transport=FakeTransport({"assistant_message": "invalid"}),
+                repair_attempts=0,
+            ),
+            fallback=RuleBasedStageGenerator(),
+        )
+
+        fallback.generate(guided_session(), "研究传输线驻波")
+
+        info = fallback.runtime_info()
+        self.assertEqual(info["last_fallback_reason"], "model_output_rejected")
+        self.assertEqual(info["output_rejections"], 1)
 
     def test_auto_mode_without_key_remains_rule_based(self) -> None:
         generator = generator_from_environment({})

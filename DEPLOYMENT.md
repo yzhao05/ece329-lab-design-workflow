@@ -33,6 +33,7 @@ Use any container host that provides a public HTTPS URL and a persistent disk. C
 OPENAI_API_KEY=<backend secret>
 ECE329_GENERATOR=auto
 OPENAI_MODEL=gpt-5.4-mini
+OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS=3200
 OPENAI_FINAL_MAX_OUTPUT_TOKENS=5000
 ECE329_OPENAI_STATEFUL=false
 ECE329_ACCESS_CODE=<generate-a-long-random-course-code>
@@ -58,6 +59,14 @@ After deployment, verify both liveness and readiness:
 curl https://YOUR-BACKEND-HOST/health
 curl https://YOUR-BACKEND-HOST/ready
 ```
+
+After several real conversations, inspect `generator` in `/health`. A growing
+`api_failures` value points to transport, timeout, authentication, quota, or
+HTTP failures. A growing `output_rejections` value means the model answered but
+did not satisfy the workflow contract; `repair_successes` counts cases fixed by
+the automatic one-time retry. `fallback_calls` and `last_fallback_reason` show
+whether students are currently receiving the course-built-in fallback. These
+fields contain no API key or student message text.
 
 ## 3. Connect GitHub Pages without editing config.js
 

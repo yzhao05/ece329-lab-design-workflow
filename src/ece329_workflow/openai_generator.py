@@ -4,16 +4,20 @@ import json
 import logging
 import os
 import socket
+from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .generator import RuleBasedStageGenerator
+from .generator import ILLUSTRATIVE_EXTENSION_SCOPE, RuleBasedStageGenerator
 from .guardrails import (
     AMBIGUOUS,
+    BREADTH_EXPLORATION,
     COURSE_CONTENT,
+    DEPTH_EXPANSION,
+    INTEREST_DESCRIPTION,
     OUT_OF_SCOPE,
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
@@ -491,19 +495,24 @@ def _validate_lecture_grounding(
             AMBIGUOUS,
         }:
             raise ModelOutputError("Stage 1 preclassification was invalid")
+        phase = output.stage_payload.get("brainstorm_phase")
+        allowed_phases = {
+            BREADTH_EXPLORATION,
+            INTEREST_DESCRIPTION,
+            DEPTH_EXPANSION,
+        }
+        if phase not in allowed_phases:
+            raise ModelOutputError("Stage 1 returned an invalid brainstorm phase")
         alternatives = output.stage_payload.get("alternative_ideas")
+        exploration_scenes = output.stage_payload.get("exploration_scenes")
         if output.stage_payload.get("brainstorm_activity") != "RELATIONSHIP_DISCOVERY":
             raise ModelOutputError(
                 "Stage 1 must use RELATIONSHIP_DISCOVERY before later-stage refinement"
             )
-        if (
-            not isinstance(alternatives, list)
-            or not alternatives
-            or not (cited_concepts or cited_supplemental)
-        ):
-            raise ModelOutputError(
-                "Stage 1 must return catalog-grounded alternative_ideas"
-            )
+        if not isinstance(alternatives, list):
+            raise ModelOutputError("Stage 1 alternative_ideas must be an array")
+        if not isinstance(exploration_scenes, list):
+            raise ModelOutputError("Stage 1 exploration_scenes must be an array")
         for alternative in alternatives:
             if not isinstance(alternative, dict):
                 raise ModelOutputError("Every Stage 1 alternative must be an object")
@@ -511,7 +520,73 @@ def _validate_lecture_grounding(
                 raise ModelOutputError(
                     "Every Stage 1 alternative must exactly reuse a retrieved brainstorm option"
                 )
+        if phase == BREADTH_EXPLORATION:
+            if len(exploration_scenes) != len(alternatives):
+                raise ModelOutputError(
+                    "Breadth exploration requires one scene per grounded alternative"
+                )
+            seen_scene_ids: set[str] = set()
+            scene_string_fields = {
+                "scene_id",
+                "label",
+                "title",
+                "physical_picture",
+                "thinking_prompt",
+                "combination_seed",
+                "illustrative_extension",
+                "extension_scope",
+            }
+            for index, scene in enumerate(exploration_scenes):
+                if not isinstance(scene, dict):
+                    raise ModelOutputError("Every Stage 1 exploration scene must be an object")
+                if any(
+                    not isinstance(scene.get(field), str)
+                    or not str(scene.get(field)).strip()
+                    for field in scene_string_fields
+                ):
+                    raise ModelOutputError(
+                        "Every Stage 1 exploration scene requires complete descriptive fields"
+                    )
+                scene_id = str(scene["scene_id"]).strip()
+                if scene_id in seen_scene_ids:
+                    raise ModelOutputError("Stage 1 exploration scene ids must be unique")
+                seen_scene_ids.add(scene_id)
+                if scene.get("course_anchor") != alternatives[index]:
+                    raise ModelOutputError(
+                        "Every Stage 1 scene must exactly bind its matching course alternative"
+                    )
+                if scene.get("extension_scope") != ILLUSTRATIVE_EXTENSION_SCOPE:
+                    raise ModelOutputError(
+                        "Illustrative scene extensions must be separated from course evidence"
+                    )
+                if len(str(scene["physical_picture"]).strip()) < 35:
+                    raise ModelOutputError(
+                        "Stage 1 scenes must contain a concrete, vivid physical picture"
+                    )
+            visible_message = output.assistant_message
+            if "图景" not in visible_message or not any(
+                phrase in visible_message
+                for phrase in ("组合", "改造", "交换", "叠加")
+            ):
+                raise ModelOutputError(
+                    "Breadth replies must present combinable physical scenes"
+                )
+            if not any(
+                phrase in visible_message
+                for phrase in ("启发性延伸", "启发性设想")
+            ):
+                raise ModelOutputError(
+                    "Breadth replies must label illustrative extensions"
+                )
+        elif exploration_scenes:
+            raise ModelOutputError(
+                "Interest description and depth expansion cannot return exploration scenes"
+            )
         if input_category in {OUT_OF_SCOPE, UNREASONABLE_REQUEST}:
+            if phase != BREADTH_EXPLORATION:
+                raise ModelOutputError(
+                    "Redirected Stage 1 responses must return to breadth exploration"
+                )
             if len(alternatives) != 3:
                 raise ModelOutputError(
                     "Redirected Stage 1 responses must contain exactly three course examples"
@@ -532,6 +607,31 @@ def _validate_lecture_grounding(
                 raise ModelOutputError(
                     "Unreasonable requests must be explicitly refused"
                 )
+        elif phase == BREADTH_EXPLORATION:
+            if not alternatives or not (cited_concepts or cited_supplemental):
+                raise ModelOutputError(
+                    "Breadth exploration must return catalog-grounded alternatives"
+                )
+        elif alternatives:
+            raise ModelOutputError(
+                "Interest description and depth expansion cannot return choice options"
+            )
+        if input_category == COURSE_CONTENT and phase == DEPTH_EXPANSION:
+            deepening_connections = output.stage_payload.get(
+                "deepening_connections"
+            )
+            if not isinstance(deepening_connections, list) or not deepening_connections:
+                raise ModelOutputError(
+                    "Depth expansion requires catalog-grounded deepening connections"
+                )
+            for connection in deepening_connections:
+                if (
+                    not isinstance(connection, dict)
+                    or connection not in retrieved_brainstorm_options
+                ):
+                    raise ModelOutputError(
+                        "Depth connections must exactly reuse retrieved brainstorm options"
+                    )
         resolved_reference = prompt_packet["context"].get(
             "resolved_stage_one_reference"
         )
@@ -581,16 +681,98 @@ def _validate_lecture_grounding(
             raise ModelOutputError("Stage 5 must cite a retrieved lecture formula")
 
 
+def _step_output_from_response(
+    session: DesignSession,
+    response: dict[str, Any],
+    packet: dict[str, Any],
+) -> StepOutput:
+    try:
+        raw_output = json.loads(_extract_output_text(response))
+    except json.JSONDecodeError as exc:
+        raise ModelOutputError("The model output was not valid JSON") from exc
+    if not isinstance(raw_output, dict):
+        raise ModelOutputError("The model output must be a JSON object")
+
+    assistant_message = raw_output.get("assistant_message")
+    stage_payload = _json_object(
+        raw_output.get("stage_payload_json"),
+        "stage_payload_json",
+    )
+    student_task = raw_output.get("student_task")
+    visualization = _json_object(
+        raw_output.get("visualization_json"),
+        "visualization_json",
+        allow_null=True,
+    )
+    if not isinstance(assistant_message, str) or not assistant_message.strip():
+        raise ModelOutputError("Model field assistant_message must be a non-empty string")
+    if student_task is not None and not isinstance(student_task, str):
+        raise ModelOutputError("Model field student_task must be a string or null")
+
+    output = StepOutput(
+        assistant_message=assistant_message.strip(),
+        stage_payload=stage_payload,
+        student_task=student_task,
+        visualization=visualization,
+        assumptions=_string_list(raw_output.get("assumptions"), "assumptions"),
+        warnings=_string_list(raw_output.get("warnings"), "warnings"),
+    )
+    if (
+        session.current_stage is Stage.IDEA_BRAINSTORMING
+        and session.interaction_state is InteractionState.GUIDED_DESIGN
+    ):
+        stage_one_thread = packet["context"].get("stage_one_thread", {})
+        if isinstance(stage_one_thread, dict):
+            for key in (
+                "topic_anchor",
+                "current_focus",
+                "focus_history",
+                "contextual_continuation",
+                "brainstorm_phase",
+                "selected_focus",
+                "interest_description",
+                "ready_for_next_stage",
+                "resolved_stage_one_reference",
+            ):
+                output.stage_payload[key] = deepcopy(stage_one_thread.get(key))
+            phase = stage_one_thread.get("brainstorm_phase")
+            if phase in {INTEREST_DESCRIPTION, DEPTH_EXPANSION}:
+                output.stage_payload["alternative_ideas"] = []
+                output.stage_payload["exploration_scenes"] = []
+            if phase == DEPTH_EXPANSION:
+                output.stage_payload["deepening_connections"] = deepcopy(
+                    packet["context"]["knowledge_retrieval"]["brainstorm_options"]
+                )
+            current_focus = str(stage_one_thread.get("current_focus") or "").strip()
+            if (
+                stage_one_thread.get("contextual_continuation") is True
+                and current_focus
+                and current_focus not in output.assistant_message
+            ):
+                output.assistant_message = (
+                    f"我们继续沿着已经形成的“{current_focus}”方向讨论；"
+                    "你这次的回答是在补充它，不是开始一个新实验。\n\n"
+                    f"{output.assistant_message}"
+                )
+    _validate_stage_constraints(session, output)
+    _validate_lecture_grounding(session, output, packet)
+    return output
+
+
 @dataclass(slots=True)
 class OpenAIStageGenerator:
     transport: ResponsesTransport
     model: str = DEFAULT_MODEL
     max_output_tokens: int = 2400
+    stage_one_max_output_tokens: int = 3200
     final_max_output_tokens: int = 5000
     stateful: bool = False
+    repair_attempts: int = 1
     _api_successes: int = field(default=0, init=False, repr=False)
     _api_failures: int = field(default=0, init=False, repr=False)
     _chain_resets: int = field(default=0, init=False, repr=False)
+    _output_rejections: int = field(default=0, init=False, repr=False)
+    _repair_successes: int = field(default=0, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
@@ -609,12 +791,24 @@ class OpenAIStageGenerator:
             "CONTEXT_JSON:\n"
             f"{packet['serialized_context']}"
         )
-        output_budget = (
-            max(self.max_output_tokens, self.final_max_output_tokens)
-            if session.interaction_state is InteractionState.EMVR_DIRECT
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
             and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
-            else self.max_output_tokens
-        )
+        ):
+            output_budget = max(
+                self.max_output_tokens,
+                self.final_max_output_tokens,
+            )
+        elif (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+        ):
+            output_budget = max(
+                self.max_output_tokens,
+                self.stage_one_max_output_tokens,
+            )
+        else:
+            output_budget = self.max_output_tokens
         request_payload: dict[str, Any] = {
                 "model": self.model,
                 "instructions": packet["system"],
@@ -672,35 +866,39 @@ class OpenAIStageGenerator:
                 self._api_failures += 1
             raise
         try:
-            raw_output = json.loads(_extract_output_text(response))
-        except json.JSONDecodeError as exc:
-            raise ModelOutputError("The model output was not valid JSON") from exc
-        if not isinstance(raw_output, dict):
-            raise ModelOutputError("The model output must be a JSON object")
-
-        assistant_message = raw_output.get("assistant_message")
-        stage_payload = _json_object(raw_output.get("stage_payload_json"), "stage_payload_json")
-        student_task = raw_output.get("student_task")
-        visualization = _json_object(
-            raw_output.get("visualization_json"),
-            "visualization_json",
-            allow_null=True,
-        )
-        if not isinstance(assistant_message, str) or not assistant_message.strip():
-            raise ModelOutputError("Model field assistant_message must be a non-empty string")
-        if student_task is not None and not isinstance(student_task, str):
-            raise ModelOutputError("Model field student_task must be a string or null")
-
-        output = StepOutput(
-            assistant_message=assistant_message.strip(),
-            stage_payload=stage_payload,
-            student_task=student_task,
-            visualization=visualization,
-            assumptions=_string_list(raw_output.get("assumptions"), "assumptions"),
-            warnings=_string_list(raw_output.get("warnings"), "warnings"),
-        )
-        _validate_stage_constraints(session, output)
-        _validate_lecture_grounding(session, output, packet)
+            output = _step_output_from_response(session, response, packet)
+        except ModelOutputError:
+            with self._metrics_lock:
+                self._output_rejections += 1
+            if self.repair_attempts < 1:
+                raise
+            repair_payload = deepcopy(request_payload)
+            repair_payload.pop("previous_response_id", None)
+            repair_payload["input"][0]["content"].append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "上一份回答未通过当前阶段的结构或课程约束检查。请重新读取同一份"
+                        "CONTEXT_JSON，只修正回答格式、上下文承接和检索对象复制问题；"
+                        "不要改变学生已经选择的实验方向。"
+                    ),
+                }
+            )
+            try:
+                repair_response = self.transport.create(repair_payload)
+            except ModelServiceError:
+                with self._metrics_lock:
+                    self._api_failures += 1
+                raise
+            try:
+                output = _step_output_from_response(session, repair_response, packet)
+            except ModelOutputError:
+                with self._metrics_lock:
+                    self._output_rejections += 1
+                raise
+            response = repair_response
+            with self._metrics_lock:
+                self._repair_successes += 1
         if self.stateful:
             response_id = response.get("id")
             if isinstance(response_id, str) and response_id:
@@ -714,6 +912,8 @@ class OpenAIStageGenerator:
             successes = self._api_successes
             failures = self._api_failures
             chain_resets = self._chain_resets
+            output_rejections = self._output_rejections
+            repair_successes = self._repair_successes
         return {
             "provider": "openai",
             "model": self.model,
@@ -722,6 +922,8 @@ class OpenAIStageGenerator:
             "api_successes": successes,
             "api_failures": failures,
             "response_chain_resets": chain_resets,
+            "output_rejections": output_rejections,
+            "repair_successes": repair_successes,
         }
 
 
@@ -730,26 +932,39 @@ class FallbackStageGenerator:
     primary: OpenAIStageGenerator
     fallback: RuleBasedStageGenerator
     _fallback_calls: int = field(default=0, init=False, repr=False)
+    _last_fallback_reason: str | None = field(default=None, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         try:
             return self.primary.generate(session, user_message)
         except ModelServiceError as exc:
+            if isinstance(exc, ModelOutputError):
+                fallback_reason = "model_output_rejected"
+            elif isinstance(exc, ModelHTTPError):
+                fallback_reason = f"model_http_{exc.status_code}"
+            elif isinstance(exc, ModelConfigurationError):
+                fallback_reason = "model_configuration_error"
+            else:
+                fallback_reason = "model_transport_error"
             with self._metrics_lock:
                 self._fallback_calls += 1
+                self._last_fallback_reason = fallback_reason
             LOGGER.warning(
                 "Using rule-based fallback after %s",
                 type(exc).__name__,
             )
             output = self.fallback.generate(session, user_message)
-            output.warnings.append("本轮建议依据已整理的ECE329课程资料生成。")
+            output.warnings.append(
+                "本轮暂时使用课程内置引导；之前的实验方向和选择已保留。"
+            )
             return output
 
     def runtime_info(self) -> dict[str, Any]:
         primary_info = self.primary.runtime_info()
         with self._metrics_lock:
             fallback_calls = self._fallback_calls
+            last_fallback_reason = self._last_fallback_reason
         return {
             "provider": "openai",
             "model": self.primary.model,
@@ -759,7 +974,10 @@ class FallbackStageGenerator:
             "api_successes": primary_info["api_successes"],
             "api_failures": primary_info["api_failures"],
             "response_chain_resets": primary_info["response_chain_resets"],
+            "output_rejections": primary_info["output_rejections"],
+            "repair_successes": primary_info["repair_successes"],
             "fallback_calls": fallback_calls,
+            "last_fallback_reason": last_fallback_reason,
         }
 
 
@@ -815,6 +1033,10 @@ def generator_from_environment(
         env.get("OPENAI_MAX_OUTPUT_TOKENS", "2400"),
         "OPENAI_MAX_OUTPUT_TOKENS",
     )
+    stage_one_max_tokens = _positive_int(
+        env.get("OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS", "3200"),
+        "OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS",
+    )
     final_max_tokens = _positive_int(
         env.get("OPENAI_FINAL_MAX_OUTPUT_TOKENS", "5000"),
         "OPENAI_FINAL_MAX_OUTPUT_TOKENS",
@@ -823,6 +1045,7 @@ def generator_from_environment(
         transport=transport or OpenAIResponsesHTTPTransport(api_key, timeout),
         model=model,
         max_output_tokens=max_tokens,
+        stage_one_max_output_tokens=stage_one_max_tokens,
         final_max_output_tokens=final_max_tokens,
         stateful=_boolean(
             env.get("ECE329_OPENAI_STATEFUL", "false"),

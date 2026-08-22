@@ -46,6 +46,19 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("turn.selected_option_id = state.pendingOptionId", self.app_js)
         self.assertIn("option_id: item.option_id || null", self.app_js)
 
+    def test_stage_one_confirmation_uses_server_preserved_focus(self) -> None:
+        self.assertIn("response.stage_payload?.current_focus", self.app_js)
+        self.assertIn("state.pendingDirection = serverFocus.trim()", self.app_js)
+        self.assertIn("response.stage_payload?.ready_for_next_stage", self.app_js)
+        self.assertIn('inputCategory === "COURSE_CONTENT"', self.app_js)
+        self.assertIn(
+            'response.stage_payload?.input_category !== "COURSE_CONTENT"',
+            self.app_js,
+        )
+        self.assertIn('phase === "BREADTH_EXPLORATION"', self.app_js)
+        self.assertIn('phase === "INTEREST_DESCRIPTION"', self.app_js)
+        self.assertIn("return response.stage_payload?.ready_for_next_stage ? [confirmation] : []", self.app_js)
+
     def test_stage_one_greeting_and_redirects_use_student_facing_course_language(self) -> None:
         self.assertIn("ECE329课上所学", self.app_js)
         self.assertNotIn(
@@ -57,7 +70,8 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("我不能执行", self.app_js)
         self.assertIn("classifyDemoStageOneInput", self.app_js)
         self.assertIn("resolveDemoOptionReference", self.app_js)
-        self.assertIn("你选择的是", self.app_js)
+        self.assertIn("你已经把方向收到了", self.app_js)
+        self.assertIn("请先用自己的话说说", self.app_js)
         self.assertIn('return "UNREASONABLE_REQUEST"', self.app_js)
         self.assertIn('return directEvidence ? "COURSE_CONTENT" : "OUT_OF_SCOPE"', self.app_js)
         self.assertIn(
@@ -65,7 +79,19 @@ class WebFrontendContractTests(unittest.TestCase):
             self.app_js,
         )
         self.assertIn("当前请求没有改变你的实验设计进度", self.app_js)
-        self.assertIn("message.text === LEGACY_INITIAL_GREETING", self.app_js)
+        self.assertIn(
+            "[LEGACY_INITIAL_GREETING, PREVIOUS_INITIAL_GREETING].includes(message.text)",
+            self.app_js,
+        )
+
+    def test_stage_one_demo_and_api_present_combinable_physical_scenes(self) -> None:
+        self.assertIn("function createDemoExplorationScenes(evidence)", self.app_js)
+        self.assertIn("function formatDemoExplorationScenes(scenes)", self.app_js)
+        self.assertIn("ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE", self.app_js)
+        self.assertIn("启发性延伸", self.app_js)
+        self.assertIn("提出一个自己的ECE329课内设想", self.app_js)
+        self.assertIn("response.stage_payload?.exploration_scenes", self.app_js)
+        self.assertIn("scene.course_anchor?.option_id", self.app_js)
 
     def test_failed_api_request_preserves_real_session(self) -> None:
         self.assertIn("当前设计已保留，请稍后重试", self.app_js)

@@ -3,14 +3,15 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from .guardrails import (
+    BREADTH_EXPLORATION,
     COURSE_CONTENT,
+    DEPTH_EXPANSION,
+    INTEREST_DESCRIPTION,
     OUT_OF_SCOPE,
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
     course_example_options,
     is_no_direction_request,
-    resolve_option_id,
-    resolve_option_reference,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput
@@ -23,7 +24,7 @@ class StageGenerator(Protocol):
 def _idea(session: DesignSession, user_message: str) -> str:
     idea_context = session.design_context.get("idea", {})
     if isinstance(idea_context, dict):
-        for key in ("current_summary", "main_direction"):
+        for key in ("current_focus", "current_summary", "main_direction"):
             value = idea_context.get(key)
             if value:
                 return str(value)
@@ -46,20 +47,6 @@ def _topic_options(text: str) -> list[dict[str, Any]]:
     return KNOWLEDGE.brainstorm_options(text)
 
 
-def _latest_stage_one_options(session: DesignSession) -> list[dict[str, Any]]:
-    for history_item in reversed(session.history):
-        output = history_item.get("output")
-        if not isinstance(output, dict):
-            continue
-        payload = output.get("stage_payload")
-        if not isinstance(payload, dict):
-            continue
-        options = payload.get("alternative_ideas")
-        if isinstance(options, list) and all(isinstance(item, dict) for item in options):
-            return [dict(item) for item in options]
-    return []
-
-
 def _course_topics(text: str) -> list[str]:
     matches = KNOWLEDGE.concept_references(text)
     if matches:
@@ -73,6 +60,197 @@ def _course_references(text: str) -> list[dict[str, Any]]:
 
 def _formula_references(text: str) -> list[dict[str, Any]]:
     return KNOWLEDGE.formula_references(text)
+
+
+ILLUSTRATIVE_EXTENSION_SCOPE = "ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE"
+
+
+def _clean_focus_text(value: Any) -> str:
+    text = str(value or "").strip()
+    for prefix in ("例如：", "例如:", "比如：", "比如:"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :].strip()
+    return text.rstrip("？?")
+
+
+def _scene_components(direction: str, index: int) -> tuple[str, str, str, str]:
+    if "散度" in direction or "通量" in direction:
+        return (
+            "用透明曲面包住看不见的源",
+            "想象一个带电分布周围悬浮着许多场箭头，再用大小和形状不同的透明闭合面"
+            "把它包住。你既能贴近每一点观察场向外发散的程度，也能退后看穿过整个曲面"
+            "的场线总效果；当曲面被拉长、压扁，却仍包住同样的源时，两种观察会怎样呼应？",
+            "局部看到的源强特征，怎样共同组成闭合面上的整体效果？",
+            "可以把闭合面做成偏心、凹陷或穿过材料界面的形状，作为超出标准例题的联想。",
+        )
+    if "旋度" in direction or "环流" in direction:
+        return (
+            "沿一圈小路追踪场的转向",
+            "想象在空间中放入许多大小不同的透明闭合路径，并沿每条路径逐段观察场箭头"
+            "是顺着前进方向、逆着前进方向，还是近乎垂直。局部看似轻微的旋转趋势，"
+            "沿整圈累积后会不会显现出明显差别？当路径移到另一个区域时，画面又如何改变？",
+            "你更想解释局部的旋转感，还是它沿整条闭合路径累积后的整体差异？",
+            "可以让路径变形、偏离对称中心或同时环绕多个来源，看看直觉是否仍成立。",
+        )
+    if "驻波" in direction or "共振" in direction:
+        return (
+            "节点与波腹沿线路浮现",
+            "想象一列波沿着传输线前进，又有一列波从末端返回；把两者同时冻结在空间中，"
+            "有些位置几乎不动，有些位置反复达到很强的响应。若末端状态或线路尺度换一种"
+            "情形，这些节点、波腹与重复图样会整体移动，还是以另一种方式重排？",
+            "这种空间图样最让你想追问的是节点的位置、图样的重复性，还是共振的形成？",
+            "可以把均匀线路改成带转折或分段结构，设想原有驻波图样会如何被重新塑造。",
+        )
+    if "匹配" in direction or "功率反射" in direction:
+        return (
+            "让末端从像墙一样反弹到平顺接续",
+            "想象同一个波包连续遇到几种不同的线路末端：有的像硬墙一样把明显的波送回来，"
+            "有的只留下很弱的回波，有的则让能量继续向前。把这些画面并排比较时，末端状态、"
+            "反射强弱与能量传递之间会呈现怎样的联系？",
+            "你最想理解的是回波为什么变弱，还是能量为什么能更顺利地继续传递？",
+            "可以设想用多段渐变结构代替单一末端，观察反射是否会分散成更复杂的图样。",
+        )
+    if "反射" in direction or "暂态" in direction:
+        return (
+            "追着一个脉冲看它到达边界之后",
+            "想象一个短脉冲沿传输线向前奔跑，到达末端后出现返回的波，并在途中与后续入射"
+            "部分相遇。若把不同末端状态的时间画面并排播放，你会看到返回波的方向、形状和"
+            "到达时刻怎样改变原来的信号图样？",
+            "你更想追问边界为什么产生回波，还是来回传播怎样形成完整的暂态过程？",
+            "可以加入第二个不连续处或支路，让同一个脉冲经历多次往返，形成更复杂的启发性画面。",
+        )
+    if "偏振" in direction or "正交" in direction:
+        return (
+            "看场箭头的尖端在空间中画轨迹",
+            "想象固定在空间一点观察电场箭头：两个正交方向的分量一边振荡，一边保持某种"
+            "相对节奏，箭头尖端可能画出直线、椭圆或旋转轨迹。把观察点沿传播方向移动时，"
+            "这种轨迹与波的空间变化会怎样联系起来？",
+            "哪种分量关系最能帮助你解释偏振轨迹为什么改变？",
+            "可以让波经过一个倾斜结构或多层界面，设想输出轨迹出现怎样的新变化。",
+        )
+    if "磁通" in direction or "感应" in direction:
+        return (
+            "让穿过回路的磁场图样动起来",
+            "想象一个线圈附近的磁场随时间增强、减弱，或让线圈与磁场来源发生相对运动。"
+            "把穿过回路的磁场图样与回路中出现的电响应同时显示，你会看到变化的快慢、"
+            "方向与响应方向之间产生怎样的对应？",
+            "你最想解释的是磁场本身的变化，还是回路为何对这种变化作出响应？",
+            "可以把单个回路换成不同形状或相互靠近的多个回路，比较感应图样是否仍直观。",
+        )
+    if "衰减" in direction or "穿透" in direction or "屏蔽" in direction:
+        return (
+            "跟随场进入材料并逐渐消退",
+            "想象一列电磁波碰到一块材料：一部分在界面返回，另一部分进入内部，但颜色与"
+            "箭头长度随深度逐渐变化。把不同材料或不同激励情形并排放置时，界面附近和材料"
+            "深处的空间图样会出现怎样的反差？",
+            "你更想解释界面处的分流，还是进入材料后的衰减与穿透？",
+            "可以把材料做成薄层、弯曲外壳或带接缝结构，想象屏蔽与泄漏会形成什么画面。",
+        )
+    if "介质" in direction or "极化" in direction or "材料" in direction:
+        return (
+            "把同一物体换成不同材料",
+            "想象两个外形完全相同的物体被放进同一外加场，其中一个表现得像导体，另一个"
+            "是介质。把场线、等势面或材料内部的响应并排显示，物体内外的场会怎样重新分布，"
+            "界面两侧又会出现怎样的方向反差？",
+            "你最想理解材料内部的响应，还是材料界面怎样改变周围空间的场？",
+            "可以给介质做分层、开孔或包覆结构，构造一个课堂公式未直接给出答案的设想。",
+        )
+    if "边界" in direction or "电势" in direction:
+        return (
+            "把平滑边界慢慢捏成尖角和窄缝",
+            "想象一个规则导体边界逐渐被拉出尖角、凹槽或窄缝，同时另一个带电物体缓慢靠近。"
+            "原本均匀或对称的场线和等势面会从哪里先变形，哪些位置会出现明显的聚集或疏散？",
+            "哪一种边界形状最能触发你对场分布变化的直觉或疑问？",
+            "可以把尖角放进介质外壳或带开口的金属结构中，把几何与材料图景组合起来。",
+        )
+    if any(keyword in direction for keyword in ("电荷", "电流分布", "场形状", "空间场")):
+        return (
+            "让两个场源从远处慢慢靠近",
+            "想象先分别观察两个不同形状或方向的场源，再把它们逐渐移近。每个来源单独存在时"
+            "清晰的对称性会怎样被另一个来源打破；空间中的场线、箭头方向和强弱区域会在哪里"
+            "合并、偏转、抵消或形成新的结构？",
+            "你最想追踪的是对称性被打破的过程，还是强场与弱场区域如何重新出现？",
+            "可以把球形或线形来源换成带尖端、偏心或多部分结构，作为更有画面感的延伸。",
+        )
+    generic_frames = (
+        (
+            "让几何关系变得可见",
+            "想象把两个相关对象从相距很远慢慢移到彼此附近，并从多个方向观察场或波的"
+            "空间图样。原先规则的结构会在哪里先弯曲、聚集、抵消或重新排列？",
+            "哪一种空间变化最违背你的第一直觉？",
+            "可以把规则外形换成带尖角、弯折或窄缝的结构，作为进一步联想。",
+        ),
+        (
+            "让材料与边界形成反差",
+            "想象保持整体轮廓相近，却改变一个区域的材料或边界状态。从一侧走到另一侧时，"
+            "场的方向、幅度或传播图样会呈现怎样的反差？",
+            "哪一处边界变化最值得继续解释？",
+            "可以设想分层材料或不完全封闭的边界，看看是否出现新的空间特征。",
+        ),
+        (
+            "让多个来源在空间中相遇",
+            "想象同时存在两个来源或两条传播路径，并改变它们的相对位置和朝向。在空间中"
+            "移动观察点，哪里会出现增强、减弱、节点或方向突变？",
+            "哪一种相互作用最能成为你自己的探索主线？",
+            "可以加入第三个对象或不对称扰动，观察原有图样是否仍保持直观对称性。",
+        ),
+    )
+    return generic_frames[index % len(generic_frames)]
+
+
+def build_exploration_scenes(
+    options: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn catalog-grounded relationships into vivid but clearly scoped scenes."""
+
+    labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    scenes: list[dict[str, Any]] = []
+    for index, option in enumerate(options):
+        direction = str(option.get("direction") or "ECE329课程关系").strip()
+        focus = _clean_focus_text(option.get("focus"))
+        title, physical_frame, thinking_prompt, extension = _scene_components(
+            direction,
+            index,
+        )
+        focus_sentence = (
+            f"这个画面围绕“{direction}”展开，课程内可以追问：{focus}？"
+            if focus
+            else f"这个画面围绕“{direction}”展开。"
+        )
+        next_label = labels[(index + 1) % max(len(options), 1)]
+        scenes.append(
+            {
+                "scene_id": f"scene_{labels[index].lower()}",
+                "label": f"图景 {labels[index]}",
+                "title": title,
+                "course_anchor": option,
+                "physical_picture": f"{physical_frame}{focus_sentence}",
+                "thinking_prompt": thinking_prompt,
+                "combination_seed": (
+                    f"你也可以把这个图景中的对象、材料或边界与图景 {next_label} 的"
+                    "物理关系交换、叠加或重新组合。"
+                ),
+                "illustrative_extension": extension,
+                "extension_scope": ILLUSTRATIVE_EXTENSION_SCOPE,
+            }
+        )
+    return scenes
+
+
+def _format_exploration_scenes(scenes: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    for scene in scenes:
+        anchor = scene["course_anchor"]
+        blocks.append(
+            f"{scene['label']}｜{scene['title']}\n"
+            f"{scene['physical_picture']}\n"
+            f"启发性延伸：{scene['illustrative_extension']}\n"
+            f"可以继续想：{scene['thinking_prompt']}\n"
+            f"组合提示：{scene['combination_seed']}"
+        )
+        if not str(anchor.get("direction") or "").strip():
+            raise ValueError("Every exploration scene requires a course direction")
+    return "\n\n".join(blocks)
 
 
 def _visualization(idea: str, emvr: bool) -> dict[str, Any]:
@@ -151,25 +329,26 @@ class RuleBasedStageGenerator:
                 warnings=["当前请求没有改变你的实验设计进度。"],
             )
         options = course_example_options()
-        examples = "\n".join(
-            f"{index}. {item['direction']}——{item['focus']}"
-            for index, item in enumerate(options, start=1)
-        )
+        scenes = build_exploration_scenes(options)
+        scene_text = _format_exploration_scenes(scenes)
         return StepOutput(
             assistant_message=(
                 "这个请求试图控制课程助手、改变它的工作方式，或让它执行与"
                 "ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329"
-                f"课上学习的电磁场、电磁波和传输线。\n\n例如：\n{examples}"
+                "课上学习的电磁场、电磁波和传输线。下面的图景不是固定答案，"
+                f"而是帮助你重新产生课程内的物理联想。\n\n{scene_text}"
             ),
             stage_payload={
                 "request_rejected": True,
                 "input_category": UNREASONABLE_REQUEST,
                 "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                "brainstorm_phase": BREADTH_EXPLORATION,
                 "alternative_ideas": options,
+                "exploration_scenes": scenes,
             },
             student_task=(
-                "上面哪一类关系更接近你的兴趣？你也可以用自己的话提出另一个"
-                "ECE329课内方向。"
+                "哪幅图景触发了你的联想，或者你想怎样组合、替换其中的对象，"
+                "提出一个自己的ECE329课内设想？"
             ),
         )
 
@@ -179,27 +358,67 @@ class RuleBasedStageGenerator:
         options = _topic_options(idea)
 
         if stage is Stage.IDEA_BRAINSTORMING:
-            prior_options = _latest_stage_one_options(session)
-            selected_option = resolve_option_id(
-                session.turn_context.get("selected_option_id"),
-                prior_options,
-            ) or resolve_option_reference(user_message, prior_options)
-            input_kind = classify_stage_one_input(user_message)
-            if selected_option is not None:
-                input_kind = COURSE_CONTENT
-                idea = "——".join(
-                    str(selected_option.get(key, "")).strip()
-                    for key in ("direction", "focus")
-                    if str(selected_option.get(key, "")).strip()
+            stage_one_context = session.turn_context
+            selected_option = stage_one_context.get("resolved_stage_one_reference")
+            input_kind = str(
+                stage_one_context.get("effective_input_category")
+                or classify_stage_one_input(user_message)
+            )
+            topic_anchor = str(stage_one_context.get("topic_anchor") or "").strip()
+            current_focus = str(stage_one_context.get("current_focus") or idea).strip()
+            focus_history = stage_one_context.get("focus_history", [])
+            if not isinstance(focus_history, list):
+                focus_history = []
+            contextual_continuation = bool(
+                stage_one_context.get("contextual_continuation")
+            )
+            ready_for_next_stage = bool(
+                stage_one_context.get("ready_for_next_stage")
+            )
+            brainstorm_phase = str(
+                stage_one_context.get("brainstorm_phase")
+                or BREADTH_EXPLORATION
+            )
+            selected_focus = str(
+                stage_one_context.get("selected_focus") or ""
+            ).strip()
+            interest_description = str(
+                stage_one_context.get("interest_description") or ""
+            ).strip()
+            retrieval_text = " ".join(
+                item
+                for item in (
+                    topic_anchor,
+                    " ".join(str(value) for value in focus_history),
+                    current_focus,
                 )
-                options = _topic_options(idea)
+                if item
+            )
+            if input_kind == COURSE_CONTENT and retrieval_text:
+                idea = current_focus or topic_anchor or idea
+                options = _topic_options(retrieval_text)
             no_direction = is_no_direction_request(user_message)
             if input_kind != COURSE_CONTENT:
                 options = course_example_options()
-            examples = "\n".join(
-                f"{index}. {item['direction']}——{item['focus']}"
-                for index, item in enumerate(options, start=1)
+                brainstorm_phase = BREADTH_EXPLORATION
+            alternatives = (
+                options
+                if brainstorm_phase == BREADTH_EXPLORATION
+                or input_kind != COURSE_CONTENT
+                else []
             )
+            exploration_scenes = (
+                build_exploration_scenes(alternatives)
+                if alternatives
+                else []
+            )
+            deepening_connections = (
+                options
+                if input_kind == COURSE_CONTENT
+                and brainstorm_phase == DEPTH_EXPANSION
+                else []
+            )
+            scene_text = _format_exploration_scenes(exploration_scenes)
             if input_kind == UNREASONABLE_REQUEST:
                 introduction = (
                     "这个请求试图控制课程助手、改变它的工作方式，或让它执行与"
@@ -224,34 +443,99 @@ class RuleBasedStageGenerator:
                     or "上一轮所选方向"
                 )
                 introduction = (
-                    f"你选择的是“{selected_direction}”。这个方向属于ECE329课程内容，"
-                    "可以继续从相关现象和概念关系中展开。现在仍先不确定变量、公式"
-                    "或实验结构，而是进一步确认你最感兴趣的物理联系。"
+                    f"你已经把方向收到了“{selected_direction}”。我先不继续给你新的"
+                    "选项，因为同一个方向对不同学生可能意味着完全不同的兴趣。你可以"
+                    "描述让你注意到它的现象、你觉得最值得解释的联系，或者目前仍感到"
+                    "疑惑的地方；不需要写成正式的实验问题。"
+                )
+            elif brainstorm_phase == INTEREST_DESCRIPTION:
+                introduction = (
+                    f"现在我们暂时把“{selected_focus or current_focus}”作为感兴趣的方向。"
+                    "接下来先由你赋予这个方向更具体的含义，而不是继续从一组答案中选择。"
+                    "你可以结合观察到的现象、直觉上的矛盾，或希望学生真正看懂的物理联系"
+                    "来描述。"
+                )
+            elif brainstorm_phase == DEPTH_EXPANSION:
+                related_directions = [
+                    str(item.get("direction") or "").strip()
+                    for item in deepening_connections[:3]
+                    if str(item.get("direction") or "").strip()
+                    and str(item.get("direction") or "").strip() != selected_focus
+                ]
+                connection_text = "、".join(related_directions[:2])
+                related_sentence = (
+                    f"同时，{connection_text}提供了与这条主线相邻的观察角度。"
+                    if connection_text
+                    else "它还可以和同一课程板块中的边界行为与空间分布联系起来。"
+                )
+                introduction = (
+                    f"你刚才把关注点描述为：“{interest_description or user_message.strip()}”"
+                    f"。从ECE329的概念联系看，可以把“{selected_focus or topic_anchor}”"
+                    "作为这段想法的主线：重点不只是看到某个结果，而是理解不同场或波的"
+                    "成分、边界行为与最终空间图样之间为什么会产生联系。"
+                    f"{related_sentence}这样形成的内容已经比一个宽泛主题更深入，同时仍把"
+                    "变量、公式和实验装置留给后续阶段。"
+                )
+            elif contextual_continuation:
+                previous_focus = str(
+                    stage_one_context.get("previous_focus") or topic_anchor
+                ).strip()
+                introduction = (
+                    f"我会把“{user_message.strip()}”理解为对前面“{previous_focus}”"
+                    "这一实验方向的继续补充，而不是一个新的实验。我们把目前的想法"
+                    f"保留为“{current_focus}”，再看看它还能和哪些ECE329课内现象建立联系。"
                 )
             else:
                 introduction = (
                     f"“{idea}”可以继续从不同的ECE329概念关系中展开。"
                     "现在先不确定变量、公式或实验结构，而是找出你真正感兴趣的物理联系。"
                 )
+            if brainstorm_phase == INTEREST_DESCRIPTION and input_kind == COURSE_CONTENT:
+                closing_task = (
+                    "请用自己的话描述：这个方向中什么现象或物理联系最吸引你，"
+                    "以及你最希望进一步弄清什么？"
+                )
+            elif brainstorm_phase == DEPTH_EXPANSION and input_kind == COURSE_CONTENT:
+                closing_task = (
+                    "请继续用自己的话补充或修正这段理解；如果它已经准确表达你的想法，"
+                    "也可以确认当前方向并进入下一阶段。"
+                )
+            else:
+                closing_task = (
+                    "哪幅图景触发了你的联想，或者你想怎样组合、替换其中的对象，"
+                    "提出一个自己的ECE329课内设想？"
+                )
+            assistant_message = introduction
+            if scene_text:
+                assistant_message = (
+                    f"{introduction}\n\n下面不是一组标准答案，而是几幅可以继续改造、"
+                    f"交换或组合的物理图景：\n\n{scene_text}"
+                )
             return StepOutput(
-                assistant_message=(
-                    f"{introduction}\n\n"
-                    f"例如：\n{examples}"
-                ),
+                assistant_message=assistant_message,
                 stage_payload={
                     "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                    "brainstorm_phase": brainstorm_phase,
                     "input_category": input_kind,
                     "resolved_option_reference": selected_option,
                     "current_idea_summary": idea,
-                    "alternative_ideas": options,
+                    "topic_anchor": topic_anchor,
+                    "current_focus": current_focus,
+                    "focus_history": focus_history,
+                    "contextual_continuation": contextual_continuation,
+                    "selected_focus": selected_focus,
+                    "interest_description": interest_description,
+                    "alternative_ideas": alternatives,
+                    "exploration_scenes": exploration_scenes,
+                    "deepening_connections": deepening_connections,
                     "course_source": KNOWLEDGE.source_reference,
                     "reference_sources": KNOWLEDGE.source_references,
                     "source_policy": KNOWLEDGE.supplemental_data["policy"][
                         "course_scope_rule"
                     ],
-                    "ready_for_next_stage": False,
+                    "ready_for_next_stage": ready_for_next_stage,
                 },
-                student_task="上面哪一类关系更接近你的兴趣？你也可以用自己的话提出另一个ECE329课内方向。",
+                student_task=closing_task,
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             topics = _course_topics(idea)
