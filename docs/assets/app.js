@@ -548,7 +548,7 @@ async function createApiDesign(message) {
     return await request();
   } catch (error) {
     if (!(error instanceof ApiError) || error.code !== "access_denied") throw error;
-    const accessCode = window.prompt("该后端需要课程访问码。访问码只保存在当前浏览器标签页，不会写入GitHub。", "");
+    const accessCode = window.prompt("该网站需要输入课程访问码。请输入老师提供的访问码。", "");
     if (!accessCode) throw error;
     sessionStorage.setItem(ACCESS_CODE_KEY, accessCode.trim());
     return request();
