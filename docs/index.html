@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="基于 ECE 329 lecture notes 的实验设计引导工作台。">
+    <meta name="theme-color" content="#0b1f33">
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: http://127.0.0.1:8080 http://localhost:8080; object-src 'none'; base-uri 'self'; form-action 'self'">
+    <title>ECE329 Lab Studio</title>
+    <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+    <link rel="manifest" href="site.webmanifest">
+    <link rel="stylesheet" href="assets/styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#chatInput">跳到消息输入框</a>
+
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="ECE329 Lab Studio 首页">
+        <img src="assets/icon.svg" alt="" width="36" height="36">
+        <span>
+          <strong>ECE329</strong>
+          <small>LAB STUDIO</small>
+        </span>
+      </a>
+
+      <div class="topbar-actions">
+        <div id="connectionBadge" class="connection-badge" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>检查连接中</span>
+        </div>
+        <button id="resetButton" class="ghost-button" type="button">新建设计</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <aside class="stage-sidebar" aria-label="设计阶段">
+        <div class="sidebar-heading">
+          <p class="eyebrow">DESIGN PATH</p>
+          <h1>实验设计路径</h1>
+          <p>每次对话只推进一个阶段。</p>
+        </div>
+
+        <div class="progress-summary" aria-live="polite">
+          <span id="stageCounter">阶段 1 / 13</span>
+          <span id="progressPercent">0%</span>
+        </div>
+        <div class="progress-track" aria-hidden="true">
+          <span id="progressBar"></span>
+        </div>
+
+        <ol id="stageList" class="stage-list"></ol>
+
+        <div class="source-mini-card">
+          <span class="source-icon" aria-hidden="true">§</span>
+          <div>
+            <strong>Lecture-grounded</strong>
+            <p>39讲 · 82条公式 · 带页码依据</p>
+          </div>
+        </div>
+      </aside>
+
+      <section class="conversation-panel" aria-label="与实验设计助手对话">
+        <div class="conversation-header">
+          <div>
+            <p class="eyebrow">CURRENT WORKSPACE</p>
+            <h2 id="currentStageTitle">实验想法探索与完善</h2>
+          </div>
+          <div class="mode-selector" aria-label="工作流模式">
+            <span id="modeLabel">引导模式</span>
+            <span class="mode-code" id="modeCode">GUIDED</span>
+          </div>
+        </div>
+
+        <div id="offlineNotice" class="offline-notice" hidden>
+          <strong>演示模式</strong>
+          <span>API 地址尚未配置。当前回答用于体验网页交互，不代表真实 Agent 输出。</span>
+        </div>
+
+        <div id="messageList" class="message-list" aria-live="polite" aria-label="对话记录"></div>
+
+        <div id="quickActions" class="quick-actions" aria-label="快捷操作"></div>
+
+        <form id="chatForm" class="composer">
+          <label class="sr-only" for="chatInput">输入你的实验设计想法</label>
+          <textarea
+            id="chatInput"
+            rows="1"
+            maxlength="2000"
+            placeholder="描述一个你想探索的电磁现象……"
+            required
+          ></textarea>
+          <div class="composer-footer">
+            <span id="inputHint">Enter 发送 · Shift+Enter 换行</span>
+            <button id="sendButton" class="send-button" type="submit">
+              <span>发送</span>
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <path d="M3 10h13M11 5l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="insight-panel" aria-label="设计依据与可视化">
+        <section class="insight-card source-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">COURSE EVIDENCE</p>
+              <h2>讲义依据</h2>
+            </div>
+            <span class="verified-mark" title="来源已固定">✓</span>
+          </div>
+          <div id="evidenceContent" class="evidence-content">
+            <p class="empty-copy">输入想法后，这里会显示匹配的讲次、概念和公式页码。</p>
+          </div>
+          <details class="source-details">
+            <summary>知识来源</summary>
+            <dl>
+              <div><dt>资料</dt><dd>ECE 329 Lecture Notes</dd></div>
+              <div><dt>作者</dt><dd>Erhan Kudeki</dd></div>
+              <div><dt>范围</dt><dd>324页 / 39讲</dd></div>
+            </dl>
+          </details>
+        </section>
+
+        <section class="insight-card visualization-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">THEORY PREVIEW</p>
+              <h2>理论预测窗口</h2>
+            </div>
+            <span class="data-label">非实测</span>
+          </div>
+
+          <div class="chart-wrap">
+            <canvas id="theoryChart" role="img" aria-label="理论预测曲线示意图"></canvas>
+            <div class="chart-legend"><span></span><span id="chartLegendLabel">理论预测</span></div>
+          </div>
+
+          <label class="slider-control" for="chartParameter">
+            <span>参数比例 <output id="parameterValue">1.00</output></span>
+            <input id="chartParameter" type="range" min="0.5" max="2" value="1" step="0.05">
+          </label>
+          <p id="chartDescription" class="chart-description">示意曲线用于预览网页交互。连接 API 后应由阶段5所选公式生成。</p>
+        </section>
+
+        <section class="insight-card design-notes-card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">DESIGN NOTES</p>
+              <h2>当前设计摘要</h2>
+            </div>
+          </div>
+          <ul id="designNotes" class="design-notes">
+            <li>尚未记录实验想法</li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <noscript>
+      <div class="noscript-message">这个网页需要启用 JavaScript 才能运行对话和可视化。</div>
+    </noscript>
+
+    <script src="assets/config.js"></script>
+    <script src="assets/app.js"></script>
+  </body>
+</html>

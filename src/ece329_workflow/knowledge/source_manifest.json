@@ -1,0 +1,14 @@
+{
+  "source_id": "ece329_lecture_notes_2026",
+  "title": "ECE 329 Lecture Notes",
+  "author": "Erhan Kudeki",
+  "source_filename": "ece329lecture_notes.pdf",
+  "sha256": "11E34B2399005576DD8EA44384C0B73D5768D9594E8288DF16E194FA5E16591C",
+  "page_count": 324,
+  "lecture_count": 39,
+  "extraction_policy": {
+    "concepts": "Only concepts explicitly present in the lecture titles, overview, or lecture text are cataloged.",
+    "formulas": "Core formulas are curated from the PDF and retain PDF page references; visually ambiguous symbols were checked against rendered pages.",
+    "runtime_constraint": "Course mapping, brainstorming and theory generation must retrieve from this catalog. Uncataloged ECE329 claims require a source update or an explicit user-provided source."
+  }
+}

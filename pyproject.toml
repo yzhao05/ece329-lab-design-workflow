@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ece329-lab-design-workflow"
+version = "0.1.0"
+description = "A guided and EMVR-direct workflow for designing ZJUI ECE329 lab proposals."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "ZJUI ECE329 Workflow Team"}]
+dependencies = []
+
+[project.optional-dependencies]
+production = ["gunicorn>=23"]
+
+[project.scripts]
+ece329-workflow = "ece329_workflow.api:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ece329_workflow = ["knowledge/*.json"]

@@ -1,0 +1,60 @@
+name: Deploy static site to GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "docs/**"
+      - "tools/configure_pages_api.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify repository before publishing
+        env:
+          PYTHONPATH: src
+          ECE329_GENERATOR: rule
+        run: |
+          python -m unittest discover -s tests -v
+          node --check docs/assets/app.js
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Inject public backend URL
+        if: ${{ vars.ECE329_API_BASE_URL != '' }}
+        env:
+          ECE329_API_BASE_URL: ${{ vars.ECE329_API_BASE_URL }}
+        run: python tools/configure_pages_api.py --api-base-url "$ECE329_API_BASE_URL"
+
+      - name: Upload static site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

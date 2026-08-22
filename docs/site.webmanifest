@@ -1,0 +1,16 @@
+{
+  "name": "ECE329 Lab Studio",
+  "short_name": "ECE329 Studio",
+  "description": "基于课程讲义的ECE329实验设计工作台",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f1eb",
+  "theme_color": "#0b1f33",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

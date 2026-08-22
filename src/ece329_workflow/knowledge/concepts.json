@@ -1,0 +1,365 @@
+{
+  "source_id": "ece329_lecture_notes_2026",
+  "overview": {
+    "pages": [10, 11, 12],
+    "course_blocks": [
+      {"id": "electrostatics", "label": "Electrostatics", "lectures": "1-11"},
+      {"id": "magnetism", "label": "Magnetism and magneto-quasi-statics", "lectures": "12-15"},
+      {"id": "electromagnetics", "label": "Electromagnetics, waves, and transmission lines", "lectures": "16-39"}
+    ],
+    "explicitly_out_of_scope_or_barely_covered": ["radiation and antennas", "dispersion in material media"]
+  },
+  "lectures": [
+    {
+      "id": "lecture_01",
+      "lecture": 1,
+      "title": "Vector fields and Lorentz force",
+      "pages": [14, 21],
+      "concepts": ["electric and magnetic vector fields", "Lorentz force", "reference frames", "dot and cross products"],
+      "keywords": ["vector", "lorentz", "force", "electric field", "magnetic field", "矢量", "洛伦兹力", "电场", "磁场"],
+      "brainstorm_axes": ["改变粒子速度方向并比较磁力方向", "改变E或B方向并观察合力", "比较静止电荷与运动电荷的受力"]
+    },
+    {
+      "id": "lecture_02",
+      "lecture": 2,
+      "title": "Static electric fields - Coulomb's and Gauss's laws",
+      "pages": [22, 29],
+      "concepts": ["Coulomb field", "field superposition", "electric flux", "Gauss's law", "line charge"],
+      "keywords": ["coulomb", "gauss", "charge", "flux", "line charge", "库仑", "高斯", "电荷", "通量", "线电荷"],
+      "brainstorm_axes": ["改变点电荷位置或符号并观察场叠加", "改变高斯面尺寸并比较通量", "改变线电荷密度并观察径向场"]
+    },
+    {
+      "id": "lecture_03",
+      "lecture": 3,
+      "title": "Gauss's law and static charge densities",
+      "pages": [30, 37],
+      "concepts": ["surface charge", "volume charge", "planar symmetry", "Dirac delta charge models"],
+      "keywords": ["surface charge", "volume charge", "sheet", "delta", "平面电荷", "面电荷", "体电荷", "狄拉克"],
+      "brainstorm_axes": ["比较面电荷、体电荷和点电荷的场分布", "改变带电层厚度并观察分段电场", "用delta模型表示不同维度的电荷分布"]
+    },
+    {
+      "id": "lecture_04",
+      "lecture": 4,
+      "title": "Divergence and curl",
+      "pages": [38, 45],
+      "concepts": ["divergence", "curl", "divergence theorem", "curl-free fields"],
+      "keywords": ["divergence", "curl", "gradient", "散度", "旋度", "无旋场"],
+      "brainstorm_axes": ["改变矢量场分布并观察散度热图", "比较有旋与无旋矢量场", "把局部散度与闭合面通量联系起来"]
+    },
+    {
+      "id": "lecture_05",
+      "lecture": 5,
+      "title": "Curl-free fields and electrostatic potential",
+      "pages": [46, 55],
+      "concepts": ["electrostatic potential", "gradient", "path-independent line integral", "potential energy"],
+      "keywords": ["potential", "voltage", "line integral", "path independent", "电势", "电压", "线积分", "路径无关"],
+      "brainstorm_axes": ["从电势地形观察电场方向", "比较不同路径的静电场线积分", "改变参考电势并观察场不变性"]
+    },
+    {
+      "id": "lecture_06",
+      "lecture": 6,
+      "title": "Circulation and boundary conditions",
+      "pages": [56, 64],
+      "concepts": ["circulation", "Stokes' theorem", "electrostatic boundary conditions", "normal and tangential components"],
+      "keywords": ["circulation", "stokes", "boundary condition", "normal", "tangential", "环流", "斯托克斯", "边界条件", "法向", "切向"],
+      "brainstorm_axes": ["跨越带电界面比较D的法向分量", "沿界面比较E的切向分量", "改变闭合路径并观察静电环流"]
+    },
+    {
+      "id": "lecture_07",
+      "lecture": 7,
+      "title": "Poisson's and Laplace's equations",
+      "pages": [65, 75],
+      "concepts": ["Poisson equation", "Laplace equation", "boundary-value problems", "Green-function potential", "Helmholtz decomposition"],
+      "keywords": ["poisson", "laplace", "boundary value", "potential equation", "泊松", "拉普拉斯", "边值", "电势方程"],
+      "brainstorm_axes": ["改变边界电势并观察Laplace解", "改变空间电荷分布并观察Poisson解", "比较有源区和无源区的电势曲率"]
+    },
+    {
+      "id": "lecture_08",
+      "lecture": 8,
+      "title": "Conductors, dielectrics, and polarization",
+      "pages": [76, 87],
+      "concepts": ["Ohm's law", "perfect conductors", "charge relaxation", "polarization", "electric displacement", "permittivity"],
+      "keywords": ["conductor", "dielectric", "polarization", "permittivity", "conductivity", "导体", "介质", "极化", "介电常数", "电导率"],
+      "brainstorm_axes": ["比较导体与介质内部的电场", "改变极化率并观察E、D、P关系", "改变电导率并观察电荷弛豫时间"]
+    },
+    {
+      "id": "lecture_09",
+      "lecture": 9,
+      "title": "Static fields in dielectric media",
+      "pages": [88, 95],
+      "concepts": ["dielectric interfaces", "piecewise permittivity", "continuity of potential", "inhomogeneous dielectric"],
+      "keywords": ["dielectric interface", "inhomogeneous", "piecewise", "介质界面", "非均匀介质", "分段介电常数"],
+      "brainstorm_axes": ["改变两侧介电常数并比较E与D", "在分层介质中观察电势斜率", "改变介电常数的空间分布"]
+    },
+    {
+      "id": "lecture_10",
+      "lecture": 10,
+      "title": "Capacitance and conductance",
+      "pages": [96, 104],
+      "concepts": ["capacitance", "conductance", "parallel-plate and coaxial structures", "stored electric energy", "junction capacitance"],
+      "keywords": ["capacitance", "conductance", "capacitor", "coax", "energy", "电容", "电导", "同轴", "储能"],
+      "brainstorm_axes": ["改变极板距离或面积并观察电容", "比较平行板与同轴结构", "改变介质参数并观察电容和电导的联动"]
+    },
+    {
+      "id": "lecture_11",
+      "lecture": 11,
+      "title": "Lorentz-Drude models for conductivity, susceptibility, and polarization current",
+      "pages": [105, 112],
+      "concepts": ["Drude conductivity", "collision frequency", "electric susceptibility", "bound-electron oscillator", "polarization current"],
+      "keywords": ["drude", "collision", "susceptibility", "polarization current", "德鲁德", "碰撞频率", "极化电流", "电极化率"],
+      "brainstorm_axes": ["改变碰撞频率并观察电导率", "改变驱动频率并比较AC电导", "观察极化变化率与极化电流"]
+    },
+    {
+      "id": "lecture_12",
+      "lecture": 12,
+      "title": "Magnetic force and fields and Ampere's law",
+      "pages": [113, 120],
+      "concepts": ["magnetic force", "Biot-Savart law", "Ampere's law", "current density", "magnetic flux density"],
+      "keywords": ["ampere", "biot", "current density", "magnetic force", "安培", "毕奥萨伐尔", "电流密度", "磁力"],
+      "brainstorm_axes": ["改变电流大小并观察环向磁场", "比较不同电流分布的磁场", "沿不同安培回路比较环流"]
+    },
+    {
+      "id": "lecture_13",
+      "lecture": 13,
+      "title": "Current sheet, solenoid, vector potential, and current loops",
+      "pages": [121, 129],
+      "concepts": ["current sheets", "solenoids", "magnetic vector potential", "current loops", "magnetic boundary conditions"],
+      "keywords": ["current sheet", "solenoid", "vector potential", "current loop", "电流片", "螺线管", "矢量势", "电流环"],
+      "brainstorm_axes": ["比较电流片两侧磁场", "改变螺线管匝密度并观察内部磁场", "改变探针位置并观察电流环磁场"]
+    },
+    {
+      "id": "lecture_14",
+      "lecture": 14,
+      "title": "Faraday's law and induced emf",
+      "pages": [130, 142],
+      "concepts": ["Faraday's law", "induced emf", "motional emf", "magnetic flux", "Lenz's law"],
+      "keywords": ["faraday", "emf", "induction", "magnetic flux", "法拉第", "感应电动势", "电磁感应", "磁通"],
+      "brainstorm_axes": ["改变磁通变化率并观察感应电动势", "移动导体并比较运动电动势", "改变线圈方向并观察电动势符号"]
+    },
+    {
+      "id": "lecture_15",
+      "lecture": 15,
+      "title": "Inductance - coil, solenoid, and shorted coax",
+      "pages": [143, 150],
+      "concepts": ["self-inductance", "RL decay", "solenoid inductance", "magnetic energy", "coaxial inductance"],
+      "keywords": ["inductance", "coil", "rl", "magnetic energy", "电感", "线圈", "磁能", "衰减"],
+      "brainstorm_axes": ["改变匝数或几何尺寸并观察电感", "改变R/L比并观察电流衰减", "比较不同结构的单位长度电感"]
+    },
+    {
+      "id": "lecture_16",
+      "lecture": 16,
+      "title": "Charge conservation, continuity equation, displacement current, and Maxwell's equations",
+      "pages": [151, 158],
+      "concepts": ["charge conservation", "continuity equation", "displacement current", "Maxwell's equations", "dynamic boundary conditions"],
+      "keywords": ["continuity", "displacement current", "maxwell", "charge conservation", "连续性方程", "位移电流", "麦克斯韦", "电荷守恒"],
+      "brainstorm_axes": ["比较传导电流与位移电流", "观察电荷密度变化与电流散度", "从四个方程比较静态与动态场"]
+    },
+    {
+      "id": "lecture_17",
+      "lecture": 17,
+      "title": "Magnetization current and Maxwell's equations in material media",
+      "pages": [159, 170],
+      "concepts": ["bound charge and current", "magnetization", "H field", "permeability", "Maxwell equations in media"],
+      "keywords": ["magnetization", "permeability", "bound current", "material media", "磁化", "磁导率", "束缚电流", "材料介质"],
+      "brainstorm_axes": ["改变磁化率并观察B与H", "比较自由电流与磁化电流", "改变磁性材料并观察螺线管磁通"]
+    },
+    {
+      "id": "lecture_18",
+      "lecture": 18,
+      "title": "Wave equation and plane TEM waves in source-free media",
+      "pages": [171, 178],
+      "concepts": ["wave equation", "plane TEM waves", "wave speed", "intrinsic impedance", "transverse fields"],
+      "keywords": ["wave equation", "tem", "wave speed", "intrinsic impedance", "波动方程", "平面波", "波速", "本征阻抗"],
+      "brainstorm_axes": ["改变介电常数或磁导率并观察波速", "比较E、H与传播方向", "改变波形并观察传播时延"]
+    },
+    {
+      "id": "lecture_19",
+      "lecture": 19,
+      "title": "d'Alembert wave solutions and radiation from current sheets",
+      "pages": [179, 187],
+      "concepts": ["d'Alembert traveling waves", "retarded waveforms", "current-sheet radiation", "field discontinuity"],
+      "keywords": ["d'alembert", "traveling wave", "current sheet radiation", "retarded", "行波", "达朗贝尔", "电流片辐射", "延迟波形"],
+      "brainstorm_axes": ["移动时间或空间观察点并比较延迟波形", "改变电流片波形并观察两侧辐射", "检查E和H在电流片边界的连续性"]
+    },
+    {
+      "id": "lecture_20",
+      "lecture": 20,
+      "title": "Poynting theorem and monochromatic waves",
+      "pages": [188, 194],
+      "concepts": ["Poynting vector", "electromagnetic energy conservation", "energy density", "time-average power"],
+      "keywords": ["poynting", "energy flow", "power density", "坡印廷", "能流", "功率密度", "电磁能量"],
+      "brainstorm_axes": ["改变E或H幅值并观察能流", "比较瞬时与时间平均功率", "观察源功率与向外能流平衡"]
+    },
+    {
+      "id": "lecture_21",
+      "lecture": 21,
+      "title": "Monochromatic waves and phasor notation",
+      "pages": [195, 202],
+      "concepts": ["angular frequency", "wavenumber", "wavelength", "phasors", "complex Poynting vector"],
+      "keywords": ["phasor", "wavenumber", "wavelength", "monochromatic", "相量", "波数", "波长", "单色波"],
+      "brainstorm_axes": ["改变频率并观察波长", "比较时域波形与相量表示", "改变相位并观察空间场分布"]
+    },
+    {
+      "id": "lecture_22",
+      "lecture": 22,
+      "title": "Phasor Maxwell equations and damped waves in conducting media",
+      "pages": [203, 210],
+      "concepts": ["phasor Maxwell equations", "complex propagation constant", "attenuation", "phase constant", "conducting-media impedance"],
+      "keywords": ["propagation constant", "attenuation", "conducting medium", "gamma", "传播常数", "衰减", "导电介质", "相位常数"],
+      "brainstorm_axes": ["改变电导率并观察衰减常数", "改变频率并观察相位速度", "比较理想介质与导电介质的场相位"]
+    },
+    {
+      "id": "lecture_23",
+      "lecture": 23,
+      "title": "Imperfect dielectrics and good conductors",
+      "pages": [211, 216],
+      "concepts": ["loss tangent ratio", "good conductor approximation", "skin depth", "penetration depth", "power attenuation"],
+      "keywords": ["skin depth", "penetration", "good conductor", "imperfect dielectric", "趋肤深度", "穿透深度", "良导体", "有损介质", "屏蔽"],
+      "brainstorm_axes": ["改变频率并观察趋肤深度", "改变电导率并观察穿透深度", "比较不完美介质与良导体中的功率衰减"]
+    },
+    {
+      "id": "lecture_24",
+      "lecture": 24,
+      "title": "Signal transmission and circular polarization",
+      "pages": [217, 225],
+      "concepts": ["amplitude modulation", "signal propagation", "linear and circular polarization", "phasor polarization"],
+      "keywords": ["polarization", "circular", "linear", "signal transmission", "偏振", "圆偏振", "线偏振", "信号传输"],
+      "brainstorm_axes": ["改变正交分量相位差并观察偏振轨迹", "比较线偏振和圆偏振", "改变观察位置并观察调制信号时延"]
+    },
+    {
+      "id": "lecture_25",
+      "lecture": 25,
+      "title": "Wave reflection and transmission",
+      "pages": [226, 231],
+      "concepts": ["normal-incidence reflection", "transmission coefficient", "impedance matching", "power balance"],
+      "keywords": ["reflection", "transmission", "interface", "impedance matching", "反射", "透射", "界面", "阻抗匹配"],
+      "brainstorm_axes": ["改变两侧本征阻抗并观察反射", "比较匹配、PEC和一般界面", "比较场幅系数与功率比例"]
+    },
+    {
+      "id": "lecture_26",
+      "lecture": 26,
+      "title": "Standing waves and radiation pressure",
+      "pages": [232, 237],
+      "concepts": ["standing waves", "nodes and antinodes", "surface current", "surface resistance", "radiation pressure"],
+      "keywords": ["standing wave", "node", "antinode", "radiation pressure", "驻波", "节点", "腹点", "辐射压力"],
+      "brainstorm_axes": ["移动探针观察节点和腹点", "比较PEC表面的E与H", "改变入射功率并观察辐射压力趋势"]
+    },
+    {
+      "id": "lecture_27",
+      "lecture": 27,
+      "title": "Guided TEM waves on transmission-line systems",
+      "pages": [238, 245],
+      "concepts": ["guided TEM waves", "telegrapher equations", "distributed inductance and capacitance", "characteristic impedance", "power flow"],
+      "keywords": ["transmission line", "telegrapher", "guided wave", "characteristic impedance", "传输线", "电报方程", "导波", "特征阻抗"],
+      "brainstorm_axes": ["改变单位长度L或C并观察波速", "比较电压电流波与E、H场", "改变几何参数并观察特征阻抗"]
+    },
+    {
+      "id": "lecture_28",
+      "lecture": 28,
+      "title": "Distributed circuits and bounce diagrams",
+      "pages": [246, 253],
+      "concepts": ["distributed circuits", "load and generator reflection", "bounce diagrams", "transient wave superposition"],
+      "keywords": ["bounce diagram", "transient", "load reflection", "generator reflection", "反弹图", "暂态", "负载反射", "源端反射"],
+      "brainstorm_axes": ["改变负载阻抗并观察反弹序列", "改变线路长度并观察到达时间", "比较源端匹配和不匹配"]
+    },
+    {
+      "id": "lecture_29",
+      "lecture": 29,
+      "title": "Bounce diagram examples",
+      "pages": [254, 257],
+      "concepts": ["step and pulse responses", "time-domain reflection", "matched and mismatched terminations"],
+      "keywords": ["step response", "pulse response", "time domain", "阶跃响应", "脉冲响应", "时域反射"],
+      "brainstorm_axes": ["比较阶跃与有限脉冲的反射", "在不同位置观察电压随时间", "改变源与负载反射系数"]
+    },
+    {
+      "id": "lecture_30",
+      "lecture": 30,
+      "title": "Multi-line circuits",
+      "pages": [258, 263],
+      "concepts": ["multi-line junctions", "junction reflection and transmission", "equivalent impedance", "branched lines"],
+      "keywords": ["multi-line", "junction", "branched line", "多传输线", "结点", "分支线路"],
+      "brainstorm_axes": ["改变分支数量或阻抗并观察结点反射", "比较电压透射与电流连续", "使用等效阻抗解释多线结点"]
+    },
+    {
+      "id": "lecture_31",
+      "lecture": 31,
+      "title": "Periodic oscillations in lossless transmission-line circuits",
+      "pages": [264, 272],
+      "concepts": ["transmission-line normal modes", "open and short boundary conditions", "fundamental frequency", "harmonics"],
+      "keywords": ["normal mode", "harmonic", "periodic oscillation", "resonance", "本征模", "谐波", "周期振荡", "共振"],
+      "brainstorm_axes": ["改变线路长度并观察共振频率", "比较开路和短路边界的模式", "观察不同谐波的节点分布"]
+    },
+    {
+      "id": "lecture_32",
+      "lecture": 32,
+      "title": "Input impedance and microwave resonators",
+      "pages": [273, 282],
+      "concepts": ["input impedance", "open and short stubs", "microwave resonance", "frequency response"],
+      "keywords": ["input impedance", "stub", "microwave resonator", "输入阻抗", "短截线", "微波谐振器"],
+      "brainstorm_axes": ["改变短截线长度并观察输入电抗", "扫描频率并观察谐振峰", "比较开路和短路短截线"]
+    },
+    {
+      "id": "lecture_33",
+      "lecture": 33,
+      "title": "Transmission-line circuits with half- and quarter-wave transformers",
+      "pages": [283, 288],
+      "concepts": ["half-wave repetition", "quarter-wave impedance transformation", "current forcing", "power transfer"],
+      "keywords": ["quarter wave", "half wave", "transformer", "四分之一波长", "半波", "阻抗变换器"],
+      "brainstorm_axes": ["比较半波和四分之一波长线路", "改变负载并观察四分之一波长输入阻抗", "观察四分之一波长电流相位关系"]
+    },
+    {
+      "id": "lecture_34",
+      "lecture": 34,
+      "title": "Line impedance, generalized reflection coefficient, and Smith Chart",
+      "pages": [289, 296],
+      "concepts": ["load reflection coefficient", "generalized reflection coefficient", "line impedance", "normalized impedance", "Smith Chart"],
+      "keywords": ["smith chart", "generalized reflection", "normalized impedance", "史密斯圆图", "广义反射系数", "归一化阻抗"],
+      "brainstorm_axes": ["沿线路移动并观察Γ相位旋转", "比较阻抗与反射系数的双线性变换", "在Smith Chart上跟踪等驻波比圆"]
+    },
+    {
+      "id": "lecture_35",
+      "lecture": 35,
+      "title": "Smith Chart examples",
+      "pages": [297, 302],
+      "concepts": ["Smith Chart impedance transformation", "series and shunt combinations", "input impedance"],
+      "keywords": ["smith example", "series shunt", "impedance transformation", "史密斯圆图例题", "串并联", "阻抗变换"],
+      "brainstorm_axes": ["改变线路电长度并观察Smith Chart旋转", "比较串联和并联元件的图上操作", "从输入阻抗反推负载"]
+    },
+    {
+      "id": "lecture_36",
+      "lecture": 36,
+      "title": "Smith Chart and VSWR",
+      "pages": [303, 310],
+      "concepts": ["voltage standing-wave ratio", "voltage maxima and minima", "load inference", "power on a line"],
+      "keywords": ["vswr", "standing wave ratio", "voltage maximum", "驻波比", "电压最大值", "电压最小值"],
+      "brainstorm_axes": ["改变反射系数幅值并观察VSWR", "移动探针寻找电压最大和最小位置", "利用VSWR和极值位置反推负载"]
+    },
+    {
+      "id": "lecture_37",
+      "lecture": 37,
+      "title": "Smith Chart and impedance matching",
+      "pages": [311, 316],
+      "concepts": ["power reflection", "quarter-wave matching", "stub matching", "single-stub design"],
+      "keywords": ["impedance matching", "quarter-wave match", "stub matching", "阻抗匹配", "四分之一波长匹配", "短截线匹配"],
+      "brainstorm_axes": ["比较匹配前后的反射功率", "改变四分之一波长变换器阻抗", "改变短截线位置和长度实现匹配"]
+    },
+    {
+      "id": "lecture_38",
+      "lecture": 38,
+      "title": "Distribution networks",
+      "pages": [317, 319],
+      "concepts": ["corporate distribution networks", "power combining and splitting", "quarter-wave branches", "equivalent loading"],
+      "keywords": ["distribution network", "corporate network", "power split", "分配网络", "企业式馈电", "功率分配"],
+      "brainstorm_axes": ["改变分支负载并观察输入等效阻抗", "比较功率分配与合成", "改变支路波长观察相位关系"]
+    },
+    {
+      "id": "lecture_39",
+      "lecture": 39,
+      "title": "Lossy lines",
+      "pages": [320, 324],
+      "concepts": ["lossy telegrapher equations", "series resistance", "shunt conductance", "complex characteristic impedance", "high-frequency attenuation"],
+      "keywords": ["lossy line", "series resistance", "shunt conductance", "line attenuation", "有损传输线", "串联电阻", "并联电导", "线路衰减"],
+      "brainstorm_axes": ["改变R或G并观察线路衰减", "改变频率并比较高频近似", "比较有损和无损线路的传播常数"]
+    }
+  ]
+}
