@@ -75,6 +75,14 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('canvas.dataset.source = hasApiPoints ? "api" : "demo"', self.app_js)
         self.assertIn('id="chartLegendLabel"', self.index_html)
 
+    def test_stage_titles_show_emvr_only_in_emvr_mode(self) -> None:
+        self.assertIn('["CONCEPTUAL_OR_VR_SETUP", "概念实验结构"]', self.app_js)
+        self.assertIn('["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "学生总结"]', self.app_js)
+        self.assertIn('CONCEPTUAL_OR_VR_SETUP: "Unity VR模拟实验设计"', self.app_js)
+        self.assertIn('STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR方案汇总"', self.app_js)
+        self.assertIn('state.mode === "EMVR_DIRECT"', self.app_js)
+        self.assertIn("function stageTitle(index)", self.app_js)
+
     def test_published_frontend_contains_no_obvious_openai_secret(self) -> None:
         published_text = "\n".join(
             path.read_text(encoding="utf-8", errors="ignore")

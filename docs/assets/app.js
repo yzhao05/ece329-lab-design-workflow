@@ -21,14 +21,19 @@ const STAGES = [
   ["RESEARCH_QUESTION", "研究问题"],
   ["THEORETICAL_FRAMEWORK", "理论框架"],
   ["HYPOTHESIS", "假设与预期趋势"],
-  ["CONCEPTUAL_OR_VR_SETUP", "概念结构／Unity VR设计"],
+  ["CONCEPTUAL_OR_VR_SETUP", "概念实验结构"],
   ["VARIABLES_AND_CONDITIONS", "变量与条件"],
   ["CONCEPTUAL_PROCEDURE", "概念实验流程"],
   ["EXPECTED_DATA_VISUALIZATION", "预期数据可视化"],
   ["RESULT_INTERPRETATION", "可能结果及解释"],
   ["DESIGN_VALUE_AND_LIMITATIONS", "设计价值与局限"],
-  ["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "学生总结／EMVR方案"],
+  ["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "学生总结"],
 ];
+
+const EMVR_STAGE_TITLES = Object.freeze({
+  CONCEPTUAL_OR_VR_SETUP: "Unity VR模拟实验设计",
+  STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR方案汇总",
+});
 
 const DEMO_KNOWLEDGE = [
   {
@@ -260,7 +265,8 @@ function render() {
 
 function renderStages() {
   dom.stageList.replaceChildren();
-  STAGES.forEach(([id, title], index) => {
+  STAGES.forEach(([id], index) => {
+    const title = stageTitle(index);
     const item = document.createElement("li");
     item.className = "stage-item";
     item.dataset.stageId = id;
@@ -284,7 +290,15 @@ function renderStages() {
   dom.stageCounter.textContent = `阶段 ${state.stageIndex + 1} / ${STAGES.length}`;
   dom.progressPercent.textContent = `${progress}%`;
   dom.progressBar.style.width = `${progress}%`;
-  dom.currentStageTitle.textContent = STAGES[state.stageIndex][1];
+  dom.currentStageTitle.textContent = stageTitle(state.stageIndex);
+}
+
+function stageTitle(index) {
+  const [id, guidedTitle] = STAGES[index];
+  if (state.mode === "EMVR_DIRECT" && EMVR_STAGE_TITLES[id]) {
+    return EMVR_STAGE_TITLES[id];
+  }
+  return guidedTitle;
 }
 
 function renderMessages() {
@@ -618,7 +632,7 @@ function createDemoResponse(message) {
   const advanceRequested = /确认|进入下一|继续下一|完成本阶段/.test(message);
   if (advanceRequested && state.stageIndex < STAGES.length - 1) {
     state.stageIndex += 1;
-    state.notes.push(`已进入阶段${state.stageIndex + 1}：${STAGES[state.stageIndex][1]}`);
+    state.notes.push(`已进入阶段${state.stageIndex + 1}：${stageTitle(state.stageIndex)}`);
   }
 
   const prompt = DEMO_STAGE_PROMPTS[state.stageIndex];
@@ -695,7 +709,7 @@ function deriveQuickActions(response) {
   if (state.mode === "EMVR_DIRECT") return ["继续完善下一阶段"];
 
   if (response.current_stage && response.handled_stage && response.current_stage !== response.handled_stage) {
-    return [`开始阶段${state.stageIndex + 1}：${STAGES[state.stageIndex][1]}`];
+    return [`开始阶段${state.stageIndex + 1}：${stageTitle(state.stageIndex)}`];
   }
 
   if (state.stageIndex === 0) {
