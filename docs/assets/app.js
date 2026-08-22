@@ -4,6 +4,8 @@ const CONFIG = window.ECE329_CONFIG || { API_BASE_URL: "", REQUEST_TIMEOUT_MS: 7
 const STORAGE_KEY = "ece329-lab-studio-session-v1";
 const DESIGN_TOKEN_KEY = "ece329-design-access-token-v1";
 const ACCESS_CODE_KEY = "ece329-course-access-code-v1";
+const LEGACY_INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们先从讲义中的概念出发探索想法，不急着写完整方案。\n\n请描述一个你感兴趣的电磁现象，或者告诉我你还没有具体方向。";
+const INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们会从ECE329课上所学的电磁场、电磁波和传输线概念出发，一起探索实验想法，不急着写完整方案。\n\n你可以描述一个感兴趣的现象，例如静电场与材料边界、磁场与电磁感应、电磁波的偏振与反射，或传输线中的反射与驻波。如果暂时没有方向，也可以直接告诉我。";
 
 class ApiError extends Error {
   constructor(message, status = 0, code = "request_failed") {
@@ -38,15 +40,15 @@ const EMVR_STAGE_TITLES = Object.freeze({
 const DEMO_KNOWLEDGE = [
   {
     keywords: ["驻波", "传输线", "负载", "阻抗", "反射"],
-    conceptId: "lecture_34",
+    conceptId: "transmission_line_topic",
     formulaId: "load_reflection_phasor",
-    lecture: "Lecture 34",
-    pages: "289–296",
-    title: "Line impedance, generalized reflection coefficient, and Smith Chart",
-    concepts: "负载反射系数、广义反射系数、线路阻抗、归一化阻抗、Smith Chart",
+    lecture: "Lectures 27–39",
+    pages: "238–324",
+    title: "Transmission-line systems",
+    concepts: "导波传播、反射与暂态、驻波与共振、阻抗匹配、有损线路",
     formula: "Γ_L=(Z_L-Z₀)/(Z_L+Z₀); Γ(d)=Γ_L e^{-j2βd}",
     formulaPages: "289–290",
-    options: ["沿线路移动并观察Γ相位旋转", "比较阻抗与反射系数的双线性变换", "在Smith Chart上跟踪等驻波比圆"],
+    options: ["传输线与反射、暂态响应的关系", "传输线与驻波、共振模式的关系", "传输线与阻抗匹配、功率反射的关系"],
   },
   {
     keywords: ["偏振", "圆偏振", "线偏振"],
@@ -58,7 +60,7 @@ const DEMO_KNOWLEDGE = [
     concepts: "线偏振、圆偏振、正交分量和相位差",
     formula: "E=m(t-z/v)[x̂ cos(ωt-βz) ± ŷ sin(ωt-βz)]",
     formulaPages: "218–220",
-    options: ["改变正交分量相位差观察偏振轨迹", "比较线偏振与圆偏振", "改变观察位置比较矢量旋转"],
+    options: ["时变电场、磁场与波传播的关系", "正交场分量与偏振轨迹的关系", "场幅度、相位与功率流的关系"],
   },
   {
     keywords: ["屏蔽", "趋肤", "导体", "穿透", "衰减"],
@@ -70,7 +72,7 @@ const DEMO_KNOWLEDGE = [
     concepts: "良导体近似、趋肤深度、穿透深度、功率衰减",
     formula: "δ = 1/α; for a good conductor δ≈1/√(πfμσ)",
     formulaPages: "210–211, 216",
-    options: ["改变频率并观察趋肤深度", "改变电导率并观察穿透深度", "比较介质与良导体中的衰减"],
+    options: ["界面材料与反射、透射的关系", "频率、导电性质与穿透/衰减的关系", "场的传播路径与屏蔽、串扰的关系"],
   },
   {
     keywords: ["电容", "极板", "同轴", "介电"],
@@ -82,7 +84,7 @@ const DEMO_KNOWLEDGE = [
     concepts: "电容、电导、平行板与同轴结构、电场储能",
     formula: "Q = CV",
     formulaPages: "96–97",
-    options: ["改变极板距离观察电容", "改变介电参数观察电容", "比较平行板与同轴结构"],
+    options: ["边界形状与电势/电场分布的关系", "介质分布与电场、位移场的关系", "电容结构与场能量的关系"],
   },
   {
     keywords: ["感应", "法拉第", "磁通", "电动势"],
@@ -94,7 +96,7 @@ const DEMO_KNOWLEDGE = [
     concepts: "Faraday定律、感应电动势、运动电动势、磁通",
     formula: "ℰ = ∮_C (E+v×B)·dl = -dΦ_B/dt",
     formulaPages: "131–132",
-    options: ["改变磁通变化率观察电动势", "改变线圈方向观察符号", "比较运动电动势与时变磁通"],
+    options: ["电流几何与磁场空间结构的关系", "磁通变化、运动与感应电动势的关系", "场能量与电磁力、传感或驱动的关系"],
   },
 ];
 
@@ -105,15 +107,19 @@ const FALLBACK_EVIDENCE = {
   concepts: "Electrostatics；Magnetism；Electromagnetics, waves and transmission lines",
   formula: null,
   formulaPages: null,
-  options: ["从静电场、电势、介质或电容开始", "从磁力、感应或电感开始", "从电磁波、偏振、反射或传输线开始"],
+  options: [
+    "静电场与电势、介质、极化或电容结构之间的关系",
+    "磁场与电流、磁通变化、电磁感应或电感之间的关系",
+    "电磁波与偏振、界面反射、导体衰减或传输线之间的关系",
+  ],
 };
 
 const DEMO_STAGE_PROMPTS = [
-  "下面三个方向都来自讲义目录。哪一个最接近你真正想让学生探索的现象？",
-  "你希望把哪一个讲义概念作为实验的主要理论核心？",
+  "你更想探索这个主题与哪一类现象或概念之间的关系？可以参考这些例子，也可以提出自己的关联。",
+  "你希望把哪一个ECE329课程概念作为实验的主要理论核心？",
   "你最希望学生通过这个实验获得哪一种能力？",
   "你希望实验主要改变哪一个因素？",
-  "哪一个讲义公式最直接连接自变量和观察量？",
+  "哪一个ECE329理论关系式最直接连接自变量和观察量？",
   "当主要自变量增大时，你预计因变量怎样变化？",
   "实验中由什么对象或条件产生目标电磁场？",
   "你准备主动改变的一个量是什么？",
@@ -165,9 +171,9 @@ function initialState() {
       {
         id: crypto.randomUUID(),
         role: "assistant",
-        text: "欢迎来到 ECE329 Lab Studio。我们先从讲义中的概念出发探索想法，不急着写完整方案。\n\n请描述一个你感兴趣的电磁现象，或者告诉我你还没有具体方向。",
+        text: INITIAL_GREETING,
         meta: "ECE329 Design Guide",
-        tags: ["阶段 1", "Lecture-grounded"],
+        tags: ["阶段 1", "ECE329课程相关"],
       },
     ],
     evidence: null,
@@ -184,6 +190,11 @@ function loadState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (saved && Array.isArray(saved.messages) && Number.isInteger(saved.stageIndex)) {
+      saved.messages = saved.messages.map((message) => (
+        message.role === "assistant" && message.text === LEGACY_INITIAL_GREETING
+          ? { ...message, text: INITIAL_GREETING, tags: ["阶段 1", "ECE329课程相关"] }
+          : message
+      ));
       return { ...initialState(), ...saved };
     }
   } catch (error) {
@@ -497,8 +508,8 @@ async function handleSubmit(event) {
       clearApiSession();
       setConnectionState("online", "Agent API 已连接");
       const guidance = hadDesign
-        ? "原后端会话已失效或访问令牌不匹配。网页已清除旧会话；请重新输入实验想法开始新设计。"
-        : "访问码不正确或尚未提供。请再次发送，并输入后端管理员提供的课程访问码。";
+        ? "之前的设计会话已经失效。请重新输入实验想法，开始一次新的设计。"
+        : "课程访问码不正确或尚未提供。请再次发送，并输入教师或课程管理员提供的访问码。";
       addMessage("assistant", guidance, ["需要重新连接"], { meta: "ECE329 Agent" });
       state.quickActions = ["传输线驻波", "电磁波偏振", "导体中的衰减"];
       showToast("未切换演示模式，请按提示重新连接");
@@ -510,7 +521,7 @@ async function handleSubmit(event) {
     dom.offlineNotice.querySelector("span").textContent = "Agent API请求失败，已自动切换为本地演示回答。";
     clearApiSession();
     const fallback = createDemoResponse(message);
-    fallback.assistant_message = `Agent API请求失败（${error.message}），本轮已切换为本地演示。\n\n${fallback.assistant_message}`;
+    fallback.assistant_message = `课程助手暂时无法连接，本轮先提供一份ECE329课程范围内的参考回答。\n\n${fallback.assistant_message}`;
     hideTyping();
     applyResponse(fallback, message);
     showToast("API请求失败，已切换到演示模式");
@@ -605,8 +616,14 @@ function buildTurnRequest(message) {
 function createDemoResponse(message) {
   const lower = message.toLocaleLowerCase();
   const firstTurn = !state.designId;
-  const emvr = lower.includes("emvr");
-  const evidence = matchDemoKnowledge(message);
+  const requestedEmvr = lower.includes("emvr");
+  const directEvidence = findDemoKnowledge(message);
+  const inputCategory = classifyDemoStageOneInput(message, directEvidence);
+  const noDirection = isDemoNoDirectionRequest(message);
+  const emvr = requestedEmvr && inputCategory !== "UNREASONABLE_REQUEST";
+  const evidence = inputCategory === "COURSE_CONTENT"
+    ? (directEvidence || state.evidence || FALLBACK_EVIDENCE)
+    : (state.evidence || FALLBACK_EVIDENCE);
 
   if (firstTurn) {
     state.designId = `demo_${Date.now().toString(36)}`;
@@ -616,15 +633,42 @@ function createDemoResponse(message) {
     state.notes = [`初始想法：${message}`];
     state.quickActions = evidence.options;
     if (emvr) state.stageIndex = 1;
+    const examples = evidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+    let guidedIntroduction;
+    if (inputCategory === "UNREASONABLE_REQUEST") {
+      guidedIntroduction = "这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。";
+    } else if (noDirection) {
+      guidedIntroduction = "暂时没有具体方向也没关系。我们可以先从ECE329课上学习的电磁场、电磁波和传输线中寻找你感兴趣的关系。";
+    } else if (inputCategory === "OUT_OF_SCOPE") {
+      guidedIntroduction = "你提出的主题不属于ECE329课程的内容范围，因此不适合作为这门课实验设计的核心。ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。";
+    } else {
+      guidedIntroduction = `“${message}”属于ECE329课程相关内容，可以继续从不同的物理关系中展开。现在先不确定变量、公式或实验结构，而是找出你真正感兴趣的物理联系。`;
+    }
     return {
       assistant_message: emvr
-        ? `已把你的想法映射到讲义中的“${evidence.title}”，并整理为Unity VR模拟实验的设计起点。当前是页面演示回答；连接API后，将由Agent直接完善每个阶段。`
-        : `我在讲义中找到了与“${evidence.title}”相关的入口。先停留在想法探索阶段，下面三个方向都来自对应讲次。\n\n${evidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n")}\n\n${DEMO_STAGE_PROMPTS[0]}`,
+        ? `已把你的想法整理为Unity VR模拟实验的设计起点，并将优先保留其中与ECE329课程相关的物理现象。接下来会逐步完善学习目标、理论关系、交互对象和观察反馈。`
+        : `${guidedIntroduction}\n\n例如：\n${examples}\n\n${DEMO_STAGE_PROMPTS[0]}`,
       current_stage: STAGES[state.stageIndex][0],
       interaction_state: state.mode,
       knowledge_references: [evidence],
       quick_actions: evidence.options,
-      warnings: ["本回答来自静态页面演示器，不是远程Agent。"],
+      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      _runtime_source: "demo",
+    };
+  }
+
+  if (inputCategory === "UNREASONABLE_REQUEST") {
+    const courseEvidence = FALLBACK_EVIDENCE;
+    const examples = courseEvidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+    state.quickActions = courseEvidence.options;
+    return {
+      assistant_message: `这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。\n\n例如：\n${examples}`,
+      current_stage: STAGES[state.stageIndex][0],
+      interaction_state: state.mode,
+      knowledge_references: [courseEvidence],
+      quick_actions: courseEvidence.options,
+      warnings: ["当前请求没有改变你的实验设计进度。"],
+      request_rejected: true,
       _runtime_source: "demo",
     };
   }
@@ -636,21 +680,52 @@ function createDemoResponse(message) {
   }
 
   const prompt = DEMO_STAGE_PROMPTS[state.stageIndex];
+  if (state.mode === "GUIDED_DESIGN" && state.stageIndex === 0 && inputCategory !== "COURSE_CONTENT") {
+    const courseEvidence = FALLBACK_EVIDENCE;
+    const examples = courseEvidence.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
+    const introduction = inputCategory === "UNREASONABLE_REQUEST"
+      ? "这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。"
+      : "你提出的主题不属于ECE329课程的内容范围，因此不适合作为这门课实验设计的核心。ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。";
+    state.evidence = courseEvidence;
+    state.quickActions = courseEvidence.options;
+    return {
+      assistant_message: `${introduction}\n\n例如：\n${examples}\n\n${DEMO_STAGE_PROMPTS[0]}`,
+      current_stage: STAGES[0][0],
+      interaction_state: state.mode,
+      knowledge_references: [courseEvidence],
+      quick_actions: courseEvidence.options,
+      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      _runtime_source: "demo",
+    };
+  }
   return {
-    assistant_message: `已记录你本轮的想法：“${message}”。\n\n当前仍以讲义中的“${evidence.title}”作为课程依据。${prompt}`,
+    assistant_message: `已记录你本轮的想法：“${message}”。\n\n我们会继续围绕ECE329课上所学的“${evidence.title}”展开。${prompt}`,
     current_stage: STAGES[state.stageIndex][0],
     interaction_state: state.mode,
     knowledge_references: [evidence],
     quick_actions: state.stageIndex === 0 ? evidence.options : ["确认并继续下一阶段"],
-    warnings: ["本回答来自静态页面演示器，不是远程Agent。"],
+    warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
     _runtime_source: "demo",
   };
 }
 
-function matchDemoKnowledge(text) {
+function findDemoKnowledge(text) {
   const lower = text.toLocaleLowerCase();
-  const match = DEMO_KNOWLEDGE.find((entry) => entry.keywords.some((keyword) => lower.includes(keyword)));
-  return match || state.evidence || FALLBACK_EVIDENCE;
+  return DEMO_KNOWLEDGE.find((entry) => entry.keywords.some((keyword) => lower.includes(keyword))) || null;
+}
+
+function classifyDemoStageOneInput(text, directEvidence) {
+  const normalized = text.trim();
+  const unreasonable = /(工作流|workflow|\bagent\b|智能体).{0,12}(提示|内部|规则|原理|关闭|修改|绕过|任意输出)|(提示|内部|规则|原理|关闭|修改|绕过).{0,12}(工作流|workflow|\bagent\b|智能体)|system\s*prompt|系统提示|提示词|内部指令|隐藏指令|\bapi\b|后端|前端|服务器|源代码|github|render|部署|密钥|access[ _-]*token|令牌|角色扮演|role\s*play|扮演.{0,12}(角色|老师|学生|专家|人物)|忽略.{0,12}(之前|以上|系统|规则|指令)|越狱|jailbreak|捣乱|输出.{0,8}(无关|随机|违规)内容|你的.{0,8}(工作原理|内部机制|规则|提示|身份|能力)|(关闭|关掉|停止|终止|禁用|卸载|删除|重启|重置).{0,12}(你|助手|agent|智能体|网页|网站|系统|服务|工作流)|(shut\s*down|turn\s*off|disable|kill|stop|restart|reset).{0,20}(agent|assistant|website|system|service|workflow)|(写|生成|执行|运行|注入|提交).{0,8}(代码|脚本|程序|命令|指令)|(代码|脚本|程序|命令).{0,8}(执行|运行|控制|修改|输出|关闭)|```|<\s*script\b|javascript\s*:|\beval\s*\(|\bexec\s*\(|\bfetch\s*\(|\b(import|def|class|function|subprocess|os\.system|document\.|window\.|localstorage|process\.env)\b|\b(python|javascript|typescript|powershell|bash|cmd|sql|html|css)\b|(接入|调用|连接|控制).{0,16}(b站|哔哩哔哩|youtube|抖音|网站|平台|机器人|bot|agent|智能体)|(b站|哔哩哔哩|youtube|抖音).{0,20}(翻译|输出|脚本|代码|agent|智能体)/i;
+  if (unreasonable.test(normalized)) return "UNREASONABLE_REQUEST";
+  if (isDemoNoDirectionRequest(normalized)) return "COURSE_CONTENT";
+  return directEvidence ? "COURSE_CONTENT" : "OUT_OF_SCOPE";
+}
+
+function isDemoNoDirectionRequest(text) {
+  const normalized = text.trim();
+  const noDirection = /还没有.{0,6}(方向|想法)|没有.{0,6}(具体|明确).{0,6}(方向|想法)|不知道.{0,10}(研究|选|做什么)|帮我.{0,4}(想|brainstorm)|随便.{0,6}(推荐|举例|给.*方向)/i;
+  return !normalized || noDirection.test(normalized);
 }
 
 function applyResponse(response, userMessage) {
@@ -732,12 +807,15 @@ function extractEvidence(response) {
   const payload = response.stage_payload || {};
   const concepts = payload.course_references || [];
   const formulas = payload.lecture_formula_candidates || payload.core_equations || [];
-  const brainstorm = (payload.alternative_ideas || []).map((item) => ({
-    lecture: item.source_lecture ? `Lecture ${item.source_lecture}` : "Course overview",
-    pages: item.source_pages,
-    title: item.direction,
-    concepts: item.focus,
-  }));
+  const brainstorm = (payload.alternative_ideas || []).map((item) => {
+    const reference = Array.isArray(item.references) ? item.references[0] : null;
+    return {
+      lecture: reference?.source_title || (item.source_lecture ? `Lecture ${item.source_lecture}` : "Course overview"),
+      pages: reference?.pdf_pages || item.source_pages,
+      title: item.direction,
+      concepts: item.focus,
+    };
+  });
   return [...concepts, ...formulas, ...brainstorm].slice(0, 4);
 }
 

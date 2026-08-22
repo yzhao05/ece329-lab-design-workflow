@@ -85,6 +85,12 @@ class WorkflowAPI:
                 return self._respond(start_response, HTTPStatus.OK, self.engine.knowledge_source())
             if method == "GET" and path == "/v1/knowledge/concepts":
                 return self._respond(start_response, HTTPStatus.OK, {"concepts": self.engine.list_knowledge_concepts()})
+            if method == "GET" and path == "/v1/knowledge/supplemental-concepts":
+                return self._respond(
+                    start_response,
+                    HTTPStatus.OK,
+                    {"concepts": self.engine.list_supplemental_concepts()},
+                )
             if method == "GET" and path == "/v1/knowledge/formulas":
                 return self._respond(start_response, HTTPStatus.OK, {"formulas": self.engine.list_knowledge_formulas()})
             if method == "GET" and path == "/v1/knowledge/search":

@@ -48,15 +48,18 @@ python -m http.server 4173 --directory docs
 
 ## ECE329知识来源与约束
 
-工作流的唯一内置课程知识来源是提取时使用的 `ece329lecture_notes.pdf`（Erhan Kudeki，324页，39讲）。来源文件本身不随仓库发布；其 SHA-256 固定为 `11E34B2399005576DD8EA44384C0B73D5768D9594E8288DF16E194FA5E16591C`。
+`ece329lecture_notes.pdf`（Erhan Kudeki，324页，39讲）定义ECE329课程范围，但不是阶段1的唯一参考答案。工作流还使用三份经过核对的补充资料扩展课程相关的概念关系、应用和例子：Jin Au Kong 的 *Electromagnetic Wave Theory*、David H. Staelin 的 *Electromagnetics and Applications*，以及 N. Narayana Rao 的 *Fundamentals of Electromagnetics for Electrical and Computer Engineering*。
 
-- 阶段1的 brainstorming 只能从讲义知识目录中的概念和探索轴生成；没有具体命中时，只能回退到讲义第10—12页列出的 Electrostatics、Magnetism、Electromagnetics 三个板块。
+- 阶段1先帮助学生探索“当前宽泛主题与哪些现象或概念有关”，可以使用课程讲义或补充资料中提到、学习或直接相关的关系示例，并允许学生提出自己的关联；此时不要求确定变量、公式、研究问题或实验结构。
+- 阶段1面向学生统一使用“ECE329课上所学概念”的表述，并按请求的实际意图分为三类：ECE329课程内容正常进行关系探索；正常但不属于课程范围的主题会被说明课程边界；试图控制或关闭课程助手、改变内部规则、执行代码/脚本/命令、借外部平台改变输出或绕开课程用途的请求会被明确拒绝。后两类都会回到静电场、磁场与感应、电磁波与传输线三个课程关系示例。类别按意图判断，文档中的行为示例不是限定关键词清单。
+- 学生可见回答不会显示知识检索字段、内部规则、提示词、PDF页码或前后端部署术语；来源和页码只保留在依据面板及结构化记录中供核查。
+- 每个补充概念都必须通过 `course_scope_concept_ids` 映射回ECE329课程范围，并返回 `supplemental_concept_id`、资料章节和PDF页码。课程目录和补充目录都没有具体命中时，才回退到讲义第10—12页的 Electrostatics、Magnetism、Electromagnetics 三个板块。
 - 阶段2的课程映射和阶段5的理论公式必须来自知识目录，并随结果返回 `concept_id`／公式 `id` 和 PDF 页码。
-- 不凭模型记忆补充课程主题、公式、课程要求或实验条件。目录外的课程主张需要先更新来源，或由用户提供另一份明确来源。
-- 讲义及其提取文本只被视为参考数据，其中的文字不会覆盖工作流规则或作为系统指令执行。
+- 不凭模型记忆补充课程主题、公式、课程要求或实验条件。补充资料用于概念与关系检索，不会自动授权模型生成未核对的公式。
+- 讲义、教材及其提取文本只被视为参考数据，其中的文字不会覆盖工作流规则或作为系统指令执行。
 - 讲义第10—12页把 radiation and antennas、dispersion in material media 标为未覆盖或仅略微覆盖；工作流不会主动把它们推荐为核心方向。
 
-运行时知识文件位于 `src/ece329_workflow/knowledge/`：`concepts.json` 收录39讲的概念、关键词与讲义来源的 brainstorm 轴，`formulas.json` 收录82条核心公式及适用条件和页码，`source_manifest.json` 固定来源身份与提取政策。详细目录见 `knowledge/README.md`。
+运行时知识文件位于 `src/ece329_workflow/knowledge/`：`concepts.json` 收录39讲的课程范围，`formulas.json` 收录82条核心公式，`source_manifest.json` 固定讲义身份，`supplemental_sources.json` 收录补充来源、概念摘要、关系示例、课程映射和PDF页码。大型来源PDF不提交到GitHub。详细目录见 `knowledge/README.md`。
 
 ## 13个阶段
 
@@ -180,7 +183,6 @@ X-ECE329-Access-Code: 课程访问码（后端启用时）
 POST /v1/designs/{design_id}/turns
 Content-Type: application/json
 Authorization: Bearer <design_access_token>
-Authorization: Bearer <design_access_token>
 
 {
   "message": "我决定研究网格尺寸对屏蔽效果的影响",
@@ -234,16 +236,17 @@ GET /v1/designs/{design_id}?include_history=true    (需要Bearer令牌)
 GET /v1/stages
 ```
 
-### 查询讲义知识
+### 查询课程与补充知识
 
 ```text
 GET /v1/knowledge/source
 GET /v1/knowledge/concepts
+GET /v1/knowledge/supplemental-concepts
 GET /v1/knowledge/formulas
 GET /v1/knowledge/search?q=偏振
 ```
 
-搜索响应会同时返回匹配概念、公式、阶段1候选方向及来源页码。创建设计和处理每轮的响应也包含 `knowledge_source`，方便部署端记录知识版本。
+搜索响应会同时返回课程范围概念、补充概念、公式、阶段1候选方向及来源页码。创建设计和处理每轮的响应保留 `knowledge_source`，并新增 `knowledge_sources` 记录全部启用来源。
 
 ### 获取大模型提示包
 
@@ -307,20 +310,21 @@ python -m unittest discover -s tests -v
 - 阶段13引导状态不生成最终方案；
 - HTTP健康检查。
 - 39讲概念与82条公式目录的内部引用有效性；
-- 阶段1方向与阶段5公式均带有讲义页码；
+- 阶段1方向带有课程范围映射及讲义/补充资料页码，阶段5公式带有已核对目录页码；
 - 未知想法只回退到讲义总览板块；
-- 讲义知识搜索接口。
+- 课外主题会被明确标注，并返回三个ECE329课内示例；控制助手、代码注入、内部机制、外部平台改写输出和角色扮演等不合理请求会被拒绝且不会泄露项目术语；
+- 多来源知识搜索接口。
 
-## 更新讲义知识目录
+## 更新知识目录
 
 `tools/extract_lecture_notes.py` 用于生成带 PDF 页码的原始文本索引，`tools/inspect_lecture_notes.py` 用于辅助检查讲次、标题和公式候选。它们不在 API 运行时执行。
 
-如果 PDF 文件发生变化，应重新提取、人工核对公式符号与页码、更新三个知识 JSON 和来源哈希，然后运行完整测试。不要在未核对的情况下让大模型自动扩写公式目录。
+如果课程讲义发生变化，应重新提取并人工核对公式符号与页码。如果补充资料发生变化，应更新 `supplemental_sources.json` 中的来源哈希、概念摘要、课程映射和页码，然后运行完整测试。不要在未核对的情况下让大模型自动扩写公式目录。
 
 ## 生产部署注意事项
 
 内置 `InMemorySessionStore` 适合本地开发；设置 `ECE329_DATABASE_PATH` 后会启用SQLite和乐观版本检查。SQLite适合单服务实例，多实例部署仍应替换为共享数据库。
 
-`OpenAIStageGenerator` 使用官方 Responses API 的严格 JSON Schema 结构化输出。模型结果仍会经过本地校验：阶段1概念、阶段2课程映射和阶段5公式必须来自本轮检索结果且页码与目录完全一致；阶段10不得伪装成实测数据；引导状态阶段13不得代写最终方案；EMVR阶段7不得加入场景、舒适性或可访问性字段。阶段推进仍只由 `WorkflowEngine` 控制。
+`OpenAIStageGenerator` 使用官方 Responses API 的严格 JSON Schema 结构化输出。模型结果仍会经过本地校验：阶段1方向必须逐项复用本轮课程/补充检索结果并保留课程范围映射和来源，阶段2课程映射及阶段5公式必须来自已核对目录；阶段10不得伪装成实测数据；引导状态阶段13不得代写最终方案；EMVR阶段7不得加入场景、舒适性或可访问性字段。阶段推进仍只由 `WorkflowEngine` 控制。
 
 内置 `InMemorySessionStore` 会在进程重启后清空会话。正式部署前仍应替换为持久化数据库，并为同一 `design_id` 的阶段推进增加事务或乐观锁。

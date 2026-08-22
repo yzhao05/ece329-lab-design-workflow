@@ -1,0 +1,339 @@
+{
+  "policy": {
+    "course_scope_rule": "ECE329 lecture notes define the course boundary. Supplemental references may broaden examples, applications, and conceptual relationships only when each catalog entry maps to one or more course-scope concept IDs.",
+    "stage_one_rule": "Stage 1 may use any cataloged relationship that is taught, mentioned, or directly related in the course-scope notes or the verified supplemental references. It must remain at relationship brainstorming rather than select variables, formulas, apparatus, or procedures.",
+    "formula_rule": "Supplemental concept summaries are not a license to invent formulas. Formula-bearing stages continue to use the separately validated formula catalog unless a supplemental formula is explicitly extracted and cataloged later.",
+    "copyright_rule": "Only extracted metadata, short paraphrased summaries, concept labels, and page references are stored in this repository. Local source PDFs are not redistributed."
+  },
+  "sources": [
+    {
+      "source_id": "kong_em_wave_theory_2008",
+      "title": "Electromagnetic Wave Theory",
+      "authors": ["Jin Au Kong"],
+      "publisher": "EMW Publishing",
+      "edition_year": 2008,
+      "local_filename": "BOOK_ElectromagneticWaveTheory_by_JINAUKONG_FreeRelease2021.pdf",
+      "page_count": 1032,
+      "sha256": "22d2cd03de8e814d91368b831849962f8d9435f303c01dc874aa6f8de1eed5e0",
+      "availability": "user_provided_local_reference",
+      "license_note": "Use the supplied local copy as a reference; do not redistribute it from this repository."
+    },
+    {
+      "source_id": "staelin_em_applications_2011",
+      "title": "Electromagnetics and Applications",
+      "authors": ["David H. Staelin"],
+      "publisher": "MIT OpenCourseWare",
+      "edition_year": 2011,
+      "local_filename": "EMandApp_DavidH.pdf",
+      "page_count": 443,
+      "sha256": "339945f81b2daebc5109956f4f9476c6e645094246009b9018d5950baad43e7e",
+      "official_url": "https://ocw.mit.edu/courses/6-013-electromagnetics-and-applications-spring-2009/pages/readings/",
+      "availability": "open_textbook",
+      "license_note": "MIT OpenCourseWare identifies the course material under CC BY-NC-SA 4.0."
+    },
+    {
+      "source_id": "rao_fundamentals_em_2009",
+      "title": "Fundamentals of Electromagnetics for Electrical and Computer Engineering",
+      "authors": ["Nannapaneni Narayana Rao"],
+      "publisher": "Pearson Education; rights transferred to the author",
+      "edition_year": 2009,
+      "isbn_13": "9780136013334",
+      "local_filename": "getfile.asp",
+      "page_count": 481,
+      "sha256": "86f87777fd344e7a6d6d5c5c52d6b367df39c74aa63c1c292fdc4534b2bd43c5",
+      "availability": "author_released_for_teaching",
+      "license_note": "The copyright page states that the author made this edition available free of charge for teaching and learning and excludes monetary use."
+    }
+  ],
+  "candidate_sources_not_used_for_retrieval": [
+    {
+      "source_id": "guru_hiziroglu_em_field_theory_2e",
+      "title": "Electromagnetic Field Theory Fundamentals",
+      "authors": ["Bhag Singh Guru", "Huseyin R. Hiziroglu"],
+      "edition": 2,
+      "publisher": "Cambridge University Press",
+      "published_print": 2004,
+      "electronic_isbn": "9781139165297",
+      "doi": "10.1017/CBO9781139165297",
+      "official_url": "https://www.cambridge.org/core/product/identifier/9781139165297/type/book",
+      "status": "official_electronic_edition_found_but_full_text_not_locally_available",
+      "retrieval_enabled": false
+    },
+    {
+      "source_id": "guru_zhou_chinese_translation_2e",
+      "title": "电磁场与电磁波",
+      "authors": ["Bhag Singh Guru", "Huseyin R. Hiziroglu"],
+      "translator": "周克定",
+      "publisher": "机械工业出版社",
+      "edition": 2,
+      "status": "no_verifiable_licensed_full_text_found",
+      "retrieval_enabled": false
+    },
+    {
+      "source_id": "xie_rao_em_fields_waves_5e",
+      "title": "电磁场与电磁波",
+      "authors": ["谢处方", "饶克谨"],
+      "publisher": "高等教育出版社",
+      "edition": 5,
+      "status": "no_verifiable_licensed_full_text_found",
+      "retrieval_enabled": false
+    }
+  ],
+  "concepts": [
+    {
+      "supplemental_concept_id": "supp_field_sources_and_vector_structure",
+      "title": "场源、场的空间结构与局部/整体描述",
+      "keywords": ["field", "vector field", "electric field", "magnetic field", "gauss", "divergence", "curl", "场", "矢量场", "电场", "磁场", "高斯", "散度", "旋度"],
+      "course_scope_concept_ids": ["lecture_01", "lecture_02", "lecture_03", "lecture_04", "lecture_12"],
+      "concepts": ["电荷与电流作为场源", "场的叠加与空间分布", "散度与通量的关系", "旋度与环流的关系", "局部微分描述与整体积分描述"],
+      "content_summary": "三份补充资料都从场、源和Maxwell方程出发，把电荷/电流分布、场的方向与强度、通量/环流以及散度/旋度联系起来。阶段1可据此探索同一场源在不同几何、观察位置或描述方式下的关系。",
+      "relationship_examples": [
+        {
+          "direction": "电荷或电流分布与空间场形状的关系",
+          "focus": "例如：源的几何分布与场的对称性、方向或衰减特征之间可能有什么联系？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["1.2", "1.3", "1.4"], "pdf_pages": [15, 22]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["1.3", "1.5", "1.6"], "pdf_pages": [36, 60]}
+          ]
+        },
+        {
+          "direction": "局部散度与闭合面通量的关系",
+          "focus": "例如：同一场分布的局部源强描述与闭合面上的整体通量之间可以怎样联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.1B"], "pdf_pages": [22, 39]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["3.4", "3.6"], "pdf_pages": [111, 128]}
+          ]
+        },
+        {
+          "direction": "局部旋度与闭合路径环流的关系",
+          "focus": "例如：场在局部的旋转特征与沿闭合路径累积的环流之间可以怎样比较？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["2.4"], "pdf_pages": [37, 40]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["3.1", "3.2", "3.3"], "pdf_pages": [94, 110]}
+          ]
+        }
+      ]
+    },
+    {
+      "supplemental_concept_id": "supp_electrostatics_potential_and_materials",
+      "title": "静电场、电势、边界与介质结构",
+      "keywords": ["electrostatic", "potential", "laplace", "poisson", "capacitance", "dielectric", "静电", "电势", "拉普拉斯", "泊松", "电容", "介质", "极化"],
+      "course_scope_concept_ids": ["lecture_05", "lecture_06", "lecture_07", "lecture_08", "lecture_09", "lecture_10"],
+      "concepts": ["电势与电场", "Poisson和Laplace问题", "导体与介质边界", "电容与储能", "非均匀介质中的静态场"],
+      "content_summary": "补充资料把电势地形、边界条件、材料分区和电容结构组织在一起，可用于阶段1探索几何、材料与静态场分布之间的概念关系，而不必先指定某个参数。",
+      "relationship_examples": [
+        {
+          "direction": "边界形状与电势/电场分布的关系",
+          "focus": "例如：不同导体边界或给定电势条件与空间中的等势面、场方向之间有什么联系？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["4.2", "4.5", "4.6"], "pdf_pages": [102, 128]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["6.1", "6.2"], "pdf_pages": [209, 220]}
+          ]
+        },
+        {
+          "direction": "介质分布与电场、位移场的关系",
+          "focus": "例如：材料分区或介电性质与界面两侧场的连续性、弯折或储能分布之间有什么联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.5", "1.6"], "pdf_pages": [97, 113]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["2.5", "2.6"], "pdf_pages": [41, 55]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["4.4"], "pdf_pages": [109, 114]}
+          ]
+        },
+        {
+          "direction": "电容结构与场能量的关系",
+          "focus": "例如：不同电极几何或介质配置与电荷、电势差及场能量之间可以怎样联系？",
+          "references": [
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["6.3"], "pdf_pages": [220, 228]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["3.1", "3.3"], "pdf_pages": [59, 88]}
+          ]
+        }
+      ]
+    },
+    {
+      "supplemental_concept_id": "supp_magnetic_induction_energy_and_force",
+      "title": "磁场、感应、能量与力的相互联系",
+      "keywords": ["magnetic", "faraday", "induction", "flux", "inductance", "force", "motor", "sensor", "磁场", "法拉第", "感应", "磁通", "电感", "力", "电机", "传感器"],
+      "course_scope_concept_ids": ["lecture_12", "lecture_13", "lecture_14", "lecture_15"],
+      "concepts": ["电流分布与磁场", "磁通变化与感应电动势", "运动导体与运动电动势", "磁场能量与力", "电感和磁耦合"],
+      "content_summary": "补充资料把电流产生磁场、磁通变化产生电动势、场能量产生机械作用以及传感/驱动应用串联起来，适合阶段1先探索物理关系或应用关系。",
+      "relationship_examples": [
+        {
+          "direction": "电流几何与磁场空间结构的关系",
+          "focus": "例如：线电流、电流环或线圈的形状与磁场方向、对称性和集中区域之间有什么联系？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["1.4"], "pdf_pages": [21, 22]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["4.4"], "pdf_pages": [109, 114]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["1.6", "2.4"], "pdf_pages": [50, 84]}
+          ]
+        },
+        {
+          "direction": "磁通变化、运动与感应电动势的关系",
+          "focus": "例如：时间变化的磁场和导体运动这两种机制与感应电动势之间可以怎样比较？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.3B"], "pdf_pages": [69, 72]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["6.1"], "pdf_pages": [151, 154]}
+          ]
+        },
+        {
+          "direction": "场能量与电磁力、传感或驱动的关系",
+          "focus": "例如：储能随位置或材料状态的变化与力、位移响应或传感信号之间有什么联系？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["5.1", "5.5", "6.2", "6.6"], "pdf_pages": [131, 184]},
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.3A", "1.3C"], "pdf_pages": [61, 80]}
+          ]
+        }
+      ]
+    },
+    {
+      "supplemental_concept_id": "supp_maxwell_coupling_and_wave_propagation",
+      "title": "Maxwell耦合、波传播、偏振与功率流",
+      "keywords": ["maxwell", "wave", "plane wave", "polarization", "poynting", "electromagnetic wave", "麦克斯韦", "电磁波", "平面波", "偏振", "坡印廷", "功率流", "波传播"],
+      "course_scope_concept_ids": ["lecture_16", "lecture_17", "lecture_18", "lecture_19", "lecture_20", "lecture_21", "lecture_24"],
+      "concepts": ["时变电场和磁场的耦合", "波速与介质参数", "电场/磁场/传播方向", "偏振轨迹", "Poynting功率流"],
+      "content_summary": "三份资料都从Maxwell方程说明时变电场与磁场的相互产生，并将波的传播方向、E/H取向、偏振和功率流联系起来。阶段1可从这些概念关系中选择感兴趣的现象。",
+      "relationship_examples": [
+        {
+          "direction": "时变电场、磁场与波传播的关系",
+          "focus": "例如：E与H的相互耦合如何与传播方向、传播速度或空间延迟联系起来？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.1A", "1.2A"], "pdf_pages": [19, 46]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["2.1", "2.2"], "pdf_pages": [23, 30]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["4.1", "4.5"], "pdf_pages": [129, 154]}
+          ]
+        },
+        {
+          "direction": "正交场分量与偏振轨迹的关系",
+          "focus": "例如：两个正交电场分量的相对幅度和相位与线偏振、椭圆偏振或圆偏振之间有什么联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.2C"], "pdf_pages": [49, 60]},
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["3.1B"], "pdf_pages": [281, 282]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["2.3.4"], "pdf_pages": [35, 37]}
+          ]
+        },
+        {
+          "direction": "场幅度、相位与功率流的关系",
+          "focus": "例如：E和H的相对方向与相位如何对应瞬时或平均能量传输？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.3C"], "pdf_pages": [72, 80]},
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["3.1C"], "pdf_pages": [282, 283]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["4.6"], "pdf_pages": [152, 163]}
+          ]
+        }
+      ]
+    },
+    {
+      "supplemental_concept_id": "supp_interfaces_reflection_and_material_loss",
+      "title": "界面反射、材料响应、衰减与屏蔽",
+      "keywords": ["reflection", "transmission", "boundary", "conductor", "skin depth", "attenuation", "shielding", "crosstalk", "反射", "透射", "边界", "导体", "趋肤", "衰减", "屏蔽", "串扰"],
+      "course_scope_concept_ids": ["lecture_08", "lecture_09", "lecture_22", "lecture_23", "lecture_25", "lecture_26", "lecture_39"],
+      "concepts": ["本征阻抗与反射", "导体中的场弛豫和趋肤深度", "介质/导体中的波衰减", "边界条件", "屏蔽与串扰的场路径"],
+      "content_summary": "补充资料把界面不连续、反射/透射、导电损耗、趋肤效应以及工程中的屏蔽和串扰联系起来。阶段1可先讨论哪一种关系值得探索，不直接决定材料参数或测量方案。",
+      "relationship_examples": [
+        {
+          "direction": "界面材料与反射、透射的关系",
+          "focus": "例如：两侧介质或导体的电磁性质与反射强弱、相位或能量分配之间有什么联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["1.7"], "pdf_pages": [114, 135]},
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["4.1"], "pdf_pages": [383, 417]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["9.1", "9.2"], "pdf_pages": [255, 278]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["5.5", "5.6"], "pdf_pages": [189, 208]}
+          ]
+        },
+        {
+          "direction": "频率、导电性质与穿透/衰减的关系",
+          "focus": "例如：场随频率进入导体时，穿透深度、损耗和相位变化之间可能有什么联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["3.1D"], "pdf_pages": [284, 291]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["4.3"], "pdf_pages": [104, 109]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["9.2.4", "9.2.5"], "pdf_pages": [269, 273]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["5.1", "5.4"], "pdf_pages": [164, 188]}
+          ]
+        },
+        {
+          "direction": "场的传播路径与屏蔽、串扰的关系",
+          "focus": "例如：屏蔽结构或相邻传输路径与场耦合、泄漏或串扰之间可以怎样联系？",
+          "references": [
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["10.3", "10.4"], "pdf_pages": [410, 425]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["8.2", "8.3"], "pdf_pages": [241, 254]}
+          ]
+        }
+      ]
+    },
+    {
+      "supplemental_concept_id": "supp_transmission_line_systems",
+      "title": "传输线的传播、反射、暂态、共振与匹配",
+      "keywords": ["transmission line", "transmission-line", "TEM line", "distributed circuit", "bounce diagram", "standing wave", "resonance", "smith chart", "impedance matching", "传输线", "分布电路", "反弹图", "驻波", "共振", "史密斯圆图", "阻抗匹配", "负载"],
+      "course_scope_concept_ids": ["lecture_27", "lecture_28", "lecture_29", "lecture_30", "lecture_31", "lecture_32", "lecture_33", "lecture_34", "lecture_35", "lecture_36", "lecture_37", "lecture_38", "lecture_39"],
+      "concepts": ["分布参数与TEM传播", "负载和源端反射", "时域反弹与叠加", "驻波和共振", "Smith Chart与阻抗匹配", "有损线路和高速信号失真"],
+      "content_summary": "三份资料都把传输线作为分布系统处理，并分别展开传播时延、终端反射、暂态往返、驻波/共振、匹配和损耗。阶段1应先让学生选择想研究传输线与哪类现象的关系，而不是立即选择L、C、负载或几何参数。",
+      "relationship_examples": [
+        {
+          "direction": "传输线与反射、暂态响应的关系",
+          "focus": "例如：终端状态、波的往返过程与信号到达/叠加现象之间可能有什么联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["2.2"], "pdf_pages": [169, 195]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["7.2"], "pdf_pages": [198, 206]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["8.1"], "pdf_pages": [229, 240]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["7.2", "7.4", "7.5", "7.6"], "pdf_pages": [264, 301]}
+          ]
+        },
+        {
+          "direction": "传输线与驻波、共振模式的关系",
+          "focus": "例如：边界状态、线路电长度与节点、腹点、固有频率或谐波模式之间可能有什么联系？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["2.2C", "2.3F"], "pdf_pages": [184, 216]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["7.4"], "pdf_pages": [213, 228]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["7.1"], "pdf_pages": [257, 263]}
+          ]
+        },
+        {
+          "direction": "传输线与阻抗匹配、功率反射的关系",
+          "focus": "例如：线路、负载和匹配结构之间的关系如何对应反射功率或能量传输？",
+          "references": [
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["2.3B", "2.3D", "2.3E"], "pdf_pages": [197, 216]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["7.3"], "pdf_pages": [207, 212]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["7.3"], "pdf_pages": [269, 277]}
+          ]
+        }
+      ]
+    },
+    {
+      "supplemental_concept_id": "supp_quasistatic_to_wave_frequency_behavior",
+      "title": "从静态、准静态电路到波传播的频率行为",
+      "keywords": ["quasistatic", "frequency behavior", "circuit approximation", "RLC", "distributed", "准静态", "频率行为", "电路近似", "分布参数", "高频"],
+      "course_scope_concept_ids": ["lecture_08", "lecture_10", "lecture_11", "lecture_14", "lecture_15", "lecture_16", "lecture_27", "lecture_39"],
+      "concepts": ["静态/准静态/波动三种尺度", "集总模型与分布模型", "弛豫、时延和共振", "频率升高后的损耗与相位效应"],
+      "content_summary": "Staelin和Rao都用频率与尺寸尺度解释何时电路近似成立、何时必须考虑传播时延和分布效应。这为阶段1提供了从熟悉电路现象过渡到ECE329场与波问题的方向。",
+      "relationship_examples": [
+        {
+          "direction": "系统尺寸、变化时间尺度与模型选择的关系",
+          "focus": "例如：一个结构何时可以近似为集总电路，何时需要考虑空间传播和分布效应？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["3.3"], "pdf_pages": [83, 88]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["7.1"], "pdf_pages": [185, 197]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["6.4", "6.5"], "pdf_pages": [228, 241]}
+          ]
+        },
+        {
+          "direction": "频率与弛豫、趋肤或传播时延的关系",
+          "focus": "例如：频率尺度变化时，电荷弛豫、磁场扩散、导体穿透和线路时延中哪种效应会变得重要？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["4.3"], "pdf_pages": [104, 109]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["8.3"], "pdf_pages": [248, 254]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["6.4"], "pdf_pages": [228, 233]},
+            {"source_id": "rao_fundamentals_em_2009", "sections": ["7.6"], "pdf_pages": [295, 301]}
+          ]
+        },
+        {
+          "direction": "集总共振与分布共振的关系",
+          "focus": "例如：RLC共振与传输线驻波/共振在储能、边界和空间模式方面有哪些联系与差异？",
+          "references": [
+            {"source_id": "staelin_em_applications_2011", "sections": ["3.5"], "pdf_pages": [92, 100]},
+            {"source_id": "staelin_em_applications_2011", "sections": ["7.4"], "pdf_pages": [213, 228]},
+            {"source_id": "kong_em_wave_theory_2008", "sections": ["2.3F"], "pdf_pages": [208, 216]}
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -8,6 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 from .generator import StageGenerator
+from .guardrails import UNREASONABLE_REQUEST, classify_stage_one_input
 from .knowledge_base import KNOWLEDGE
 from .models import (
     STAGE_SEQUENCE,
@@ -57,7 +58,10 @@ class WorkflowEngine:
         if not idea.strip():
             raise ValueError("idea must not be empty")
         state = self._coerce_state(interaction_state) or InteractionState.GUIDED_DESIGN
-        if _mentions_emvr(idea):
+        if (
+            _mentions_emvr(idea)
+            and classify_stage_one_input(idea) != UNREASONABLE_REQUEST
+        ):
             state = InteractionState.EMVR_DIRECT
         access_token = secrets.token_urlsafe(32)
         session = DesignSession(
@@ -100,7 +104,10 @@ class WorkflowEngine:
             raise ValueError("message must not be empty")
         if request.interaction_state is not None:
             session.interaction_state = request.interaction_state
-        elif _mentions_emvr(message):
+        elif (
+            _mentions_emvr(message)
+            and classify_stage_one_input(message) != UNREASONABLE_REQUEST
+        ):
             session.interaction_state = InteractionState.EMVR_DIRECT
 
         _deep_merge(session.design_context, request.context_patch)
@@ -130,7 +137,7 @@ class WorkflowEngine:
         should_complete = (
             session.interaction_state is InteractionState.EMVR_DIRECT
             or request.complete_stage
-        )
+        ) and output.stage_payload.get("request_rejected") is not True
         completion_error: str | None = None
         if should_complete:
             try:
@@ -156,6 +163,7 @@ class WorkflowEngine:
             "assumptions": output.assumptions,
             "warnings": output.warnings,
             "knowledge_source": KNOWLEDGE.source_reference,
+            "knowledge_sources": KNOWLEDGE.source_references,
             "completion_error": completion_error,
             "current_stage": session.current_stage.value,
             "next_stage": next_stage,
@@ -199,11 +207,26 @@ class WorkflowEngine:
 
     @staticmethod
     def knowledge_source() -> dict[str, Any]:
-        return {"source": KNOWLEDGE.source_reference, "policies": KNOWLEDGE.manifest["extraction_policy"]}
+        return {
+            "source": KNOWLEDGE.source_reference,
+            "course_scope_source": KNOWLEDGE.source_reference,
+            "supplemental_sources": KNOWLEDGE.supplemental_sources,
+            "candidate_sources_not_used_for_retrieval": KNOWLEDGE.supplemental_data[
+                "candidate_sources_not_used_for_retrieval"
+            ],
+            "policies": {
+                "lecture_extraction": KNOWLEDGE.manifest["extraction_policy"],
+                "multi_source": KNOWLEDGE.supplemental_data["policy"],
+            },
+        }
 
     @staticmethod
     def list_knowledge_concepts() -> list[dict[str, Any]]:
         return KNOWLEDGE.public_concepts()
+
+    @staticmethod
+    def list_supplemental_concepts() -> list[dict[str, Any]]:
+        return KNOWLEDGE.public_supplemental_concepts()
 
     @staticmethod
     def list_knowledge_formulas() -> list[dict[str, Any]]:

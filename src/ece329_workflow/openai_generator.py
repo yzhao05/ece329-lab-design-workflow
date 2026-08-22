@@ -9,6 +9,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .generator import RuleBasedStageGenerator
+from .guardrails import (
+    COURSE_CONTENT,
+    OUT_OF_SCOPE,
+    UNREASONABLE_REQUEST,
+    classify_stage_one_input,
+)
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput, WorkflowError
 from .prompts import build_prompt_packet
@@ -159,6 +165,39 @@ def _contains_forbidden_key(value: Any, forbidden: set[str]) -> bool:
 def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> None:
     stage = session.current_stage
     visual = output.visualization
+    if (
+        session.interaction_state is InteractionState.GUIDED_DESIGN
+        and stage is Stage.IDEA_BRAINSTORMING
+    ):
+        visible_text = " ".join(
+            [output.assistant_message, output.student_task or "", *output.warnings]
+        ).casefold()
+        forbidden_student_facing_terms = (
+            "knowledge_retrieval",
+            "知识检索",
+            "知识目录",
+            "stage_payload",
+            "结构化字段",
+            "concept_id",
+            "supplemental_concept_id",
+            "pdf",
+            "讲义第",
+            "内部阶段",
+            "系统指令",
+            "提示词",
+            "内部指令",
+            "模型服务",
+            "api",
+            "前端",
+            "后端",
+            "服务器",
+            "部署",
+            "源代码",
+        )
+        if any(term in visible_text for term in forbidden_student_facing_terms):
+            raise ModelOutputError(
+                "Guided Stage 1 contains implementation terms in student-facing text"
+            )
     if stage is Stage.EXPECTED_DATA_VISUALIZATION:
         if visual is None:
             raise ModelOutputError("Stage 10 requires a visualization object")
@@ -210,6 +249,12 @@ def _validate_lecture_grounding(
         for item in retrieval["formulas"]
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
+    allowed_supplemental = {
+        item["supplemental_concept_id"]
+        for item in retrieval["supplemental_concepts"] + retrieval["brainstorm_options"]
+        if isinstance(item, dict)
+        and isinstance(item.get("supplemental_concept_id"), str)
+    }
     concept_catalog = {
         item["id"]: item for item in KNOWLEDGE.lectures
     }
@@ -217,11 +262,16 @@ def _validate_lecture_grounding(
     for block in KNOWLEDGE.concept_data["overview"]["course_blocks"]:
         concept_catalog[block["id"]] = {"pages": overview_pages}
     formula_catalog = {item["id"]: item for item in KNOWLEDGE.formulas}
+    supplemental_catalog = {
+        item["supplemental_concept_id"]: item
+        for item in KNOWLEDGE.supplemental_concepts
+    }
     retrieved_brainstorm_options = [
         item for item in retrieval["brainstorm_options"] if isinstance(item, dict)
     ]
     cited_concepts: set[str] = set()
     cited_formulas: set[str] = set()
+    cited_supplemental: set[str] = set()
 
     def validate(value: Any, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, list):
@@ -239,6 +289,25 @@ def _validate_lecture_grounding(
             pages = value.get("source_pages", value.get("pages"))
             if pages != concept_catalog[concept_id]["pages"]:
                 raise ModelOutputError(f"Concept {concept_id} must use its catalog PDF pages")
+
+        supplemental_id = value.get("supplemental_concept_id")
+        if supplemental_id is not None:
+            if (
+                not isinstance(supplemental_id, str)
+                or supplemental_id not in allowed_supplemental
+                or supplemental_id not in supplemental_catalog
+            ):
+                raise ModelOutputError(
+                    f"Unknown or unretrieved supplemental_concept_id: {supplemental_id}"
+                )
+            cited_supplemental.add(supplemental_id)
+            expected_scope = supplemental_catalog[supplemental_id][
+                "course_scope_concept_ids"
+            ]
+            if value.get("course_scope_concept_ids") != expected_scope:
+                raise ModelOutputError(
+                    f"Supplemental concept {supplemental_id} must preserve course scope ids"
+                )
 
         formula_id = value.get("formula_id")
         path_is_formula = any("formula" in part or "equation" in part for part in path)
@@ -262,15 +331,80 @@ def _validate_lecture_grounding(
         validate(output.visualization, ("visualization",))
 
     if session.current_stage is Stage.IDEA_BRAINSTORMING:
+        input_category = output.stage_payload.get("input_category")
+        allowed_input_categories = {
+            COURSE_CONTENT,
+            OUT_OF_SCOPE,
+            UNREASONABLE_REQUEST,
+        }
+        if input_category not in allowed_input_categories:
+            raise ModelOutputError(
+                "Stage 1 must classify the request into one supported input category"
+            )
+        preclassified_category = prompt_packet["context"].get(
+            "stage_one_input_category"
+        )
+        if (
+            preclassified_category == UNREASONABLE_REQUEST
+            and input_category != UNREASONABLE_REQUEST
+        ):
+            raise ModelOutputError(
+                "A locally detected unreasonable request cannot be downgraded"
+            )
+        if (
+            preclassified_category == COURSE_CONTENT
+            and input_category != COURSE_CONTENT
+        ):
+            raise ModelOutputError(
+                "A course-content request must remain in the course-content category"
+            )
+        if (
+            preclassified_category == OUT_OF_SCOPE
+            and input_category not in {OUT_OF_SCOPE, UNREASONABLE_REQUEST}
+        ):
+            raise ModelOutputError(
+                "An out-of-scope request cannot be upgraded to course content"
+            )
         alternatives = output.stage_payload.get("alternative_ideas")
-        if not isinstance(alternatives, list) or not alternatives or not cited_concepts:
-            raise ModelOutputError("Stage 1 must return lecture-grounded alternative_ideas")
+        if output.stage_payload.get("brainstorm_activity") != "RELATIONSHIP_DISCOVERY":
+            raise ModelOutputError(
+                "Stage 1 must use RELATIONSHIP_DISCOVERY before later-stage refinement"
+            )
+        if (
+            not isinstance(alternatives, list)
+            or not alternatives
+            or not (cited_concepts or cited_supplemental)
+        ):
+            raise ModelOutputError(
+                "Stage 1 must return catalog-grounded alternative_ideas"
+            )
         for alternative in alternatives:
             if not isinstance(alternative, dict):
                 raise ModelOutputError("Every Stage 1 alternative must be an object")
             if alternative not in retrieved_brainstorm_options:
                 raise ModelOutputError(
                     "Every Stage 1 alternative must exactly reuse a retrieved brainstorm option"
+                )
+        if input_category in {OUT_OF_SCOPE, UNREASONABLE_REQUEST}:
+            if len(alternatives) != 3:
+                raise ModelOutputError(
+                    "Redirected Stage 1 responses must contain exactly three course examples"
+                )
+            visible_message = output.assistant_message.casefold()
+            if input_category == OUT_OF_SCOPE and not (
+                "不属于ece329" in visible_message
+                or "超出ece329" in visible_message
+                or "不在ece329" in visible_message
+            ):
+                raise ModelOutputError(
+                    "Out-of-scope responses must explicitly state the ECE329 course boundary"
+                )
+            if input_category == UNREASONABLE_REQUEST and not any(
+                phrase in visible_message
+                for phrase in ("不能执行", "不会执行", "无法执行", "拒绝")
+            ):
+                raise ModelOutputError(
+                    "Unreasonable requests must be explicitly refused"
                 )
     if session.current_stage is Stage.COURSE_MAPPING_AND_DIRECTION:
         references = output.stage_payload.get("course_references")
@@ -316,6 +450,8 @@ class OpenAIStageGenerator:
     max_output_tokens: int = 2400
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
+        if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
+            return RuleBasedStageGenerator().generate(session, user_message)
         packet = build_prompt_packet(session, user_message)
         input_text = (
             f"{packet['user']}\n\n"
@@ -397,7 +533,7 @@ class FallbackStageGenerator:
             return self.primary.generate(session, user_message)
         except ModelServiceError:
             output = self.fallback.generate(session, user_message)
-            output.warnings.append("模型服务本轮不可用，已使用本地讲义规则生成器。")
+            output.warnings.append("本轮建议依据已整理的ECE329课程资料生成。")
             return output
 
     def runtime_info(self) -> dict[str, Any]:

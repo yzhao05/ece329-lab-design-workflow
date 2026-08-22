@@ -9,6 +9,6 @@
   "extraction_policy": {
     "concepts": "Only concepts explicitly present in the lecture titles, overview, or lecture text are cataloged.",
     "formulas": "Core formulas are curated from the PDF and retain PDF page references; visually ambiguous symbols were checked against rendered pages.",
-    "runtime_constraint": "Course mapping, brainstorming and theory generation must retrieve from this catalog. Uncataloged ECE329 claims require a source update or an explicit user-provided source."
+    "runtime_constraint": "These notes define the ECE329 course boundary and the validated formula catalog. Brainstorming may also retrieve from supplemental_sources.json when an entry maps back to course-scope concept IDs. Uncataloged ECE329 claims require a reviewed source update."
   }
 }

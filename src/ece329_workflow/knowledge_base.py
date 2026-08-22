@@ -11,9 +11,20 @@ class LectureKnowledgeBase:
         self.manifest = json.loads(root.joinpath("source_manifest.json").read_text(encoding="utf-8"))
         self.concept_data = json.loads(root.joinpath("concepts.json").read_text(encoding="utf-8"))
         self.formula_data = json.loads(root.joinpath("formulas.json").read_text(encoding="utf-8"))
+        self.supplemental_data = json.loads(
+            root.joinpath("supplemental_sources.json").read_text(encoding="utf-8")
+        )
         self.lectures: list[dict[str, Any]] = self.concept_data["lectures"]
         self.formulas: list[dict[str, Any]] = self.formula_data["formulas"]
+        self.supplemental_sources: list[dict[str, Any]] = self.supplemental_data["sources"]
+        self.supplemental_concepts: list[dict[str, Any]] = self.supplemental_data["concepts"]
         self._lecture_by_id = {item["id"]: item for item in self.lectures}
+        self._supplemental_source_by_id = {
+            item["source_id"]: item for item in self.supplemental_sources
+        }
+        self._supplemental_concept_by_id = {
+            item["supplemental_concept_id"]: item for item in self.supplemental_concepts
+        }
 
     @property
     def source_reference(self) -> dict[str, Any]:
@@ -23,6 +34,10 @@ class LectureKnowledgeBase:
             "sha256": self.manifest["sha256"],
             "page_count": self.manifest["page_count"],
         }
+
+    @property
+    def source_references(self) -> list[dict[str, Any]]:
+        return [self.source_reference, *[dict(source) for source in self.supplemental_sources]]
 
     def match_concepts(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
         normalized = text.casefold()
@@ -44,13 +59,18 @@ class LectureKnowledgeBase:
     def broad_entry_points(self) -> list[dict[str, Any]]:
         overview = self.concept_data["overview"]
         descriptions = {
-            "electrostatics": "从静电场、电势、介质、极化或电容等讲义概念开始发散",
-            "magnetism": "从磁力、安培定律、磁通、感应或电感等讲义概念开始发散",
-            "electromagnetics": "从Maxwell方程、电磁波、偏振、反射或传输线等讲义概念开始发散",
+            "electrostatics": "静电场与电势、介质、极化或电容结构之间的关系",
+            "magnetism": "磁场与电流、磁通变化、电磁感应或电感之间的关系",
+            "electromagnetics": "电磁波与偏振、界面反射、导体衰减或传输线之间的关系",
+        }
+        labels = {
+            "electrostatics": "静电场与材料、边界",
+            "magnetism": "磁场与电磁感应",
+            "electromagnetics": "电磁波与传输线",
         }
         return [
             {
-                "direction": block["label"],
+                "direction": labels[block["id"]],
                 "focus": descriptions[block["id"]],
                 "source_pages": overview["pages"],
                 "source_lectures": block["lectures"],
@@ -59,7 +79,55 @@ class LectureKnowledgeBase:
             for block in overview["course_blocks"]
         ]
 
+    def match_supplemental_concepts(
+        self,
+        text: str,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        normalized = text.casefold()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for concept in self.supplemental_concepts:
+            score = 0
+            for keyword in concept["keywords"]:
+                keyword_normalized = keyword.casefold()
+                if keyword_normalized and keyword_normalized in normalized:
+                    score += max(2, len(keyword_normalized.split()))
+            for label in concept["concepts"]:
+                if label.casefold() in normalized:
+                    score += 3
+            if score:
+                scored.append((score, concept))
+        scored.sort(key=lambda item: (-item[0], item[1]["supplemental_concept_id"]))
+        return [item for _, item in scored[:limit]]
+
+    def supplemental_concept_references(
+        self,
+        text: str,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.match_supplemental_concepts(text, limit)]
+
     def brainstorm_options(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
+        supplemental_matches = self.match_supplemental_concepts(text, limit=1)
+        if supplemental_matches:
+            concept = supplemental_matches[0]
+            return [
+                {
+                    **dict(option),
+                    "references": [
+                        {
+                            **dict(reference),
+                            "source_title": self._supplemental_source_by_id[
+                                reference["source_id"]
+                            ]["title"],
+                        }
+                        for reference in option["references"]
+                    ],
+                    "supplemental_concept_id": concept["supplemental_concept_id"],
+                    "course_scope_concept_ids": list(concept["course_scope_concept_ids"]),
+                }
+                for option in concept["relationship_examples"][:limit]
+            ]
         matches = self.match_concepts(text, limit=3)
         if not matches:
             return self.broad_entry_points()[:limit]
@@ -81,6 +149,15 @@ class LectureKnowledgeBase:
 
     def concept_references(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
         matches = self.match_concepts(text, limit=limit)
+        if not matches:
+            scope_ids: list[str] = []
+            for supplemental in self.match_supplemental_concepts(text, limit=1):
+                scope_ids.extend(supplemental["course_scope_concept_ids"])
+            matches = [
+                self._lecture_by_id[concept_id]
+                for concept_id in dict.fromkeys(scope_ids)
+                if concept_id in self._lecture_by_id
+            ][:limit]
         return [
             {
                 "concept_id": item["id"],
@@ -95,6 +172,9 @@ class LectureKnowledgeBase:
     def formula_references(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
         concept_ids = {item["id"] for item in self.match_concepts(text, limit=5)}
         if not concept_ids:
+            for supplemental in self.match_supplemental_concepts(text, limit=1):
+                concept_ids.update(supplemental["course_scope_concept_ids"])
+        if not concept_ids:
             return []
         matches = [
             formula
@@ -106,18 +186,25 @@ class LectureKnowledgeBase:
     def public_concepts(self) -> list[dict[str, Any]]:
         return self.lectures
 
+    def public_supplemental_concepts(self) -> list[dict[str, Any]]:
+        return self.supplemental_concepts
+
     def public_formulas(self) -> list[dict[str, Any]]:
         return self.formulas
 
     def search(self, text: str) -> dict[str, Any]:
         concepts = self.concept_references(text, limit=5)
+        supplemental = self.supplemental_concept_references(text, limit=5)
         return {
             "query": text,
             "source": self.source_reference,
+            "course_scope_source": self.source_reference,
+            "sources": self.source_references,
             "concepts": concepts,
+            "supplemental_concepts": supplemental,
             "formulas": self.formula_references(text, limit=12),
             "brainstorm_options": self.brainstorm_options(text, limit=3),
-            "fallback_used": not bool(concepts),
+            "fallback_used": not bool(concepts or supplemental),
         }
 
     def validate(self) -> list[str]:
@@ -139,6 +226,40 @@ class LectureKnowledgeBase:
             start, end = lecture["pages"]
             if start > end or start < 1 or end > self.manifest["page_count"]:
                 errors.append(f"invalid page range for {lecture['id']}")
+        source_ids = set(self._supplemental_source_by_id)
+        supplemental_ids: set[str] = set()
+        for concept in self.supplemental_concepts:
+            concept_id = concept["supplemental_concept_id"]
+            if concept_id in supplemental_ids:
+                errors.append(f"duplicate supplemental concept id: {concept_id}")
+            supplemental_ids.add(concept_id)
+            missing_scope = set(concept["course_scope_concept_ids"]) - valid_concept_ids
+            if missing_scope:
+                errors.append(
+                    f"supplemental concept {concept_id} has unknown course scope ids: {sorted(missing_scope)}"
+                )
+            for option in concept["relationship_examples"]:
+                if not option.get("direction") or not option.get("focus"):
+                    errors.append(f"supplemental concept {concept_id} has an empty relationship")
+                for reference in option["references"]:
+                    source_id = reference["source_id"]
+                    if source_id not in source_ids:
+                        errors.append(
+                            f"supplemental concept {concept_id} has unknown source: {source_id}"
+                        )
+                        continue
+                    pages = reference["pdf_pages"]
+                    page_count = self._supplemental_source_by_id[source_id]["page_count"]
+                    if (
+                        not isinstance(pages, list)
+                        or len(pages) != 2
+                        or pages[0] < 1
+                        or pages[0] > pages[1]
+                        or pages[1] > page_count
+                    ):
+                        errors.append(
+                            f"supplemental concept {concept_id} has invalid pages for {source_id}: {pages}"
+                        )
         return errors
 
 

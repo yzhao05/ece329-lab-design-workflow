@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from .guardrails import (
+    COURSE_CONTENT,
+    OUT_OF_SCOPE,
+    UNREASONABLE_REQUEST,
+    classify_stage_one_input,
+    course_example_options,
+    is_no_direction_request,
+)
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
@@ -103,9 +111,36 @@ class RuleBasedStageGenerator:
         }
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
+        if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
+            return self._unreasonable_request_output()
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             return self._generate_emvr(session, user_message)
         return self._generate_guided(session, user_message)
+
+    @staticmethod
+    def _unreasonable_request_output() -> StepOutput:
+        options = course_example_options()
+        examples = "\n".join(
+            f"{index}. {item['direction']}——{item['focus']}"
+            for index, item in enumerate(options, start=1)
+        )
+        return StepOutput(
+            assistant_message=(
+                "这个请求试图控制课程助手、改变它的工作方式，或让它执行与"
+                "ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329"
+                f"课上学习的电磁场、电磁波和传输线。\n\n例如：\n{examples}"
+            ),
+            stage_payload={
+                "request_rejected": True,
+                "input_category": UNREASONABLE_REQUEST,
+                "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                "alternative_ideas": options,
+            },
+            student_task=(
+                "上面哪一类关系更接近你的兴趣？你也可以用自己的话提出另一个"
+                "ECE329课内方向。"
+            ),
+        )
 
     def _generate_guided(self, session: DesignSession, user_message: str) -> StepOutput:
         stage = session.current_stage
@@ -113,16 +148,54 @@ class RuleBasedStageGenerator:
         options = _topic_options(idea)
 
         if stage is Stage.IDEA_BRAINSTORMING:
+            input_kind = classify_stage_one_input(user_message)
+            no_direction = is_no_direction_request(user_message)
+            if input_kind != COURSE_CONTENT:
+                options = course_example_options()
+            examples = "\n".join(
+                f"{index}. {item['direction']}——{item['focus']}"
+                for index, item in enumerate(options, start=1)
+            )
+            if input_kind == UNREASONABLE_REQUEST:
+                introduction = (
+                    "这个请求试图控制课程助手、改变它的工作方式，或让它执行与"
+                    "ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329"
+                    "课上学习的电磁场、电磁波和传输线。"
+                )
+            elif no_direction:
+                introduction = (
+                    "暂时没有具体方向也没关系。我们可以先从ECE329课上学习的"
+                    "电磁场、电磁波和传输线中寻找你感兴趣的关系。"
+                )
+            elif input_kind == OUT_OF_SCOPE:
+                introduction = (
+                    "你提出的主题不属于ECE329课程的内容范围，"
+                    "因此不适合作为这门课实验设计的核心。"
+                    "ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。"
+                )
+            else:
+                introduction = (
+                    f"“{idea}”可以继续从不同的ECE329概念关系中展开。"
+                    "现在先不确定变量、公式或实验结构，而是找出你真正感兴趣的物理联系。"
+                )
             return StepOutput(
-                assistant_message="我们先停留在想法探索，不急着写研究问题。下面是围绕你当前兴趣可以继续发展的三个角度。",
+                assistant_message=(
+                    f"{introduction}\n\n"
+                    f"例如：\n{examples}"
+                ),
                 stage_payload={
-                    "brainstorm_activity": "DIVERGE_OR_COMPARE",
+                    "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                    "input_category": input_kind,
                     "current_idea_summary": idea,
                     "alternative_ideas": options,
                     "course_source": KNOWLEDGE.source_reference,
+                    "reference_sources": KNOWLEDGE.source_references,
+                    "source_policy": KNOWLEDGE.supplemental_data["policy"][
+                        "course_scope_rule"
+                    ],
                     "ready_for_next_stage": False,
                 },
-                student_task="这三个方向中，哪一个最接近你真正想让学生探索的现象？也可以修改其中一个。",
+                student_task="上面哪一类关系更接近你的兴趣？你也可以用自己的话提出另一个ECE329课内方向。",
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             topics = _course_topics(idea)
@@ -226,6 +299,10 @@ class RuleBasedStageGenerator:
                     "possible_vr_interactions": [item["focus"] for item in _topic_options(idea)],
                     "design_scope": "概念设计与Unity VR模拟规划，不包含真实实验实施",
                     "course_references": _course_references(idea),
+                    "supplemental_references": KNOWLEDGE.supplemental_concept_references(
+                        idea,
+                        limit=3,
+                    ),
                 },
                 assumptions=["暂以用户提供的想法为设计边界，后续阶段再补充参数和理论模型。"],
             )
