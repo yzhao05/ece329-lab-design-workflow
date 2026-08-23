@@ -15,10 +15,21 @@ class LectureKnowledgeBase:
         self.supplemental_data = json.loads(
             root.joinpath("supplemental_sources.json").read_text(encoding="utf-8")
         )
+        self.scene_template_data = json.loads(
+            root.joinpath("scene_templates.json").read_text(encoding="utf-8")
+        )
         self.lectures: list[dict[str, Any]] = self.concept_data["lectures"]
+        self.baseline_comparisons: list[dict[str, Any]] = self.concept_data.get(
+            "baseline_comparisons",
+            [],
+        )
         self.formulas: list[dict[str, Any]] = self.formula_data["formulas"]
         self.supplemental_sources: list[dict[str, Any]] = self.supplemental_data["sources"]
         self.supplemental_concepts: list[dict[str, Any]] = self.supplemental_data["concepts"]
+        self.scene_templates: list[dict[str, Any]] = self.scene_template_data["templates"]
+        self.generic_scene_frames: list[dict[str, Any]] = self.scene_template_data[
+            "generic_frames"
+        ]
         self._lecture_by_id = {item["id"]: item for item in self.lectures}
         self._supplemental_source_by_id = {
             item["source_id"]: item for item in self.supplemental_sources
@@ -169,6 +180,83 @@ class LectureKnowledgeBase:
                     return options
         return options
 
+    def standard_comparison_suggestions(
+        self,
+        text: str,
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Return course-cataloged basic case bundles whose trigger groups match."""
+
+        normalized = text.casefold()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for comparison in self.baseline_comparisons:
+            trigger_groups = comparison.get("trigger_groups", [])
+            if not isinstance(trigger_groups, list) or not trigger_groups:
+                continue
+            matched_terms: list[str] = []
+            matched = True
+            for group in trigger_groups:
+                terms = group if isinstance(group, list) else []
+                group_matches = [
+                    str(term)
+                    for term in terms
+                    if self._term_matches(str(term).casefold(), normalized)
+                ]
+                if not group_matches:
+                    matched = False
+                    break
+                matched_terms.extend(group_matches)
+            if matched:
+                score = sum(max(1, len(term)) for term in matched_terms)
+                scored.append((score, comparison))
+        scored.sort(key=lambda item: (-item[0], item[1]["comparison_id"]))
+        return [
+            {
+                "comparison_id": item["comparison_id"],
+                "cases": list(item["cases"]),
+                "recommended_cases": list(item["cases"]),
+                "case_aliases": {
+                    str(case): list(aliases)
+                    for case, aliases in item.get("case_aliases", {}).items()
+                },
+                "role": "PROPOSED_BASELINE_COMPARISON",
+                "adoption_status": "PENDING",
+                "reason": item["reason"],
+                "course_concept_ids": list(item["course_concept_ids"]),
+                "proposal_source": "COURSE_CATALOG",
+            }
+            for _, item in scored[:limit]
+        ]
+
+    def scene_components(self, direction: str, index: int) -> tuple[str, str, str, str]:
+        """Select a course-grounded scene by catalog terms, with a generic fallback.
+
+        Scene routing lives in data so adding another ECE329 concept does not require a
+        new Python branch.  The score favors more and longer matching catalog terms.
+        """
+
+        normalized = direction.casefold()
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for order, template in enumerate(self.scene_templates):
+            matches = [
+                str(keyword)
+                for keyword in template.get("keywords", [])
+                if self._term_matches(str(keyword).casefold(), normalized)
+            ]
+            if matches:
+                score = sum(max(1, len(keyword)) for keyword in matches)
+                candidates.append((score, -order, template))
+        if candidates:
+            template = max(candidates, key=lambda item: (item[0], item[1]))[2]
+        else:
+            template = self.generic_scene_frames[index % len(self.generic_scene_frames)]
+        return (
+            str(template["title"]),
+            str(template["physical_picture"]),
+            str(template["thinking_prompt"]),
+            str(template["illustrative_extension"]),
+        )
+
     def concept_references(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
         matches = self.match_concepts(text, limit=limit)
         if not matches:
@@ -226,6 +314,10 @@ class LectureKnowledgeBase:
             "supplemental_concepts": supplemental,
             "formulas": self.formula_references(text, limit=12),
             "brainstorm_options": self.brainstorm_options(text, limit=3),
+            "baseline_comparison_suggestions": self.standard_comparison_suggestions(
+                text,
+                limit=1,
+            ),
             "fallback_used": not bool(concepts or supplemental),
         }
 
@@ -248,6 +340,74 @@ class LectureKnowledgeBase:
             start, end = lecture["pages"]
             if start > end or start < 1 or end > self.manifest["page_count"]:
                 errors.append(f"invalid page range for {lecture['id']}")
+        comparison_ids: set[str] = set()
+        for comparison in self.baseline_comparisons:
+            comparison_id = comparison.get("comparison_id")
+            if not isinstance(comparison_id, str) or not comparison_id:
+                errors.append("baseline comparison has an invalid id")
+                continue
+            if comparison_id in comparison_ids:
+                errors.append(f"duplicate baseline comparison id: {comparison_id}")
+            comparison_ids.add(comparison_id)
+            cases = comparison.get("cases")
+            if (
+                not isinstance(cases, list)
+                or not 2 <= len(cases) <= 4
+                or any(not isinstance(case, str) or not case.strip() for case in cases)
+            ):
+                errors.append(f"baseline comparison {comparison_id} has invalid cases")
+            trigger_groups = comparison.get("trigger_groups")
+            if (
+                not isinstance(trigger_groups, list)
+                or not trigger_groups
+                or any(not isinstance(group, list) or not group for group in trigger_groups)
+            ):
+                errors.append(
+                    f"baseline comparison {comparison_id} has invalid trigger groups"
+                )
+            missing_scope = (
+                set(comparison.get("course_concept_ids", [])) - valid_concept_ids
+            )
+            if missing_scope:
+                errors.append(
+                    f"baseline comparison {comparison_id} has unknown course scope ids: "
+                    f"{sorted(missing_scope)}"
+                )
+        scene_template_ids: set[str] = set()
+        required_scene_fields = {
+            "title",
+            "physical_picture",
+            "thinking_prompt",
+            "illustrative_extension",
+        }
+        for template in self.scene_templates:
+            template_id = template.get("template_id")
+            if not isinstance(template_id, str) or not template_id:
+                errors.append("scene template has an invalid id")
+                continue
+            if template_id in scene_template_ids:
+                errors.append(f"duplicate scene template id: {template_id}")
+            scene_template_ids.add(template_id)
+            keywords = template.get("keywords")
+            if (
+                not isinstance(keywords, list)
+                or not keywords
+                or any(not isinstance(keyword, str) or not keyword.strip() for keyword in keywords)
+            ):
+                errors.append(f"scene template {template_id} has invalid keywords")
+            if any(
+                not isinstance(template.get(field), str) or not template[field].strip()
+                for field in required_scene_fields
+            ):
+                errors.append(f"scene template {template_id} has an empty scene field")
+        if not self.generic_scene_frames:
+            errors.append("scene templates have no generic fallback")
+        for index, frame in enumerate(self.generic_scene_frames):
+            if any(
+                not isinstance(frame.get(field), str) or not frame[field].strip()
+                for field in required_scene_fields
+            ):
+                errors.append(f"generic scene frame {index} has an empty scene field")
         source_ids = set(self._supplemental_source_by_id)
         supplemental_ids: set[str] = set()
         for concept in self.supplemental_concepts:

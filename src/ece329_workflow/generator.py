@@ -73,129 +73,42 @@ def _clean_focus_text(value: Any) -> str:
     return text.rstrip("？?")
 
 
+def _format_standard_comparison_status(
+    comparisons: list[dict[str, Any]],
+) -> str:
+    summaries: list[str] = []
+    for comparison in comparisons:
+        status = str(comparison.get("adoption_status") or "PENDING").upper()
+        cases = [
+            str(case).strip()
+            for case in comparison.get("cases", [])
+            if str(case).strip()
+        ]
+        recommended_cases = [
+            str(case).strip()
+            for case in comparison.get("recommended_cases", cases)
+            if str(case).strip()
+        ]
+        if status == "REJECTED":
+            summaries.append("已按你的决定不采用这组默认对照。")
+        elif status == "MODIFIED":
+            summaries.append(
+                f"按你的决定，基本情形只保留{'与'.join(cases)}。"
+                if cases
+                else "已按你的决定移除这组默认对照。"
+            )
+        elif status == "ACCEPTED":
+            summaries.append(f"已采纳{'与'.join(cases)}作为一组基本对照。")
+        elif recommended_cases:
+            summaries.append(
+                f"建议默认把{'与'.join(recommended_cases)}作为一组基本对照；"
+                "确认当前概括即表示采纳，也可以直接指出要删改。"
+            )
+    return "".join(summaries)
+
+
 def _scene_components(direction: str, index: int) -> tuple[str, str, str, str]:
-    if "散度" in direction or "通量" in direction:
-        return (
-            "用透明曲面包住看不见的源",
-            "想象一个带电分布周围悬浮着许多场箭头，再用大小和形状不同的透明闭合面"
-            "把它包住。你既能贴近每一点观察场向外发散的程度，也能退后看穿过整个曲面"
-            "的场线总效果；当曲面被拉长、压扁，却仍包住同样的源时，两种观察会怎样呼应？",
-            "局部看到的源强特征，怎样共同组成闭合面上的整体效果？",
-            "可以把闭合面做成偏心、凹陷或穿过材料界面的形状，作为超出标准例题的联想。",
-        )
-    if "旋度" in direction or "环流" in direction:
-        return (
-            "沿一圈小路追踪场的转向",
-            "想象在空间中放入许多大小不同的透明闭合路径，并沿每条路径逐段观察场箭头"
-            "是顺着前进方向、逆着前进方向，还是近乎垂直。局部看似轻微的旋转趋势，"
-            "沿整圈累积后会不会显现出明显差别？当路径移到另一个区域时，画面又如何改变？",
-            "你更想解释局部的旋转感，还是它沿整条闭合路径累积后的整体差异？",
-            "可以让路径变形、偏离对称中心或同时环绕多个来源，看看直觉是否仍成立。",
-        )
-    if "驻波" in direction or "共振" in direction:
-        return (
-            "节点与波腹沿线路浮现",
-            "想象一列波沿着传输线前进，又有一列波从末端返回；把两者同时冻结在空间中，"
-            "有些位置几乎不动，有些位置反复达到很强的响应。若末端状态或线路尺度换一种"
-            "情形，这些节点、波腹与重复图样会整体移动，还是以另一种方式重排？",
-            "这种空间图样最让你想追问的是节点的位置、图样的重复性，还是共振的形成？",
-            "可以把均匀线路改成带转折或分段结构，设想原有驻波图样会如何被重新塑造。",
-        )
-    if "匹配" in direction or "功率反射" in direction:
-        return (
-            "让末端从像墙一样反弹到平顺接续",
-            "想象同一个波包连续遇到几种不同的线路末端：有的像硬墙一样把明显的波送回来，"
-            "有的只留下很弱的回波，有的则让能量继续向前。把这些画面并排比较时，末端状态、"
-            "反射强弱与能量传递之间会呈现怎样的联系？",
-            "你最想理解的是回波为什么变弱，还是能量为什么能更顺利地继续传递？",
-            "可以设想用多段渐变结构代替单一末端，观察反射是否会分散成更复杂的图样。",
-        )
-    if "反射" in direction or "暂态" in direction:
-        return (
-            "追着一个脉冲看它到达边界之后",
-            "想象一个短脉冲沿传输线向前奔跑，到达末端后出现返回的波，并在途中与后续入射"
-            "部分相遇。若把不同末端状态的时间画面并排播放，你会看到返回波的方向、形状和"
-            "到达时刻怎样改变原来的信号图样？",
-            "你更想追问边界为什么产生回波，还是来回传播怎样形成完整的暂态过程？",
-            "可以加入第二个不连续处或支路，让同一个脉冲经历多次往返，形成更复杂的启发性画面。",
-        )
-    if "偏振" in direction or "正交" in direction:
-        return (
-            "看场箭头的尖端在空间中画轨迹",
-            "想象固定在空间一点观察电场箭头：两个正交方向的分量一边振荡，一边保持某种"
-            "相对节奏，箭头尖端可能画出直线、椭圆或旋转轨迹。把观察点沿传播方向移动时，"
-            "这种轨迹与波的空间变化会怎样联系起来？",
-            "哪种分量关系最能帮助你解释偏振轨迹为什么改变？",
-            "可以让波经过一个倾斜结构或多层界面，设想输出轨迹出现怎样的新变化。",
-        )
-    if "磁通" in direction or "感应" in direction:
-        return (
-            "让穿过回路的磁场图样动起来",
-            "想象一个线圈附近的磁场随时间增强、减弱，或让线圈与磁场来源发生相对运动。"
-            "把穿过回路的磁场图样与回路中出现的电响应同时显示，你会看到变化的快慢、"
-            "方向与响应方向之间产生怎样的对应？",
-            "你最想解释的是磁场本身的变化，还是回路为何对这种变化作出响应？",
-            "可以把单个回路换成不同形状或相互靠近的多个回路，比较感应图样是否仍直观。",
-        )
-    if "衰减" in direction or "穿透" in direction or "屏蔽" in direction:
-        return (
-            "跟随场进入材料并逐渐消退",
-            "想象一列电磁波碰到一块材料：一部分在界面返回，另一部分进入内部，但颜色与"
-            "箭头长度随深度逐渐变化。把不同材料或不同激励情形并排放置时，界面附近和材料"
-            "深处的空间图样会出现怎样的反差？",
-            "你更想解释界面处的分流，还是进入材料后的衰减与穿透？",
-            "可以把材料做成薄层、弯曲外壳或带接缝结构，想象屏蔽与泄漏会形成什么画面。",
-        )
-    if "介质" in direction or "极化" in direction or "材料" in direction:
-        return (
-            "把同一物体换成不同材料",
-            "想象两个外形完全相同的物体被放进同一外加场，其中一个表现得像导体，另一个"
-            "是介质。把场线、等势面或材料内部的响应并排显示，物体内外的场会怎样重新分布，"
-            "界面两侧又会出现怎样的方向反差？",
-            "你最想理解材料内部的响应，还是材料界面怎样改变周围空间的场？",
-            "可以给介质做分层、开孔或包覆结构，构造一个课堂公式未直接给出答案的设想。",
-        )
-    if "边界" in direction or "电势" in direction:
-        return (
-            "把平滑边界慢慢捏成尖角和窄缝",
-            "想象一个规则导体边界逐渐被拉出尖角、凹槽或窄缝，同时另一个带电物体缓慢靠近。"
-            "原本均匀或对称的场线和等势面会从哪里先变形，哪些位置会出现明显的聚集或疏散？",
-            "哪一种边界形状最能触发你对场分布变化的直觉或疑问？",
-            "可以把尖角放进介质外壳或带开口的金属结构中，把几何与材料图景组合起来。",
-        )
-    if any(keyword in direction for keyword in ("电荷", "电流分布", "场形状", "空间场")):
-        return (
-            "让两个场源从远处慢慢靠近",
-            "想象先分别观察两个不同形状或方向的场源，再把它们逐渐移近。每个来源单独存在时"
-            "清晰的对称性会怎样被另一个来源打破；空间中的场线、箭头方向和强弱区域会在哪里"
-            "合并、偏转、抵消或形成新的结构？",
-            "你最想追踪的是对称性被打破的过程，还是强场与弱场区域如何重新出现？",
-            "可以把球形或线形来源换成带尖端、偏心或多部分结构，作为更有画面感的延伸。",
-        )
-    generic_frames = (
-        (
-            "让几何关系变得可见",
-            "想象把两个相关对象从相距很远慢慢移到彼此附近，并从多个方向观察场或波的"
-            "空间图样。原先规则的结构会在哪里先弯曲、聚集、抵消或重新排列？",
-            "哪一种空间变化最违背你的第一直觉？",
-            "可以把规则外形换成带尖角、弯折或窄缝的结构，作为进一步联想。",
-        ),
-        (
-            "让材料与边界形成反差",
-            "想象保持整体轮廓相近，却改变一个区域的材料或边界状态。从一侧走到另一侧时，"
-            "场的方向、幅度或传播图样会呈现怎样的反差？",
-            "哪一处边界变化最值得继续解释？",
-            "可以设想分层材料或不完全封闭的边界，看看是否出现新的空间特征。",
-        ),
-        (
-            "让多个来源在空间中相遇",
-            "想象同时存在两个来源或两条传播路径，并改变它们的相对位置和朝向。在空间中"
-            "移动观察点，哪里会出现增强、减弱、节点或方向突变？",
-            "哪一种相互作用最能成为你自己的探索主线？",
-            "可以加入第三个对象或不对称扰动，观察原有图样是否仍保持直观对称性。",
-        ),
-    )
-    return generic_frames[index % len(generic_frames)]
+    return KNOWLEDGE.scene_components(direction, index)
 
 
 def build_exploration_scenes(
@@ -385,6 +298,50 @@ class RuleBasedStageGenerator:
             interest_description = str(
                 stage_one_context.get("interest_description") or ""
             ).strip()
+            selected_scene_ids = stage_one_context.get("selected_scene_ids", [])
+            if not isinstance(selected_scene_ids, list):
+                selected_scene_ids = []
+            selected_course_relations = stage_one_context.get(
+                "selected_course_relations",
+                [],
+            )
+            if not isinstance(selected_course_relations, list):
+                selected_course_relations = []
+            selected_course_relations = [
+                item for item in selected_course_relations if isinstance(item, dict)
+            ]
+            standard_comparisons = stage_one_context.get("standard_comparisons", [])
+            if not isinstance(standard_comparisons, list):
+                standard_comparisons = []
+            standard_comparisons = [
+                item for item in standard_comparisons if isinstance(item, dict)
+            ]
+            core_phenomenon = str(
+                stage_one_context.get("core_phenomenon") or ""
+            ).strip()
+            refinement_notes = stage_one_context.get("refinement_notes", [])
+            if not isinstance(refinement_notes, list):
+                refinement_notes = []
+            direction_summary = str(
+                stage_one_context.get("direction_summary") or current_focus
+            ).strip()
+            relation_directions = [
+                str(item.get("direction") or item.get("focus") or "").strip()
+                for item in selected_course_relations
+                if str(item.get("direction") or item.get("focus") or "").strip()
+            ]
+            relation_sentence = (
+                f"组合关系完整保留为：{'；'.join(relation_directions)}。"
+                if len(relation_directions) > 1
+                else (
+                    f"课程关系是：{relation_directions[0]}。"
+                    if relation_directions
+                    else ""
+                )
+            )
+            comparison_sentence = _format_standard_comparison_status(
+                standard_comparisons
+            )
             retrieval_text = " ".join(
                 item
                 for item in (
@@ -449,33 +406,38 @@ class RuleBasedStageGenerator:
                     "疑惑的地方；不需要写成正式的实验问题。"
                 )
             elif brainstorm_phase == INTEREST_DESCRIPTION:
-                introduction = (
-                    f"现在我们暂时把“{selected_focus or current_focus}”作为感兴趣的方向。"
-                    "接下来先由你赋予这个方向更具体的含义，而不是继续从一组答案中选择。"
-                    "你可以结合观察到的现象、直觉上的矛盾，或希望学生真正看懂的物理联系"
-                    "来描述。"
-                )
+                if len(relation_directions) > 1:
+                    introduction = (
+                        f"你提出的组合已经按两条课程关系保留：{'；'.join(relation_directions)}。"
+                        "接下来只需要说明你希望这两条关系共同解释什么核心现象；它们不会在"
+                        "后续描述中被拆成二选一。"
+                    )
+                else:
+                    introduction = (
+                        f"现在把“{selected_focus or current_focus}”作为感兴趣的方向。"
+                        "请用自己的话说明最想理解的现象或物理联系，不需要预先判断结果，"
+                        "也不需要确定变量、公式或实验结构。"
+                    )
             elif brainstorm_phase == DEPTH_EXPANSION:
-                related_directions = [
-                    str(item.get("direction") or "").strip()
-                    for item in deepening_connections[:3]
-                    if str(item.get("direction") or "").strip()
-                    and str(item.get("direction") or "").strip() != selected_focus
-                ]
-                connection_text = "、".join(related_directions[:2])
-                related_sentence = (
-                    f"同时，{connection_text}提供了与这条主线相邻的观察角度。"
-                    if connection_text
-                    else "它还可以和同一课程板块中的边界行为与空间分布联系起来。"
-                )
-                introduction = (
-                    f"你刚才把关注点描述为：“{interest_description or user_message.strip()}”"
-                    f"。从ECE329的概念联系看，可以把“{selected_focus or topic_anchor}”"
-                    "作为这段想法的主线：重点不只是看到某个结果，而是理解不同场或波的"
-                    "成分、边界行为与最终空间图样之间为什么会产生联系。"
-                    f"{related_sentence}这样形成的内容已经比一个宽泛主题更深入，同时仍把"
-                    "变量、公式和实验装置留给后续阶段。"
-                )
+                if ready_for_next_stage:
+                    phenomenon = core_phenomenon or interest_description or direction_summary
+                    priority_sentence = (
+                        f"目前记录的观察重点是：{'；'.join(str(item) for item in refinement_notes[-2:])}。"
+                        if refinement_notes
+                        else ""
+                    )
+                    introduction = (
+                        f"当前研究方向已经足够清楚：{phenomenon}。"
+                        f"{relation_sentence}{comparison_sentence}{priority_sentence}"
+                        "阶段1到这里保留核心现象与课程关系即可；具体变量、定量关系和展示"
+                        "细节将在后续阶段处理。"
+                    )
+                else:
+                    introduction = (
+                        f"当前核心现象是：{interest_description or user_message.strip()}。"
+                        f"{relation_sentence}{comparison_sentence}"
+                        "下一步只需确认这是否准确表达你真正想理解的物理联系。"
+                    )
             elif contextual_continuation:
                 previous_focus = str(
                     stage_one_context.get("previous_focus") or topic_anchor
@@ -492,13 +454,17 @@ class RuleBasedStageGenerator:
                 )
             if brainstorm_phase == INTEREST_DESCRIPTION and input_kind == COURSE_CONTENT:
                 closing_task = (
-                    "请用自己的话描述：这个方向中什么现象或物理联系最吸引你，"
-                    "以及你最希望进一步弄清什么？"
+                    "请用自己的话描述这组关系共同要解释的核心现象。"
+                    if len(relation_directions) > 1
+                    else (
+                        "请用自己的话描述：这个方向中什么现象或物理联系最吸引你，"
+                        "以及你最希望进一步弄清什么？"
+                    )
                 )
             elif brainstorm_phase == DEPTH_EXPANSION and input_kind == COURSE_CONTENT:
                 closing_task = (
-                    "请继续用自己的话补充或修正这段理解；如果它已经准确表达你的想法，"
-                    "也可以确认当前方向并进入下一阶段。"
+                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
+                    "请直接指出遗漏。"
                 )
             else:
                 closing_task = (
@@ -524,6 +490,13 @@ class RuleBasedStageGenerator:
                     "focus_history": focus_history,
                     "contextual_continuation": contextual_continuation,
                     "selected_focus": selected_focus,
+                    "selected_scene_ids": selected_scene_ids,
+                    "selected_course_relations": selected_course_relations,
+                    "combination_intent": len(selected_course_relations) > 1,
+                    "core_phenomenon": core_phenomenon,
+                    "refinement_notes": refinement_notes,
+                    "standard_comparisons": standard_comparisons,
+                    "direction_summary": direction_summary,
                     "interest_description": interest_description,
                     "alternative_ideas": alternatives,
                     "exploration_scenes": exploration_scenes,

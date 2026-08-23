@@ -442,6 +442,172 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(output.stage_payload["alternative_ideas"], [])
         self.assertEqual(output.stage_payload["deepening_connections"], options)
 
+    def test_ready_combined_direction_rejects_another_forced_choice(self) -> None:
+        session = guided_session()
+        options = KNOWLEDGE.brainstorm_options(
+            "静电场 电场线 电荷源",
+            limit=3,
+        )
+        scenes = build_exploration_scenes(options)
+        session.history.append(
+            {
+                "handled_stage": Stage.IDEA_BRAINSTORMING.value,
+                "user_message": "我想研究静电场中的两个源",
+                "output": {
+                    "stage_payload": {
+                        "input_category": "COURSE_CONTENT",
+                        "alternative_ideas": options,
+                        "exploration_scenes": scenes,
+                    }
+                },
+            }
+        )
+        session.design_context["idea"].update(
+            {
+                "topic_anchor": "我想研究静电场中的两个源",
+                "current_focus": "图景A与图景B的组合",
+                "focus_history": [
+                    "我想研究静电场中的两个源",
+                    "图景A与图景B的组合",
+                ],
+                "course_scope_confirmed": True,
+                "brainstorm_phase": "INTEREST_DESCRIPTION",
+                "selected_scene_ids": ["scene_a", "scene_b"],
+                "selected_course_relations": [options[0], options[1]],
+                "combination_intent": True,
+            }
+        )
+        message = "观察两个源靠近时电场线在中间区域的变化"
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                message,
+                options=options,
+                scenes=scenes,
+                idea_context=session.design_context["idea"],
+            )
+        )
+        transport = FakeTransport(
+            valid_output(
+                assistant_message=(
+                    "这个方向可以继续细化。你想先看同种电荷还是异种电荷？"
+                )
+            )
+        )
+
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(transport=transport).generate(session, message)
+
+    def test_model_can_propose_a_new_course_grounded_basic_case_bundle(self) -> None:
+        session = guided_session()
+        session.design_context["idea"].update(
+            {
+                "topic_anchor": "我想研究电磁波偏振",
+                "current_focus": "电磁波偏振 → 偏振轨迹",
+                "focus_history": ["我想研究电磁波偏振", "偏振轨迹"],
+                "course_scope_confirmed": True,
+                "brainstorm_phase": "INTEREST_DESCRIPTION",
+                "selected_focus": "偏振轨迹",
+            }
+        )
+        message = "我想理解正交分量的关系怎样形成不同的偏振轨迹"
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                message,
+                options=KNOWLEDGE.brainstorm_options("电磁波偏振", limit=3),
+                idea_context=session.design_context["idea"],
+            )
+        )
+        self.assertTrue(session.turn_context["ready_for_next_stage"])
+        self.assertEqual(session.turn_context["standard_comparisons"], [])
+
+        comparison = {
+            "comparison_id": "wave_polarization_forms",
+            "cases": ["线偏振", "圆偏振"],
+            "recommended_cases": ["线偏振", "圆偏振"],
+            "case_aliases": {"线偏振": [], "圆偏振": []},
+            "role": "PROPOSED_BASELINE_COMPARISON",
+            "adoption_status": "PENDING",
+            "reason": "两种偏振形式可作为观察正交分量相位关系的基础参照。",
+            "course_concept_ids": ["lecture_24"],
+        }
+        transport = FakeTransport(
+            valid_output(
+                assistant_message=(
+                    "当前方向是理解正交分量如何形成偏振轨迹。建议默认把线偏振与"
+                    "圆偏振作为一组基本对照；确认当前概括即表示采纳，也可以直接删改。"
+                ),
+                stage_payload_json=json.dumps(
+                    {
+                        "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                        "input_category": "COURSE_CONTENT",
+                        "standard_comparisons": [comparison],
+                    },
+                    ensure_ascii=False,
+                ),
+                student_task=(
+                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
+                    "请直接指出遗漏。"
+                ),
+            )
+        )
+
+        output = OpenAIStageGenerator(transport=transport).generate(session, message)
+
+        proposed = output.stage_payload["standard_comparisons"][0]
+        self.assertEqual(proposed["cases"], ["线偏振", "圆偏振"])
+        self.assertEqual(proposed["adoption_status"], "PENDING")
+        self.assertEqual(proposed["proposal_source"], "COURSE_GROUNDED_MODEL")
+
+    def test_model_basic_case_bundle_rejects_unretrieved_course_grounding(self) -> None:
+        session = guided_session()
+        session.design_context["idea"].update(
+            {
+                "topic_anchor": "我想研究电磁波偏振",
+                "current_focus": "电磁波偏振 → 偏振轨迹",
+                "focus_history": ["我想研究电磁波偏振", "偏振轨迹"],
+                "course_scope_confirmed": True,
+                "brainstorm_phase": "INTEREST_DESCRIPTION",
+                "selected_focus": "偏振轨迹",
+            }
+        )
+        message = "我想理解正交分量的关系怎样形成不同的偏振轨迹"
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                message,
+                options=KNOWLEDGE.brainstorm_options("电磁波偏振", limit=3),
+                idea_context=session.design_context["idea"],
+            )
+        )
+        comparison = {
+            "comparison_id": "invented_case_bundle",
+            "cases": ["情形甲", "情形乙"],
+            "recommended_cases": ["情形甲", "情形乙"],
+            "reason": "声称有课程依据。",
+            "course_concept_ids": ["lecture_999"],
+        }
+        transport = FakeTransport(
+            valid_output(
+                assistant_message=(
+                    "建议默认把情形甲与情形乙作为一组基本对照；确认当前概括即表示采纳。"
+                ),
+                stage_payload_json=json.dumps(
+                    {
+                        "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                        "input_category": "COURSE_CONTENT",
+                        "standard_comparisons": [comparison],
+                    },
+                    ensure_ascii=False,
+                ),
+                student_task=(
+                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
+                    "请直接指出遗漏。"
+                ),
+            )
+        )
+
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(transport=transport).generate(session, message)
+
     def test_valid_out_of_scope_model_response_keeps_three_course_examples(self) -> None:
         broad_options = KNOWLEDGE.broad_entry_points()
         broad_scenes = build_exploration_scenes(broad_options)

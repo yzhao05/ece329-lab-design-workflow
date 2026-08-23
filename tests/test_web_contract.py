@@ -70,6 +70,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("我不能执行", self.app_js)
         self.assertIn("classifyDemoStageOneInput", self.app_js)
         self.assertIn("resolveDemoOptionReference", self.app_js)
+        self.assertIn("function parseDemoOrdinal(raw)", self.app_js)
         self.assertIn("你已经把方向收到了", self.app_js)
         self.assertIn("请先用自己的话说说", self.app_js)
         self.assertIn('return "UNREASONABLE_REQUEST"', self.app_js)
@@ -92,6 +93,18 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("提出一个自己的ECE329课内设想", self.app_js)
         self.assertIn("response.stage_payload?.exploration_scenes", self.app_js)
         self.assertIn("scene.course_anchor?.option_id", self.app_js)
+        self.assertIn("function resolveDemoSceneCombination(text, options)", self.app_js)
+        self.assertIn("function inferDemoStandardComparisons(text)", self.app_js)
+        self.assertIn("function updateDemoStandardComparisonDecisions", self.app_js)
+        self.assertIn("function formatDemoStandardComparisons", self.app_js)
+        self.assertIn("const DEMO_BASELINE_COMPARISONS", self.app_js)
+        self.assertIn("function escapeRegularExpression", self.app_js)
+        self.assertNotIn("const sameOnly", self.app_js)
+        self.assertNotIn("const oppositeOnly", self.app_js)
+        self.assertIn("建议默认把", self.app_js)
+        self.assertIn('adoption_status: "PENDING"', self.app_js)
+        self.assertNotIn("自动同时纳入", self.app_js)
+        self.assertIn("共同解释什么核心现象", self.app_js)
 
     def test_failed_api_request_preserves_real_session(self) -> None:
         self.assertIn("当前设计已保留，请稍后重试", self.app_js)
@@ -112,6 +125,12 @@ class WebFrontendContractTests(unittest.TestCase):
     def test_stale_backend_session_is_cleared_without_fake_continuation(self) -> None:
         self.assertIn("function clearApiSession()", self.app_js)
         self.assertIn('["session_not_found", "access_denied"]', self.app_js)
+        self.assertIn("state = { ...initialState(), messages: retainedMessages }", self.app_js)
+        self.assertIn("saveState();", self.app_js)
+
+    def test_frontend_abuse_detection_is_platform_independent(self) -> None:
+        self.assertIn("网站|平台|应用|服务|插件|频道|论坛|直播", self.app_js)
+        self.assertNotIn("b站|哔哩哔哩|youtube|抖音", self.app_js)
 
     def test_hidden_connection_notice_is_not_overridden_by_flex_style(self) -> None:
         self.assertRegex(
@@ -138,6 +157,10 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR方案汇总"', self.app_js)
         self.assertIn('state.mode === "EMVR_DIRECT"', self.app_js)
         self.assertIn("function stageTitle(index)", self.app_js)
+        emvr_detector = self.app_js.split("function detectDemoEmvrIntent", 1)[1].split(
+            "function isDemoNoDirectionRequest", 1
+        )[0]
+        self.assertNotIn("unity\\s*vr", emvr_detector)
 
     def test_published_frontend_contains_no_obvious_openai_secret(self) -> None:
         published_text = "\n".join(

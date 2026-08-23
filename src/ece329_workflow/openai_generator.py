@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -11,7 +12,11 @@ from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .generator import ILLUSTRATIVE_EXTENSION_SCOPE, RuleBasedStageGenerator
+from .generator import (
+    ILLUSTRATIVE_EXTENSION_SCOPE,
+    RuleBasedStageGenerator,
+    _format_standard_comparison_status,
+)
 from .guardrails import (
     AMBIGUOUS,
     BREADTH_EXPLORATION,
@@ -21,6 +26,7 @@ from .guardrails import (
     OUT_OF_SCOPE,
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
+    latest_stage_one_options,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput, WorkflowError
@@ -107,6 +113,104 @@ EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
         "builder_pack_handoff",
     ),
 }
+
+
+def _comparison_status_is_visible(
+    comparison: dict[str, Any],
+    message: str,
+) -> bool:
+    status = str(comparison.get("adoption_status") or "PENDING").upper()
+    if status == "PENDING":
+        return "建议" in message and "默认" in message
+    if status == "ACCEPTED":
+        return bool(re.search(r"已采纳|已接受|已确认|已按.{0,8}保留", message))
+    if status == "MODIFIED":
+        return bool(re.search(r"按你的决定|只保留|已修改|已删改", message))
+    if status == "REJECTED":
+        return bool(re.search(r"不采用|不纳入|已移除|已拒绝", message))
+    return False
+
+
+def _validated_model_standard_comparisons(
+    raw_comparisons: Any,
+    allowed_concept_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Validate a model-proposed basic case bundle against retrieved course scope."""
+
+    if raw_comparisons in (None, []):
+        return []
+    if not isinstance(raw_comparisons, list) or len(raw_comparisons) > 1:
+        raise ModelOutputError("Stage 1 may propose at most one basic case bundle")
+    if not allowed_concept_ids:
+        raise ModelOutputError("A basic case bundle requires retrieved course grounding")
+
+    validated: list[dict[str, Any]] = []
+    for comparison in raw_comparisons:
+        if not isinstance(comparison, dict):
+            raise ModelOutputError("A basic case bundle must be an object")
+        comparison_id = comparison.get("comparison_id")
+        cases = comparison.get("recommended_cases", comparison.get("cases"))
+        reason = comparison.get("reason")
+        concept_ids = comparison.get("course_concept_ids")
+        if (
+            not isinstance(comparison_id, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,79}", comparison_id)
+        ):
+            raise ModelOutputError("A basic case bundle needs a stable comparison_id")
+        if (
+            not isinstance(cases, list)
+            or not 2 <= len(cases) <= 4
+            or any(
+                not isinstance(case, str)
+                or not case.strip()
+                or len(case.strip()) > 40
+                for case in cases
+            )
+        ):
+            raise ModelOutputError("A basic case bundle needs two to four concise cases")
+        normalized_cases = [str(case).strip() for case in cases]
+        if len(set(normalized_cases)) != len(normalized_cases):
+            raise ModelOutputError("A basic case bundle cannot contain duplicate cases")
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 180:
+            raise ModelOutputError("A basic case bundle needs a concise course-based reason")
+        if (
+            not isinstance(concept_ids, list)
+            or not concept_ids
+            or any(
+                not isinstance(concept_id, str)
+                or concept_id not in allowed_concept_ids
+                for concept_id in concept_ids
+            )
+        ):
+            raise ModelOutputError(
+                "A basic case bundle must cite retrieved course concept IDs"
+            )
+        validated.append(
+            {
+                "comparison_id": comparison_id,
+                "cases": normalized_cases,
+                "recommended_cases": normalized_cases,
+                "case_aliases": {
+                    str(case): [
+                        str(alias).strip()
+                        for alias in aliases
+                        if isinstance(alias, str) and alias.strip()
+                    ][:5]
+                    for case, aliases in (
+                        comparison.get("case_aliases", {}).items()
+                        if isinstance(comparison.get("case_aliases"), dict)
+                        else []
+                    )
+                    if str(case) in normalized_cases and isinstance(aliases, list)
+                },
+                "role": "PROPOSED_BASELINE_COMPARISON",
+                "adoption_status": "PENDING",
+                "reason": reason.strip(),
+                "course_concept_ids": list(dict.fromkeys(concept_ids)),
+                "proposal_source": "COURSE_GROUNDED_MODEL",
+            }
+        )
+    return validated
 LOGGER = logging.getLogger(__name__)
 
 
@@ -632,6 +736,134 @@ def _validate_lecture_grounding(
                     raise ModelOutputError(
                         "Depth connections must exactly reuse retrieved brainstorm options"
                     )
+        stage_one_thread = prompt_packet["context"].get("stage_one_thread", {})
+        if isinstance(stage_one_thread, dict):
+            selected_relations = stage_one_thread.get("selected_course_relations", [])
+            preserved_relation_catalog = [
+                *retrieved_brainstorm_options,
+                *latest_stage_one_options(session.history),
+            ]
+            if not isinstance(selected_relations, list) or any(
+                not isinstance(item, dict) for item in selected_relations
+            ):
+                raise ModelOutputError(
+                    "Stage 1 selected_course_relations must be an array of objects"
+            )
+            for relation in selected_relations:
+                if relation not in preserved_relation_catalog:
+                    raise ModelOutputError(
+                        "Every preserved Stage 1 relation must remain grounded"
+                    )
+            if phase == INTEREST_DESCRIPTION and len(selected_relations) > 1:
+                combined_visible = " ".join(
+                    [output.assistant_message, output.student_task or ""]
+                )
+                if re.search(r"更想.{0,40}还是|选择.{0,30}(?:一个|其中)", combined_visible):
+                    raise ModelOutputError(
+                        "A combined Stage 1 direction cannot be turned back into a choice"
+                    )
+                if output.student_task != "请用自己的话描述这组关系共同要解释的核心现象。":
+                    raise ModelOutputError(
+                        "A combined Stage 1 direction should request one shared core phenomenon"
+                    )
+            if stage_one_thread.get("ready_for_next_stage") is True:
+                visible = output.assistant_message.strip()
+                if len(visible) > 650:
+                    raise ModelOutputError(
+                        "A ready Stage 1 direction must be summarized concisely"
+                    )
+                if "？" in visible or "?" in visible:
+                    raise ModelOutputError(
+                        "A ready Stage 1 direction cannot introduce another content question"
+                    )
+                forced_choice_patterns = (
+                    r"更想.{0,30}还是",
+                    r"先看.{0,30}还是",
+                    r"告诉我.{0,30}(?:还是|或者)",
+                    r"可以继续补",
+                    r"如果愿意.{0,40}(?:下一|继续|补充)",
+                    r"我们继续沿着已经形成的",
+                )
+                if any(
+                    re.search(pattern, visible)
+                    for pattern in forced_choice_patterns
+                ):
+                    raise ModelOutputError(
+                        "A ready Stage 1 direction cannot create another artificial choice"
+                    )
+                for relation in selected_relations:
+                    direction = str(
+                        relation.get("direction") or relation.get("focus") or ""
+                    ).strip()
+                    if direction and direction not in visible:
+                        raise ModelOutputError(
+                            "A ready Stage 1 summary forgot a combined course relation"
+                        )
+                standard_comparisons = output.stage_payload.get(
+                    "standard_comparisons",
+                    [],
+                )
+                if isinstance(standard_comparisons, list):
+                    for comparison in standard_comparisons:
+                        if not isinstance(comparison, dict):
+                            raise ModelOutputError(
+                                "Stage 1 standard comparisons must be objects"
+                            )
+                        status = str(
+                            comparison.get("adoption_status") or "PENDING"
+                        ).upper()
+                        if status not in {
+                            "PENDING",
+                            "ACCEPTED",
+                            "MODIFIED",
+                            "REJECTED",
+                        }:
+                            raise ModelOutputError(
+                                "Stage 1 standard comparison status is invalid"
+                            )
+                        visible_cases = (
+                            comparison.get("recommended_cases", comparison.get("cases", []))
+                            if status == "PENDING"
+                            else comparison.get("cases", [])
+                        )
+                        for case in visible_cases:
+                            if str(case).strip() not in visible:
+                                raise ModelOutputError(
+                                    "A ready Stage 1 summary omitted a standard comparison case"
+                                )
+                        if not _comparison_status_is_visible(comparison, visible):
+                            raise ModelOutputError(
+                                "A baseline comparison decision is not stated correctly"
+                            )
+                        if status == "PENDING" and re.search(
+                            r"自动.{0,4}纳入",
+                            visible,
+                        ):
+                            raise ModelOutputError(
+                                "A pending baseline cannot be described as automatically adopted"
+                            )
+                        if status == "PENDING" and re.search(
+                            r"已采纳|已接受|已经纳入",
+                            visible,
+                        ):
+                            raise ModelOutputError(
+                                "A pending baseline cannot be described as accepted"
+                            )
+                        if status != "PENDING" and re.search(
+                            r"待采纳|确认.{0,8}(?:表示|即).{0,4}采纳",
+                            visible,
+                        ):
+                            raise ModelOutputError(
+                                "A decided baseline cannot be presented as pending"
+                            )
+                expected_task = (
+                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
+                    "请直接指出遗漏。"
+                )
+                if output.student_task != expected_task:
+                    raise ModelOutputError(
+                        "A ready Stage 1 turn must ask only for confirmation or correction"
+                    )
         resolved_reference = prompt_packet["context"].get(
             "resolved_stage_one_reference"
         )
@@ -723,6 +955,41 @@ def _step_output_from_response(
     ):
         stage_one_thread = packet["context"].get("stage_one_thread", {})
         if isinstance(stage_one_thread, dict):
+            context_comparisons = stage_one_thread.get("standard_comparisons", [])
+            context_comparisons = (
+                [
+                    deepcopy(comparison)
+                    for comparison in context_comparisons
+                    if isinstance(comparison, dict)
+                ]
+                if isinstance(context_comparisons, list)
+                else []
+            )
+            model_comparisons = output.stage_payload.get("standard_comparisons", [])
+            ready_for_next_stage = stage_one_thread.get("ready_for_next_stage") is True
+            if context_comparisons:
+                standard_comparisons = context_comparisons
+            elif ready_for_next_stage:
+                retrieval_concepts = packet["context"]["knowledge_retrieval"].get(
+                    "concepts",
+                    [],
+                )
+                allowed_concept_ids = {
+                    str(concept.get("concept_id") or "").strip()
+                    for concept in retrieval_concepts
+                    if isinstance(concept, dict)
+                    and str(concept.get("concept_id") or "").strip()
+                }
+                standard_comparisons = _validated_model_standard_comparisons(
+                    model_comparisons,
+                    allowed_concept_ids,
+                )
+            else:
+                if model_comparisons not in (None, []):
+                    raise ModelOutputError(
+                        "Basic case bundles may be proposed only after Stage 1 is ready"
+                    )
+                standard_comparisons = []
             for key in (
                 "topic_anchor",
                 "current_focus",
@@ -730,11 +997,18 @@ def _step_output_from_response(
                 "contextual_continuation",
                 "brainstorm_phase",
                 "selected_focus",
+                "selected_scene_ids",
+                "selected_course_relations",
+                "combination_intent",
+                "core_phenomenon",
+                "refinement_notes",
+                "direction_summary",
                 "interest_description",
                 "ready_for_next_stage",
                 "resolved_stage_one_reference",
             ):
                 output.stage_payload[key] = deepcopy(stage_one_thread.get(key))
+            output.stage_payload["standard_comparisons"] = standard_comparisons
             phase = stage_one_thread.get("brainstorm_phase")
             if phase in {INTEREST_DESCRIPTION, DEPTH_EXPANSION}:
                 output.stage_payload["alternative_ideas"] = []
@@ -743,17 +1017,87 @@ def _step_output_from_response(
                 output.stage_payload["deepening_connections"] = deepcopy(
                     packet["context"]["knowledge_retrieval"]["brainstorm_options"]
                 )
-            current_focus = str(stage_one_thread.get("current_focus") or "").strip()
-            if (
-                stage_one_thread.get("contextual_continuation") is True
-                and current_focus
-                and current_focus not in output.assistant_message
-            ):
+            selected_relations = stage_one_thread.get("selected_course_relations", [])
+            relation_directions = [
+                str(item.get("direction") or item.get("focus") or "").strip()
+                for item in selected_relations
+                if isinstance(item, dict)
+                and str(item.get("direction") or item.get("focus") or "").strip()
+            ] if isinstance(selected_relations, list) else []
+            missing_relations = [
+                direction
+                for direction in relation_directions
+                if direction not in output.assistant_message
+            ]
+            if missing_relations:
+                label = "组合关系保留" if len(relation_directions) > 1 else "课程关系"
                 output.assistant_message = (
-                    f"我们继续沿着已经形成的“{current_focus}”方向讨论；"
-                    "你这次的回答是在补充它，不是开始一个新实验。\n\n"
+                    f"{label}：{'；'.join(relation_directions)}。\n\n"
                     f"{output.assistant_message}"
                 )
+            standard_comparisons = output.stage_payload.get("standard_comparisons", [])
+            comparison_summary = _format_standard_comparison_status(
+                [
+                    comparison
+                    for comparison in standard_comparisons
+                    if isinstance(comparison, dict)
+                ]
+                if isinstance(standard_comparisons, list)
+                else []
+            )
+            if ready_for_next_stage and comparison_summary:
+                statuses_visible = all(
+                    _comparison_status_is_visible(
+                        comparison,
+                        output.assistant_message,
+                    )
+                    and all(
+                        str(case).strip() in output.assistant_message
+                        for case in (
+                            comparison.get(
+                                "recommended_cases",
+                                comparison.get("cases", []),
+                            )
+                            if str(comparison.get("adoption_status") or "PENDING").upper()
+                            == "PENDING"
+                            else comparison.get("cases", [])
+                        )
+                        if str(case).strip()
+                    )
+                    for comparison in standard_comparisons
+                    if isinstance(comparison, dict)
+                )
+                if not statuses_visible or re.search(
+                    r"自动.{0,4}纳入",
+                    output.assistant_message,
+                ):
+                    output.assistant_message = (
+                        f"{comparison_summary}\n\n{output.assistant_message}"
+                    )
+                    output.assistant_message = re.sub(
+                        r"自动(?:同时)?纳入",
+                        "建议默认纳入",
+                        output.assistant_message,
+                    )
+            if ready_for_next_stage:
+                output.student_task = (
+                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
+                    "请直接指出遗漏。"
+                )
+            elif phase == INTEREST_DESCRIPTION and len(relation_directions) > 1:
+                output.student_task = "请用自己的话描述这组关系共同要解释的核心现象。"
+            elif (
+                stage_one_thread.get("contextual_continuation") is True
+                and not relation_directions
+            ):
+                selected_focus = str(
+                    stage_one_thread.get("selected_focus") or ""
+                ).strip()
+                if selected_focus and selected_focus not in output.assistant_message:
+                    output.assistant_message = (
+                        f"当前仍围绕“{selected_focus}”讨论。\n\n"
+                        f"{output.assistant_message}"
+                    )
     _validate_stage_constraints(session, output)
     _validate_lecture_grounding(session, output, packet)
     return output

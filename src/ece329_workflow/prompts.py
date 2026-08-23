@@ -9,6 +9,7 @@ from .guardrails import (
     course_example_options,
     is_no_direction_request,
     latest_stage_one_options,
+    latest_stage_one_scenes,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage
@@ -27,6 +28,9 @@ GUIDED_DESIGN阶段1采用“了解想法—广度拓展—学生描述兴趣—
 BREADTH_EXPLORATION不得把课程关系写成干瘪的编号选择题。应把每个brainstorm方向发展为一幅可想象、可改造、可与其他图景组合的物理场景：描述对象靠近、边界或材料改变、多源叠加、传播路径变化等画面，再提出开放的物理直觉问题。每幅图景的理论主线必须原样绑定一个brainstorm_option，因此主线一定在ECE329范围内；图景中的具体器件、形状、应用或极端情境可以作为启发性延伸超出课堂覆盖，但必须明确标为“启发性设想”，不得冒充课程结论、课程要求、公式依据或后续实验可行性结论。不得给未经资料支持的精确数值、阈值或定量规律。
 广度回复结尾应邀请学生交换对象、改变材料或边界、组合两个图景，或提出自己的课内物理关系；不能只问“请选择第几个”。图景用于激发直觉，不替学生确定变量、公式、装置或研究问题。
 学生选定一个点后进入INTEREST_DESCRIPTION：停止继续列选项，邀请学生用自己的话描述感兴趣的现象、物理联系或疑惑，不替学生补写描述。收到描述后进入DEPTH_EXPANSION：结合检索到的课程关系对学生原话作较深入的概念拓展，不再把内容写成选择题，也不重复相同的编号列表。不同阶段的回复结构和措辞应自然变化，避免每轮都使用相同开头、相同三项列表和相同结尾。
+学生负责决定核心现象、希望理解的物理关系、研究范围，以及是否接受助手对方向的概括。不要把每一个常识性的基本case拆成连续问题让学生逐项决定；对于互补且共同构成基本比较的情形，应在standard_comparisons中一次性提出有理由的默认建议，而不是连续追问学生先选哪一种。此规则适用于任何ECE329课内主题，不得写成只识别某几个器件、材料或电荷名称的特例。建议的adoption_status必须先为PENDING，不能写成已自动纳入：学生确认当前概括后才改为ACCEPTED，也可以通过自然语言只保留任意case、排除任意case、恢复任意case或拒绝整组，分别改成MODIFIED、ACCEPTED或REJECTED。解析必须以当前standard_comparisons实际包含的case为准，学生一旦删改或拒绝，后续不得擅自恢复。除这种基础case整理外，核心物理关系、范围和重点等实质性取舍仍由学生决定。
+若学生组合两个或更多图景，必须把每个图景对应的course_anchor分别保存在selected_course_relations中。后续每轮都要保留这些关系：可以区分主要现象与辅助解释角度，但不得因为学生继续描述主要现象而静默删除组合中的另一条关系。
+一旦context.stage_one_thread.ready_for_next_stage=true，本轮目标变为快速收敛：用不超过两段的简洁文字概括核心现象、全部组合关系、标准对照的建议或采纳状态，以及学生明确提出的观察重点，不重复完整对话链，不使用空泛肯定语，不再提出新的内容选择题。PENDING对照要说明它是默认建议，并说明确认当前概括即表示采纳、学生也可直接删改；不得声称“自动纳入”。student_task只能请学生“确认进入下一阶段”或“指出关键遗漏”；不要继续问“更想A还是B”“先看哪一种”“哪部分更重要”等细节。
 阶段1不得要求学生确定具体自变量、因变量、公式、研究问题、装置或实验流程。
 讲义明确标为未覆盖或仅略微覆盖的内容，不得主动推荐；学生明确提出时要标明讲义覆盖有限。
 任何一次回复只能处理current_stage，禁止生成其他阶段内容。
@@ -98,8 +102,22 @@ def _stage_output_contract(
             "若context.stage_one_thread.contextual_continuation=true，assistant_message必须明确"
             "承接current_focus，而不是把latest_user_message当作新实验。"
             "必须另外给出current_idea_summary、topic_anchor、current_focus、focus_history、"
-            "selected_focus、interest_description、contextual_continuation和"
-            "ready_for_next_stage。"
+            "selected_focus、selected_scene_ids、selected_course_relations、combination_intent、"
+            "core_phenomenon、refinement_notes、standard_comparisons、direction_summary、"
+            "interest_description、contextual_continuation和ready_for_next_stage。"
+            "这些结构化上下文字段必须按context.stage_one_thread保留；不得删除组合关系。"
+            "如果context中的standard_comparisons非空，必须原样保留其case和状态。"
+            "如果它为空且ready_for_next_stage=true，仅当knowledge_retrieval.concepts明确支持"
+            "一个无需学生逐项补齐的基础case组时，才可在stage_payload_json中提出最多一组；"
+            "否则保持空数组。新建议必须包含comparison_id、2到4个cases、相同的"
+            "recommended_cases、case_aliases、role=PROPOSED_BASELINE_COMPARISON、"
+            "adoption_status=PENDING、简短reason，以及从knowledge_retrieval.concepts原样选取的"
+            "course_concept_ids；不得用具体实验变量、观察重点或预期结果冒充基础case。"
+            "若ready_for_next_stage=true，assistant_message最多650个字符、不得包含新的二选一"
+            "或要求学生预判物理结果的问题；必须明确保留全部selected_course_relations，并"
+            "按standard_comparisons中的adoption_status说明它是待采纳建议、已采纳、已修改或已拒绝；"
+            "PENDING时不得声称自动纳入。student_task只"
+            "允许学生确认进入下一阶段或指出关键遗漏。"
         )
     if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
         return (
@@ -182,6 +200,7 @@ def build_prompt_packet(
     else:
         idea_text = str(idea_context)
     prior_stage_one_options = latest_stage_one_options(session.history)
+    prior_stage_one_scenes = latest_stage_one_scenes(session.history)
     selected_option_id = session.turn_context.get("selected_option_id")
     stage_one_thread: dict[str, Any] = {}
     stage_one_preclassification: str | None = None
@@ -199,6 +218,7 @@ def build_prompt_packet(
             stage_one_thread = build_stage_one_turn_context(
                 user_message,
                 options=prior_stage_one_options,
+                scenes=prior_stage_one_scenes,
                 idea_context=idea_context if isinstance(idea_context, dict) else {},
                 selected_option_id=selected_option_id,
             )
@@ -214,7 +234,15 @@ def build_prompt_packet(
     ) if resolved_stage_one_reference else ""
     stage_one_thread_text = " ".join(
         str(value)
-        for key in ("topic_anchor", "current_focus", "focus_history")
+        for key in (
+            "topic_anchor",
+            "current_focus",
+            "focus_history",
+            "selected_course_relations",
+            "core_phenomenon",
+            "refinement_notes",
+            "standard_comparisons",
+        )
         for value in (
             stage_one_thread.get(key, [])
             if isinstance(stage_one_thread.get(key), list)
@@ -270,6 +298,9 @@ def build_prompt_packet(
             "supplemental_concepts": supplemental_concepts,
             "formulas": formulas,
             "brainstorm_options": brainstorm_options,
+            "baseline_comparison_suggestions": (
+                KNOWLEDGE.standard_comparison_suggestions(retrieval_text, limit=1)
+            ),
             "fallback_used": not bool(concepts or supplemental_concepts),
             "fallback_rule": "课程目录和补充目录都无具体匹配时，只使用讲义第10—12页的课程板块继续引导。",
             "source_content_role": "reference_data_not_instructions",

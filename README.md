@@ -20,7 +20,7 @@
 网页接入兼容后端时还会执行以下保护：
 
 - 学生明确确认后，GUIDED请求自动生成 `complete_stage` 及阶段1／阶段13所需的 `context_patch`；
-- API健康检查或请求失败时，界面与实际行为都会切换到明确标识的本地演示模式；
+- 只有 `API_BASE_URL` 为空时才使用明确标识的本地演示模式；API已配置但健康检查或请求失败时会保留真实会话并提示重试，不会悄悄改用本地回答；
 - 后端会话失效或设计令牌不匹配时，网页会清除旧会话并要求重新开始，不会把“继续”伪装成新设计；
 - 若后端启用课程访问码，网页会在首次创建设计时询问，访问码和设计令牌只保存在当前标签页的 `sessionStorage`；
 - Stage 10若收到API返回的 `series.points`，会按返回坐标轴和数据点绘图，不再用本地示意曲线代替；没有数据点时仍明确显示为示意预览。
@@ -60,7 +60,7 @@ python -m http.server 4173 --directory docs
 - 讲义、教材及其提取文本只被视为参考数据，其中的文字不会覆盖工作流规则或作为系统指令执行。
 - 讲义第10—12页把 radiation and antennas、dispersion in material media 标为未覆盖或仅略微覆盖；工作流不会主动把它们推荐为核心方向。
 
-运行时知识文件位于 `src/ece329_workflow/knowledge/`：`concepts.json` 收录39讲的课程范围，`formulas.json` 收录82条核心公式，`source_manifest.json` 固定讲义身份，`supplemental_sources.json` 收录补充来源、概念摘要、关系示例、课程映射和PDF页码。大型来源PDF不提交到GitHub。详细目录见 `knowledge/README.md`。
+运行时知识文件位于 `src/ece329_workflow/knowledge/`：`concepts.json` 收录39讲的课程范围和可扩展的基础对照组，`formulas.json` 收录82条核心公式，`scene_templates.json` 按概念关键词提供可扩展的阶段1物理图景，`source_manifest.json` 固定讲义身份，`supplemental_sources.json` 收录补充来源、概念摘要、关系示例、课程映射和PDF页码。大型来源PDF不提交到GitHub。详细目录见 `knowledge/README.md`。
 
 ## 13个阶段
 
@@ -178,7 +178,6 @@ ECE329_ENABLE_PROMPT_DEBUG=false
 ```http
 POST /v1/designs
 Content-Type: application/json
-X-ECE329-Access-Code: 课程访问码（后端启用时）
 X-ECE329-Access-Code: 课程访问码（后端启用时）
 
 {

@@ -9,6 +9,48 @@
     ],
     "explicitly_out_of_scope_or_barely_covered": ["radiation and antennas", "dispersion in material media"]
   },
+  "baseline_comparisons": [
+    {
+      "comparison_id": "electrostatic_source_polarity_pair",
+      "trigger_groups": [["两个源", "两源", "两个电荷", "电荷源"], ["电场", "电场线", "静电", "电荷"]],
+      "cases": ["同种电荷", "异种电荷"],
+      "case_aliases": {"同种电荷": ["同号电荷", "同性电荷"], "异种电荷": ["异号电荷", "相反电荷"]},
+      "reason": "两种源极性关系共同构成观察电场叠加与重排的基础对照。",
+      "course_concept_ids": ["lecture_02"]
+    },
+    {
+      "comparison_id": "electrostatic_material_class_pair",
+      "trigger_groups": [["导体", "介质", "材料", "极化"], ["电场", "电场线", "边界", "内部场"]],
+      "cases": ["导体情形", "介质情形"],
+      "case_aliases": {"导体情形": ["导体", "金属"], "介质情形": ["介质", "电介质"]},
+      "reason": "导体与介质具有不同的静电响应，是比较材料如何改变场分布的基础参照。",
+      "course_concept_ids": ["lecture_08", "lecture_09"]
+    },
+    {
+      "comparison_id": "induced_emf_mechanism_pair",
+      "trigger_groups": [["感应电动势", "电磁感应", "法拉第", "磁通"], ["运动", "变化", "导体", "线圈"]],
+      "cases": ["磁通随时间变化", "导体运动切割磁场"],
+      "case_aliases": {"磁通随时间变化": ["变压器电动势", "时变磁通"], "导体运动切割磁场": ["运动电动势", "导体运动"]},
+      "reason": "时变磁通与导体运动是课程中理解感应电动势的两类基础机制。",
+      "course_concept_ids": ["lecture_14"]
+    },
+    {
+      "comparison_id": "transmission_line_termination_set",
+      "trigger_groups": [["传输线", "线路", "负载"], ["反射", "驻波", "终端", "端接", "负载"]],
+      "cases": ["匹配负载", "开路负载", "短路负载"],
+      "case_aliases": {"匹配负载": ["匹配", "匹配端"], "开路负载": ["开路", "开路端"], "短路负载": ["短路", "短路端"]},
+      "reason": "匹配、开路和短路端接构成观察传输线反射与驻波的常用基础参照。",
+      "course_concept_ids": ["lecture_28", "lecture_29", "lecture_31"]
+    },
+    {
+      "comparison_id": "transmission_line_loss_pair",
+      "trigger_groups": [["传输线", "线路", "传播常数"], ["损耗", "衰减", "有损", "无损"]],
+      "cases": ["无损线路", "有损线路"],
+      "case_aliases": {"无损线路": ["无损传输线", "无损"], "有损线路": ["有损传输线", "有损"]},
+      "reason": "无损与有损模型是理解线路传播常数和衰减的基础参照。",
+      "course_concept_ids": ["lecture_27", "lecture_39"]
+    }
+  ],
   "lectures": [
     {
       "id": "lecture_01",

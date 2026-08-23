@@ -20,6 +20,7 @@ from .guardrails import (
     is_no_direction_request,
     is_stage_one_control_message,
     latest_stage_one_options,
+    latest_stage_one_scenes,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import (
@@ -211,6 +212,7 @@ class WorkflowEngine:
                 build_stage_one_turn_context(
                     message,
                     options=latest_stage_one_options(session.history),
+                    scenes=latest_stage_one_scenes(session.history),
                     idea_context=idea_context if isinstance(idea_context, dict) else {},
                     selected_option_id=request.selected_option_id,
                 )
@@ -551,10 +553,30 @@ class WorkflowEngine:
                 ),
             }
         )
-        for key in ("selected_focus", "interest_description"):
+        for key in (
+            "selected_focus",
+            "core_phenomenon",
+            "interest_description",
+            "direction_summary",
+        ):
             value = str(turn_context.get(key) or "").strip()
             if value:
                 idea[key] = value
+        for key in (
+            "selected_scene_ids",
+            "selected_course_relations",
+            "refinement_notes",
+        ):
+            value = turn_context.get(key)
+            if isinstance(value, list):
+                idea[key] = deepcopy(value)
+        output_comparisons = output.stage_payload.get("standard_comparisons")
+        context_comparisons = turn_context.get("standard_comparisons")
+        if isinstance(output_comparisons, list):
+            idea["standard_comparisons"] = deepcopy(output_comparisons)
+        elif isinstance(context_comparisons, list):
+            idea["standard_comparisons"] = deepcopy(context_comparisons)
+        idea["combination_intent"] = bool(turn_context.get("combination_intent"))
         if turn_context.get("control_turn") is not True:
             idea["stage_one_turns"] = int(idea.get("stage_one_turns", 0)) + 1
 

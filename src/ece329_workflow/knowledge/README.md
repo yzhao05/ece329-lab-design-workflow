@@ -10,8 +10,9 @@ This directory contains compact, deployable reference catalogs. Source PDFs are 
 
 ## Runtime files
 
-- `concepts.json`: 39 lecture units, keywords, concepts, and lecture-grounded brainstorming axes.
+- `concepts.json`: 39 lecture units, keywords, concepts, lecture-grounded brainstorming axes, and an extensible catalog of basic comparison-case bundles. Each bundle carries course concept IDs; conversation code handles adoption and modification generically rather than branching on its topic.
 - `formulas.json`: canonical formulas with IDs, conditions, course concept mappings, and PDF pages.
+- `scene_templates.json`: extensible Stage 1 physical-scene templates selected by catalog keywords, plus topic-independent fallback frames. New course topics are added as data instead of Python conditionals.
 - `source_manifest.json`: identity and extraction policy for the course-scope lecture notes.
 - `supplemental_sources.json`: enabled supplemental sources and multi-source Stage 1 relationship catalog.
 
@@ -31,4 +32,4 @@ The following files were inspected under `E:\暑研\新参考资料` and are int
 - `EMandApp_DavidH.pdf`
 - `getfile.asp` (a PDF despite its extension)
 
-Run the test suite after any catalog change. `LectureKnowledgeBase.validate()` checks IDs, course-scope mappings, source IDs, and PDF page bounds.
+Run the test suite after any catalog change. `LectureKnowledgeBase.validate()` checks IDs, course-scope mappings, source IDs, PDF page bounds, comparison bundles, and scene-template completeness.

@@ -23,13 +23,24 @@ _NO_DIRECTION_PATTERNS = (
     r"随便.{0,6}(推荐|举例|给.*方向)",
 )
 
-_CHINESE_ORDINALS = {"一": 0, "二": 1, "三": 2}
+_CHINESE_DIGITS = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_ORDINAL_TOKEN = r"(\d+|[一二三四五六七八九十]{1,3})"
 _OPTION_REFERENCE_PATTERNS = (
-    r"第\s*([一二三123])\s*(?:个|项|类|条|种|方向|例子)",
-    r"第\s*([一二三123])\s*$",
-    r"(?:选|选择|研究|想要|考虑)\s*(?:第\s*)?([一二三123])\s*(?:个|项|类|条|种|方向|例子)",
-    r"(?:选|选择)\s*([123])\s*$",
-    r"(?:上面|刚才|之前).{0,6}([一二三123])\s*(?:个|项|类|条|种|方向|例子)",
+    rf"第\s*{_ORDINAL_TOKEN}\s*(?:个|项|类|条|种|方向|例子)",
+    rf"第\s*{_ORDINAL_TOKEN}\s*$",
+    rf"(?:选|选择|研究|想要|考虑)\s*(?:第\s*)?{_ORDINAL_TOKEN}\s*(?:个|项|类|条|种|方向|例子)",
+    rf"(?:选|选择)\s*(?:第\s*)?{_ORDINAL_TOKEN}\s*$",
+    rf"(?:上面|刚才|之前).{{0,6}}{_ORDINAL_TOKEN}\s*(?:个|项|类|条|种|方向|例子)",
 )
 
 _EXPLICIT_TOPIC_SWITCH_PATTERNS = (
@@ -85,9 +96,10 @@ _UNREASONABLE_REQUEST_PATTERNS = (
     r"\b(import|def|class|function)\b.{0,24}\b(code|script|execute|run|agent|assistant)\b",
     r"\b(code|script|execute|run)\b.{0,24}\b(import|def|class|function)\b",
     r"\b(python|javascript|typescript|powershell|bash|cmd|sql|html|css)\b",
-    # Attempts to repurpose the course assistant through unrelated platforms or services.
-    r"(接入|调用|连接|控制).{0,16}(b站|哔哩哔哩|youtube|抖音|网站|平台|机器人|bot|agent|智能体)",
-    r"(b站|哔哩哔哩|youtube|抖音).{0,20}(翻译|输出|脚本|代码|agent|智能体)",
+    # Platform-independent attempts to repurpose the course assistant or force output.
+    r"(接入|调用|连接|控制|转发|发布|上传).{0,40}(\bagent\b|智能体|助手|机器人|\bbot\b)",
+    r"(\bagent\b|智能体|助手|机器人|\bbot\b).{0,40}(接入|调用|连接|控制|转发|发布|上传).{0,40}(网站|平台|应用|服务|插件|频道|论坛|直播)",
+    r"(网站|平台|应用|服务|插件|频道|论坛|直播).{0,32}(强制|控制|改写|指定).{0,24}(输出|回答|翻译|内容)",
 )
 
 
@@ -133,6 +145,23 @@ def is_stage_one_control_message(text: str) -> bool:
     return text.strip() in _STAGE_ONE_CONTROL_MESSAGES
 
 
+def _parse_positive_ordinal(raw: str) -> int | None:
+    if raw.isdigit():
+        value = int(raw)
+    elif raw == "十":
+        value = 10
+    elif "十" in raw:
+        left, right = raw.split("十", maxsplit=1)
+        if left and left not in _CHINESE_DIGITS:
+            return None
+        if right and right not in _CHINESE_DIGITS:
+            return None
+        value = _CHINESE_DIGITS.get(left, 1) * 10 + _CHINESE_DIGITS.get(right, 0)
+    else:
+        value = _CHINESE_DIGITS.get(raw, 0)
+    return value if value > 0 else None
+
+
 def referenced_option_index(text: str) -> int | None:
     normalized = text.strip()
     for pattern in _OPTION_REFERENCE_PATTERNS:
@@ -140,10 +169,8 @@ def referenced_option_index(text: str) -> int | None:
         if not match:
             continue
         raw_index = match.group(1)
-        if raw_index in _CHINESE_ORDINALS:
-            return _CHINESE_ORDINALS[raw_index]
-        numeric_index = int(raw_index) - 1
-        return numeric_index if numeric_index >= 0 else None
+        ordinal = _parse_positive_ordinal(raw_index)
+        return ordinal - 1 if ordinal is not None else None
     return None
 
 
@@ -246,10 +273,221 @@ def latest_stage_one_options(history: Sequence[dict[str, Any]]) -> list[dict[str
     return []
 
 
+def latest_stage_one_scenes(history: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    for history_item in reversed(history):
+        output = history_item.get("output")
+        if not isinstance(output, dict):
+            continue
+        payload = output.get("stage_payload")
+        if not isinstance(payload, dict):
+            continue
+        scenes = payload.get("exploration_scenes")
+        if (
+            isinstance(scenes, list)
+            and scenes
+            and all(isinstance(item, dict) for item in scenes)
+        ):
+            return [dict(item) for item in scenes]
+    return []
+
+
+def resolve_scene_references(
+    text: str,
+    scenes: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve explicit scene labels such as ``图景A和图景B``."""
+
+    labels = [
+        label.upper()
+        for label in re.findall(r"图景\s*([A-Z])", text, re.IGNORECASE)
+    ]
+    if not labels:
+        return []
+    resolved: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for label in labels:
+        for scene in scenes:
+            scene_label = str(scene.get("label") or "").upper().replace(" ", "")
+            scene_id = str(scene.get("scene_id") or "").strip()
+            if scene_label not in {f"图景{label}", label} and scene_id.casefold() != f"scene_{label.lower()}":
+                continue
+            anchor = scene.get("course_anchor")
+            if not isinstance(anchor, dict):
+                break
+            anchor_id = str(anchor.get("option_id") or repr(anchor))
+            if anchor_id not in seen_ids:
+                resolved.append(dict(anchor))
+                seen_ids.add(anchor_id)
+            break
+    return resolved
+
+
+def infer_standard_comparisons(text: str) -> list[dict[str, Any]]:
+    """Propose course-cataloged baseline bundles without topic-specific code."""
+
+    return KNOWLEDGE.standard_comparison_suggestions(text, limit=1)
+
+
+def update_standard_comparison_decisions(
+    text: str,
+    comparisons: Sequence[dict[str, Any]],
+    *,
+    control_turn: bool = False,
+) -> list[dict[str, Any]]:
+    """Apply an explicit accept, modification, or rejection to proposed baselines.
+
+    The assistant may bundle scientifically routine cases as a recommendation,
+    but the student's decision remains authoritative and persists on later turns.
+    """
+
+    normalized = text.strip()
+    rejects_bundle = re.search(
+        r"(?:不采用|不保留|不考虑|不需要|无需|不用|不要|取消)"
+        r"(?:这组|这个|整组|全部)?(?:基本|标准)?(?:case|情况|情形|对照|比较)|"
+        r"不需要.{0,6}(?:分类|分情况)讨论|(?:这些|上述|所有|全部).{0,4}都不要",
+        normalized,
+        re.IGNORECASE,
+    )
+    accepts_bundle = re.search(
+        r"(?:接受|采纳|同意|保留|采用|恢复).{0,8}"
+        r"(?:这组|这个|整组|全部)?(?:基本|标准)?(?:case|情况|情形|对照|比较)|"
+        r"(?:全部|所有|这些|上述).{0,5}(?:都要|都考虑|都保留|一起做|同时做)",
+        normalized,
+        re.IGNORECASE,
+    )
+    updated: list[dict[str, Any]] = []
+    for comparison in comparisons:
+        item = dict(comparison)
+        recommended_cases = item.get("recommended_cases", item.get("cases", []))
+        recommended_cases = [
+            str(case).strip()
+            for case in recommended_cases
+            if str(case).strip()
+        ] if isinstance(recommended_cases, list) else []
+        cases = item.get("cases", recommended_cases)
+        cases = [
+            str(case).strip() for case in cases if str(case).strip()
+        ] if isinstance(cases, list) else list(recommended_cases)
+        status = str(item.get("adoption_status") or "PENDING").upper()
+        if status not in {"PENDING", "ACCEPTED", "MODIFIED", "REJECTED"}:
+            status = "PENDING"
+
+        aliases = item.get("case_aliases", {})
+        aliases = aliases if isinstance(aliases, dict) else {}
+
+        def labels_for(case: str) -> list[str]:
+            raw_aliases = aliases.get(case, [])
+            return [case, *(
+                [str(alias).strip() for alias in raw_aliases if str(alias).strip()]
+                if isinstance(raw_aliases, list)
+                else []
+            )]
+
+        mentioned_cases = [
+            case
+            for case in recommended_cases
+            if any(label and label.casefold() in normalized.casefold() for label in labels_for(case))
+        ]
+        only_instruction = re.search(
+            r"(?:只|仅).{0,8}(?:保留|采用|考虑|研究|观察|比较|看|做)",
+            normalized,
+        )
+        removed_cases: list[str] = []
+        restored_cases: list[str] = []
+        replacement_pairs: list[tuple[str, str]] = []
+        for case in recommended_cases:
+            for label in labels_for(case):
+                escaped = re.escape(label)
+                if re.search(
+                    rf"(?:不采用|不保留|不考虑|不要|不用|排除|去掉|删除|移除)"
+                    rf"[^，,。；;！？?]{{0,3}}{escaped}|{escaped}[^，,。；;！？?]{{0,3}}"
+                    rf"(?:不采用|不保留|不考虑|不要|不用|排除|去掉|删除|移除)",
+                    normalized,
+                    re.IGNORECASE,
+                ):
+                    removed_cases.append(case)
+                    break
+                if re.search(
+                    rf"(?:加入|加回|恢复|重新采用|重新保留|也保留)"
+                    rf"[^，,。；;！？?]{{0,3}}{escaped}|{escaped}[^，,。；;！？?]{{0,3}}"
+                    rf"(?:加入|加回|恢复|重新采用|重新保留)",
+                    normalized,
+                    re.IGNORECASE,
+                ):
+                    restored_cases.append(case)
+                    break
+        for old_case in recommended_cases:
+            for new_case in recommended_cases:
+                if old_case == new_case:
+                    continue
+                if any(
+                    re.search(
+                        rf"(?:把)?{re.escape(old_label)}[^，,。；;！？?]{{0,4}}"
+                        rf"(?:换成|替换为|改成){re.escape(new_label)}",
+                        normalized,
+                        re.IGNORECASE,
+                    )
+                    for old_label in labels_for(old_case)
+                    for new_label in labels_for(new_case)
+                ):
+                    replacement_pairs.append((old_case, new_case))
+
+        only_cases = [case for case in mentioned_cases if case not in set(removed_cases)]
+        mentions_all_as_group = (
+            bool(re.search(r"(?:都|一起|同时).{0,5}(?:要|考虑|保留|采用|研究|观察|比较|看|做)?", normalized))
+            and set(mentioned_cases) == set(recommended_cases)
+        )
+
+        if rejects_bundle:
+            cases = []
+            status = "REJECTED"
+        elif replacement_pairs:
+            for old_case, new_case in replacement_pairs:
+                cases = [case for case in cases if case != old_case]
+                if new_case not in cases:
+                    cases.append(new_case)
+            status = (
+                "ACCEPTED"
+                if set(cases) == set(recommended_cases)
+                else "MODIFIED"
+            )
+        elif only_instruction and only_cases:
+            cases = list(dict.fromkeys(only_cases))
+            status = (
+                "ACCEPTED"
+                if set(cases) == set(recommended_cases)
+                else "MODIFIED"
+            )
+        elif removed_cases:
+            cases = [case for case in cases if case not in set(removed_cases)]
+            status = "MODIFIED" if cases else "REJECTED"
+        elif restored_cases:
+            cases = list(dict.fromkeys([*cases, *restored_cases]))
+            status = (
+                "ACCEPTED"
+                if set(cases) == set(recommended_cases)
+                else "MODIFIED"
+            )
+        elif accepts_bundle or mentions_all_as_group:
+            cases = list(recommended_cases)
+            status = "ACCEPTED"
+        elif control_turn and normalized != "继续" and status == "PENDING":
+            cases = list(recommended_cases)
+            status = "ACCEPTED"
+
+        item["recommended_cases"] = recommended_cases
+        item["cases"] = cases
+        item["role"] = "PROPOSED_BASELINE_COMPARISON"
+        item["adoption_status"] = status
+        updated.append(item)
+    return updated
+
+
 def build_stage_one_turn_context(
     text: str,
     *,
     options: Sequence[dict[str, Any]],
+    scenes: Sequence[dict[str, Any]] = (),
     idea_context: dict[str, Any] | None,
     selected_option_id: str | None = None,
 ) -> dict[str, Any]:
@@ -265,6 +503,7 @@ def build_stage_one_turn_context(
         text,
         options,
     )
+    resolved_scene_relations = resolve_scene_references(text, scenes)
     preclassification = preclassify_stage_one_input(text)
     previous_focus = str(
         idea.get("current_focus")
@@ -280,6 +519,7 @@ def build_stage_one_turn_context(
     )
     contextual_continuation = bool(
         resolved is not None
+        or resolved_scene_relations
         or (
             scope_confirmed
             and previous_focus
@@ -289,7 +529,7 @@ def build_stage_one_turn_context(
     )
     if preclassification == UNREASONABLE_REQUEST:
         effective_classification = UNREASONABLE_REQUEST
-    elif resolved is not None or (
+    elif resolved is not None or resolved_scene_relations or (
         preclassification == AMBIGUOUS and contextual_continuation
     ):
         effective_classification = COURSE_CONTENT
@@ -300,7 +540,7 @@ def build_stage_one_turn_context(
     prompt_preclassification = (
         COURSE_CONTENT
         if effective_classification == COURSE_CONTENT
-        and (resolved is not None or contextual_continuation)
+        and (resolved is not None or resolved_scene_relations or contextual_continuation)
         else preclassification
     )
 
@@ -309,6 +549,36 @@ def build_stage_one_turn_context(
         for key in ("direction", "focus")
         if resolved is not None and str(resolved.get(key, "")).strip()
     )
+    previous_relations = idea.get("selected_course_relations", [])
+    selected_course_relations = (
+        [dict(item) for item in previous_relations if isinstance(item, dict)]
+        if isinstance(previous_relations, list)
+        else []
+    )
+    previous_scene_ids = idea.get("selected_scene_ids", [])
+    selected_scene_ids = (
+        [str(item) for item in previous_scene_ids if str(item).strip()]
+        if isinstance(previous_scene_ids, list)
+        else []
+    )
+    if resolved_scene_relations:
+        selected_course_relations = resolved_scene_relations
+        selected_scene_ids = [
+            str(scene.get("scene_id"))
+            for scene in scenes
+            if isinstance(scene, dict)
+            and isinstance(scene.get("course_anchor"), dict)
+            and scene.get("course_anchor") in resolved_scene_relations
+            and str(scene.get("scene_id") or "").strip()
+        ]
+    elif resolved is not None:
+        selected_course_relations = [dict(resolved)]
+        selected_scene_ids = []
+    relation_selection_text = " + ".join(
+        str(item.get("direction") or item.get("focus") or "").strip()
+        for item in selected_course_relations
+        if str(item.get("direction") or item.get("focus") or "").strip()
+    )
     normalized = text.strip()
     history = idea.get("focus_history", [])
     focus_history = [str(item).strip() for item in history if str(item).strip()] \
@@ -316,6 +586,8 @@ def build_stage_one_turn_context(
     control_turn = is_stage_one_control_message(normalized)
     if is_no_direction_request(normalized) or control_turn:
         focus_component = ""
+    elif resolved_scene_relations and relation_selection_text:
+        focus_component = relation_selection_text
     elif selected_text:
         focus_component = selected_text
     elif effective_classification == COURSE_CONTENT:
@@ -325,13 +597,14 @@ def build_stage_one_turn_context(
     if focus_component and (not focus_history or focus_history[-1] != focus_component):
         focus_history.append(focus_component)
     focus_history = focus_history[-8:]
-    proposed_focus = " → ".join(focus_history[-4:]) or previous_focus
     if not topic_anchor and effective_classification == COURSE_CONTENT and not is_no_direction_request(normalized):
         topic_anchor = normalized
     elif explicit_switch and effective_classification == COURSE_CONTENT:
         topic_anchor = normalized
         focus_history = [normalized]
-        proposed_focus = normalized
+        selected_course_relations = []
+        selected_scene_ids = []
+        relation_selection_text = ""
 
     previous_phase = str(
         idea.get("brainstorm_phase") or BREADTH_EXPLORATION
@@ -341,7 +614,7 @@ def build_stage_one_turn_context(
         brainstorm_phase = BREADTH_EXPLORATION
     elif control_turn:
         brainstorm_phase = previous_phase
-    elif resolved is not None:
+    elif resolved is not None or resolved_scene_relations:
         brainstorm_phase = INTEREST_DESCRIPTION
     elif previous_phase == INTEREST_DESCRIPTION:
         brainstorm_phase = DEPTH_EXPANSION
@@ -351,9 +624,11 @@ def build_stage_one_turn_context(
         brainstorm_phase = INTEREST_DESCRIPTION
     else:
         brainstorm_phase = BREADTH_EXPLORATION
-    resolved_focus = str(
-        resolved.get("direction") or resolved.get("focus") or ""
-    ).strip() if resolved is not None else ""
+    resolved_focus = relation_selection_text
+    if not resolved_focus and resolved is not None:
+        resolved_focus = str(
+            resolved.get("direction") or resolved.get("focus") or ""
+        ).strip()
     selected_focus = resolved_focus or previous_selected_focus
     if brainstorm_phase == INTEREST_DESCRIPTION and not selected_focus:
         selected_focus = normalized or proposed_focus
@@ -362,12 +637,74 @@ def build_stage_one_turn_context(
         if brainstorm_phase == DEPTH_EXPANSION and not control_turn
         else str(idea.get("interest_description") or "").strip()
     )
+    previous_core_phenomenon = str(idea.get("core_phenomenon") or "").strip()
+    core_phenomenon = previous_core_phenomenon
+    if (
+        brainstorm_phase == DEPTH_EXPANSION
+        and previous_phase == INTEREST_DESCRIPTION
+        and not control_turn
+    ):
+        core_phenomenon = normalized
+    refinement_history = idea.get("refinement_notes", [])
+    refinement_notes = (
+        [str(item).strip() for item in refinement_history if str(item).strip()]
+        if isinstance(refinement_history, list)
+        else []
+    )
+    if (
+        brainstorm_phase == DEPTH_EXPANSION
+        and previous_phase == DEPTH_EXPANSION
+        and not control_turn
+        and normalized
+        and (not refinement_notes or refinement_notes[-1] != normalized)
+    ):
+        refinement_notes.append(normalized)
+    refinement_notes = refinement_notes[-6:]
+    focus_parts = [topic_anchor]
+    if relation_selection_text and relation_selection_text != topic_anchor:
+        focus_parts.append(relation_selection_text)
+    if core_phenomenon and core_phenomenon not in focus_parts:
+        focus_parts.append(core_phenomenon)
+    for note in refinement_notes[-2:]:
+        if note not in focus_parts:
+            focus_parts.append(note)
+    proposed_focus = " → ".join(item for item in focus_parts if item) or previous_focus
+    comparison_text = " ".join(
+        [topic_anchor, relation_selection_text, core_phenomenon, *refinement_notes, normalized]
+    )
+    previous_comparisons = idea.get("standard_comparisons", [])
+    if explicit_switch:
+        previous_comparisons = []
+    preserved_comparisons = (
+        [dict(item) for item in previous_comparisons if isinstance(item, dict)]
+        if isinstance(previous_comparisons, list)
+        else []
+    )
+    inferred_comparisons = infer_standard_comparisons(comparison_text)
+    previous_ids = {
+        str(item.get("comparison_id") or "").strip()
+        for item in preserved_comparisons
+    }
+    standard_comparisons = preserved_comparisons + [
+        item
+        for item in inferred_comparisons
+        if str(item.get("comparison_id") or "").strip() not in previous_ids
+    ]
+    standard_comparisons = update_standard_comparison_decisions(
+        normalized,
+        standard_comparisons,
+        control_turn=control_turn,
+    )
+    direction_summary = core_phenomenon or selected_focus or topic_anchor or proposed_focus
+    if refinement_notes:
+        direction_summary = f"{direction_summary}；观察重点：{'；'.join(refinement_notes[-2:])}"
 
     return {
         "stage_one_preclassification": prompt_preclassification,
         "effective_input_category": effective_classification,
         "raw_stage_one_preclassification": preclassification,
         "resolved_stage_one_reference": resolved,
+        "resolved_scene_relations": resolved_scene_relations,
         "contextual_continuation": contextual_continuation,
         "explicit_topic_switch": explicit_switch,
         "previous_focus": previous_focus,
@@ -379,9 +716,16 @@ def build_stage_one_turn_context(
         "previous_brainstorm_phase": previous_phase,
         "brainstorm_phase": brainstorm_phase,
         "selected_focus": selected_focus,
+        "selected_scene_ids": selected_scene_ids,
+        "selected_course_relations": selected_course_relations,
+        "combination_intent": len(selected_course_relations) > 1,
+        "core_phenomenon": core_phenomenon,
+        "refinement_notes": refinement_notes,
+        "standard_comparisons": standard_comparisons,
+        "direction_summary": direction_summary,
         "interest_description": interest_description,
         "ready_for_next_stage": (
-            brainstorm_phase == DEPTH_EXPANSION and len(focus_history) >= 3
+            brainstorm_phase == DEPTH_EXPANSION and bool(interest_description)
         ),
         "control_turn": control_turn,
     }
