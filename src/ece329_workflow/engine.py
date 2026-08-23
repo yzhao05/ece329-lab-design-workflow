@@ -19,6 +19,7 @@ from .guardrails import (
     classify_stage_one_input,
     is_explicit_topic_switch,
     is_no_direction_request,
+    is_progression_intent,
     is_stage_one_control_message,
     latest_stage_one_options,
     latest_stage_one_scenes,
@@ -95,6 +96,8 @@ def _emvr_intent(text: str) -> bool | None:
 
 def _is_pure_stage_transition(text: str) -> bool:
     normalized = text.strip()
+    if is_progression_intent(normalized):
+        return True
     if normalized in {
         "继续",
         "继续完善下一阶段",
@@ -246,11 +249,24 @@ class WorkflowEngine:
         expected_revision = session.revision
         transitioned_from_stage: Stage | None = None
         completion_error: str | None = None
+        idea_development = session.design_context.get("idea_development", {})
+        idea_development_complete = bool(
+            session.current_stage is Stage.IDEA_BRAINSTORMING
+            and isinstance(idea_development, dict)
+            and idea_development.get("complete") is True
+        )
+        explicit_transition_intent = bool(
+            _is_pure_stage_transition(message)
+            or is_progression_intent(
+                message,
+                allow_confirmation=idea_development_complete,
+            )
+        )
         pre_transition_attempted = bool(
             session.interaction_state is InteractionState.GUIDED_DESIGN
-            and request.complete_stage
+            and (request.complete_stage or explicit_transition_intent)
             and session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
-            and _is_pure_stage_transition(message)
+            and explicit_transition_intent
         )
         if pre_transition_attempted:
             previous_stage = session.current_stage
@@ -264,6 +280,29 @@ class WorkflowEngine:
                             comparisons,
                             control_turn=True,
                         )
+                    development = session.design_context.get("idea_development", {})
+                    outline = session.design_context.get("experiment_outline_seed", {})
+                    if (
+                        isinstance(development, dict)
+                        and development.get("complete") is True
+                        and isinstance(outline, dict)
+                    ):
+                        phenomenon = str(
+                            idea.get("core_phenomenon")
+                            or outline.get("core_phenomenon")
+                            or idea.get("topic_anchor")
+                            or ""
+                        ).strip()
+                        main_direction = str(
+                            idea.get("direction_summary")
+                            or idea.get("current_focus")
+                            or phenomenon
+                        ).strip()
+                        if phenomenon:
+                            idea["phenomenon"] = phenomenon
+                        if main_direction:
+                            idea["main_direction"] = main_direction
+                        idea["student_confirmed"] = True
             try:
                 self._validate_completion(session, previous_stage)
                 self._advance(session, previous_stage)
@@ -271,15 +310,16 @@ class WorkflowEngine:
             except StageCompletionError as exc:
                 completion_error = str(exc)
         handled_stage = session.current_stage
+        stage_one_control_turn = is_stage_one_control_message(message)
         dynamic_idea_turn = bool(
             handled_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
             and has_idea_development(session)
             and input_kind != UNREASONABLE_REQUEST
-            and not is_stage_one_control_message(message)
+            and (not stage_one_control_turn or completion_error is not None)
             and not is_explicit_topic_switch(message)
         )
-        if dynamic_idea_turn:
+        if dynamic_idea_turn and not stage_one_control_turn:
             update_idea_development(session, message)
         turn_context: dict[str, Any] = {
             "selected_option_id": request.selected_option_id,
@@ -327,6 +367,8 @@ class WorkflowEngine:
         if dynamic_idea_turn:
             output = build_gap_output(session, message)
             session.turn_context = {}
+            if stage_one_control_turn:
+                completion_error = None
         else:
             try:
                 output = self.generator.generate(session, message)
@@ -569,7 +611,14 @@ class WorkflowEngine:
             "进入下一阶段",
             "完成本阶段",
         }
-        if not normalized or normalized in control_messages:
+        if (
+            not normalized
+            or normalized in control_messages
+            or (
+                stage is Stage.IDEA_BRAINSTORMING
+                and is_stage_one_control_message(normalized)
+            )
+        ):
             return
         decisions = session.design_context.setdefault("student_decisions", {})
         if not isinstance(decisions, dict):

@@ -18,6 +18,7 @@ from ece329_workflow.guardrails import (
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
     infer_standard_comparisons,
+    is_progression_intent,
     referenced_option_index,
     update_standard_comparison_decisions,
 )
@@ -159,24 +160,26 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(status["mode"], "DYNAMIC_COMPLETENESS")
         self.assertEqual(status["facets_by_id"]["course_mapping"]["status"], "CLEAR")
         self.assertTrue(status["missing_facet_ids"])
-        self.assertIn("实验想法完整性检查", ready["assistant_message"])
+        self.assertNotIn("实验想法完整性检查", ready["assistant_message"])
+        self.assertNotIn("当前优先补充", ready["assistant_message"])
+        self.assertIn("接下来先把", ready["assistant_message"])
+        self.assertIsNone(ready["student_task"])
 
-        ready = self._fill_idea_development(first["design_id"], ready)
+        blocked = self.engine.process_turn(
+            first["design_id"],
+            {"message": "好的，那我们往下走吧"},
+        )
+        self.assertEqual(blocked["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+        self.assertNotIn("实验想法完整性检查", blocked["assistant_message"])
+        self.assertNotIn("尚未推进", blocked["assistant_message"])
+        self.assertIsNone(blocked["student_task"])
+
+        ready = self._fill_idea_development(first["design_id"], blocked)
         self.assertTrue(ready["stage_payload"]["idea_development_status"]["complete"])
 
         mapped = self.engine.process_turn(
             first["design_id"],
-            {
-                "message": "确认想法完善并进入变量与条件",
-                "complete_stage": True,
-                "context_patch": {
-                    "idea": {
-                        "phenomenon": ready["stage_payload"]["core_phenomenon"],
-                        "main_direction": ready["stage_payload"]["current_idea_summary"],
-                        "student_confirmed": True,
-                    }
-                },
-            },
+            {"message": "好的，那我们往下走吧"},
         )
 
         self.assertEqual(mapped["handled_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
@@ -185,6 +188,60 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(mapped["workflow_stage_number"], 2)
         self.assertIsNone(mapped["substep_number"])
         self.assertNotRegex(mapped["assistant_message"], r"请选择|你希望把哪|选哪")
+
+        second = self.engine.create_design("我想研究不同负载下的传输线驻波")
+        selected = second["stage_payload"]["alternative_ideas"][0]
+        self.engine.process_turn(
+            second["design_id"],
+            {
+                "message": str(selected.get("focus") or selected.get("direction")),
+                "selected_option_id": selected["option_id"],
+            },
+        )
+        described = self.engine.process_turn(
+            second["design_id"],
+            {"message": "我想观察不同负载下反射与驻波分布的变化"},
+        )
+        complete = self._fill_idea_development(second["design_id"], described)
+        self.assertTrue(complete["stage_payload"]["idea_development_status"]["complete"])
+        confirmed = self.engine.process_turn(second["design_id"], {"message": "可以了"})
+        self.assertEqual(confirmed["current_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
+        self.assertEqual(
+            confirmed["transitioned_from_stage"],
+            Stage.IDEA_BRAINSTORMING.value,
+        )
+
+    def test_progression_intent_uses_semantics_and_respects_negation(self) -> None:
+        explicit_intents = (
+            "下一步",
+            "进入下一阶段",
+            "好的，那我们往下走吧",
+            "没问题，我们继续吧",
+            "可以转到后面的内容",
+            "推进到下一部分",
+            "想法完善，进入变量与条件",
+            "不需要补充了，可以进入下一阶段",
+        )
+        for message in explicit_intents:
+            with self.subTest(message=message):
+                self.assertTrue(is_progression_intent(message))
+
+        confirmations = ("好的", "可以了", "没问题", "就这样吧", "没有要修改的了")
+        for message in confirmations:
+            with self.subTest(message=message):
+                self.assertFalse(is_progression_intent(message))
+                self.assertTrue(is_progression_intent(message, allow_confirmation=True))
+
+        blocked = (
+            "先不要进入下一步",
+            "我暂时不想继续",
+            "为什么还没有进入下一阶段",
+            "刚刚让它进入下一步，它重复着同样的话",
+            "进入下一阶段失败了",
+        )
+        for message in blocked:
+            with self.subTest(message=message):
+                self.assertFalse(is_progression_intent(message, allow_confirmation=True))
 
     def test_one_student_reply_can_fill_multiple_idea_facets(self) -> None:
         first = self.engine.create_design("我想研究不同负载下的传输线驻波")
@@ -225,6 +282,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertGreaterEqual(len(newly_completed), 2)
         self.assertEqual(response["current_stage"], Stage.IDEA_BRAINSTORMING.value)
         self.assertNotIn("小点", response["student_task"] or "")
+        self.assertIsNone(response["student_task"])
+        self.assertNotIn("实验想法完整性检查", response["assistant_message"])
 
     def test_first_seven_internal_steps_share_one_public_stage(self) -> None:
         catalog = public_stage_catalog()
@@ -565,7 +624,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(depth_payload["deepening_connections"])
         self.assertTrue(depth_payload["ready_for_next_stage"])
         self.assertIn("反射", depth["assistant_message"])
-        self.assertNotIn("上面哪一类", depth["student_task"])
+        self.assertNotIn("上面哪一类", depth["assistant_message"])
+        self.assertIsNone(depth["student_task"])
         self.assertNotEqual(
             breadth["assistant_message"].split("\n", 1)[0],
             depth["assistant_message"].split("\n", 1)[0],
@@ -623,11 +683,13 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn("自动", ready["assistant_message"])
         for relation in expected_relations:
             self.assertIn(relation["direction"], ready["assistant_message"])
-        self.assertNotIn("？", ready["assistant_message"])
+        self.assertLessEqual(ready["assistant_message"].count("？"), 1)
         self.assertNotIn("还是", ready["assistant_message"])
         self.assertNotIn("如果愿意", ready["assistant_message"])
         self.assertLessEqual(len(ready["assistant_message"]), 1400)
-        self.assertIn("实验想法完整性检查", ready["assistant_message"])
+        self.assertNotIn("实验想法完整性检查", ready["assistant_message"])
+        self.assertIn("接下来先把", ready["assistant_message"])
+        self.assertIsNone(ready["student_task"])
         self.assertEqual(
             ready["stage_payload"]["idea_development_status"]["mode"],
             "DYNAMIC_COMPLETENESS",

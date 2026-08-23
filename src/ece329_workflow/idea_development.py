@@ -199,11 +199,9 @@ def decorate_outline_output(
     )
     output.assistant_message = (
         f"{output.assistant_message}\n\n"
-        f"{_format_checklist(status)}\n\n"
-        "这些内容属于同一个“实验想法完善”阶段，不需要按固定顺序逐项闯关。"
-        "我会在每轮后重新检查缺口；你一次补充的内容也可以同时明确多项。"
+        f"{_student_facing_next_turn(status, first_review=True)}"
     )
-    output.student_task = _next_task(status)
+    output.student_task = None
     return output
 
 
@@ -219,14 +217,14 @@ def build_gap_output(
         if facet_id in status["facets_by_id"]
     ]
     acknowledgement = (
-        f"你刚才的补充已经明确了：{'、'.join(clarified_titles)}。"
+        f"你刚才已经把{'、'.join(f'“{title}”' for title in clarified_titles)}说明得更清楚了。"
         if clarified_titles
-        else "这轮内容已保留，但目前还不足以把正在讨论的缺口标为明确。"
+        else _student_facing_retry(status, acknowledged_message)
     )
     comparison_update = _comparison_update_summary(session, acknowledged_message)
     assistant_message = (
-        f"{acknowledgement}{comparison_update}\n\n{_format_checklist(status)}\n\n"
-        "我会继续围绕当前实验想法补齐仍缺少的部分，不会把已经明确的内容重新当成新方向。"
+        f"{acknowledgement}{comparison_update}\n\n"
+        f"{_student_facing_next_turn(status)}"
     )
     idea = session.design_context.get("idea", {})
     preserved_payload: dict[str, Any] = {}
@@ -271,7 +269,7 @@ def build_gap_output(
             "contextual_continuation": True,
             **preserved_payload,
         },
-        student_task=_next_task(status),
+        student_task=None,
     )
 
 
@@ -403,19 +401,6 @@ def _refresh(development: dict[str, Any]) -> None:
     development["status"] = "COMPLETE" if not missing else "ACTIVE"
 
 
-def _format_checklist(status: dict[str, Any]) -> str:
-    lines = ["实验想法完整性检查"]
-    active = status.get("active_facet_id")
-    for facet in status.get("facets", []):
-        is_clear = facet.get("status") == CLEAR
-        marker = "✓" if is_clear else ("→" if facet.get("facet_id") == active else "○")
-        suffix = "已明确" if is_clear else (
-            "当前优先补充" if facet.get("facet_id") == active else "仍需明确"
-        )
-        lines.append(f"{marker} {facet.get('title')}：{suffix}")
-    return "\n".join(lines)
-
-
 def _next_task(status: dict[str, Any]) -> str:
     if status.get("complete") is True:
         return (
@@ -426,6 +411,51 @@ def _next_task(status: dict[str, Any]) -> str:
     question = _FACET_QUESTION.get(active, "请补充当前实验想法中仍未明确的关键内容。")
     hint = _FACET_HINT.get(active, "")
     return f"{question}{hint}"
+
+
+def _student_facing_next_turn(
+    status: dict[str, Any],
+    *,
+    first_review: bool = False,
+) -> str:
+    if status.get("complete") is True:
+        return (
+            "现在，这个实验想法中的研究对象、课程依据、学习目标和预期现象已经能够相互对应。"
+            "请整体看一遍；如果与自己的想法一致，直接告诉我进入“变量与条件”。"
+            "如果还有想调整的地方，也可以直接说明。"
+        )
+    active = str(status.get("active_facet_id") or "")
+    facet = status.get("facets_by_id", {}).get(active, {})
+    title = str(facet.get("title") or "下一部分")
+    prefix = (
+        "这个方向已经形成了可以继续发展的实验雏形。"
+        if first_review
+        else "我们继续沿着同一个实验方向往下完善。"
+    )
+    return f"{prefix} 接下来先把“{title}”说清楚：{_next_task(status)}"
+
+
+def _student_facing_retry(status: dict[str, Any], message: str) -> str:
+    active = str(status.get("active_facet_id") or "")
+    feedback = {
+        "learning_objective": (
+            "我理解了你补充的现象，但这里还需要更明确地说出学生完成实验后能够解释、"
+            "判断或比较什么。"
+        ),
+        "research_question": (
+            "我保留了你刚才的补充，但研究问题还需要同时出现要比较的条件和准备观察的变化。"
+        ),
+        "hypothesis": (
+            "你已经描述了可能看到的现象；要把它变成实验预期，还需要说明这种变化背后的物理理由。"
+        ),
+        "conceptual_structure": (
+            "我理解了你的补充，但还需要说明这个想法中有哪些对象、边界或激励共同构成比较。"
+        ),
+    }
+    return feedback.get(
+        active,
+        "我保留了你刚才的补充，但还需要把它与当前实验想法的物理关系说得更具体。",
+    )
 
 
 def _comparison_update_summary(session: DesignSession, message: str) -> str:

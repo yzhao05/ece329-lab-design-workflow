@@ -1133,9 +1133,8 @@ def _step_output_from_response(
                 comparison_prefix = f"{comparison_summary}\n\n" if comparison_summary else ""
                 output.assistant_message = (
                     f"{comparison_prefix}{_format_experiment_outline_seed(outline_seed)}\n\n"
-                    "这个雏形保留了你已经确定的方向。课程映射、学习目标、研究问题、"
-                    "理论依据、预期趋势和概念实验结构将作为同一阶段的完整性清单统一检查，"
-                    "不会按固定顺序重新选择实验方向。"
+                    "这个雏形保留了你已经确定的方向，后续讨论会继续沿着同一个物理关系展开，"
+                    "不会让你重新选择已经确定的内容。"
                 )
                 output.student_task = (
                     "请检查这个大纲雏形是否准确；若有关键遗漏，请直接补充。"
@@ -1355,9 +1354,6 @@ class FallbackStageGenerator:
                 type(exc).__name__,
             )
             output = self.fallback.generate(session, user_message)
-            output.warnings.append(
-                "本轮暂时使用课程内置引导；之前的实验方向和选择已保留。"
-            )
             return output
 
     def runtime_info(self) -> dict[str, Any]:

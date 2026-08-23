@@ -783,8 +783,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         output = fallback.generate(guided_session(), "研究传输线驻波")
 
         self.assertTrue(output.stage_payload["alternative_ideas"])
-        self.assertIn("之前的实验方向和选择已保留", output.warnings[-1])
-        self.assertNotIn("生成器", output.warnings[-1])
+        self.assertEqual(output.warnings, [])
         info = fallback.runtime_info()
         self.assertEqual(info["last_fallback_reason"], "model_transport_error")
         self.assertEqual(info["fallback_calls"], 1)

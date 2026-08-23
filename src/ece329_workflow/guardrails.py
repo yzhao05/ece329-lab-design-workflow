@@ -77,6 +77,43 @@ _STAGE_ONE_CONTROL_MESSAGES = {
     "完成本阶段",
 }
 
+_IDEA_DEVELOPMENT_TRANSITION_PATTERNS = (
+    r"(?:想法|方向|大纲).{0,12}(?:已)?(?:完善|完成|确认|没问题).{0,16}"
+    r"(?:进入|继续).{0,12}(?:变量与条件|下一阶段)",
+    r"(?:可以|请|现在|直接|确认|同意|接受|准备好).{0,8}"
+    r"(?:进入|继续).{0,12}(?:变量与条件|下一阶段)",
+    r"(?:进入|继续).{0,12}变量与条件",
+)
+
+# Stage transitions are an intent, not a password.  Keep these patterns broad
+# enough for natural student language, while rejecting negated requests and
+# messages that merely report a failed transition.
+_PROGRESSION_BLOCK_PATTERNS = (
+    r"(?:先|暂时)?(?:不|别)(?:要|想|用)?[\s，,。；;！!]*"
+    r"(?:现在|马上|再)?[\s，,。；;！!]*"
+    r"(?:继续|推进|往下|进入|下一(?:步|阶段|部分|环节))",
+    r"(?:不能|无法|没法|没能).{0,8}"
+    r"(?:继续|推进|往下|进入|下一(?:步|阶段|部分|环节))",
+    r"(?:为什么|怎么|为何).{0,16}(?:还没|没有|不能|无法|没能).{0,12}"
+    r"(?:继续|推进|进入|下一(?:步|阶段|部分|环节))",
+    r"(?:继续|推进|进入|下一(?:步|阶段|部分|环节)).{0,24}"
+    r"(?:失败|不了|没反应|没进入|没有进入|重复|卡住|卡在)",
+)
+
+_EXPLICIT_PROGRESSION_PATTERNS = (
+    r"下一(?:步|阶段|部分|环节)",
+    r"(?:进入|转到|切换到|前往|开始).{0,10}(?:后面|后续|变量与条件)",
+    r"(?:往下走|往下进行|继续推进|推进到|推进至)",
+    r"^(?:好的?|可以|行|没问题|确认|同意|接受)?[\s，,。；;！!]*"
+    r"(?:(?:那|那么)[\s，,。；;！!]*)?(?:我们[\s，,。；;！!]*)?"
+    r"(?:就[\s，,。；;！!]*)?(?:继续|推进)(?:吧|了|呀|啊)?[。！!]*$",
+)
+
+_POSITIVE_PROGRESSION_CONFIRMATION = (
+    r"(?:好的?|可以(?:了)?|行|没问题|确认|同意|接受|就这样(?:吧)?|"
+    r"完成(?:了)?|没有(?:要|需要|什么)?(?:改|修改|补充)(?:的)?(?:了)?)"
+)
+
 _UNREASONABLE_REQUEST_PATTERNS = (
     # Attempts to inspect or alter the assistant rather than design an ECE329 lab.
     r"(工作流|workflow|\bagent\b|智能体).{0,12}(提示|内部|规则|原理|关闭|修改|绕过|任意输出)",
@@ -147,7 +184,55 @@ def is_stage_one_control_message(text: str) -> bool:
     normalized = text.strip()
     if normalized in _STAGE_ONE_CONTROL_MESSAGES:
         return True
-    return bool(re.fullmatch(r"确认.{0,20}(?:继续小点\s*\d+|进入下一阶段)", normalized))
+    return bool(
+        re.fullmatch(r"确认.{0,20}(?:继续小点\s*\d+|进入下一阶段)", normalized)
+        or is_progression_intent(normalized)
+    )
+
+
+def is_idea_development_transition(text: str) -> bool:
+    normalized = text.strip()
+    if _is_blocked_progression_message(normalized):
+        return False
+    return any(
+        re.search(pattern, normalized, re.IGNORECASE)
+        for pattern in _IDEA_DEVELOPMENT_TRANSITION_PATTERNS
+    )
+
+
+def _is_blocked_progression_message(text: str) -> bool:
+    return any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in _PROGRESSION_BLOCK_PATTERNS
+    )
+
+
+def is_progression_intent(text: str, *, allow_confirmation: bool = False) -> bool:
+    """Recognize a student's semantic intent to move forward.
+
+    Bare agreement is only considered a transition when the caller already
+    knows the current stage is complete.  This avoids turning an ordinary
+    "好的" during brainstorming into an early stage change.
+    """
+
+    normalized = text.strip()
+    if not normalized or _is_blocked_progression_message(normalized):
+        return False
+    if is_idea_development_transition(normalized):
+        return True
+    if any(
+        re.search(pattern, normalized, re.IGNORECASE)
+        for pattern in _EXPLICIT_PROGRESSION_PATTERNS
+    ):
+        return True
+    return bool(
+        allow_confirmation
+        and re.fullmatch(
+            rf"{_POSITIVE_PROGRESSION_CONFIRMATION}[。！!]*",
+            normalized,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _parse_positive_ordinal(raw: str) -> int | None:

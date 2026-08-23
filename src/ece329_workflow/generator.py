@@ -151,18 +151,24 @@ def _format_experiment_outline_seed(outline: dict[str, Any]) -> str:
     relations = outline.get("course_relationships", [])
     comparisons = outline.get("baseline_comparisons", [])
     observations = outline.get("observation_focus", [])
+    status_labels = {
+        "PENDING": "建议作为基础比较",
+        "ACCEPTED": "已采用",
+        "MODIFIED": "已按你的想法调整",
+        "REJECTED": "已移除",
+    }
     comparison_text = "；".join(
-        f"{'、'.join(item.get('cases', []))}（{item.get('adoption_status', 'PENDING')}）"
+        f"{'、'.join(item.get('cases', []))}"
+        f"（{status_labels.get(str(item.get('adoption_status', 'PENDING')).upper(), '待确认')}）"
         for item in comparisons
         if item.get("cases")
     ) or "暂未提出基础对照"
     return (
         "实验大纲雏形\n"
         f"核心现象：{outline.get('core_phenomenon') or '待补充'}\n"
-        f"课程关系：{'；'.join(relations) if relations else '将在完整性检查中补充'}\n"
+        f"课程关系：{'；'.join(relations) if relations else '将结合当前现象继续说明'}\n"
         f"基础比较：{comparison_text}\n"
-        f"观察重点：{'；'.join(observations) if observations else '围绕核心现象继续细化'}\n"
-        "待完善：课程映射、学习目标、研究问题、理论依据、假设与预期趋势、概念实验结构"
+        f"观察重点：{'；'.join(observations) if observations else '围绕核心现象继续细化'}"
     )
 
 
@@ -496,9 +502,8 @@ class RuleBasedStageGenerator:
                     introduction = (
                         f"{comparison_prefix}"
                         f"{_format_experiment_outline_seed(experiment_outline_seed or {})}\n\n"
-                        "这个雏形保留了你已经确定的方向。课程映射、学习目标、研究问题、"
-                        "理论依据、预期趋势和概念实验结构将作为同一阶段的完整性清单统一检查，"
-                        "不会按固定顺序重新选择实验方向。"
+                        "这个雏形保留了你已经确定的方向，后续讨论会继续沿着同一个物理关系展开，"
+                        "不会让你重新选择已经确定的内容。"
                     )
                 else:
                     introduction = (

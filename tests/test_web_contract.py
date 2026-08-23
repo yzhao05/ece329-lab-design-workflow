@@ -52,7 +52,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("确认想法完善并进入变量与条件", self.app_js)
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(
-            self.index_html.count("v=20260823-dynamic-idea-checklist"),
+            self.index_html.count("v=20260823-semantic-stage-advance"),
             3,
         )
 
@@ -60,8 +60,18 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("function updateDemoIdeaDevelopmentStatus", self.app_js)
         self.assertIn("function refreshDemoIdeaDevelopmentStatus", self.app_js)
         self.assertIn("missing_facet_ids", self.app_js)
-        self.assertIn("这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关", self.app_js)
+        self.assertIn("function demoStudentFacingNextTurn", self.app_js)
+        self.assertIn("我们继续沿着同一个实验方向往下完善", self.app_js)
+        self.assertNotIn("这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关", self.app_js)
         self.assertNotIn("现在进入“实验想法完善”的小点2", self.app_js)
+
+    def test_natural_idea_completion_message_is_recognized(self) -> None:
+        self.assertIn("const ideaTransition", self.app_js)
+        self.assertIn("const blockedTransition", self.app_js)
+        self.assertIn("const semanticTransition", self.app_js)
+        self.assertIn("const completedIdeaConfirmation", self.app_js)
+        self.assertIn("想法|方向|大纲", self.app_js)
+        self.assertIn("变量与条件|下一阶段", self.app_js)
 
     def test_quick_actions_send_stable_option_id(self) -> None:
         self.assertIn("function normalizeQuickAction(action)", self.app_js)
@@ -134,9 +144,10 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("await reloadApiDesignState()", self.app_js)
         self.assertNotIn("已自动切换为本地演示回答", self.app_js)
 
-    def test_api_student_task_and_warnings_are_visible(self) -> None:
+    def test_internal_stage_one_task_is_not_appended_to_chat(self) -> None:
         self.assertIn("function composeAssistantText(response)", self.app_js)
         self.assertIn("response.student_task", self.app_js)
+        self.assertIn("const shouldShowStudentTask = state.stageIndex !== 0", self.app_js)
         self.assertIn("response.warnings", self.app_js)
         self.assertIn("response.completion_error", self.app_js)
 

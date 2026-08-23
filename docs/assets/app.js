@@ -778,7 +778,17 @@ async function reloadApiDesignState() {
 }
 
 function isAdvanceIntent(message) {
-  return /确认.*(下一|进入|继续|完成)|进入下一阶段|继续下一阶段|继续小点|完成本阶段|完成总结/.test(message);
+  const normalized = String(message || "").trim();
+  const blockedTransition = /(?:先|暂时)?(?:不|别)(?:要|想|用)?[\s，,。；;！!]*(?:现在|马上|再)?[\s，,。；;！!]*(?:继续|推进|往下|进入|下一(?:步|阶段|部分|环节))|(?:不能|无法|没法|没能).{0,8}(?:继续|推进|往下|进入|下一(?:步|阶段|部分|环节))|(?:为什么|怎么|为何).{0,16}(?:还没|没有|不能|无法|没能).{0,12}(?:继续|推进|进入|下一(?:步|阶段|部分|环节))|(?:继续|推进|进入|下一(?:步|阶段|部分|环节)).{0,24}(?:失败|不了|没反应|没进入|没有进入|重复|卡住|卡在)/.test(normalized);
+  if (blockedTransition) return false;
+  const standardTransition = /确认.*(下一|进入|继续|完成)|进入下一阶段|继续下一阶段|继续小点|完成本阶段|完成总结/.test(message);
+  const ideaTransition = /(?:想法|方向|大纲).{0,12}(?:已)?(?:完善|完成|确认|没问题).{0,16}(?:进入|继续).{0,12}(?:变量与条件|下一阶段)|(?:可以|请|现在|直接|确认|同意|接受|准备好).{0,8}(?:进入|继续).{0,12}(?:变量与条件|下一阶段)|(?:进入|继续).{0,12}变量与条件/.test(message);
+  const semanticTransition = /下一(?:步|阶段|部分|环节)|(?:进入|转到|切换到|前往|开始).{0,10}(?:后面|后续|变量与条件)|(?:往下走|往下进行|继续推进|推进到|推进至)/.test(normalized);
+  const shortTransition = /^(?:好的?|可以|行|没问题|确认|同意|接受)?[\s，,。；;！!]*(?:(?:那|那么)[\s，,。；;！!]*)?(?:我们[\s，,。；;！!]*)?(?:就[\s，,。；;！!]*)?(?:继续|推进)(?:吧|了|呀|啊)?[。！!]*$/.test(normalized);
+  const completedIdeaConfirmation = state.stageIndex === 0
+    && state.ideaDevelopmentStatus?.complete === true
+    && /^(?:好的?|可以(?:了)?|行|没问题|确认|同意|接受|就这样(?:吧)?|完成(?:了)?|没有(?:要|需要|什么)?(?:改|修改|补充)(?:的)?(?:了)?)[。！!]*$/.test(normalized);
+  return standardTransition || ideaTransition || semanticTransition || shortTransition || completedIdeaConfirmation;
 }
 
 function buildTurnRequest(message) {
@@ -901,7 +911,7 @@ function createDemoResponse(message) {
   const evidence = inputCategory === "COURSE_CONTENT"
     ? (directEvidence || state.evidence || FALLBACK_EVIDENCE)
     : (state.evidence || FALLBACK_EVIDENCE);
-  const advanceRequested = /确认|进入下一|继续下一|继续小点|完成本阶段/.test(message);
+  const advanceRequested = isAdvanceIntent(message);
 
   if (firstTurn) {
     state.designId = `demo_${Date.now().toString(36)}`;
@@ -938,7 +948,7 @@ function createDemoResponse(message) {
         exploration_scenes: scenes,
         ready_for_next_stage: false,
       },
-      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      warnings: [],
       _runtime_source: "demo",
     };
   }
@@ -983,8 +993,8 @@ function createDemoResponse(message) {
       .map((facetId) => status.facets.find((facet) => facet.facet_id === facetId)?.title)
       .filter(Boolean);
     return {
-      assistant_message: `${clarified.length ? `你刚才的补充已经明确了：${clarified.join("、")}。` : "这轮内容已保留，但当前缺口还需要更具体的说明。"}\n\n${formatDemoIdeaChecklist(status)}\n\n我会继续围绕同一个实验想法检查缺口；一条回复也可以同时明确多项。`,
-      student_task: demoIdeaDevelopmentTask(status),
+      assistant_message: `${clarified.length ? `你刚才已经把“${clarified.join("、")}”说明得更清楚了。` : demoStudentFacingRetry(status)}\n\n${demoStudentFacingNextTurn(status)}`,
+      student_task: null,
       current_stage: STAGES[0][0],
       handled_stage: STAGES[0][0],
       interaction_state: state.mode,
@@ -999,7 +1009,7 @@ function createDemoResponse(message) {
         exploration_scenes: [],
       },
       quick_actions: status.complete ? ["确认想法完善并进入变量与条件"] : [],
-      warnings: ["当前使用课程示例回答，内容用于帮助你检查实验想法的完整性。"],
+      warnings: [],
       _runtime_source: "demo",
     };
   }
@@ -1064,7 +1074,7 @@ function createDemoResponse(message) {
         ready_for_next_stage: false,
       },
       quick_actions: [],
-      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      warnings: [],
       _runtime_source: "demo",
     };
   }
@@ -1113,8 +1123,8 @@ function createDemoResponse(message) {
     const outlineText = formatDemoExperimentOutlineSeed(state.experimentOutlineSeed);
     const comparisonPrefix = comparisonSentence ? `${comparisonSentence}\n\n` : "";
     return {
-      assistant_message: `${comparisonPrefix}${outlineText}\n\n${formatDemoIdeaChecklist(state.ideaDevelopmentStatus)}\n\n这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关；每轮都会重新检查还缺少什么。`,
-      student_task: demoIdeaDevelopmentTask(state.ideaDevelopmentStatus),
+      assistant_message: `${comparisonPrefix}${outlineText}\n\n${demoStudentFacingNextTurn(state.ideaDevelopmentStatus, true)}`,
+      student_task: null,
       current_stage: STAGES[0][0],
       interaction_state: state.mode,
       knowledge_references: [evidence],
@@ -1137,7 +1147,7 @@ function createDemoResponse(message) {
       quick_actions: state.ideaDevelopmentStatus.complete
         ? ["确认想法完善并进入变量与条件"]
         : [],
-      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      warnings: [],
       _runtime_source: "demo",
     };
   }
@@ -1154,8 +1164,8 @@ function createDemoResponse(message) {
       state.stageIndex = IDEA_DEVELOPMENT_STAGE_IDS.length;
     } else if (state.stageIndex === 0 && state.ideaDevelopmentStatus) {
       return {
-        assistant_message: formatDemoIdeaChecklist(state.ideaDevelopmentStatus),
-        student_task: demoIdeaDevelopmentTask(state.ideaDevelopmentStatus),
+        assistant_message: `这个实验想法还有一部分需要说明清楚，因此现在还不能进入“变量与条件”。\n\n${demoStudentFacingNextTurn(state.ideaDevelopmentStatus)}`,
+        student_task: null,
         current_stage: STAGES[0][0],
         handled_stage: STAGES[0][0],
         interaction_state: state.mode,
@@ -1197,7 +1207,7 @@ function createDemoResponse(message) {
         exploration_scenes: scenes,
         ready_for_next_stage: false,
       },
-      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      warnings: [],
       _runtime_source: "demo",
     };
   }
@@ -1217,7 +1227,7 @@ function createDemoResponse(message) {
         exploration_scenes: scenes,
         ready_for_next_stage: false,
       },
-      warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+      warnings: [],
       _runtime_source: "demo",
     };
   }
@@ -1227,7 +1237,7 @@ function createDemoResponse(message) {
     interaction_state: state.mode,
     knowledge_references: [evidence],
     quick_actions: state.stageIndex === 0 ? evidence.options : [guidedAdvanceLabel(state.stageIndex)],
-    warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
+    warnings: [],
     _runtime_source: "demo",
   };
 }
@@ -1581,21 +1591,6 @@ function refreshDemoIdeaDevelopmentStatus(status) {
   status.complete = status.missing_facet_ids.length === 0;
 }
 
-function formatDemoIdeaChecklist(status) {
-  return [
-    "实验想法完整性检查",
-    ...status.facets.map((facet) => {
-      const marker = facet.status === "CLEAR" ? "✓" : (
-        facet.facet_id === status.active_facet_id ? "→" : "○"
-      );
-      const label = facet.status === "CLEAR" ? "已明确" : (
-        facet.facet_id === status.active_facet_id ? "当前优先补充" : "仍需明确"
-      );
-      return `${marker} ${facet.title}：${label}`;
-    }),
-  ].join("\n");
-}
-
 function demoIdeaDevelopmentTask(status) {
   if (status.complete) {
     return "必要内容已经齐全。请整体检查；若准确，可确认想法完善并进入变量与条件，若有遗漏请直接补充。";
@@ -1607,6 +1602,29 @@ function demoIdeaDevelopmentTask(status) {
     conceptual_structure: "这个想法至少需要哪些对象、边界或激励条件？这里只描述组成部分，不需要写实现步骤。",
   };
   return tasks[status.active_facet_id] || "请补充当前实验想法中仍未明确的关键内容。";
+}
+
+function demoStudentFacingNextTurn(status, firstReview = false) {
+  if (status.complete) {
+    return "现在，这个实验想法中的研究对象、课程依据、学习目标和预期现象已经能够相互对应。请整体看一遍；如果与自己的想法一致，直接告诉我进入“变量与条件”。如果还有想调整的地方，也可以直接说明。";
+  }
+  const active = status.facets.find((facet) => facet.facet_id === status.active_facet_id);
+  const title = active?.title || "下一部分";
+  const prefix = firstReview
+    ? "这个方向已经形成了可以继续发展的实验雏形。"
+    : "我们继续沿着同一个实验方向往下完善。";
+  return `${prefix} 接下来先把“${title}”说清楚：${demoIdeaDevelopmentTask(status)}`;
+}
+
+function demoStudentFacingRetry(status) {
+  const feedback = {
+    learning_objective: "我理解了你补充的现象，但这里还需要更明确地说出学生完成实验后能够解释、判断或比较什么。",
+    research_question: "我保留了你刚才的补充，但研究问题还需要同时出现要比较的条件和准备观察的变化。",
+    hypothesis: "你已经描述了可能看到的现象；要把它变成实验预期，还需要说明这种变化背后的物理理由。",
+    conceptual_structure: "我理解了你的补充，但还需要说明这个想法中有哪些对象、边界或激励共同构成比较。",
+  };
+  return feedback[status.active_facet_id]
+    || "我保留了你刚才的补充，但还需要把它与当前实验想法的物理关系说得更具体。";
 }
 
 function applyResponse(response, userMessage) {
@@ -1683,13 +1701,18 @@ function applyResponse(response, userMessage) {
 function composeAssistantText(response) {
   const base = response.assistant_message || response.message || "Agent已处理当前阶段。";
   const parts = [base];
-  const studentTask = typeof response.student_task === "string" ? response.student_task.trim() : "";
+  const shouldShowStudentTask = state.stageIndex !== 0;
+  const studentTask = shouldShowStudentTask && typeof response.student_task === "string"
+    ? response.student_task.trim()
+    : "";
   if (studentTask && !base.includes(studentTask)) parts.push(studentTask);
   const warnings = Array.isArray(response.warnings)
     ? response.warnings.filter((item) => typeof item === "string" && item.trim())
     : [];
   if (warnings.length) parts.push(`提示：${warnings.join("；")}`);
-  if (response.completion_error) parts.push(`尚未推进：${response.completion_error}`);
+  if (response.completion_error && state.stageIndex !== 0) {
+    parts.push(`尚未推进：${response.completion_error}`);
+  }
   return parts.join("\n\n");
 }
 
