@@ -15,21 +15,51 @@ class StageDefinition:
     emvr_rule: str
 
 
+@dataclass(frozen=True, slots=True)
+class IdeaDevelopmentFacet:
+    facet_id: str
+    stage: Stage
+    title_zh: str
+
+
+IDEA_DEVELOPMENT_STAGES: tuple[Stage, ...] = (
+    Stage.IDEA_BRAINSTORMING,
+    Stage.COURSE_MAPPING_AND_DIRECTION,
+    Stage.LEARNING_OBJECTIVES,
+    Stage.RESEARCH_QUESTION,
+    Stage.THEORETICAL_FRAMEWORK,
+    Stage.HYPOTHESIS,
+    Stage.CONCEPTUAL_OR_VR_SETUP,
+)
+IDEA_DEVELOPMENT_TITLE = "实验想法完善"
+PUBLIC_STAGE_COUNT = 1 + len(Stage) - len(IDEA_DEVELOPMENT_STAGES)
+
+IDEA_DEVELOPMENT_FACETS: tuple[IdeaDevelopmentFacet, ...] = (
+    IdeaDevelopmentFacet("direction_outline", Stage.IDEA_BRAINSTORMING, "实验现象与大纲雏形"),
+    IdeaDevelopmentFacet("course_mapping", Stage.COURSE_MAPPING_AND_DIRECTION, "课程映射"),
+    IdeaDevelopmentFacet("learning_objective", Stage.LEARNING_OBJECTIVES, "学习目标"),
+    IdeaDevelopmentFacet("research_question", Stage.RESEARCH_QUESTION, "研究问题"),
+    IdeaDevelopmentFacet("theoretical_framework", Stage.THEORETICAL_FRAMEWORK, "理论依据"),
+    IdeaDevelopmentFacet("hypothesis", Stage.HYPOTHESIS, "假设与预期趋势"),
+    IdeaDevelopmentFacet("conceptual_structure", Stage.CONCEPTUAL_OR_VR_SETUP, "概念实验结构"),
+)
+
+
 STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
     StageDefinition(
         1,
         Stage.IDEA_BRAINSTORMING,
-        "实验想法探索与完善",
-        "帮助学生发散、比较和完善自己的实验想法。",
-        "停留在本阶段循环探索；先询问学生想研究主题与哪类现象或概念的关系，并用讲义内的例子帮助发散；不提前确定变量、公式、研究问题或实验结构；每次只给学生一个任务。",
+        "想法探索与大纲雏形",
+        "帮助学生发散、比较和完善想法，并形成可按缺口继续补充的实验大纲雏形。",
+        "先询问学生想研究主题与哪类现象或概念的关系，并用课程资料支持的例子帮助发散；收敛时整理核心现象、课程关系、基本对照和观察重点，形成实验大纲雏形；不提前确定具体变量、公式、研究问题或实验结构；每次只给学生一个任务。",
         "直接整理用户原始想法、目标现象、可用的VR交互机会和必要假设。",
     ),
     StageDefinition(
         2,
         Stage.COURSE_MAPPING_AND_DIRECTION,
-        "ECE329课程映射与实验方向",
-        "将想法关联到ECE329知识点并收敛为一个方向。",
-        "最多给三个方向，让学生自己选择或修改；不要替学生决定。",
+        "课程映射",
+        "展示已经确定的实验方向与ECE329知识点之间的联系。",
+        "承接想法探索中已经确定的方向，由助手展示主要课程支点、辅助关系和映射理由；不得重新列出候选方向让学生选择，只请学生检查是否准确或指出遗漏。",
         "直接选择兼顾课程相关性、理论清晰度和VR表现力的方向。",
     ),
     StageDefinition(
@@ -133,6 +163,33 @@ def public_stage_catalog() -> list[dict[str, object]]:
             "id": item.stage.value,
             "title": item.title_zh,
             "goal": item.goal_zh,
+            **stage_group_metadata(item.stage),
         }
         for item in STAGE_DEFINITIONS
     ]
+
+
+def stage_group_metadata(stage: Stage) -> dict[str, object]:
+    definition = STAGES_BY_ID[stage]
+    if stage in IDEA_DEVELOPMENT_STAGES:
+        facet = IDEA_DEVELOPMENT_FACETS[IDEA_DEVELOPMENT_STAGES.index(stage)]
+        return {
+            "workflow_stage_number": 1,
+            "workflow_stage_count": PUBLIC_STAGE_COUNT,
+            "workflow_stage_title": IDEA_DEVELOPMENT_TITLE,
+            "substep_number": None,
+            "substep_count": None,
+            "substep_title": None,
+            "idea_component_id": facet.facet_id,
+            "idea_component_title": facet.title_zh,
+        }
+    return {
+        "workflow_stage_number": definition.number - len(IDEA_DEVELOPMENT_STAGES) + 1,
+        "workflow_stage_count": PUBLIC_STAGE_COUNT,
+        "workflow_stage_title": definition.title_zh,
+        "substep_number": None,
+        "substep_count": None,
+        "substep_title": None,
+        "idea_component_id": None,
+        "idea_component_title": None,
+    }

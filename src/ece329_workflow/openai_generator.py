@@ -15,7 +15,9 @@ from urllib.request import Request, urlopen
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
     RuleBasedStageGenerator,
+    _format_experiment_outline_seed,
     _format_standard_comparison_status,
+    build_experiment_outline_seed,
 )
 from .guardrails import (
     AMBIGUOUS,
@@ -40,7 +42,7 @@ ALLOWED_VISUALIZATION_TYPES = {
     "illustrative_synthetic_data",
 }
 GUIDED_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
-    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_references", "candidate_course_directions"),
+    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_references", "primary_course_anchor"),
     Stage.LEARNING_OBJECTIVES: ("objective_types",),
     Stage.RESEARCH_QUESTION: ("candidate_independent_variables", "main_research_question"),
     Stage.THEORETICAL_FRAMEWORK: ("core_equations", "lecture_formula_candidates"),
@@ -413,6 +415,23 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         raise ModelOutputError(
             "Student-facing text contains internal implementation terminology"
         )
+    if (
+        session.interaction_state is InteractionState.GUIDED_DESIGN
+        and stage is Stage.COURSE_MAPPING_AND_DIRECTION
+    ):
+        if not output.stage_payload.get("course_references") or not output.stage_payload.get(
+            "primary_course_anchor"
+        ):
+            raise ModelOutputError(
+                "Guided course mapping must display one grounded primary anchor"
+            )
+        if re.search(
+            r"(?:请选择|你希望把哪|选哪|哪一个课程方向|从.{0,20}中选)",
+            visible_text,
+        ):
+            raise ModelOutputError(
+                "Guided course mapping cannot ask the student to choose the direction again"
+            )
     if stage is Stage.EXPECTED_DATA_VISUALIZATION:
         if visual is None:
             raise ModelOutputError("Stage 10 requires a visualization object")
@@ -857,8 +876,7 @@ def _validate_lecture_grounding(
                                 "A decided baseline cannot be presented as pending"
                             )
                 expected_task = (
-                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
-                    "请直接指出遗漏。"
+                    "请检查这个大纲雏形是否准确；若有关键遗漏，请直接补充。"
                 )
                 if output.student_task != expected_task:
                     raise ModelOutputError(
@@ -1080,9 +1098,47 @@ def _step_output_from_response(
                         output.assistant_message,
                     )
             if ready_for_next_stage:
+                if re.search(
+                    r"你(?:想|希望|更倾向|更想).{0,28}(?:哪|还是)|"
+                    r"请(?:选择|选).{0,20}(?:一个|方向)|"
+                    r"先看.{0,24}还是",
+                    output.assistant_message,
+                ):
+                    raise ModelOutputError(
+                        "A ready Stage 1 draft cannot ask the student to choose another direction"
+                    )
+                outline_seed = build_experiment_outline_seed(
+                    phenomenon=str(
+                        stage_one_thread.get("core_phenomenon")
+                        or stage_one_thread.get("interest_description")
+                        or stage_one_thread.get("direction_summary")
+                        or ""
+                    ),
+                    selected_course_relations=(
+                        selected_relations if isinstance(selected_relations, list) else []
+                    ),
+                    standard_comparisons=(
+                        standard_comparisons if isinstance(standard_comparisons, list) else []
+                    ),
+                    observation_focus=[
+                        *(
+                            stage_one_thread.get("refinement_notes", [])
+                            if isinstance(stage_one_thread.get("refinement_notes"), list)
+                            else []
+                        ),
+                        str(stage_one_thread.get("interest_description") or ""),
+                    ],
+                )
+                output.stage_payload["experiment_outline_seed"] = outline_seed
+                comparison_prefix = f"{comparison_summary}\n\n" if comparison_summary else ""
+                output.assistant_message = (
+                    f"{comparison_prefix}{_format_experiment_outline_seed(outline_seed)}\n\n"
+                    "这个雏形保留了你已经确定的方向。课程映射、学习目标、研究问题、"
+                    "理论依据、预期趋势和概念实验结构将作为同一阶段的完整性清单统一检查，"
+                    "不会按固定顺序重新选择实验方向。"
+                )
                 output.student_task = (
-                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
-                    "请直接指出遗漏。"
+                    "请检查这个大纲雏形是否准确；若有关键遗漏，请直接补充。"
                 )
             elif phase == INTEREST_DESCRIPTION and len(relation_directions) > 1:
                 output.student_task = "请用自己的话描述这组关系共同要解释的核心现象。"

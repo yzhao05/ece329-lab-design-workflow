@@ -71,6 +71,8 @@ _STAGE_ONE_CONTROL_MESSAGES = {
     "继续完善下一阶段",
     "确认本阶段并进入下一阶段",
     "确认当前方向并进入下一阶段",
+    "确认大纲雏形并继续小点2",
+    "确认想法完善并进入变量与条件",
     "进入下一阶段",
     "完成本阶段",
 }
@@ -142,7 +144,10 @@ def is_no_direction_request(text: str) -> bool:
 
 
 def is_stage_one_control_message(text: str) -> bool:
-    return text.strip() in _STAGE_ONE_CONTROL_MESSAGES
+    normalized = text.strip()
+    if normalized in _STAGE_ONE_CONTROL_MESSAGES:
+        return True
+    return bool(re.fullmatch(r"确认.{0,20}(?:继续小点\s*\d+|进入下一阶段)", normalized))
 
 
 def _parse_positive_ordinal(raw: str) -> int | None:

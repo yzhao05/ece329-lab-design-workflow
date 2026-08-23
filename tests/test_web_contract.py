@@ -40,6 +40,29 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("response.request_rejected !== true", self.app_js)
         self.assertIn("summary.length >= 20", self.app_js)
 
+    def test_first_seven_steps_render_as_one_expandable_public_stage(self) -> None:
+        self.assertIn('title: "实验想法完善"', self.app_js)
+        self.assertIn("IDEA_DEVELOPMENT_STAGE_IDS", self.app_js)
+        self.assertIn("WORKFLOW_GROUPS", self.app_js)
+        self.assertIn("stage-substeps", self.app_js)
+        self.assertIn("阶段 1 / 7", self.index_html)
+        self.assertIn("DYNAMIC_COMPLETENESS", self.app_js)
+        self.assertIn("ideaDevelopmentStatus", self.app_js)
+        self.assertIn("active_facet_id", self.app_js)
+        self.assertIn("确认想法完善并进入变量与条件", self.app_js)
+        self.assertNotIn("确认课程映射并继续小点3", self.app_js)
+        self.assertEqual(
+            self.index_html.count("v=20260823-dynamic-idea-checklist"),
+            3,
+        )
+
+    def test_demo_rechecks_all_idea_facets_without_fixed_substep_order(self) -> None:
+        self.assertIn("function updateDemoIdeaDevelopmentStatus", self.app_js)
+        self.assertIn("function refreshDemoIdeaDevelopmentStatus", self.app_js)
+        self.assertIn("missing_facet_ids", self.app_js)
+        self.assertIn("这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关", self.app_js)
+        self.assertNotIn("现在进入“实验想法完善”的小点2", self.app_js)
+
     def test_quick_actions_send_stable_option_id(self) -> None:
         self.assertIn("function normalizeQuickAction(action)", self.app_js)
         self.assertIn("state.pendingOptionId = optionId", self.app_js)
@@ -49,7 +72,7 @@ class WebFrontendContractTests(unittest.TestCase):
     def test_stage_one_confirmation_uses_server_preserved_focus(self) -> None:
         self.assertIn("response.stage_payload?.current_focus", self.app_js)
         self.assertIn("state.pendingDirection = serverFocus.trim()", self.app_js)
-        self.assertIn("response.stage_payload?.ready_for_next_stage", self.app_js)
+        self.assertIn("response.stage_payload?.idea_development_status", self.app_js)
         self.assertIn('inputCategory === "COURSE_CONTENT"', self.app_js)
         self.assertIn(
             'response.stage_payload?.input_category !== "COURSE_CONTENT"',
@@ -57,7 +80,7 @@ class WebFrontendContractTests(unittest.TestCase):
         )
         self.assertIn('phase === "BREADTH_EXPLORATION"', self.app_js)
         self.assertIn('phase === "INTEREST_DESCRIPTION"', self.app_js)
-        self.assertIn("return response.stage_payload?.ready_for_next_stage ? [confirmation] : []", self.app_js)
+        self.assertIn("response.stage_payload?.idea_development_status", self.app_js)
 
     def test_stage_one_greeting_and_redirects_use_student_facing_course_language(self) -> None:
         self.assertIn("ECE329课上所学", self.app_js)

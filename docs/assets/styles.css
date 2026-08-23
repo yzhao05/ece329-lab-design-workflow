@@ -317,6 +317,37 @@ a:focus-visible {
   line-height: 1.35;
 }
 
+.stage-substeps {
+  display: grid;
+  grid-column: 2;
+  gap: 5px;
+  padding: 7px 0 3px;
+  margin: 0;
+  list-style: none;
+}
+
+.stage-substep {
+  padding-left: 9px;
+  border-left: 2px solid var(--line);
+  color: #7b8790;
+  font-size: 0.67rem;
+  line-height: 1.35;
+}
+
+.stage-substep.complete {
+  color: var(--teal);
+}
+
+.stage-substep.missing {
+  color: #8a6a38;
+}
+
+.stage-substep.current {
+  color: var(--navy);
+  border-left-color: var(--teal);
+  font-weight: 700;
+}
+
 .stage-item.current {
   color: var(--navy);
   background: white;
@@ -945,6 +976,7 @@ a:focus-visible {
   .sidebar-heading,
   .source-mini-card,
   .stage-label,
+  .stage-substeps,
   .stage-item::before {
     display: none;
   }

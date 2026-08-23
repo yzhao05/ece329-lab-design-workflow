@@ -12,6 +12,7 @@ from .guardrails import (
     classify_stage_one_input,
     course_example_options,
     is_no_direction_request,
+    is_stage_one_control_message,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput
@@ -28,11 +29,10 @@ def _idea(session: DesignSession, user_message: str) -> str:
             value = idea_context.get(key)
             if value:
                 return str(value)
-    control_messages = {"继续", "进入下一阶段", "确认本阶段并进入下一阶段"}
     if (
         session.current_stage is Stage.IDEA_BRAINSTORMING
         and user_message.strip()
-        and user_message.strip() not in control_messages
+        and not is_stage_one_control_message(user_message)
     ):
         return user_message.strip()
     if isinstance(idea_context, dict) and idea_context.get("original"):
@@ -105,6 +105,65 @@ def _format_standard_comparison_status(
                 "确认当前概括即表示采纳，也可以直接指出要删改。"
             )
     return "".join(summaries)
+
+
+def build_experiment_outline_seed(
+    *,
+    phenomenon: str,
+    selected_course_relations: list[dict[str, Any]],
+    standard_comparisons: list[dict[str, Any]],
+    observation_focus: list[str],
+) -> dict[str, Any]:
+    """Build the Stage 1 draft without inventing later-stage design decisions."""
+
+    relations = [
+        str(item.get("direction") or item.get("focus") or "").strip()
+        for item in selected_course_relations
+        if str(item.get("direction") or item.get("focus") or "").strip()
+    ]
+    comparisons = [
+        {
+            "comparison_id": str(item.get("comparison_id") or "").strip(),
+            "cases": [str(case).strip() for case in item.get("cases", []) if str(case).strip()],
+            "adoption_status": str(item.get("adoption_status") or "PENDING").upper(),
+        }
+        for item in standard_comparisons
+        if isinstance(item, dict)
+    ]
+    return {
+        "status": "DRAFT_TO_BE_REFINED",
+        "core_phenomenon": phenomenon.strip(),
+        "course_relationships": relations,
+        "baseline_comparisons": comparisons,
+        "observation_focus": [str(item).strip() for item in observation_focus if str(item).strip()][-3:],
+        "next_refinement_points": [
+            "课程映射说明",
+            "学习目标",
+            "研究问题",
+            "理论依据",
+            "假设与预期趋势",
+            "概念实验结构",
+        ],
+    }
+
+
+def _format_experiment_outline_seed(outline: dict[str, Any]) -> str:
+    relations = outline.get("course_relationships", [])
+    comparisons = outline.get("baseline_comparisons", [])
+    observations = outline.get("observation_focus", [])
+    comparison_text = "；".join(
+        f"{'、'.join(item.get('cases', []))}（{item.get('adoption_status', 'PENDING')}）"
+        for item in comparisons
+        if item.get("cases")
+    ) or "暂未提出基础对照"
+    return (
+        "实验大纲雏形\n"
+        f"核心现象：{outline.get('core_phenomenon') or '待补充'}\n"
+        f"课程关系：{'；'.join(relations) if relations else '将在完整性检查中补充'}\n"
+        f"基础比较：{comparison_text}\n"
+        f"观察重点：{'；'.join(observations) if observations else '围绕核心现象继续细化'}\n"
+        "待完善：课程映射、学习目标、研究问题、理论依据、假设与预期趋势、概念实验结构"
+    )
 
 
 def _scene_components(direction: str, index: int) -> tuple[str, str, str, str]:
@@ -342,6 +401,17 @@ class RuleBasedStageGenerator:
             comparison_sentence = _format_standard_comparison_status(
                 standard_comparisons
             )
+            phenomenon = core_phenomenon or interest_description or direction_summary
+            experiment_outline_seed = (
+                build_experiment_outline_seed(
+                    phenomenon=phenomenon,
+                    selected_course_relations=selected_course_relations,
+                    standard_comparisons=standard_comparisons,
+                    observation_focus=[*refinement_notes, interest_description],
+                )
+                if ready_for_next_stage and input_kind == COURSE_CONTENT
+                else None
+            )
             retrieval_text = " ".join(
                 item
                 for item in (
@@ -420,17 +490,15 @@ class RuleBasedStageGenerator:
                     )
             elif brainstorm_phase == DEPTH_EXPANSION:
                 if ready_for_next_stage:
-                    phenomenon = core_phenomenon or interest_description or direction_summary
-                    priority_sentence = (
-                        f"目前记录的观察重点是：{'；'.join(str(item) for item in refinement_notes[-2:])}。"
-                        if refinement_notes
-                        else ""
+                    comparison_prefix = (
+                        f"{comparison_sentence}\n\n" if comparison_sentence else ""
                     )
                     introduction = (
-                        f"当前研究方向已经足够清楚：{phenomenon}。"
-                        f"{relation_sentence}{comparison_sentence}{priority_sentence}"
-                        "阶段1到这里保留核心现象与课程关系即可；具体变量、定量关系和展示"
-                        "细节将在后续阶段处理。"
+                        f"{comparison_prefix}"
+                        f"{_format_experiment_outline_seed(experiment_outline_seed or {})}\n\n"
+                        "这个雏形保留了你已经确定的方向。课程映射、学习目标、研究问题、"
+                        "理论依据、预期趋势和概念实验结构将作为同一阶段的完整性清单统一检查，"
+                        "不会按固定顺序重新选择实验方向。"
                     )
                 else:
                     introduction = (
@@ -463,8 +531,7 @@ class RuleBasedStageGenerator:
                 )
             elif brainstorm_phase == DEPTH_EXPANSION and input_kind == COURSE_CONTENT:
                 closing_task = (
-                    "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，"
-                    "请直接指出遗漏。"
+                    "请检查这个大纲雏形是否准确；若有关键遗漏，请直接补充。"
                 )
             else:
                 closing_task = (
@@ -507,19 +574,43 @@ class RuleBasedStageGenerator:
                         "course_scope_rule"
                     ],
                     "ready_for_next_stage": ready_for_next_stage,
+                    "experiment_outline_seed": experiment_outline_seed,
                 },
                 student_task=closing_task,
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             topics = _course_topics(idea)
+            references = _course_references(idea)
+            prior_output = session.stage_outputs.get(Stage.IDEA_BRAINSTORMING.value, {})
+            prior_payload = prior_output.get("stage_payload", {}) if isinstance(prior_output, dict) else {}
+            outline = prior_payload.get("experiment_outline_seed", {}) if isinstance(prior_payload, dict) else {}
+            relationships = outline.get("course_relationships", []) if isinstance(outline, dict) else []
+            primary_anchor: dict[str, Any] = (
+                dict(references[0])
+                if references
+                else {"title": topics[0], "concepts": relationships}
+            )
+            supporting_anchors = [dict(item) for item in references[1:]]
+            primary_title = str(primary_anchor.get("title") or topics[0])
+            relationship_text = "；".join(str(item) for item in relationships if str(item))
             return StepOutput(
-                assistant_message="当前只判断这个想法与哪一类ECE329内容联系最紧密。",
+                assistant_message=(
+                    "课程映射已经根据前面形成的实验大纲雏形整理如下：\n"
+                    f"主要课程支点：{primary_title}\n"
+                    f"已保留的物理关系：{relationship_text or idea}\n"
+                    f"辅助课程联系：{'；'.join(str(item.get('title') or '') for item in supporting_anchors if item.get('title')) or '无需额外增加'}\n\n"
+                    "这里是在解释已确定方向为什么属于ECE329，而不是重新选择实验方向。"
+                ),
                 stage_payload={
-                    "candidate_course_directions": topics,
-                    "course_references": _course_references(idea),
+                    "primary_course_anchor": primary_anchor,
+                    "supporting_course_anchors": supporting_anchors,
+                    "mapped_relationships": list(relationships),
+                    "mapping_explanation": "从核心现象和已保留的物理关系映射到课程概念。",
+                    "course_references": references,
                     "idea_reference": idea,
+                    "experiment_outline_seed": outline,
                 },
-                student_task="你希望把哪一个课程方向作为实验的主要理论核心？",
+                student_task="请检查这段课程映射是否准确；若没有遗漏，可以继续到学习目标小点。",
             )
         if stage is Stage.LEARNING_OBJECTIVES:
             return StepOutput(

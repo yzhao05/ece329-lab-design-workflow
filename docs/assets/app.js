@@ -18,8 +18,8 @@ class ApiError extends Error {
 }
 
 const STAGES = [
-  ["IDEA_BRAINSTORMING", "实验想法探索与完善"],
-  ["COURSE_MAPPING_AND_DIRECTION", "课程映射与实验方向"],
+  ["IDEA_BRAINSTORMING", "想法探索与大纲雏形"],
+  ["COURSE_MAPPING_AND_DIRECTION", "课程映射"],
   ["LEARNING_OBJECTIVES", "学习目标"],
   ["RESEARCH_QUESTION", "研究问题"],
   ["THEORETICAL_FRAMEWORK", "理论框架"],
@@ -32,6 +32,16 @@ const STAGES = [
   ["DESIGN_VALUE_AND_LIMITATIONS", "设计价值与局限"],
   ["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "学生总结"],
 ];
+
+const IDEA_DEVELOPMENT_STAGE_IDS = Object.freeze(STAGES.slice(0, 7).map(([id]) => id));
+const WORKFLOW_GROUPS = Object.freeze([
+  {
+    id: "EXPERIMENT_IDEA_DEVELOPMENT",
+    title: "实验想法完善",
+    stageIds: IDEA_DEVELOPMENT_STAGE_IDS,
+  },
+  ...STAGES.slice(7).map(([id, title]) => ({ id, title, stageIds: [id] })),
+]);
 
 const EMVR_STAGE_TITLES = Object.freeze({
   CONCEPTUAL_OR_VR_SETUP: "Unity VR模拟实验设计",
@@ -171,8 +181,8 @@ const FALLBACK_EVIDENCE = {
 };
 
 const DEMO_STAGE_PROMPTS = [
-  "你更想探索这个主题与哪一类现象或概念之间的关系？可以参考这些例子，也可以提出自己的关联。",
-  "你希望把哪一个ECE329课程概念作为实验的主要理论核心？",
+  "继续把已经选定的方向扩展成实验大纲雏形。",
+  "下面由课程助手展示这个实验想法与ECE329课程内容的主要对应关系。",
   "你最希望学生通过这个实验获得哪一种能力？",
   "你希望实验主要改变哪一个因素？",
   "哪一个ECE329理论关系式最直接连接自变量和观察量？",
@@ -242,6 +252,8 @@ function initialState() {
     stageOneSelectedRelations: [],
     stageOneCorePhenomenon: null,
     stageOneStandardComparisons: [],
+    experimentOutlineSeed: null,
+    ideaDevelopmentStatus: null,
     pendingSummary: null,
     summarySections: [],
     lastStudentInput: null,
@@ -340,32 +352,92 @@ function render() {
 
 function renderStages() {
   dom.stageList.replaceChildren();
-  STAGES.forEach(([id], index) => {
-    const title = stageTitle(index);
+  const currentGroupIndex = workflowGroupIndex(state.stageIndex);
+  WORKFLOW_GROUPS.forEach((group, groupIndex) => {
+    const stageIndexes = group.stageIds.map((id) => STAGES.findIndex(([stageId]) => stageId === id));
+    const firstIndex = Math.min(...stageIndexes);
+    const lastIndex = Math.max(...stageIndexes);
     const item = document.createElement("li");
     item.className = "stage-item";
-    item.dataset.stageId = id;
-    if (index < state.stageIndex) item.classList.add("complete");
-    if (index === state.stageIndex) item.classList.add("current");
-    item.setAttribute("aria-current", index === state.stageIndex ? "step" : "false");
+    item.dataset.stageId = group.id;
+    if (state.stageIndex > lastIndex) item.classList.add("complete");
+    if (state.stageIndex >= firstIndex && state.stageIndex <= lastIndex) item.classList.add("current");
+    item.setAttribute("aria-current", groupIndex === currentGroupIndex ? "step" : "false");
 
     const number = document.createElement("span");
     number.className = "stage-number";
-    number.textContent = index < state.stageIndex ? "✓" : String(index + 1);
+    number.textContent = state.stageIndex > lastIndex ? "✓" : String(groupIndex + 1);
 
     const label = document.createElement("span");
     label.className = "stage-label";
-    label.textContent = title;
+    label.textContent = groupTitle(group, firstIndex);
 
     item.append(number, label);
+    if (group.stageIds.length > 1) {
+      const substeps = document.createElement("ol");
+      substeps.className = "stage-substeps";
+      group.stageIds.forEach((id, substepIndex) => {
+        const index = STAGES.findIndex(([stageId]) => stageId === id);
+        const substep = document.createElement("li");
+        substep.className = "stage-substep";
+        const facet = state.ideaDevelopmentStatus?.facets?.find((entry) => (
+          entry.facet_id === ideaFacetId(id)
+        ));
+        if (facet?.status === "CLEAR") substep.classList.add("complete");
+        if (facet?.status !== "CLEAR") substep.classList.add("missing");
+        if (facet?.facet_id === state.ideaDevelopmentStatus?.active_facet_id) {
+          substep.classList.add("current");
+        }
+        const marker = facet?.status === "CLEAR" ? "✓" : (
+          facet?.facet_id === state.ideaDevelopmentStatus?.active_facet_id ? "→" : "○"
+        );
+        substep.textContent = `${marker} ${facet?.title || stageTitle(index)}`;
+        substeps.append(substep);
+      });
+      item.append(substeps);
+    }
     dom.stageList.append(item);
   });
 
-  const progress = Math.round((state.stageIndex / (STAGES.length - 1)) * 100);
-  dom.stageCounter.textContent = `阶段 ${state.stageIndex + 1} / ${STAGES.length}`;
+  const progress = Math.round((currentGroupIndex / (WORKFLOW_GROUPS.length - 1)) * 100);
+  dom.stageCounter.textContent = `阶段 ${currentGroupIndex + 1} / ${WORKFLOW_GROUPS.length}`;
   dom.progressPercent.textContent = `${progress}%`;
   dom.progressBar.style.width = `${progress}%`;
-  dom.currentStageTitle.textContent = stageTitle(state.stageIndex);
+  dom.currentStageTitle.textContent = currentWorkspaceTitle(state.stageIndex);
+}
+
+function workflowGroupIndex(stageIndex) {
+  const stageId = STAGES[stageIndex]?.[0];
+  const index = WORKFLOW_GROUPS.findIndex((group) => group.stageIds.includes(stageId));
+  return index >= 0 ? index : 0;
+}
+
+function groupTitle(group, firstStageIndex) {
+  return group.stageIds.length > 1 ? group.title : stageTitle(firstStageIndex);
+}
+
+function currentWorkspaceTitle(stageIndex) {
+  const group = WORKFLOW_GROUPS[workflowGroupIndex(stageIndex)];
+  if (group.stageIds.length > 1) {
+    const active = state.ideaDevelopmentStatus?.facets?.find((facet) => (
+      facet.facet_id === state.ideaDevelopmentStatus?.active_facet_id
+    ));
+    return active ? `${group.title} · 当前缺口：${active.title}` : group.title;
+  }
+  return stageTitle(stageIndex);
+}
+
+function ideaFacetId(stageId) {
+  const mapping = {
+    IDEA_BRAINSTORMING: "direction_outline",
+    COURSE_MAPPING_AND_DIRECTION: "course_mapping",
+    LEARNING_OBJECTIVES: "learning_objective",
+    RESEARCH_QUESTION: "research_question",
+    THEORETICAL_FRAMEWORK: "theoretical_framework",
+    HYPOTHESIS: "hypothesis",
+    CONCEPTUAL_OR_VR_SETUP: "conceptual_structure",
+  };
+  return mapping[stageId] || null;
 }
 
 function stageTitle(index) {
@@ -706,7 +778,7 @@ async function reloadApiDesignState() {
 }
 
 function isAdvanceIntent(message) {
-  return /确认.*(下一|进入|完成)|进入下一阶段|继续下一阶段|完成本阶段|完成总结/.test(message);
+  return /确认.*(下一|进入|继续|完成)|进入下一阶段|继续下一阶段|继续小点|完成本阶段|完成总结/.test(message);
 }
 
 function buildTurnRequest(message) {
@@ -829,7 +901,7 @@ function createDemoResponse(message) {
   const evidence = inputCategory === "COURSE_CONTENT"
     ? (directEvidence || state.evidence || FALLBACK_EVIDENCE)
     : (state.evidence || FALLBACK_EVIDENCE);
-  const advanceRequested = /确认|进入下一|继续下一|完成本阶段/.test(message);
+  const advanceRequested = /确认|进入下一|继续下一|继续小点|完成本阶段/.test(message);
 
   if (firstTurn) {
     state.designId = `demo_${Date.now().toString(36)}`;
@@ -895,6 +967,39 @@ function createDemoResponse(message) {
       },
       warnings: ["当前请求没有改变你的实验设计进度。"],
       request_rejected: true,
+      _runtime_source: "demo",
+    };
+  }
+
+  if (
+    state.mode === "GUIDED_DESIGN"
+    && state.stageIndex === 0
+    && state.ideaDevelopmentStatus
+    && !advanceRequested
+  ) {
+    updateDemoIdeaDevelopmentStatus(state.ideaDevelopmentStatus, message);
+    const status = state.ideaDevelopmentStatus;
+    const clarified = status.last_clarified_facet_ids
+      .map((facetId) => status.facets.find((facet) => facet.facet_id === facetId)?.title)
+      .filter(Boolean);
+    return {
+      assistant_message: `${clarified.length ? `你刚才的补充已经明确了：${clarified.join("、")}。` : "这轮内容已保留，但当前缺口还需要更具体的说明。"}\n\n${formatDemoIdeaChecklist(status)}\n\n我会继续围绕同一个实验想法检查缺口；一条回复也可以同时明确多项。`,
+      student_task: demoIdeaDevelopmentTask(status),
+      current_stage: STAGES[0][0],
+      handled_stage: STAGES[0][0],
+      interaction_state: state.mode,
+      knowledge_references: [evidence],
+      stage_payload: {
+        input_category: "COURSE_CONTENT",
+        brainstorm_activity: "IDEA_COMPLETENESS_REVIEW",
+        brainstorm_phase: "IDEA_COMPLETENESS_REVIEW",
+        idea_development_status: status,
+        ready_for_next_stage: status.complete,
+        alternative_ideas: [],
+        exploration_scenes: [],
+      },
+      quick_actions: status.complete ? ["确认想法完善并进入变量与条件"] : [],
+      warnings: ["当前使用课程示例回答，内容用于帮助你检查实验想法的完整性。"],
       _runtime_source: "demo",
     };
   }
@@ -972,7 +1077,7 @@ function createDemoResponse(message) {
     && !advanceRequested
   ) {
     state.stageOnePhase = "DEPTH_EXPANSION";
-    state.quickActions = ["确认当前方向并进入下一阶段"];
+    state.quickActions = [];
     if (!state.stageOneCorePhenomenon) state.stageOneCorePhenomenon = message;
     const selectedRelations = state.stageOneSelectedRelations?.length
       ? state.stageOneSelectedRelations
@@ -992,16 +1097,24 @@ function createDemoResponse(message) {
       message,
       state.stageOneStandardComparisons,
     );
-    const relationSentence = selectedRelations.length > 1
-      ? `组合关系完整保留为：${selectedRelations.join("；")}。`
-      : `课程关系是：${selectedRelations[0]}。`;
     const comparisonSentence = formatDemoStandardComparisons(
       state.stageOneStandardComparisons,
     );
     state.pendingDirection = `${state.stageOneCorePhenomenon}（${selectedRelations.join("；")}）`;
+    state.experimentOutlineSeed = buildDemoExperimentOutlineSeed(
+      state.stageOneCorePhenomenon,
+      selectedRelations,
+      state.stageOneStandardComparisons,
+    );
+    state.ideaDevelopmentStatus = buildDemoIdeaDevelopmentStatus(
+      state.experimentOutlineSeed,
+      `${state.pendingDirection || ""} ${state.stageOneCorePhenomenon || ""} ${message}`,
+    );
+    const outlineText = formatDemoExperimentOutlineSeed(state.experimentOutlineSeed);
+    const comparisonPrefix = comparisonSentence ? `${comparisonSentence}\n\n` : "";
     return {
-      assistant_message: `当前研究方向已经足够清楚：${state.stageOneCorePhenomenon}。${relationSentence}${comparisonSentence}阶段1到这里保留核心现象与课程关系即可；具体变量、定量关系和展示细节将在后续阶段处理。`,
-      student_task: "如果概括准确，请确认当前方向并进入下一阶段；若有关键遗漏，请直接指出遗漏。",
+      assistant_message: `${comparisonPrefix}${outlineText}\n\n${formatDemoIdeaChecklist(state.ideaDevelopmentStatus)}\n\n这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关；每轮都会重新检查还缺少什么。`,
+      student_task: demoIdeaDevelopmentTask(state.ideaDevelopmentStatus),
       current_stage: STAGES[0][0],
       interaction_state: state.mode,
       knowledge_references: [evidence],
@@ -1012,6 +1125,8 @@ function createDemoResponse(message) {
         selected_course_relations: selectedRelations,
         combination_intent: selectedRelations.length > 1,
         standard_comparisons: state.stageOneStandardComparisons,
+        experiment_outline_seed: state.experimentOutlineSeed,
+        idea_development_status: state.ideaDevelopmentStatus,
         core_phenomenon: state.stageOneCorePhenomenon,
         interest_description: message,
         current_focus: `${selectedFocus} → ${message}`,
@@ -1019,7 +1134,9 @@ function createDemoResponse(message) {
         exploration_scenes: [],
         ready_for_next_stage: true,
       },
-      quick_actions: ["确认当前方向并进入下一阶段"],
+      quick_actions: state.ideaDevelopmentStatus.complete
+        ? ["确认想法完善并进入变量与条件"]
+        : [],
       warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
       _runtime_source: "demo",
     };
@@ -1033,8 +1150,27 @@ function createDemoResponse(message) {
         true,
       );
     }
-    state.stageIndex += 1;
-    state.notes.push(`已进入阶段${state.stageIndex + 1}：${stageTitle(state.stageIndex)}`);
+    if (state.stageIndex === 0 && state.ideaDevelopmentStatus?.complete) {
+      state.stageIndex = IDEA_DEVELOPMENT_STAGE_IDS.length;
+    } else if (state.stageIndex === 0 && state.ideaDevelopmentStatus) {
+      return {
+        assistant_message: formatDemoIdeaChecklist(state.ideaDevelopmentStatus),
+        student_task: demoIdeaDevelopmentTask(state.ideaDevelopmentStatus),
+        current_stage: STAGES[0][0],
+        handled_stage: STAGES[0][0],
+        interaction_state: state.mode,
+        stage_payload: {
+          idea_development_status: state.ideaDevelopmentStatus,
+          ready_for_next_stage: false,
+        },
+        quick_actions: [],
+        warnings: ["实验想法的必要内容尚未全部明确。"],
+        _runtime_source: "demo",
+      };
+    } else {
+      state.stageIndex += 1;
+    }
+    state.notes.push(`已进入${currentWorkspaceTitle(state.stageIndex)}`);
   }
 
   const prompt = DEMO_STAGE_PROMPTS[state.stageIndex];
@@ -1090,7 +1226,7 @@ function createDemoResponse(message) {
     current_stage: STAGES[state.stageIndex][0],
     interaction_state: state.mode,
     knowledge_references: [evidence],
-    quick_actions: state.stageIndex === 0 ? evidence.options : ["确认并继续下一阶段"],
+    quick_actions: state.stageIndex === 0 ? evidence.options : [guidedAdvanceLabel(state.stageIndex)],
     warnings: ["当前使用课程示例回答，内容用于帮助你继续思考实验方向。"],
     _runtime_source: "demo",
   };
@@ -1314,6 +1450,165 @@ function formatDemoStandardComparisons(comparisons) {
   }).join("");
 }
 
+function buildDemoExperimentOutlineSeed(corePhenomenon, selectedRelations, comparisons) {
+  const activeCases = (comparisons || []).flatMap((comparison) => (
+    comparison.adoption_status === "REJECTED" ? [] : (comparison.cases || [])
+  ));
+  return {
+    status: "DRAFT",
+    core_phenomenon: corePhenomenon,
+    course_relationships: [...selectedRelations],
+    baseline_comparison_cases: activeCases,
+    observation_focus: `观察“${corePhenomenon}”在不同对象、边界或基本情形下如何变化`,
+    next_refinement_points: [
+      "课程映射",
+      "学习目标",
+      "研究问题",
+      "理论依据",
+      "假设与预期趋势",
+      "概念实验结构",
+    ],
+  };
+}
+
+function formatDemoExperimentOutlineSeed(outline) {
+  const cases = outline.baseline_comparison_cases.length
+    ? outline.baseline_comparison_cases.join("、")
+    : "暂未加入默认对照，可在后续按需要补充";
+  return [
+    "实验大纲雏形",
+    `核心现象：${outline.core_phenomenon}`,
+    `课程内物理联系：${outline.course_relationships.join("；")}`,
+    `基本观察图景：${outline.observation_focus}`,
+    `建议保留的基本情形：${cases}`,
+    `下一步细化：${outline.next_refinement_points.join(" → ")}`,
+  ].join("\n");
+}
+
+function buildDemoIdeaDevelopmentStatus(outline, ideaText) {
+  const definitions = [
+    ["direction_outline", "实验现象与大纲雏形", true, outline.core_phenomenon],
+    ["course_mapping", "课程映射", true, outline.course_relationships.join("；")],
+    ["learning_objective", "学习目标", /学生|理解|掌握|解释|判断|学习目标/.test(ideaText), ideaText],
+    ["research_question", "研究问题", /关系|影响|比较|变化|差异|区别/.test(ideaText), ideaText],
+    ["theoretical_framework", "理论依据", true, "根据课程资料匹配的核心理论关系"],
+    ["hypothesis", "假设与预期趋势", /假设|预测|预计|增大|减小|变强|变弱|趋势/.test(ideaText), ideaText],
+    ["conceptual_structure", "概念实验结构", /场源|边界|导体|介质|负载|线圈|电荷|对象|对照/.test(ideaText), ideaText],
+  ];
+  const status = {
+    mode: "DYNAMIC_COMPLETENESS",
+    facets: definitions.map(([facetId, title, isClear, evidence]) => ({
+      facet_id: facetId,
+      title,
+      status: isClear ? "CLEAR" : "MISSING",
+      evidence: isClear ? evidence : "",
+      source: isClear ? "EXISTING_IDEA" : null,
+    })),
+    active_facet_id: null,
+    completed_facet_ids: [],
+    missing_facet_ids: [],
+    last_clarified_facet_ids: [],
+    complete: false,
+  };
+  refreshDemoIdeaDevelopmentStatus(status);
+  return status;
+}
+
+function updateDemoIdeaDevelopmentStatus(status, message) {
+  const clarified = [];
+  const active = status.facets.find((facet) => facet.facet_id === status.active_facet_id);
+  if (active && isSubstantiveDemoFacetAnswer(active.facet_id, message)) {
+    active.status = "CLEAR";
+    active.evidence = message.trim();
+    active.source = "STUDENT";
+    clarified.push(active.facet_id);
+  }
+  const patterns = {
+    learning_objective: /学生|理解|掌握|解释|判断|学习目标/,
+    research_question: /关系|影响|比较|变化|差异|区别/,
+    theoretical_framework: /理论|公式|方程|定律|边界条件/,
+    hypothesis: /假设|预测|预计|增大|减小|变强|变弱|趋势/,
+    conceptual_structure: /场源|边界|导体|介质|负载|线圈|电荷|对象|对照/,
+  };
+  Object.entries(patterns).forEach(([facetId, pattern]) => {
+    const facet = status.facets.find((item) => item.facet_id === facetId);
+    if (facet && pattern.test(message)) {
+      if (facet.status !== "CLEAR") clarified.push(facetId);
+      facet.status = "CLEAR";
+      facet.evidence = message.trim();
+      facet.source = "STUDENT";
+    }
+  });
+  status.last_clarified_facet_ids = [...new Set(clarified)];
+  refreshDemoIdeaDevelopmentStatus(status);
+}
+
+function isSubstantiveDemoFacetAnswer(facetId, message) {
+  const text = message.trim();
+  if (text.length < 6 || /^(继续|下一步|好的|可以|没问题|不知道|不确定|没想好|暂时没有|还不清楚)[。！!？?]*$/.test(text)) {
+    return false;
+  }
+  const patterns = {
+    learning_objective: /理解|解释|判断|比较|计算|分析|掌握|能够|学会/,
+    research_question: /比较|影响|关系|差异|区别|变化|改变|如何|怎样|是否|随.+(?:变|增|减)|与|和|、/,
+    hypothesis: /预计|预期|预测|假设|会|将|增大|减小|增强|减弱|移动|趋于|因为|由于|所以/,
+    conceptual_structure: /包含|包括|组成|场源|激励|对象|边界|导体|介质|负载|线圈|电荷|对照|参照/,
+    course_mapping: /ECE329|课程|静电场|磁场|电磁波|传输线|边界条件/i,
+    theoretical_framework: /理论|公式|方程|定律|边界条件|高斯|法拉第|安培|麦克斯韦|反射系数/,
+    direction_outline: /研究|探究|观察|比较|现象|关系|变化/,
+  };
+  return Boolean(patterns[facetId]?.test(text));
+}
+
+function refreshDemoIdeaDevelopmentStatus(status) {
+  status.completed_facet_ids = status.facets
+    .filter((facet) => facet.status === "CLEAR")
+    .map((facet) => facet.facet_id);
+  status.missing_facet_ids = status.facets
+    .filter((facet) => facet.status !== "CLEAR")
+    .map((facet) => facet.facet_id);
+  const priority = [
+    "research_question",
+    "learning_objective",
+    "hypothesis",
+    "conceptual_structure",
+    "course_mapping",
+    "theoretical_framework",
+  ];
+  status.active_facet_id = priority.find((facetId) => status.missing_facet_ids.includes(facetId))
+    || status.missing_facet_ids[0]
+    || null;
+  status.complete = status.missing_facet_ids.length === 0;
+}
+
+function formatDemoIdeaChecklist(status) {
+  return [
+    "实验想法完整性检查",
+    ...status.facets.map((facet) => {
+      const marker = facet.status === "CLEAR" ? "✓" : (
+        facet.facet_id === status.active_facet_id ? "→" : "○"
+      );
+      const label = facet.status === "CLEAR" ? "已明确" : (
+        facet.facet_id === status.active_facet_id ? "当前优先补充" : "仍需明确"
+      );
+      return `${marker} ${facet.title}：${label}`;
+    }),
+  ].join("\n");
+}
+
+function demoIdeaDevelopmentTask(status) {
+  if (status.complete) {
+    return "必要内容已经齐全。请整体检查；若准确，可确认想法完善并进入变量与条件，若有遗漏请直接补充。";
+  }
+  const tasks = {
+    learning_objective: "你最希望学生完成这个实验后能够解释、判断或比较什么？请描述一种最重要的能力。",
+    research_question: "请把当前想法压缩成一个可回答的问题：你想比较什么条件，并观察哪种现象怎样改变？",
+    hypothesis: "根据当前理论依据，你预计关键条件改变时，观察现象会朝什么方向变化？请说明物理理由。",
+    conceptual_structure: "这个想法至少需要哪些对象、边界或激励条件？这里只描述组成部分，不需要写实现步骤。",
+  };
+  return tasks[status.active_facet_id] || "请补充当前实验想法中仍未明确的关键内容。";
+}
+
 function applyResponse(response, userMessage) {
   if (response.design_access_token) {
     sessionStorage.setItem(DESIGN_TOKEN_KEY, response.design_access_token);
@@ -1330,6 +1625,12 @@ function applyResponse(response, userMessage) {
 
   const evidence = extractEvidence(response);
   if (evidence.length) state.evidence = evidence;
+  if (response.stage_payload?.experiment_outline_seed) {
+    state.experimentOutlineSeed = response.stage_payload.experiment_outline_seed;
+  }
+  if (response.stage_payload?.idea_development_status) {
+    state.ideaDevelopmentStatus = response.stage_payload.idea_development_status;
+  }
   if (state.stageIndex === 0) {
     const inputCategory = response.stage_payload?.input_category;
     if (response.stage_payload?.brainstorm_phase) {
@@ -1356,8 +1657,13 @@ function applyResponse(response, userMessage) {
   state.quickActions = deriveQuickActions(response);
 
   const text = composeAssistantText(response);
+  const handledStageId = response.handled_stage || response.current_stage || stageId;
+  const handledIndex = STAGES.findIndex(([id]) => id === handledStageId);
+  const displayIndex = handledIndex >= 0 ? handledIndex : state.stageIndex;
   const tags = [
-    `阶段 ${Math.min(state.stageIndex + 1, STAGES.length)}`,
+    displayIndex < IDEA_DEVELOPMENT_STAGE_IDS.length
+      ? "阶段 1 · 想法完善"
+      : `阶段 ${workflowGroupIndex(displayIndex) + 1}`,
     ...(response.warnings?.length ? ["含提示"] : []),
   ];
   addMessage("assistant", text, tags, {
@@ -1393,10 +1699,14 @@ function deriveQuickActions(response) {
   if (state.mode === "EMVR_DIRECT") return ["继续完善下一阶段"];
 
   if (response.current_stage && response.handled_stage && response.current_stage !== response.handled_stage) {
-    return [`开始阶段${state.stageIndex + 1}：${stageTitle(state.stageIndex)}`];
+    return [`继续${currentWorkspaceTitle(state.stageIndex)}`];
   }
 
   if (state.stageIndex === 0) {
+    const development = response.stage_payload?.idea_development_status;
+    if (development) {
+      return development.complete ? ["确认想法完善并进入变量与条件"] : [];
+    }
     const alternatives = (response.stage_payload?.alternative_ideas || [])
       .map((item) => ({
         option_id: item.option_id || null,
@@ -1418,8 +1728,7 @@ function deriveQuickActions(response) {
     }
     if (phase === "BREADTH_EXPLORATION") return breadthActions;
     if (phase === "INTEREST_DESCRIPTION") return [];
-    const confirmation = "确认当前方向并进入下一阶段";
-    return response.stage_payload?.ready_for_next_stage ? [confirmation] : [];
+    return [];
   }
   if (state.stageIndex === STAGES.length - 1) {
     return String(state.pendingSummary || "").trim().length >= 20
@@ -1427,7 +1736,13 @@ function deriveQuickActions(response) {
       ? ["确认完成学生总结"]
       : [];
   }
-  return ["确认本阶段并进入下一阶段"];
+  return [guidedAdvanceLabel(state.stageIndex)];
+}
+
+function guidedAdvanceLabel(stageIndex) {
+  return stageIndex === 0
+    ? "确认想法完善并进入变量与条件"
+    : "确认本阶段并进入下一阶段";
 }
 
 function extractEvidence(response) {

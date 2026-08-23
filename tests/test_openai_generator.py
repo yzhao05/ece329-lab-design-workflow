@@ -656,6 +656,54 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                 "映射传输线驻波",
             )
 
+    def test_stage_two_displays_existing_mapping_without_direction_choice(self) -> None:
+        reference = KNOWLEDGE.concept_references("研究传输线驻波", limit=1)[0]
+        transport = FakeTransport(
+            valid_output(
+                assistant_message="现有实验大纲的主要课程支点是传输线驻波，辅助联系是边界反射。",
+                student_task="请检查这段课程映射是否准确；若有遗漏请指出。",
+                stage_payload_json=json.dumps(
+                    {
+                        "primary_course_anchor": reference,
+                        "supporting_course_anchors": [],
+                        "mapped_relationships": ["负载边界与驻波分布的关系"],
+                        "mapping_explanation": "解释已确定实验方向与课程知识的联系。",
+                        "course_references": [reference],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
+        output = OpenAIStageGenerator(transport=transport).generate(
+            guided_session(stage_index=1),
+            "展示当前想法的课程映射",
+        )
+
+        self.assertEqual(output.stage_payload["primary_course_anchor"], reference)
+        self.assertNotRegex(output.assistant_message, r"请选择|你希望把哪|选哪")
+
+    def test_stage_two_rejects_reselecting_a_course_direction(self) -> None:
+        reference = KNOWLEDGE.concept_references("研究传输线驻波", limit=1)[0]
+        transport = FakeTransport(
+            valid_output(
+                assistant_message="你希望把哪一个课程方向作为主要理论核心？",
+                stage_payload_json=json.dumps(
+                    {
+                        "primary_course_anchor": reference,
+                        "course_references": [reference],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(transport=transport).generate(
+                guided_session(stage_index=1),
+                "展示当前想法的课程映射",
+            )
+
     def test_stage_ten_rejects_fake_measured_data(self) -> None:
         transport = FakeTransport(
             valid_output(
