@@ -37,6 +37,12 @@ BREADTH_EXPLORATION不得把课程关系写成干瘪的编号选择题。应把�
 讲义明确标为未覆盖或仅略微覆盖的内容，不得主动推荐；学生明确提出时要标明讲义覆盖有限。
 任何一次回复只能处理current_stage，禁止生成其他阶段内容。
 GUIDED_DESIGN状态下以提问和反馈引导学生，student_task最多一个。
+GUIDED_DESIGN状态下的assistant_message、student_task和warnings直接面向正在对话的学生，
+必须使用“你”来称呼对方，不得使用“学生”作为对方的第三人称主语；只有在确实讨论一组实验参与者时才可使用“学生”。
+GUIDED_DESIGN状态下进入一个新的公开阶段时，第一轮只能邀请学生先描述自己对该阶段主题的想法，
+不得直接替学生选定变量、流程、图表关系、结果解释或局限，再要求学生同意。收到学生的实质描述后，
+回复要先准确承接并简要复述学生刚提出的关键内容，再在此基础上整理或追问一个缺口；不得用空泛的
+“已记录”“说明得更清楚”代替互动，也不得把助手自己的默认方案伪装成学生已经决定的内容。
 EMVR_DIRECT状态下直接完善当前阶段，并面向Unity VR模拟实验设计。
 阶段1在GUIDED_DESIGN下允许多轮brainstorm，未经学生确认不得收敛。
 阶段1必须维护context.stage_one_thread中的topic_anchor、current_focus、focus_history和brainstorm_phase。除非学生明确表示更换主题，否则“第三个”“对称性和方向”“先看边界形状”这类回答都是对当前实验想法的选择或细化，不是新实验；回复应先承接已经讨论的关系，再只推进一层。不得重复询问学生已经选定的上位方向，也不得把已经选定的细化内容重新列成多个入口。
@@ -163,9 +169,16 @@ def _stage_output_contract(
             "不得替学生定义VR场景，也不得加入舒适性或可访问性设计。"
         )
     if stage is Stage.VARIABLES_AND_CONDITIONS:
-        return "stage_payload_json必须包含variable_type或independent_variable，本轮只处理一种变量。"
+        return (
+            "stage_payload_json必须包含variable_type或independent_variable，本轮只处理一种变量。"
+            "必须从学生刚才对变量与条件的描述出发，先复述其判断，再帮助区分自变量、观察量或"
+            "控制条件中的一个缺口；不得先替学生锁定变量后只让学生确认。"
+        )
     if stage is Stage.CONCEPTUAL_PROCEDURE:
-        return "stage_payload_json必须包含procedure_unit或procedure_steps，本轮只处理一个流程单元。"
+        return (
+            "stage_payload_json必须包含procedure_unit或procedure_steps，本轮只处理一个流程单元。"
+            "先承接学生描述的流程逻辑，再追问一个尚未明确的环节，不得直接交付完整标准流程。"
+        )
     if stage is Stage.EXPECTED_DATA_VISUALIZATION:
         return (
             "visualization_json必须编码一个理论可视化对象，包含"
@@ -173,9 +186,15 @@ def _stage_output_contract(
             "坐标轴、series和明确的非实测免责声明；stage_payload_json仍只描述阶段10。"
         )
     if stage is Stage.RESULT_INTERPRETATION:
-        return "stage_payload_json必须包含result_case或if_prediction_supported，本轮只处理一种结果情形。"
+        return (
+            "stage_payload_json必须包含result_case或if_prediction_supported，本轮只处理一种结果情形。"
+            "先回应学生对结果的解释，再帮助检查一个物理依据或替代解释。"
+        )
     if stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
-        return "stage_payload_json必须包含review_dimension或limitations，本轮只处理一个反思角度。"
+        return (
+            "stage_payload_json必须包含review_dimension或limitations，本轮只处理一个反思角度。"
+            "先回应学生自己指出的价值或限制，再帮助补充一个尚未考虑的边界。"
+        )
     if (
         stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
         and session.interaction_state is InteractionState.GUIDED_DESIGN

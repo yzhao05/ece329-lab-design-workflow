@@ -9,7 +9,12 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any
 
-from .generator import StageGenerator
+from .generator import (
+    StageGenerator,
+    guided_stage_entry_output,
+    is_substantive_guided_stage_description,
+    prepend_guided_acknowledgement,
+)
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -50,6 +55,7 @@ from .stages import (
     STAGES_BY_ID,
     public_stage_catalog,
     stage_group_metadata,
+    stage_title,
 )
 from .store import SessionStore, store_from_environment
 
@@ -364,16 +370,45 @@ class WorkflowEngine:
                 request.selected_option_id,
             )
         definition = STAGES_BY_ID[handled_stage]
+        guided_stage_entry_turn = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and transitioned_from_stage is not None
+            and handled_stage is not Stage.IDEA_BRAINSTORMING
+        )
+        guided_stage_retry_turn = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and transitioned_from_stage is None
+            and handled_stage is not Stage.IDEA_BRAINSTORMING
+            and not is_substantive_guided_stage_description(message)
+            and not (
+                handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+                and request.complete_stage
+            )
+        )
         if dynamic_idea_turn:
             output = build_gap_output(session, message)
             session.turn_context = {}
             if stage_one_control_turn:
                 completion_error = None
+        elif guided_stage_entry_turn:
+            output = guided_stage_entry_output(session)
+            session.turn_context = {}
+        elif guided_stage_retry_turn:
+            output = guided_stage_entry_output(session, retry=True)
+            session.turn_context = {}
+            completion_error = None
         else:
             try:
                 output = self.generator.generate(session, message)
             finally:
                 session.turn_context = {}
+            if (
+                session.interaction_state is InteractionState.GUIDED_DESIGN
+                and handled_stage is not Stage.IDEA_BRAINSTORMING
+                and transitioned_from_stage is None
+                and is_substantive_guided_stage_description(message)
+            ):
+                prepend_guided_acknowledgement(output, handled_stage, message)
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(
@@ -451,8 +486,8 @@ class WorkflowEngine:
             "interaction_state": session.interaction_state.value,
             "handled_stage": handled_stage.value,
             "handled_stage_number": definition.number,
-            "handled_stage_title": definition.title_zh,
-            **stage_group_metadata(handled_stage),
+            "handled_stage_title": stage_title(handled_stage, session.interaction_state),
+            **stage_group_metadata(handled_stage, session.interaction_state),
             "transitioned_from_stage": (
                 transitioned_from_stage.value
                 if transitioned_from_stage is not None
@@ -842,8 +877,8 @@ class WorkflowEngine:
                 )
             ):
                 raise StageCompletionError(
-                    "引导状态下必须由学生分至少两次完成总结，每部分至少10个字符，"
-                    "再确认完成；系统不会代写最终方案。"
+                    "引导状态下需要由你分至少两次完成总结，每部分至少10个字符，"
+                    "再确认完成；课程助手不会代写最终方案。"
                 )
 
     @staticmethod

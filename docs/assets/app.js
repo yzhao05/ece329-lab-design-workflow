@@ -183,7 +183,7 @@ const FALLBACK_EVIDENCE = {
 const DEMO_STAGE_PROMPTS = [
   "继续把已经选定的方向扩展成实验大纲雏形。",
   "下面由课程助手展示这个实验想法与ECE329课程内容的主要对应关系。",
-  "你最希望学生通过这个实验获得哪一种能力？",
+  "你最希望通过这个实验获得哪一种能力？",
   "你希望实验主要改变哪一个因素？",
   "哪一个ECE329理论关系式最直接连接自变量和观察量？",
   "当主要自变量增大时，你预计因变量怎样变化？",
@@ -195,6 +195,15 @@ const DEMO_STAGE_PROMPTS = [
   "这个设计依赖的哪个理想化假设最可能限制结论？",
   "请先用两到三句话总结实验想研究什么，以及为什么值得研究。",
 ];
+
+const DEMO_GUIDED_STAGE_ENTRY_QUESTIONS = Object.freeze({
+  VARIABLES_AND_CONDITIONS: "先不急着列完整变量表。按照你的理解，这个实验中哪些量应该主动改变、哪些现象需要观察，又有哪些条件应该保持不变？可以先说你认为最重要的部分。",
+  CONCEPTUAL_PROCEDURE: "先不急着写标准流程。你认为在这个实验中，从建立比较基准到改变条件、观察现象和比较结果，需要经历哪些关键环节？请先按自己的思路描述。",
+  EXPECTED_DATA_VISUALIZATION: "在生成理论预测窗口前，你希望窗口重点呈现哪些量之间的关系，或者最希望从图中看清哪一种变化？",
+  RESULT_INTERPRETATION: "对于这个实验可能出现的结果，你认为哪些现象最需要解释，又会先从什么课程关系寻找原因？",
+  DESIGN_VALUE_AND_LIMITATIONS: "请先按你的判断描述：这个实验最有价值的学习收获是什么，又有哪些理想化条件、展示方式或设计边界可能限制结论？",
+  STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "请先用两到三句话写出这个实验想研究什么、为什么值得研究，以及它与ECE329课程内容有什么联系。",
+});
 
 const dom = {
   connectionBadge: document.querySelector("#connectionBadge"),
@@ -882,6 +891,7 @@ function demoBreadthTask() {
 
 function createDemoResponse(message) {
   const firstTurn = !state.designId;
+  let guidedStageEntered = false;
   const emvrIntent = detectDemoEmvrIntent(message);
   const directEvidence = findDemoKnowledge(message);
   const selectedPriorOption = !firstTurn && state.stageIndex === 0
@@ -989,11 +999,9 @@ function createDemoResponse(message) {
   ) {
     updateDemoIdeaDevelopmentStatus(state.ideaDevelopmentStatus, message);
     const status = state.ideaDevelopmentStatus;
-    const clarified = status.last_clarified_facet_ids
-      .map((facetId) => status.facets.find((facet) => facet.facet_id === facetId)?.title)
-      .filter(Boolean);
+    const clarified = status.last_clarified_facet_ids;
     return {
-      assistant_message: `${clarified.length ? `你刚才已经把“${clarified.join("、")}”说明得更清楚了。` : demoStudentFacingRetry(status)}\n\n${demoStudentFacingNextTurn(status)}`,
+      assistant_message: `${clarified.length ? demoIdeaAcknowledgement(message, clarified, status) : demoStudentFacingRetry(status)}\n\n${demoStudentFacingNextTurn(status)}`,
       student_task: null,
       current_stage: STAGES[0][0],
       handled_stage: STAGES[0][0],
@@ -1059,7 +1067,7 @@ function createDemoResponse(message) {
     state.quickActions = [];
     state.notes.push(`已选择方向：${selectedPriorOption.label}`);
     return {
-      assistant_message: `你已经把方向收到了“${selectedPriorOption.label}”。我先不继续列出新选项，因为同一个方向对不同学生可能意味着不同的兴趣。你可以描述让你注意到它的现象、最想解释的物理联系，或者目前仍感到疑惑的地方；不需要写成正式的实验问题。`,
+      assistant_message: `你已经把方向收到了“${selectedPriorOption.label}”。我先不继续列出新选项，因为同一个方向可能对应不同的兴趣。你可以描述让你注意到它的现象、最想解释的物理联系，或者目前仍感到疑惑的地方；不需要写成正式的实验问题。`,
       student_task: "请用自己的话描述：这个方向中什么现象或物理联系最吸引你，以及你最希望进一步弄清什么？",
       current_stage: STAGES[0][0],
       interaction_state: state.mode,
@@ -1180,10 +1188,30 @@ function createDemoResponse(message) {
     } else {
       state.stageIndex += 1;
     }
+    guidedStageEntered = state.mode === "GUIDED_DESIGN";
     state.notes.push(`已进入${currentWorkspaceTitle(state.stageIndex)}`);
   }
 
   const prompt = DEMO_STAGE_PROMPTS[state.stageIndex];
+  if (guidedStageEntered) {
+    const [stageId] = STAGES[state.stageIndex];
+    const preservedIdea = state.stageOneCorePhenomenon || state.pendingDirection || "前面已经完善的实验想法";
+    return {
+      assistant_message: `现在进入“${currentWorkspaceTitle(state.stageIndex)}”。前面确定的实验方向已经保留：${preservedIdea}。\n\n${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "请先用自己的话描述你对当前部分的想法；我会在这个基础上继续帮你完善。"}`,
+      student_task: null,
+      current_stage: stageId,
+      handled_stage: stageId,
+      interaction_state: state.mode,
+      stage_payload: {
+        guided_entry: true,
+        awaiting_student_description: true,
+        preserved_idea_summary: preservedIdea,
+      },
+      quick_actions: [],
+      warnings: [],
+      _runtime_source: "demo",
+    };
+  }
   if (state.mode === "GUIDED_DESIGN" && state.stageIndex === 0 && inputCategory !== "COURSE_CONTENT") {
     const courseEvidence = FALLBACK_EVIDENCE;
     const scenes = createDemoExplorationScenes(courseEvidence);
@@ -1596,7 +1624,7 @@ function demoIdeaDevelopmentTask(status) {
     return "必要内容已经齐全。请整体检查；若准确，可确认想法完善并进入变量与条件，若有遗漏请直接补充。";
   }
   const tasks = {
-    learning_objective: "你最希望学生完成这个实验后能够解释、判断或比较什么？请描述一种最重要的能力。",
+    learning_objective: "你希望自己完成这个实验后能够解释、判断或比较什么？请描述一种最重要的能力。",
     research_question: "请把当前想法压缩成一个可回答的问题：你想比较什么条件，并观察哪种现象怎样改变？",
     hypothesis: "根据当前理论依据，你预计关键条件改变时，观察现象会朝什么方向变化？请说明物理理由。",
     conceptual_structure: "这个想法至少需要哪些对象、边界或激励条件？这里只描述组成部分，不需要写实现步骤。",
@@ -1618,13 +1646,30 @@ function demoStudentFacingNextTurn(status, firstReview = false) {
 
 function demoStudentFacingRetry(status) {
   const feedback = {
-    learning_objective: "我理解了你补充的现象，但这里还需要更明确地说出学生完成实验后能够解释、判断或比较什么。",
+    learning_objective: "我理解了你补充的现象，但这里还需要更明确地说出你完成实验后能够解释、判断或比较什么。",
     research_question: "我保留了你刚才的补充，但研究问题还需要同时出现要比较的条件和准备观察的变化。",
     hypothesis: "你已经描述了可能看到的现象；要把它变成实验预期，还需要说明这种变化背后的物理理由。",
     conceptual_structure: "我理解了你的补充，但还需要说明这个想法中有哪些对象、边界或激励共同构成比较。",
   };
   return feedback[status.active_facet_id]
     || "我保留了你刚才的补充，但还需要把它与当前实验想法的物理关系说得更具体。";
+}
+
+function demoIdeaAcknowledgement(message, clarifiedFacetIds, status) {
+  const excerpt = String(message || "").trim().replace(/\s+/g, " ");
+  const titles = clarifiedFacetIds
+    .map((facetId) => status.facets.find((facet) => facet.facet_id === facetId)?.title)
+    .filter(Boolean);
+  if (titles.length === 1 && titles[0] === "学习目标") {
+    return `这个学习目标表达得很清楚：“${excerpt}”。`;
+  }
+  if (titles.length === 1 && titles[0] === "研究问题") {
+    return `这个研究问题已经很具体：“${excerpt}”。`;
+  }
+  if (titles.length === 1 && titles[0] === "假设与预期趋势") {
+    return `你的预测已经同时给出了现象和判断：“${excerpt}”。`;
+  }
+  return `你的回答很清楚：“${excerpt}”。这已经把${titles.map((title) => `“${title}”`).join("、")}说明得更具体。`;
 }
 
 function applyResponse(response, userMessage) {
@@ -1689,7 +1734,7 @@ function applyResponse(response, userMessage) {
   });
 
   if (!state.notes.some((note) => note.includes(userMessage.slice(0, 40)))) {
-    state.notes.push(`学生输入：${userMessage.slice(0, 90)}`);
+    state.notes.push(`你的输入：${userMessage.slice(0, 90)}`);
   }
 
   if (response.visualization) {
@@ -1720,6 +1765,7 @@ function deriveQuickActions(response) {
   if (response.quick_actions) return response.quick_actions;
   if (response.workflow_status === "complete" || response.status === "complete") return [];
   if (state.mode === "EMVR_DIRECT") return ["继续完善下一阶段"];
+  if (response.stage_payload?.awaiting_student_description === true) return [];
 
   if (response.current_stage && response.handled_stage && response.current_stage !== response.handled_stage) {
     return [`继续${currentWorkspaceTitle(state.stageIndex)}`];
@@ -1756,7 +1802,7 @@ function deriveQuickActions(response) {
   if (state.stageIndex === STAGES.length - 1) {
     return String(state.pendingSummary || "").trim().length >= 20
       && (state.summarySections || []).filter((section) => String(section).trim().length >= 10).length >= 2
-      ? ["确认完成学生总结"]
+      ? ["确认完成总结"]
       : [];
   }
   return [guidedAdvanceLabel(state.stageIndex)];

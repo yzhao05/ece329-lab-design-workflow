@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .models import Stage
+from .models import InteractionState, Stage
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,21 +155,45 @@ STAGE_DEFINITIONS: tuple[StageDefinition, ...] = (
 
 STAGES_BY_ID = {definition.stage: definition for definition in STAGE_DEFINITIONS}
 
+_GUIDED_STAGE_TITLES: dict[Stage, str] = {
+    Stage.CONCEPTUAL_OR_VR_SETUP: "概念实验结构",
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "学生总结",
+}
 
-def public_stage_catalog() -> list[dict[str, object]]:
+_EMVR_STAGE_TITLES: dict[Stage, str] = {
+    Stage.CONCEPTUAL_OR_VR_SETUP: "Unity VR模拟实验设计",
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR方案汇总",
+}
+
+
+def stage_title(
+    stage: Stage,
+    interaction_state: InteractionState = InteractionState.GUIDED_DESIGN,
+) -> str:
+    if interaction_state is InteractionState.EMVR_DIRECT:
+        return _EMVR_STAGE_TITLES.get(stage, STAGES_BY_ID[stage].title_zh)
+    return _GUIDED_STAGE_TITLES.get(stage, STAGES_BY_ID[stage].title_zh)
+
+
+def public_stage_catalog(
+    interaction_state: InteractionState = InteractionState.GUIDED_DESIGN,
+) -> list[dict[str, object]]:
     return [
         {
             "number": item.number,
             "id": item.stage.value,
-            "title": item.title_zh,
+            "title": stage_title(item.stage, interaction_state),
             "goal": item.goal_zh,
-            **stage_group_metadata(item.stage),
+            **stage_group_metadata(item.stage, interaction_state),
         }
         for item in STAGE_DEFINITIONS
     ]
 
 
-def stage_group_metadata(stage: Stage) -> dict[str, object]:
+def stage_group_metadata(
+    stage: Stage,
+    interaction_state: InteractionState = InteractionState.GUIDED_DESIGN,
+) -> dict[str, object]:
     definition = STAGES_BY_ID[stage]
     if stage in IDEA_DEVELOPMENT_STAGES:
         facet = IDEA_DEVELOPMENT_FACETS[IDEA_DEVELOPMENT_STAGES.index(stage)]
@@ -186,7 +210,7 @@ def stage_group_metadata(stage: Stage) -> dict[str, object]:
     return {
         "workflow_stage_number": definition.number - len(IDEA_DEVELOPMENT_STAGES) + 1,
         "workflow_stage_count": PUBLIC_STAGE_COUNT,
-        "workflow_stage_title": definition.title_zh,
+        "workflow_stage_title": stage_title(stage, interaction_state),
         "substep_number": None,
         "substep_count": None,
         "substep_title": None,

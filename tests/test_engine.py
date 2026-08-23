@@ -24,7 +24,7 @@ from ece329_workflow.guardrails import (
 )
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import InteractionState, Stage
-from ece329_workflow.stages import public_stage_catalog
+from ece329_workflow.stages import public_stage_catalog, stage_title
 
 
 class WorkflowEngineTests(unittest.TestCase):
@@ -188,6 +188,22 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(mapped["workflow_stage_number"], 2)
         self.assertIsNone(mapped["substep_number"])
         self.assertNotRegex(mapped["assistant_message"], r"请选择|你希望把哪|选哪")
+        self.assertTrue(mapped["stage_payload"]["awaiting_student_description"])
+        self.assertIn("哪些量应该主动改变", mapped["assistant_message"])
+        self.assertNotIn("先把自变量定为", mapped["assistant_message"])
+
+        reasked = self.engine.process_turn(mapped["design_id"], {"message": "同意"})
+        self.assertEqual(reasked["current_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
+        self.assertTrue(reasked["stage_payload"]["awaiting_student_description"])
+        self.assertIn("先听听你", reasked["assistant_message"])
+        self.assertNotIn("锁定", reasked["assistant_message"])
+        reasked_again = self.engine.process_turn(
+            mapped["design_id"],
+            {"message": "我觉得可以"},
+        )
+        self.assertTrue(
+            reasked_again["stage_payload"]["awaiting_student_description"]
+        )
 
         second = self.engine.create_design("我想研究不同负载下的传输线驻波")
         selected = second["stage_payload"]["alternative_ideas"][0]
@@ -304,6 +320,30 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(catalog[0]["workflow_stage_title"], "实验想法完善")
         self.assertEqual(catalog[7]["workflow_stage_number"], 2)
         self.assertEqual(catalog[-1]["workflow_stage_number"], 7)
+
+    def test_stage_titles_are_mode_specific(self) -> None:
+        self.assertEqual(
+            stage_title(Stage.CONCEPTUAL_OR_VR_SETUP, InteractionState.GUIDED_DESIGN),
+            "概念实验结构",
+        )
+        self.assertEqual(
+            stage_title(
+                Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+                InteractionState.GUIDED_DESIGN,
+            ),
+            "学生总结",
+        )
+        self.assertEqual(
+            stage_title(Stage.CONCEPTUAL_OR_VR_SETUP, InteractionState.EMVR_DIRECT),
+            "Unity VR模拟实验设计",
+        )
+        self.assertEqual(
+            stage_title(
+                Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+                InteractionState.EMVR_DIRECT,
+            ),
+            "EMVR方案汇总",
+        )
 
     def test_emvr_trigger_is_explicit_and_auto_advances_one_stage(self) -> None:
         result = self.engine.create_design("请把电磁屏蔽实验放入EMVR工作流")
@@ -444,7 +484,32 @@ class WorkflowEngineTests(unittest.TestCase):
                 },
             },
         )
+        guided_answers = {
+            Stage.VARIABLES_AND_CONDITIONS.value: (
+                "我认为主动改变负载条件，观察驻波峰谷位置和幅度，并保持线路长度与激励不变。"
+            ),
+            Stage.CONCEPTUAL_PROCEDURE.value: (
+                "先建立匹配负载基准，再逐次改变负载，观察并记录驻波分布，最后比较各组结果。"
+            ),
+            Stage.EXPECTED_DATA_VISUALIZATION.value: (
+                "我希望图中展示负载条件与驻波幅度的关系，并标出峰谷位置的变化。"
+            ),
+            Stage.RESULT_INTERPRETATION.value: (
+                "我会先根据反射系数和入射波、反射波叠加解释峰谷变化。"
+            ),
+            Stage.DESIGN_VALUE_AND_LIMITATIONS.value: (
+                "它能帮助理解不可见的驻波分布，但理想无损线路会限制结论。"
+            ),
+        }
         while guided["current_stage"] != Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value:
+            self.assertTrue(guided["stage_payload"]["awaiting_student_description"])
+            if guided["current_stage"] == Stage.CONCEPTUAL_PROCEDURE.value:
+                self.assertIn("你认为在这个实验中", guided["assistant_message"])
+                self.assertNotIn("你认为学生", guided["assistant_message"])
+            guided = self.engine.process_turn(
+                guided["design_id"],
+                {"message": guided_answers[guided["current_stage"]]},
+            )
             guided = self.engine.process_turn(
                 guided["design_id"],
                 {"message": "确认本阶段并进入下一阶段", "complete_stage": True},
@@ -484,11 +549,17 @@ class WorkflowEngineTests(unittest.TestCase):
         session.current_stage_index = 12
         self.engine.store.save(session)
 
-        result = self.engine.process_turn(first["design_id"], {"message": "开始总结"})
+        entry = self.engine.process_turn(first["design_id"], {"message": "开始总结"})
+        self.assertTrue(entry["stage_payload"]["awaiting_student_description"])
+        self.assertNotIn("最终方案", entry["assistant_message"])
+
+        summary = "我想研究偏振器角度如何改变透射场，并用ECE329中的偏振关系解释观察结果。"
+        result = self.engine.process_turn(first["design_id"], {"message": summary})
 
         self.assertEqual(result["handled_stage"], Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value)
         self.assertFalse(result["stage_payload"]["final_proposal_generated"])
         self.assertIn("你自己完成总结", result["assistant_message"])
+        self.assertIn(summary, result["assistant_message"])
 
     def test_guided_final_stage_requires_student_written_summary(self) -> None:
         first = self.engine.create_design("研究偏振器角度")
@@ -533,6 +604,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("任何一次回复只能处理current_stage", packet["system"])
         self.assertIn("Lecture Notes定义课程范围", packet["system"])
         self.assertIn("不把Lecture Notes当成唯一参考答案", packet["system"])
+        self.assertIn("第一轮只能邀请学生先描述", packet["system"])
+        self.assertIn("先准确承接并简要复述学生", packet["system"])
         self.assertIn("alternative_ideas", packet["context"]["stage_output_contract"])
         self.assertIn("原样复制", packet["context"]["stage_output_contract"])
         self.assertEqual(
@@ -656,8 +729,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn("还是", combined["student_task"])
 
         description = (
-            "更想看两个源靠近时电场线由各自原来的形状逐渐变成"
-            "相互影响后的形状"
+            "我想比较两个带同种电荷的源与两个带异种电荷的源逐渐靠近时，"
+            "电场线的形状、幅度或空间分布的变化"
         )
         ready = self.engine.process_turn(
             first["design_id"],
@@ -694,6 +767,23 @@ class WorkflowEngineTests(unittest.TestCase):
             ready["stage_payload"]["idea_development_status"]["mode"],
             "DYNAMIC_COMPLETENESS",
         )
+        self.assertEqual(
+            ready["stage_payload"]["idea_development_status"]["facets_by_id"]
+            ["research_question"]["status"],
+            "CLEAR",
+        )
+        self.assertEqual(
+            ready["stage_payload"]["idea_development_status"]["active_facet_id"],
+            "learning_objective",
+        )
+
+        learning_text = "希望学生完成后能分辨不同情况下点状源之间的电场线分布并解释成因"
+        learning = self.engine.process_turn(
+            first["design_id"],
+            {"message": learning_text},
+        )
+        self.assertIn("学习目标表达得很清楚", learning["assistant_message"])
+        self.assertIn(learning_text, learning["assistant_message"])
 
         correction = self.engine.process_turn(
             first["design_id"],

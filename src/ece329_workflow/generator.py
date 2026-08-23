@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 from .guardrails import (
@@ -12,6 +13,7 @@ from .guardrails import (
     classify_stage_one_input,
     course_example_options,
     is_no_direction_request,
+    is_progression_intent,
     is_stage_one_control_message,
 )
 from .knowledge_base import KNOWLEDGE
@@ -20,6 +22,126 @@ from .models import DesignSession, InteractionState, Stage, StepOutput
 
 class StageGenerator(Protocol):
     def generate(self, session: DesignSession, user_message: str) -> StepOutput: ...
+
+
+_GUIDED_STAGE_ENTRY_QUESTIONS: dict[Stage, str] = {
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "先不急着列完整变量表。按照你的理解，这个实验中哪些量应该主动改变、"
+        "哪些现象需要观察，又有哪些条件应该保持不变？可以先说你认为最重要的部分。"
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: (
+        "先不急着写标准流程。你认为在这个实验中，从建立比较基准到改变条件、观察现象和比较结果，"
+        "需要经历哪些关键环节？请先按自己的思路描述。"
+    ),
+    Stage.EXPECTED_DATA_VISUALIZATION: (
+        "在生成理论预测窗口前，你希望窗口重点呈现哪些量之间的关系，或者最希望从图中"
+        "看清哪一种变化？请先描述你期待看到的内容。"
+    ),
+    Stage.RESULT_INTERPRETATION: (
+        "先从你的物理判断出发：对于这个实验可能出现的结果，你认为哪些现象最需要解释，"
+        "以及你会先从什么课程关系寻找原因？"
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+        "请先按你的判断描述：这个实验最有价值的学习收获是什么，又有哪些理想化条件、"
+        "展示方式或设计边界可能限制结论？"
+    ),
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: (
+        "最后的方案由你自己总结。请先用两到三句话写出这个实验想研究什么、为什么值得研究，"
+        "以及它与ECE329课程内容有什么联系。"
+    ),
+}
+
+_GUIDED_STAGE_ACKNOWLEDGEMENT: dict[Stage, str] = {
+    Stage.VARIABLES_AND_CONDITIONS: "你已经提出了自己对变量与条件的判断",
+    Stage.CONCEPTUAL_PROCEDURE: "你描述的实验流程思路是",
+    Stage.EXPECTED_DATA_VISUALIZATION: "你希望理论预测窗口重点呈现的是",
+    Stage.RESULT_INTERPRETATION: "你对结果解释的初步判断是",
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: "你指出的设计价值或限制是",
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "你这一部分的总结是",
+}
+
+
+def _student_idea_summary(session: DesignSession) -> str:
+    idea = session.design_context.get("idea", {})
+    if isinstance(idea, dict):
+        for key in ("direction_summary", "current_focus", "main_direction", "core_phenomenon"):
+            value = str(idea.get(key) or "").strip()
+            if value:
+                return value[-180:]
+    outline = session.design_context.get("experiment_outline_seed", {})
+    if isinstance(outline, dict):
+        value = str(outline.get("core_phenomenon") or "").strip()
+        if value:
+            return value[-180:]
+    return "前面已经完善的实验想法"
+
+
+def guided_stage_entry_output(
+    session: DesignSession,
+    *,
+    retry: bool = False,
+) -> StepOutput:
+    """Ask for the student's own view before proposing guided-stage content."""
+
+    question = _GUIDED_STAGE_ENTRY_QUESTIONS.get(
+        session.current_stage,
+        "请先用自己的话描述你对当前部分的想法；我会在这个基础上继续帮你完善。",
+    )
+    title = {
+        Stage.VARIABLES_AND_CONDITIONS: "变量与条件",
+        Stage.CONCEPTUAL_PROCEDURE: "概念实验流程",
+        Stage.EXPECTED_DATA_VISUALIZATION: "预期数据可视化",
+        Stage.RESULT_INTERPRETATION: "可能结果及解释",
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: "设计价值与局限",
+        Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "学生总结",
+    }.get(session.current_stage, "当前阶段")
+    opening = (
+        f"我还需要先听听你对“{title}”的想法，才能沿着你的设计继续完善。"
+        if retry
+        else f"现在进入“{title}”。前面确定的实验方向已经保留：{_student_idea_summary(session)}。"
+    )
+    return StepOutput(
+        assistant_message=f"{opening}\n\n{question}",
+        stage_payload={
+            "guided_entry": True,
+            "awaiting_student_description": True,
+            "preserved_idea_summary": _student_idea_summary(session),
+        },
+        student_task=None,
+    )
+
+
+def is_substantive_guided_stage_description(text: str) -> bool:
+    normalized = text.strip()
+    if len(normalized) < 6 or is_progression_intent(
+        normalized,
+        allow_confirmation=True,
+    ):
+        return False
+    return re.fullmatch(
+        r"(?:(?:我)?(?:觉得|认为)|我)?(?:都)?"
+        r"(?:好的?|可以(?:了)?|行|没问题|同意|确认|接受|继续|下一步|进入下一阶段)"
+        r"(?:这样|这个|上述|以上)?(?:安排|设置|方案|内容)?(?:了|吧)?[。！!？?]*",
+        normalized,
+    ) is None
+
+
+def prepend_guided_acknowledgement(
+    output: StepOutput,
+    stage: Stage,
+    student_message: str,
+) -> StepOutput:
+    """Make guided replies visibly respond to the student's own reasoning."""
+
+    excerpt = " ".join(student_message.split())
+    if len(excerpt) > 150:
+        excerpt = f"{excerpt[:147]}……"
+    lead = _GUIDED_STAGE_ACKNOWLEDGEMENT.get(stage, "我理解你这一轮的想法是")
+    acknowledgement = f"{lead}：“{excerpt}”。"
+    if excerpt and excerpt not in output.assistant_message:
+        output.assistant_message = f"{acknowledgement}\n\n{output.assistant_message}"
+    output.stage_payload["student_input_acknowledged"] = True
+    return output
 
 
 def _idea(session: DesignSession, user_message: str) -> str:
@@ -477,7 +599,7 @@ class RuleBasedStageGenerator:
                 )
                 introduction = (
                     f"你已经把方向收到了“{selected_direction}”。我先不继续给你新的"
-                    "选项，因为同一个方向对不同学生可能意味着完全不同的兴趣。你可以"
+                    "选项，因为同一个方向可能对应完全不同的兴趣。你可以"
                     "描述让你注意到它的现象、你觉得最值得解释的联系，或者目前仍感到"
                     "疑惑的地方；不需要写成正式的实验问题。"
                 )
@@ -621,7 +743,7 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="先确定学习目标的重点类型，不同时写完整目标列表。",
                 stage_payload={"objective_types": ["概念理解", "定量计算", "结果解释"]},
-                student_task="你最希望学生通过这个实验获得哪一种能力？",
+                student_task="你最希望通过这个实验获得哪一种能力？",
             )
         if stage is Stage.RESEARCH_QUESTION:
             return StepOutput(
@@ -654,15 +776,15 @@ class RuleBasedStageGenerator:
             )
         if stage is Stage.VARIABLES_AND_CONDITIONS:
             return StepOutput(
-                assistant_message="变量设计从自变量开始，本轮不同时填写其他变量。",
+                assistant_message="我会先根据你提出的内容整理变量角色，再只追问其中最需要补充的一点。",
                 stage_payload={"variable_type": "independent_variable"},
-                student_task="请写出你准备主动改变的一个量，并说明它的合理范围。",
+                student_task="你刚才提到的量中，哪一个是主动改变的，它准备怎样变化？",
             )
         if stage is Stage.CONCEPTUAL_PROCEDURE:
             return StepOutput(
-                assistant_message="流程设计先建立比较所需的基准条件。",
+                assistant_message="我会沿着你描述的顺序整理比较逻辑，并先补清一个关键环节。",
                 stage_payload={"procedure_unit": "reference_condition"},
-                student_task="在改变主要变量前，你会先建立什么基准状态？",
+                student_task="在你描述的流程中，哪一步用来建立后续比较所需的基准？",
             )
         if stage is Stage.EXPECTED_DATA_VISUALIZATION:
             visualization = _visualization(idea, emvr=False)
@@ -674,13 +796,13 @@ class RuleBasedStageGenerator:
             )
         if stage is Stage.RESULT_INTERPRETATION:
             return StepOutput(
-                assistant_message="本轮只考虑一种与预测不一致的情况。",
+                assistant_message="我会先保留你的解释思路，再围绕一种可能结果继续追问。",
                 stage_payload={"result_case": "no_clear_change"},
                 student_task="如果因变量没有随自变量明显变化，你认为最值得先检查哪一个理论假设？",
             )
         if stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
             return StepOutput(
-                assistant_message="先从理论局限这一个角度反思设计。",
+                assistant_message="我会从你指出的价值与限制出发，先把一个最关键的边界说明清楚。",
                 stage_payload={"review_dimension": "model_limitation"},
                 student_task="你的设计依赖的哪个理想化假设最可能限制结论？",
             )

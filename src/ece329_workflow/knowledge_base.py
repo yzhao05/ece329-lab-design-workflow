@@ -103,6 +103,14 @@ class LectureKnowledgeBase:
                 rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
                 text,
             ) is not None
+        counted_entity = re.fullmatch(r"(两个|两)([\u3400-\u9fff]{1,4})", term)
+        if counted_entity:
+            quantity, entity = counted_entity.groups()
+            if re.search(
+                rf"{re.escape(quantity)}[\u3400-\u9fff]{{0,12}}{re.escape(entity)}",
+                text,
+            ):
+                return True
         return term in text
 
     def match_supplemental_concepts(

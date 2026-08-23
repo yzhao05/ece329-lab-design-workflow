@@ -52,7 +52,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("确认想法完善并进入变量与条件", self.app_js)
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(
-            self.index_html.count("v=20260823-semantic-stage-advance"),
+            self.index_html.count("v=20260823-direct-student-address"),
             3,
         )
 
@@ -72,6 +72,19 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("const completedIdeaConfirmation", self.app_js)
         self.assertIn("想法|方向|大纲", self.app_js)
         self.assertIn("变量与条件|下一阶段", self.app_js)
+
+    def test_guided_stage_entry_waits_for_student_description(self) -> None:
+        self.assertIn("DEMO_GUIDED_STAGE_ENTRY_QUESTIONS", self.app_js)
+        self.assertIn("awaiting_student_description: true", self.app_js)
+        self.assertIn("哪些量应该主动改变", self.app_js)
+        self.assertIn("你认为在这个实验中", self.app_js)
+        self.assertNotIn("你认为学生从建立比较基准", self.app_js)
+        self.assertNotIn("你最希望学生", self.app_js)
+        self.assertIn(
+            "response.stage_payload?.awaiting_student_description === true",
+            self.app_js,
+        )
+        self.assertIn("function demoIdeaAcknowledgement", self.app_js)
 
     def test_quick_actions_send_stable_option_id(self) -> None:
         self.assertIn("function normalizeQuickAction(action)", self.app_js)

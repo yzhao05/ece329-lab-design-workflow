@@ -14,7 +14,7 @@ MISSING = "MISSING"
 
 _FACET_QUESTION: dict[str, str] = {
     "learning_objective": (
-        "为了让这个实验的教学目的清楚，你最希望学生完成后能够解释、判断或比较什么？"
+        "为了让这个实验的学习目标清楚，你希望自己完成实验后能够解释、判断或比较什么？"
         "请用自己的话描述一种最重要的能力。"
     ),
     "research_question": (
@@ -217,7 +217,7 @@ def build_gap_output(
         if facet_id in status["facets_by_id"]
     ]
     acknowledgement = (
-        f"你刚才已经把{'、'.join(f'“{title}”' for title in clarified_titles)}说明得更清楚了。"
+        _student_facing_acknowledgement(acknowledged_message, clarified_titles)
         if clarified_titles
         else _student_facing_retry(status, acknowledged_message)
     )
@@ -325,7 +325,10 @@ def _infer_facets(
     for facet_id, patterns in _FACET_PATTERNS.items():
         if facet_id not in facets:
             continue
-        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+        matched = any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+        if facet_id == "research_question" and _contains_research_relation(text):
+            matched = True
+        if matched:
             if facets[facet_id].get("status") != CLEAR:
                 clarified.append(facet_id)
             facets[facet_id].update(
@@ -336,6 +339,36 @@ def _infer_facets(
                 }
             )
     return clarified
+
+
+def _contains_research_relation(text: str) -> bool:
+    """Detect a condition-versus-observation relation without requiring question form."""
+
+    has_comparison_or_change = bool(
+        re.search(
+            r"比较|对比|分别|不同(?:条件|情况|情形|材料|边界|负载|频率)|"
+            r"同种|异种|同号|异号|随着|逐渐|改变|调节|靠近|远离",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    has_observable = bool(
+        re.search(
+            r"观察|测量|记录|电场|磁场|场线|通量|电势|电压|电流|阻抗|反射|"
+            r"驻波|偏振|衰减|功率|能量|响应|分布|形状|幅度|方向|位置",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    has_relationship = bool(
+        re.search(
+            r"变化|改变|差异|区别|影响|关系|分布|形状|幅度|方向|增强|减弱|"
+            r"增大|减小|移动|弯曲|偏转|抵消|叠加",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    return has_comparison_or_change and has_observable and has_relationship
 
 
 def _is_substantive_facet_answer(facet_id: str, text: str) -> bool:
@@ -439,7 +472,7 @@ def _student_facing_retry(status: dict[str, Any], message: str) -> str:
     active = str(status.get("active_facet_id") or "")
     feedback = {
         "learning_objective": (
-            "我理解了你补充的现象，但这里还需要更明确地说出学生完成实验后能够解释、"
+            "我理解了你补充的现象，但这里还需要更明确地说出你完成实验后能够解释、"
             "判断或比较什么。"
         ),
         "research_question": (
@@ -456,6 +489,25 @@ def _student_facing_retry(status: dict[str, Any], message: str) -> str:
         active,
         "我保留了你刚才的补充，但还需要把它与当前实验想法的物理关系说得更具体。",
     )
+
+
+def _student_facing_acknowledgement(
+    message: str,
+    clarified_titles: list[str],
+) -> str:
+    excerpt = " ".join(message.split())
+    if len(excerpt) > 150:
+        excerpt = f"{excerpt[:147]}……"
+    title_text = "、".join(f"“{title}”" for title in clarified_titles)
+    if clarified_titles == ["学习目标"]:
+        return f"这个学习目标表达得很清楚：“{excerpt}”。"
+    if clarified_titles == ["研究问题"]:
+        return f"这个研究问题已经很具体：“{excerpt}”。"
+    if clarified_titles == ["假设与预期趋势"]:
+        return f"你的预测已经同时给出了现象和判断：“{excerpt}”。"
+    if clarified_titles == ["概念实验结构"]:
+        return f"你已经把实验中的主要组成说得很具体：“{excerpt}”。"
+    return f"你的回答很清楚：“{excerpt}”。这已经把{title_text}说明得更具体。"
 
 
 def _comparison_update_summary(session: DesignSession, message: str) -> str:
