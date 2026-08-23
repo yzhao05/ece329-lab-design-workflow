@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Protocol
 
+from .dialogue_state import build_carried_context
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -13,8 +14,8 @@ from .guardrails import (
     classify_stage_one_input,
     course_example_options,
     is_no_direction_request,
-    is_progression_intent,
     is_stage_one_control_message,
+    shown_exploration_option_ids,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput
@@ -22,6 +23,11 @@ from .models import DesignSession, InteractionState, Stage, StepOutput
 
 class StageGenerator(Protocol):
     def generate(self, session: DesignSession, user_message: str) -> StepOutput: ...
+
+
+NO_DIRECTION_ACKNOWLEDGEMENT = (
+    "好的，那我来帮助你拓展思路。暂时没有具体方向也没关系。"
+)
 
 
 _GUIDED_STAGE_ENTRY_QUESTIONS: dict[Stage, str] = {
@@ -60,6 +66,35 @@ _GUIDED_STAGE_ACKNOWLEDGEMENT: dict[Stage, str] = {
     Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "你这一部分的总结是",
 }
 
+_GUIDED_STAGE_REFERENCE_STEPS: dict[Stage, tuple[str, ...]] = {
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "把前面确定的变化主轴列为主动改变的量",
+        "把准备观察或比较的现象列为观察量",
+        "把其余会影响比较的源、几何、材料和观察方式列为控制条件",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: (
+        "先建立一组可重复的基准条件",
+        "按照前面确定的变化主轴逐步改变条件",
+        "每次用相同方式观察并记录目标现象",
+        "完成各组基础情形后并排比较，再联系ECE329课程关系解释",
+    ),
+    Stage.EXPECTED_DATA_VISUALIZATION: (
+        "用前面确定的主动改变量作为横轴或交互控制量",
+        "把最重要的观察量作为曲线、场图或通量显示",
+        "把已经保留的基础情形并列呈现",
+        "明确标注这是理论预测而非实测数据",
+    ),
+    Stage.RESULT_INTERPRETATION: (
+        "先讨论结果符合预期时支持哪条物理解释",
+        "再讨论偏离预期时应检查的条件或假设",
+        "最后区分模型局限、展示误差与真正的物理差异",
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+        "说明这个设计帮助理解的核心课程关系",
+        "指出它依赖的理想化条件",
+        "区分概念展示能说明什么，以及不能据此推出什么",
+    ),
+}
 
 def _student_idea_summary(session: DesignSession) -> str:
     idea = session.design_context.get("idea", {})
@@ -76,12 +111,89 @@ def _student_idea_summary(session: DesignSession) -> str:
     return "前面已经完善的实验想法"
 
 
+def _prior_student_context(session: DesignSession, limit: int = 2) -> list[str]:
+    decisions = session.design_context.get("student_decisions", {})
+    excerpts: list[str] = []
+    if isinstance(decisions, dict):
+        ordered: list[dict[str, Any]] = []
+        for stage_items in decisions.values():
+            if isinstance(stage_items, list):
+                ordered.extend(item for item in stage_items if isinstance(item, dict))
+        ordered.sort(key=lambda item: int(item.get("before_revision", -1)))
+        for item in reversed(ordered):
+            message = str(item.get("message") or "").strip()
+            if message:
+                excerpts.append(message[-180:])
+            if len(excerpts) >= limit:
+                break
+    if not excerpts:
+        for item in reversed(session.history):
+            message = str(item.get("user_message") or "").strip()
+            if message:
+                excerpts.append(message[-180:])
+            if len(excerpts) >= limit:
+                break
+    return list(reversed(excerpts))
+
+
+def _compact_context_items(value: Any, limit: int = 3) -> str:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                preferred = (
+                    item.get("cases")
+                    or item.get("recommended_cases")
+                    or item.get("name")
+                    or item.get("label")
+                )
+                if isinstance(preferred, list):
+                    items.extend(str(child) for child in preferred)
+                elif preferred is not None:
+                    items.append(str(preferred))
+            else:
+                items.append(str(item))
+    else:
+        items = []
+    cleaned = list(dict.fromkeys(item.strip() for item in items if item.strip()))
+    return "、".join(cleaned[:limit])
+
+
+def _contextual_reference_steps(
+    stage: Stage,
+    carried: dict[str, Any],
+) -> list[str]:
+    """Turn confirmed earlier decisions into a stage-specific reference draft."""
+
+    variable = _compact_context_items(carried.get("independent_variable"))
+    observations = _compact_context_items(carried.get("observations"))
+    controls = _compact_context_items(carried.get("controlled_conditions"))
+    comparisons = _compact_context_items(carried.get("baseline_comparisons"))
+    if stage is Stage.VARIABLES_AND_CONDITIONS:
+        return [
+            f"把{variable or '前面确定的变化主轴'}整理为主动改变的量",
+            f"把{observations or '准备观察或比较的现象'}整理为观察量",
+            f"把{controls or '其余会影响比较的条件'}整理为控制条件",
+        ]
+    if stage is Stage.CONCEPTUAL_PROCEDURE:
+        return [
+            f"建立基准状态{f'（{controls}保持一致）' if controls else ''}",
+            f"逐步改变{variable or '前面确定的变化主轴'}",
+            f"用一致方式记录{observations or '目标现象'}",
+            f"完成{comparisons or '已经保留的基础情形'}并排比较",
+            "结合ECE329课上所学关系解释差异",
+        ]
+    return list(_GUIDED_STAGE_REFERENCE_STEPS.get(stage, ()))
+
+
 def guided_stage_entry_output(
     session: DesignSession,
     *,
     retry: bool = False,
 ) -> StepOutput:
-    """Ask for the student's own view before proposing guided-stage content."""
+    """Offer a contextual scaffold, then invite the student to revise it."""
 
     question = _GUIDED_STAGE_ENTRY_QUESTIONS.get(
         session.current_stage,
@@ -95,35 +207,48 @@ def guided_stage_entry_output(
         Stage.DESIGN_VALUE_AND_LIMITATIONS: "设计价值与局限",
         Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "学生总结",
     }.get(session.current_stage, "当前阶段")
+    prior_context = _prior_student_context(session)
+    carried = build_carried_context(session)
+    reference_steps = _contextual_reference_steps(
+        session.current_stage,
+        carried,
+    )
     opening = (
-        f"我还需要先听听你对“{title}”的想法，才能沿着你的设计继续完善。"
+        f"我们仍在整理“{title}”，前面已经确定的内容不会丢失。"
         if retry
         else f"现在进入“{title}”。前面确定的实验方向已经保留：{_student_idea_summary(session)}。"
     )
+    if reference_steps:
+        numbered = "\n".join(
+            f"{index}. {step}" for index, step in enumerate(reference_steps, start=1)
+        )
+        basis_text = (
+            f"前面已经明确的设计依据包括：{'；'.join(prior_context)}。\n"
+            if prior_context
+            else ""
+        )
+        reference_text = (
+            "根据前面已经明确的信息，可以先用下面这套可修改的结构作为参考，"
+            "它不是需要照抄的标准答案：\n"
+            f"{basis_text}"
+            f"{numbered}\n\n"
+            "你可以直接说明哪些环节要保留、删改或补充，也可以按自己的顺序重组。"
+        )
+    else:
+        reference_text = ""
     return StepOutput(
-        assistant_message=f"{opening}\n\n{question}",
+        assistant_message="\n\n".join(
+            part for part in (opening, reference_text, question) if part
+        ),
         stage_payload={
             "guided_entry": True,
             "awaiting_student_description": True,
             "preserved_idea_summary": _student_idea_summary(session),
+            "reference_draft": reference_steps,
+            "reference_basis": prior_context,
         },
         student_task=None,
     )
-
-
-def is_substantive_guided_stage_description(text: str) -> bool:
-    normalized = text.strip()
-    if len(normalized) < 6 or is_progression_intent(
-        normalized,
-        allow_confirmation=True,
-    ):
-        return False
-    return re.fullmatch(
-        r"(?:(?:我)?(?:觉得|认为)|我)?(?:都)?"
-        r"(?:好的?|可以(?:了)?|行|没问题|同意|确认|接受|继续|下一步|进入下一阶段)"
-        r"(?:这样|这个|上述|以上)?(?:安排|设置|方案|内容)?(?:了|吧)?[。！!？?]*",
-        normalized,
-    ) is None
 
 
 def prepend_guided_acknowledgement(
@@ -165,8 +290,21 @@ def _idea(session: DesignSession, user_message: str) -> str:
     return "尚未明确的ECE329实验想法"
 
 
-def _topic_options(text: str) -> list[dict[str, Any]]:
-    return KNOWLEDGE.brainstorm_options(text)
+def _topic_options(
+    text: str,
+    session: DesignSession | None = None,
+) -> list[dict[str, Any]]:
+    shown = shown_exploration_option_ids(session.history) if session else set()
+    seed_key = (
+        f"{session.design_id}:{len(shown)}"
+        if session
+        else "catalog-default"
+    )
+    return KNOWLEDGE.brainstorm_options(
+        text,
+        exclude_option_ids=shown,
+        seed_key=seed_key,
+    )
 
 
 def _course_topics(text: str) -> list[str]:
@@ -309,7 +447,7 @@ def build_exploration_scenes(
         direction = str(option.get("direction") or "ECE329课程关系").strip()
         focus = _clean_focus_text(option.get("focus"))
         title, physical_frame, thinking_prompt, extension = _scene_components(
-            direction,
+            f"{direction} {focus}",
             index,
         )
         focus_sentence = (
@@ -321,6 +459,8 @@ def build_exploration_scenes(
         scenes.append(
             {
                 "scene_id": f"scene_{labels[index].lower()}",
+                "catalog_scene_id": option.get("catalog_scene_id"),
+                "catalog_scene_number": option.get("catalog_scene_number"),
                 "label": f"图景 {labels[index]}",
                 "title": title,
                 "course_anchor": option,
@@ -428,7 +568,11 @@ class RuleBasedStageGenerator:
                 student_task="你想继续补充当前阶段中的哪一点？",
                 warnings=["当前请求没有改变你的实验设计进度。"],
             )
-        options = course_example_options()
+        shown = shown_exploration_option_ids(session.history)
+        options = course_example_options(
+            exclude_option_ids=shown,
+            seed_key=f"{session.design_id}:{len(shown)}:redirect",
+        )
         scenes = build_exploration_scenes(options)
         scene_text = _format_exploration_scenes(scenes)
         return StepOutput(
@@ -455,7 +599,7 @@ class RuleBasedStageGenerator:
     def _generate_guided(self, session: DesignSession, user_message: str) -> StepOutput:
         stage = session.current_stage
         idea = _idea(session, user_message)
-        options = _topic_options(idea)
+        options = _topic_options(idea, session)
 
         if stage is Stage.IDEA_BRAINSTORMING:
             stage_one_context = session.turn_context
@@ -551,10 +695,19 @@ class RuleBasedStageGenerator:
             )
             if input_kind == COURSE_CONTENT and retrieval_text:
                 idea = current_focus or topic_anchor or idea
-                options = _topic_options(retrieval_text)
-            no_direction = is_no_direction_request(user_message)
+                options = _topic_options(retrieval_text, session)
+            # Online/API turns receive the semantic decision through turn_context.
+            # The exact matcher remains only as an offline compatibility fallback.
+            no_direction = bool(
+                stage_one_context.get("stage_one_no_direction") is True
+                or is_no_direction_request(user_message)
+            )
             if input_kind != COURSE_CONTENT:
-                options = course_example_options()
+                shown = shown_exploration_option_ids(session.history)
+                options = course_example_options(
+                    exclude_option_ids=shown,
+                    seed_key=f"{session.design_id}:{len(shown)}:redirect",
+                )
                 brainstorm_phase = BREADTH_EXPLORATION
             alternatives = (
                 options
@@ -582,7 +735,7 @@ class RuleBasedStageGenerator:
                 )
             elif no_direction:
                 introduction = (
-                    "暂时没有具体方向也没关系。我们可以先从ECE329课上学习的"
+                    f"{NO_DIRECTION_ACKNOWLEDGEMENT}我们可以先从ECE329课上学习的"
                     "电磁场、电磁波和传输线中寻找你感兴趣的关系。"
                 )
             elif input_kind == OUT_OF_SCOPE:

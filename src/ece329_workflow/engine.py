@@ -9,10 +9,23 @@ from copy import deepcopy
 from threading import RLock
 from typing import Any
 
+from .dialogue_state import (
+    UserIntent,
+    accept_pending_comparisons_on_advance,
+    apply_resolved_intent,
+    build_carried_context,
+    clarification_output,
+    current_pending_action,
+    deterministic_intent,
+    fallback_intent,
+    hydrate_pending_action_from_history,
+    resolved_intent,
+    save_pending_action,
+    validate_resolved_intent,
+)
 from .generator import (
     StageGenerator,
     guided_stage_entry_output,
-    is_substantive_guided_stage_description,
     prepend_guided_acknowledgement,
 )
 from .guardrails import (
@@ -22,13 +35,11 @@ from .guardrails import (
     UNREASONABLE_REQUEST,
     build_stage_one_turn_context,
     classify_stage_one_input,
-    is_explicit_topic_switch,
     is_no_direction_request,
     is_progression_intent,
     is_stage_one_control_message,
     latest_stage_one_options,
     latest_stage_one_scenes,
-    update_standard_comparison_decisions,
 )
 from .idea_development import (
     build_gap_output,
@@ -101,23 +112,18 @@ def _emvr_intent(text: str) -> bool | None:
 
 
 def _is_pure_stage_transition(text: str) -> bool:
-    normalized = text.strip()
-    if is_progression_intent(normalized):
-        return True
-    if normalized in {
+    normalized = re.sub(r"[\s，,。；;！!？?]+", "", text).casefold()
+    return normalized in {
         "继续",
+        "下一步",
+        "进入下一阶段",
+        "继续下一阶段",
         "继续完善下一阶段",
         "确认本阶段并进入下一阶段",
         "确认当前方向并进入下一阶段",
         "确认想法完善并进入变量与条件",
-        "进入下一阶段",
         "完成本阶段",
-    }:
-        return True
-    return re.fullmatch(
-        r"确认.{0,30}(?:并)?(?:进入下一阶段|继续(?:下一阶段|小点\s*\d+))",
-        normalized,
-    ) is not None
+    }
 
 
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -137,6 +143,66 @@ class WorkflowEngine:
         self.generator = generator or generator_from_environment()
         self.store = store or store_from_environment()
         self._session_locks = tuple(RLock() for _ in range(64))
+
+    def _resolve_turn_intent(
+        self,
+        session: DesignSession,
+        request: TurnRequest,
+        message: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        pending = hydrate_pending_action_from_history(session)
+        direct = deterministic_intent(
+            message,
+            pending,
+            selected_option_id=request.selected_option_id,
+            complete_stage=request.complete_stage,
+        )
+        if direct is not None:
+            return validate_resolved_intent(direct, pending), pending
+        resolver = getattr(self.generator, "resolve_intent", None)
+        if callable(resolver):
+            semantic = resolver(
+                session,
+                message,
+                pending,
+                build_carried_context(session),
+            )
+            return validate_resolved_intent(semantic, pending), pending
+        # Compatibility fallback for offline/rule-only deployments. It is not
+        # extended with conversational paraphrases; ordinary text remains an
+        # answer to the current question instead of being guessed as a command.
+        if is_progression_intent(message):
+            return resolved_intent(UserIntent.ADVANCE_STAGE, confidence=0.9), pending
+        return validate_resolved_intent(fallback_intent(message, pending), pending), pending
+
+    @staticmethod
+    def _return_to_previous_stage(session: DesignSession) -> None:
+        if session.current_stage_index <= 0:
+            return
+        session.current_stage_index -= 1
+        session.status = WorkflowStatus.ACTIVE
+        previous = session.current_stage.value
+        session.completed_stages = [
+            stage for stage in session.completed_stages if stage != previous
+        ]
+
+    @staticmethod
+    def _start_new_topic(session: DesignSession, message: str) -> None:
+        previous_design = {
+            "idea": deepcopy(session.design_context.get("idea", {})),
+            "stage_outputs": deepcopy(session.stage_outputs),
+        }
+        archive = session.model_context.setdefault("previous_designs", [])
+        if isinstance(archive, list):
+            archive.append(previous_design)
+            del archive[:-3]
+        session.current_stage_index = 0
+        session.status = WorkflowStatus.ACTIVE
+        session.completed_stages = []
+        session.stage_outputs = {}
+        session.design_context = {"idea": {"original": message.strip()}}
+        session.model_context.pop("openai_previous_response_id", None)
+        session.model_context.pop("dialogue_state", None)
 
     def create_design(
         self,
@@ -239,11 +305,6 @@ class WorkflowEngine:
             session.current_stage_index = 0
         if (
             session.current_stage is Stage.IDEA_BRAINSTORMING
-            and is_explicit_topic_switch(message)
-        ):
-            session.design_context.pop("idea_development", None)
-        if (
-            session.current_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
         ):
             patched_idea = session.design_context.get("idea", {})
@@ -255,22 +316,52 @@ class WorkflowEngine:
         expected_revision = session.revision
         transitioned_from_stage: Stage | None = None
         completion_error: str | None = None
-        idea_development = session.design_context.get("idea_development", {})
-        idea_development_complete = bool(
-            session.current_stage is Stage.IDEA_BRAINSTORMING
-            and isinstance(idea_development, dict)
-            and idea_development.get("complete") is True
-        )
-        explicit_transition_intent = bool(
-            _is_pure_stage_transition(message)
-            or is_progression_intent(
+        if input_kind == UNREASONABLE_REQUEST:
+            turn_intent = resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                confidence=1.0,
+                source="SAFETY_GUARDRAIL",
+            )
+            pending_action = current_pending_action(session)
+        else:
+            turn_intent, pending_action = self._resolve_turn_intent(
+                session,
+                request,
                 message,
-                allow_confirmation=idea_development_complete,
+            )
+        apply_resolved_intent(session, turn_intent, pending_action, message)
+        intent_name = str(turn_intent.get("intent") or UserIntent.UNCLEAR.value)
+        semantic_updates = (
+            deepcopy(turn_intent.get("semantic_updates", {}))
+            if str(turn_intent.get("source") or "").startswith("SEMANTIC")
+            else None
+        )
+        content_intent_name = (
+            UserIntent.ANSWER_CURRENT_QUESTION.value
+            if request.complete_stage and not _is_pure_stage_transition(message)
+            else intent_name
+        )
+
+        if intent_name == UserIntent.NEW_TOPIC.value:
+            self._start_new_topic(session, message)
+            pending_action = None
+            apply_resolved_intent(session, turn_intent, pending_action, message)
+        elif intent_name == UserIntent.RETURN_TO_PREVIOUS_POINT.value:
+            self._return_to_previous_stage(session)
+
+        explicit_transition_intent = bool(
+            intent_name == UserIntent.ADVANCE_STAGE.value
+            or (
+                turn_intent.get("advance_requested") is True
+                and intent_name
+                in {
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                }
             )
         )
         pre_transition_attempted = bool(
             session.interaction_state is InteractionState.GUIDED_DESIGN
-            and (request.complete_stage or explicit_transition_intent)
             and session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
             and explicit_transition_intent
         )
@@ -279,13 +370,6 @@ class WorkflowEngine:
             if previous_stage is Stage.IDEA_BRAINSTORMING:
                 idea = session.design_context.get("idea", {})
                 if isinstance(idea, dict):
-                    comparisons = idea.get("standard_comparisons", [])
-                    if isinstance(comparisons, list):
-                        idea["standard_comparisons"] = update_standard_comparison_decisions(
-                            message,
-                            comparisons,
-                            control_turn=True,
-                        )
                     development = session.design_context.get("idea_development", {})
                     outline = session.design_context.get("experiment_outline_seed", {})
                     if (
@@ -311,24 +395,51 @@ class WorkflowEngine:
                         idea["student_confirmed"] = True
             try:
                 self._validate_completion(session, previous_stage)
+                if previous_stage is Stage.IDEA_BRAINSTORMING:
+                    accept_pending_comparisons_on_advance(session)
                 self._advance(session, previous_stage)
                 transitioned_from_stage = previous_stage
             except StageCompletionError as exc:
                 completion_error = str(exc)
         handled_stage = session.current_stage
-        stage_one_control_turn = is_stage_one_control_message(message)
+        stage_one_control_turn = bool(
+            (semantic_updates is None and is_stage_one_control_message(message))
+            or content_intent_name
+            in {
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            }
+        )
         dynamic_idea_turn = bool(
             handled_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
             and has_idea_development(session)
             and input_kind != UNREASONABLE_REQUEST
             and (not stage_one_control_turn or completion_error is not None)
-            and not is_explicit_topic_switch(message)
+            and intent_name != UserIntent.NEW_TOPIC.value
         )
-        if dynamic_idea_turn and not stage_one_control_turn:
-            update_idea_development(session, message)
+        if (
+            dynamic_idea_turn
+            and not stage_one_control_turn
+            and intent_name
+            in {
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            }
+        ):
+            update_idea_development(
+                session,
+                message,
+                semantic_updates=semantic_updates,
+            )
         turn_context: dict[str, Any] = {
             "selected_option_id": request.selected_option_id,
+            "resolved_intent": deepcopy(turn_intent),
+            "pending_action": deepcopy(pending_action),
+            "carried_context": build_carried_context(session),
         }
         if dynamic_idea_turn:
             idea_context = session.design_context.get("idea", {})
@@ -338,14 +449,20 @@ class WorkflowEngine:
                 scenes=latest_stage_one_scenes(session.history),
                 idea_context=idea_context if isinstance(idea_context, dict) else {},
                 selected_option_id=request.selected_option_id,
+                semantic_updates=semantic_updates,
+                resolved_intent_name=content_intent_name,
             )
             if isinstance(idea_context, dict):
                 comparisons = stage_one_context.get("standard_comparisons")
                 if isinstance(comparisons, list):
                     idea_context["standard_comparisons"] = deepcopy(comparisons)
+            if intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value:
+                stage_one_context["brainstorm_phase"] = BREADTH_EXPLORATION
+                stage_one_context["more_brainstorm_requested"] = True
             turn_context["idea_development"] = deepcopy(
                 session.design_context.get("idea_development", {})
             )
+            turn_context.update(stage_one_context)
         elif (
             handled_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -359,6 +476,8 @@ class WorkflowEngine:
                     scenes=latest_stage_one_scenes(session.history),
                     idea_context=idea_context if isinstance(idea_context, dict) else {},
                     selected_option_id=request.selected_option_id,
+                    semantic_updates=semantic_updates,
+                    resolved_intent_name=content_intent_name,
                 )
             )
         session.turn_context = turn_context
@@ -368,24 +487,34 @@ class WorkflowEngine:
                 handled_stage,
                 message,
                 request.selected_option_id,
+                content_intent_name,
             )
         definition = STAGES_BY_ID[handled_stage]
-        guided_stage_entry_turn = bool(
-            session.interaction_state is InteractionState.GUIDED_DESIGN
-            and transitioned_from_stage is not None
-            and handled_stage is not Stage.IDEA_BRAINSTORMING
-        )
-        guided_stage_retry_turn = bool(
-            session.interaction_state is InteractionState.GUIDED_DESIGN
-            and transitioned_from_stage is None
-            and handled_stage is not Stage.IDEA_BRAINSTORMING
-            and not is_substantive_guided_stage_description(message)
-            and not (
-                handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
-                and request.complete_stage
+        handled_stage_seen = bool(
+            handled_stage.value in session.stage_outputs
+            or any(
+                item.get("handled_stage") == handled_stage.value
+                for item in session.history
             )
         )
-        if dynamic_idea_turn:
+        guided_stage_entry_turn = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and handled_stage is not Stage.IDEA_BRAINSTORMING
+            and (
+                transitioned_from_stage is not None
+                or not handled_stage_seen
+            )
+        )
+        clarification_turn = intent_name == UserIntent.UNCLEAR.value
+        substantive_guided_reply = bool(
+            intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
+            and input_kind != UNREASONABLE_REQUEST
+        )
+        if clarification_turn:
+            output = clarification_output(pending_action)
+            session.turn_context = {}
+            completion_error = None
+        elif dynamic_idea_turn:
             output = build_gap_output(session, message)
             session.turn_context = {}
             if stage_one_control_turn:
@@ -393,10 +522,6 @@ class WorkflowEngine:
         elif guided_stage_entry_turn:
             output = guided_stage_entry_output(session)
             session.turn_context = {}
-        elif guided_stage_retry_turn:
-            output = guided_stage_entry_output(session, retry=True)
-            session.turn_context = {}
-            completion_error = None
         else:
             try:
                 output = self.generator.generate(session, message)
@@ -406,7 +531,8 @@ class WorkflowEngine:
                 session.interaction_state is InteractionState.GUIDED_DESIGN
                 and handled_stage is not Stage.IDEA_BRAINSTORMING
                 and transitioned_from_stage is None
-                and is_substantive_guided_stage_description(message)
+                and substantive_guided_reply
+                and intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             ):
                 prepend_guided_acknowledgement(output, handled_stage, message)
         self._validate_step_output(session.interaction_state, output.student_task)
@@ -429,7 +555,11 @@ class WorkflowEngine:
                 and outline_seed
                 and not has_idea_development(session)
             ):
-                development = initialize_idea_development(session, outline_seed)
+                development = initialize_idea_development(
+                    session,
+                    outline_seed,
+                    semantic_updates=semantic_updates,
+                )
                 decorate_outline_output(output, development)
             elif has_idea_development(session):
                 output.stage_payload.setdefault(
@@ -438,7 +568,14 @@ class WorkflowEngine:
                         session.design_context["idea_development"]
                     ),
                 )
+            # When a substantive answer also carries a premature completion
+            # flag, keep guiding without surfacing a transport-style error.
+            # A pure advance command still reports the missing design content.
+            if not _is_pure_stage_transition(message):
+                completion_error = None
 
+        if output.stage_payload.get("clarification_required") is not True:
+            save_pending_action(session, handled_stage, output)
         session.revision += 1
         output_dict = output.to_dict()
         session.stage_outputs[handled_stage.value] = {
@@ -463,7 +600,10 @@ class WorkflowEngine:
 
         should_complete = (
             session.interaction_state is InteractionState.EMVR_DIRECT
-            or (request.complete_stage and not pre_transition_attempted)
+            or (
+                (request.complete_stage or explicit_transition_intent)
+                and not pre_transition_attempted
+            )
         ) and output.stage_payload.get("request_rejected") is not True
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -478,6 +618,10 @@ class WorkflowEngine:
                 self._advance(session, handled_stage)
             except StageCompletionError as exc:
                 completion_error = str(exc)
+
+        state = session.model_context.get("dialogue_state", {})
+        if isinstance(state, dict):
+            state["carried_context"] = build_carried_context(session)
 
         self.store.save(session, expected_revision=expected_revision)
         next_stage = session.next_stage.value if session.next_stage else None
@@ -636,23 +780,16 @@ class WorkflowEngine:
         stage: Stage,
         message: str,
         selected_option_id: str | None = None,
+        resolved_intent_name: str | None = None,
     ) -> None:
         normalized = message.strip()
-        control_messages = {
-            "继续",
-            "继续完善下一阶段",
-            "确认本阶段并进入下一阶段",
-            "确认当前方向并进入下一阶段",
-            "进入下一阶段",
-            "完成本阶段",
-        }
         if (
             not normalized
-            or normalized in control_messages
-            or (
-                stage is Stage.IDEA_BRAINSTORMING
-                and is_stage_one_control_message(normalized)
-            )
+            or resolved_intent_name
+            not in {
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            }
         ):
             return
         decisions = session.design_context.setdefault("student_decisions", {})
@@ -883,6 +1020,9 @@ class WorkflowEngine:
 
     @staticmethod
     def _advance(session: DesignSession, handled_stage: Stage) -> None:
+        dialogue = session.model_context.get("dialogue_state", {})
+        if isinstance(dialogue, dict):
+            dialogue.pop("pending_action", None)
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and handled_stage is Stage.IDEA_BRAINSTORMING

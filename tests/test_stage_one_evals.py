@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
+from ece329_workflow.dialogue_state import UserIntent, resolved_intent
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
 
@@ -16,7 +17,28 @@ class StageOneDialogueEvalTests(unittest.TestCase):
         cases = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
         for case in cases:
             with self.subTest(case=case["id"]):
-                engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+                class FixtureSemanticGenerator(RuleBasedStageGenerator):
+                    selected_ids: list[str] = []
+
+                    def resolve_intent(
+                        self,
+                        session,
+                        user_message,
+                        pending_action,
+                        carried_context,
+                    ):
+                        return resolved_intent(
+                            UserIntent.ANSWER_CURRENT_QUESTION,
+                            confidence=0.98,
+                            source="SEMANTIC_TEST",
+                            semantic_updates={
+                                "no_direction": case["id"] == "no_direction",
+                                "selected_option_ids": self.selected_ids,
+                            },
+                        )
+
+                generator = FixtureSemanticGenerator()
+                engine = WorkflowEngine(generator=generator)
                 first = engine.create_design(case["initial"])
                 result = first
                 selected = None
@@ -24,6 +46,7 @@ class StageOneDialogueEvalTests(unittest.TestCase):
                     selected = first["stage_payload"]["alternative_ideas"][
                         case["selected_index"]
                     ]
+                    generator.selected_ids = [selected["option_id"]]
                     request = {"message": case["followup"]}
                     if case.get("send_option_id"):
                         request["selected_option_id"] = selected["option_id"]

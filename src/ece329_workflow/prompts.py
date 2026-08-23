@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
+from .dialogue_state import (
+    build_carried_context,
+    current_resolved_intent,
+    hydrate_pending_action_from_history,
+)
 from .guardrails import (
     COURSE_CONTENT,
     build_stage_one_turn_context,
     course_example_options,
-    is_no_direction_request,
     latest_stage_one_options,
     latest_stage_one_scenes,
+    shown_exploration_option_ids,
 )
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage
@@ -27,6 +33,8 @@ ECE329 Lecture Notes定义课程范围；context.knowledge_retrieval中的补充
 GUIDED_DESIGN阶段1的所有brainstorm方向必须来自knowledge_retrieval.brainstorm_options，不能凭空生成ECE329主题。
 GUIDED_DESIGN阶段1采用“了解想法—广度拓展—学生描述兴趣—深度拓展—学生确认”的节奏。学生尚无具体思路时，先展示课上所学概念的大致分类；学生已经给出想法时，从该想法发散一次概念关系。只有BREADTH_EXPLORATION可以把brainstorm_options显示为备选方向。
 BREADTH_EXPLORATION不得把课程关系写成干瘪的编号选择题。应把每个brainstorm方向发展为一幅可想象、可改造、可与其他图景组合的物理场景：描述对象靠近、边界或材料改变、多源叠加、传播路径变化等画面，再提出开放的物理直觉问题。每幅图景的理论主线必须原样绑定一个brainstorm_option，因此主线一定在ECE329范围内；图景中的具体器件、形状、应用或极端情境可以作为启发性延伸超出课堂覆盖，但必须明确标为“启发性设想”，不得冒充课程结论、课程要求、公式依据或后续实验可行性结论。不得给未经资料支持的精确数值、阈值或定量规律。
+brainstorm_options中的catalog_scene_id和catalog_scene_number只用于内部去重，绝不能出现在学生可见文字中。每轮恰好展示三个互不重复的候选，并按本轮顺序重新标为图景A、图景B、图景C；不得把内部编号当成学生的选项标签。
+学生用“换一组”“再给几个”“这些都不合适”等语义要求继续发散时，保持BREADTH_EXPLORATION并展示本轮新抽取的三个图景；这类反馈不是研究方向、兴趣描述或新实验主题，不得写入current_focus。
 广度回复结尾应邀请学生交换对象、改变材料或边界、组合两个图景，或提出自己的课内物理关系；不能只问“请选择第几个”。图景用于激发直觉，不替学生确定变量、公式、装置或研究问题。
 学生选定一个点后进入INTEREST_DESCRIPTION：停止继续列选项，邀请学生用自己的话描述感兴趣的现象、物理联系或疑惑，不替学生补写描述。收到描述后进入DEPTH_EXPANSION：结合检索到的课程关系对学生原话作较深入的概念拓展，不再把内容写成选择题，也不重复相同的编号列表。不同阶段的回复结构和措辞应自然变化，避免每轮都使用相同开头、相同三项列表和相同结尾。
 学生负责决定核心现象、希望理解的物理关系、研究范围，以及是否接受助手对方向的概括。不要把每一个常识性的基本case拆成连续问题让学生逐项决定；对于互补且共同构成基本比较的情形，应在standard_comparisons中一次性提出有理由的默认建议，而不是连续追问学生先选哪一种。此规则适用于任何ECE329课内主题，不得写成只识别某几个器件、材料或电荷名称的特例。建议的adoption_status必须先为PENDING，不能写成已自动纳入：学生确认当前概括后才改为ACCEPTED，也可以通过自然语言只保留任意case、排除任意case、恢复任意case或拒绝整组，分别改成MODIFIED、ACCEPTED或REJECTED。解析必须以当前standard_comparisons实际包含的case为准，学生一旦删改或拒绝，后续不得擅自恢复。除这种基础case整理外，核心物理关系、范围和重点等实质性取舍仍由学生决定。
@@ -39,10 +47,11 @@ BREADTH_EXPLORATION不得把课程关系写成干瘪的编号选择题。应把�
 GUIDED_DESIGN状态下以提问和反馈引导学生，student_task最多一个。
 GUIDED_DESIGN状态下的assistant_message、student_task和warnings直接面向正在对话的学生，
 必须使用“你”来称呼对方，不得使用“学生”作为对方的第三人称主语；只有在确实讨论一组实验参与者时才可使用“学生”。
-GUIDED_DESIGN状态下进入一个新的公开阶段时，第一轮只能邀请学生先描述自己对该阶段主题的想法，
-不得直接替学生选定变量、流程、图表关系、结果解释或局限，再要求学生同意。收到学生的实质描述后，
+GUIDED_DESIGN状态下进入一个新的公开阶段时，必须先读取前面已经确定的设计内容，并给出一套可修改的参考结构或思考顺序，帮助学生接着已有设计作答；不得像没有上下文一样只要求学生从空白开始描述，也不得把参考结构冒充最终方案或学生已经作出的决定。学生总结阶段除外，仍只能给检查维度，不能代写总结。收到学生的实质描述后，
 回复要先准确承接并简要复述学生刚提出的关键内容，再在此基础上整理或追问一个缺口；不得用空泛的
 “已记录”“说明得更清楚”代替互动，也不得把助手自己的默认方案伪装成学生已经决定的内容。
+每轮先服从context.resolved_intent，并结合context.pending_action与context.carried_context承接上一轮：接受、修改或拒绝上一轮提议时直接执行已经解析出的决定，不得重复阶段入口；进入新阶段时继承已经确认的方向、变量、观察量、控制条件和流程草案，不得让学生从头复述。这些结构只供内部推理，绝不能出现在学生可见文字中。若resolved_intent为UNCLEAR，只提出一个简短澄清问题，不得重新显示整段阶段入口。
+在变量、流程、可视化等后续阶段，常规且低风险的组织细节应由助手根据已确定内容给出可修改的默认参考，例如建立基准、每次只改变一个量、保持观察方式一致、默认显示一种视图但允许随时切换。把这些默认安排说明为“可调整的参考”并让学生决定是否采纳即可；不要把显示先后、是否来回切换、基础比较推进顺序等常规细节拆成连续选择题。只有会实质改变研究问题、物理关系、比较范围或学习目标的取舍才需要学生进一步决定。
 EMVR_DIRECT状态下直接完善当前阶段，并面向Unity VR模拟实验设计。
 阶段1在GUIDED_DESIGN下允许多轮brainstorm，未经学生确认不得收敛。
 阶段1必须维护context.stage_one_thread中的topic_anchor、current_focus、focus_history和brainstorm_phase。除非学生明确表示更换主题，否则“第三个”“对称性和方向”“先看边界形状”这类回答都是对当前实验想法的选择或细化，不是新实验；回复应先承接已经讨论的关系，再只推进一层。不得重复询问学生已经选定的上位方向，也不得把已经选定的细化内容重新列成多个入口。
@@ -91,7 +100,9 @@ def _stage_output_contract(
             "alternative_idea；extension_scope必须严格等于"
             "ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE。physical_picture要有可想象的对象、空间、"
             "边界、材料或传播变化，不能只是重述direction；thinking_prompt必须是开放的物理"
-            "直觉问题；combination_seed必须允许学生交换、叠加或改造图景。"
+            "直觉问题；combination_seed必须允许学生交换、叠加或改造图景。三项的label必须"
+            "依次为图景 A、图景 B、图景 C；学生可见文字不得出现course_anchor中的"
+            "catalog_scene_id或catalog_scene_number。"
             "illustrative_extension可以包含超出课程覆盖的具体形状、器件或应用，但必须在"
             "assistant_message中以“启发性延伸”或“启发性设想”标明，不能声称它是课程结论。"
             "assistant_message应展开这些图景，并以允许组合或自拟方向的开放问题收束，不能"
@@ -177,7 +188,8 @@ def _stage_output_contract(
     if stage is Stage.CONCEPTUAL_PROCEDURE:
         return (
             "stage_payload_json必须包含procedure_unit或procedure_steps，本轮只处理一个流程单元。"
-            "先承接学生描述的流程逻辑，再追问一个尚未明确的环节，不得直接交付完整标准流程。"
+            "阶段入口可以根据前文给出建立基准、改变条件、统一观察记录和比较解释等可修改的参考环节；"
+            "它不是标准答案。收到学生描述后先承接其流程逻辑，再补充或追问一个真正尚未明确的环节。"
         )
     if stage is Stage.EXPECTED_DATA_VISUALIZATION:
         return (
@@ -284,7 +296,7 @@ def build_prompt_packet(
         f"{idea_text} {stage_one_thread_text} {resolved_reference_text} {user_message}"
     ).strip()
     stage_one_no_direction = (
-        is_no_direction_request(user_message)
+        bool(stage_one_thread.get("stage_one_no_direction"))
         if stage_one_preclassification is not None
         else False
     )
@@ -294,10 +306,42 @@ def build_prompt_packet(
         limit=5,
     )
     formulas = KNOWLEDGE.formula_references(retrieval_text, limit=12)
+    shown_option_ids = shown_exploration_option_ids(session.history)
+    sample_seed = f"{session.design_id}:{len(shown_option_ids)}"
+    # Scene sampling should follow the student's current topic, not the whole
+    # serialized thread.  The latter also contains standard comparisons and
+    # other scaffolding words which can accidentally change the candidate pool
+    # even though the student's research direction has not changed.
+    brainstorm_text = (
+        str(stage_one_thread.get("current_focus", "")).strip()
+        or str(stage_one_thread.get("topic_anchor", "")).strip()
+        or resolved_reference_text.strip()
+        or user_message
+    )
     brainstorm_options = (
-        KNOWLEDGE.brainstorm_options(retrieval_text, limit=3)
+        KNOWLEDGE.brainstorm_options(
+            brainstorm_text,
+            limit=3,
+            exclude_option_ids=shown_option_ids,
+            seed_key=sample_seed,
+        )
         if stage_one_preclassification in {None, COURSE_CONTENT}
-        else course_example_options()
+        else course_example_options(
+            exclude_option_ids=shown_option_ids,
+            seed_key=f"{sample_seed}:redirect",
+        )
+    )
+    pending_action = deepcopy(
+        session.turn_context.get("pending_action")
+        or hydrate_pending_action_from_history(session)
+    )
+    resolved_turn_intent = deepcopy(
+        session.turn_context.get("resolved_intent")
+        or current_resolved_intent(session)
+    )
+    carried_context = deepcopy(
+        session.turn_context.get("carried_context")
+        or build_carried_context(session)
     )
     context = {
         "design_id": session.design_id,
@@ -310,6 +354,9 @@ def build_prompt_packet(
         "design_context": session.design_context,
         "completed_stage_outputs": session.stage_outputs,
         "recent_history": session.history[-6:] if include_recent_history else [],
+        "pending_action": pending_action,
+        "resolved_intent": resolved_turn_intent,
+        "carried_context": carried_context,
         "latest_user_message": user_message,
         "selected_option_id": selected_option_id,
         "stage_output_contract": _stage_output_contract(
@@ -328,6 +375,8 @@ def build_prompt_packet(
             "supplemental_concepts": supplemental_concepts,
             "formulas": formulas,
             "brainstorm_options": brainstorm_options,
+            "exploration_scene_catalog_size": len(KNOWLEDGE.exploration_points),
+            "previously_shown_scene_count": len(shown_option_ids),
             "baseline_comparison_suggestions": (
                 KNOWLEDGE.standard_comparison_suggestions(retrieval_text, limit=1)
             ),

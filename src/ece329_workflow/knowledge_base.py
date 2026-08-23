@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import random
 import re
 from importlib.resources import files
 from typing import Any
@@ -37,6 +39,7 @@ class LectureKnowledgeBase:
         self._supplemental_concept_by_id = {
             item["supplemental_concept_id"]: item for item in self.supplemental_concepts
         }
+        self.exploration_points = self._build_exploration_points()
 
     @property
     def source_reference(self) -> dict[str, Any]:
@@ -141,52 +144,161 @@ class LectureKnowledgeBase:
     ) -> list[dict[str, Any]]:
         return [dict(item) for item in self.match_supplemental_concepts(text, limit)]
 
-    def brainstorm_options(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
-        supplemental_matches = self.match_supplemental_concepts(text, limit=1)
-        if supplemental_matches:
-            concept = supplemental_matches[0]
-            return [
+    @staticmethod
+    def _course_block_for_lecture(lecture: int) -> str:
+        if lecture <= 11:
+            return "electrostatics"
+        if lecture <= 15:
+            return "magnetism"
+        return "electromagnetics"
+
+    def _course_block_for_scope(self, concept_ids: list[str]) -> str:
+        counts = {"electrostatics": 0, "magnetism": 0, "electromagnetics": 0}
+        for concept_id in concept_ids:
+            lecture = self._lecture_by_id.get(concept_id)
+            if lecture:
+                counts[self._course_block_for_lecture(int(lecture["lecture"]))] += 1
+        return max(counts, key=lambda key: (counts[key], -list(counts).index(key)))
+
+    def _build_exploration_points(self) -> list[dict[str, Any]]:
+        """Expand every cataloged lecture axis and supplemental relation into one point."""
+
+        points: list[dict[str, Any]] = []
+
+        def add_point(point: dict[str, Any]) -> None:
+            number = len(points) + 1
+            points.append(
                 {
-                    "option_id": (
-                        f"supplemental:{concept['supplemental_concept_id']}:{index}"
-                    ),
-                    **dict(option),
-                    "references": [
-                        {
-                            **dict(reference),
-                            "source_title": self._supplemental_source_by_id[
-                                reference["source_id"]
-                            ]["title"],
-                        }
-                        for reference in option["references"]
-                    ],
-                    "supplemental_concept_id": concept["supplemental_concept_id"],
-                    "course_scope_concept_ids": list(concept["course_scope_concept_ids"]),
+                    "catalog_scene_id": f"ECE329-S{number:03d}",
+                    "catalog_scene_number": number,
+                    **point,
                 }
-                for index, option in enumerate(
-                    concept["relationship_examples"][:limit],
-                    start=1,
-                )
-            ]
-        matches = self.match_concepts(text, limit=3)
-        if not matches:
-            return self.broad_entry_points()[:limit]
-        options: list[dict[str, Any]] = []
-        for lecture in matches:
+            )
+
+        for lecture in self.lectures:
             for axis_index, axis in enumerate(lecture["brainstorm_axes"], start=1):
-                options.append(
+                add_point(
                     {
                         "option_id": f"lecture:{lecture['id']}:{axis_index}",
                         "direction": lecture["title"],
                         "focus": axis,
                         "concept_id": lecture["id"],
                         "source_lecture": lecture["lecture"],
-                        "source_pages": lecture["pages"],
+                        "source_pages": list(lecture["pages"]),
+                        "course_block": self._course_block_for_lecture(
+                            int(lecture["lecture"])
+                        ),
+                        "catalog_keywords": list(lecture["keywords"]),
+                        "catalog_source_type": "LECTURE_AXIS",
                     }
                 )
-                if len(options) >= limit:
-                    return options
-        return options
+
+        for concept in self.supplemental_concepts:
+            concept_id = str(concept["supplemental_concept_id"])
+            scope_ids = list(concept["course_scope_concept_ids"])
+            for relation_index, relation in enumerate(
+                concept["relationship_examples"],
+                start=1,
+            ):
+                add_point(
+                    {
+                        "option_id": f"supplemental:{concept_id}:{relation_index}",
+                        "direction": relation["direction"],
+                        "focus": relation["focus"],
+                        "references": [
+                            {
+                                **dict(reference),
+                                "source_title": self._supplemental_source_by_id[
+                                    reference["source_id"]
+                                ]["title"],
+                            }
+                            for reference in relation["references"]
+                        ],
+                        "supplemental_concept_id": concept_id,
+                        "course_scope_concept_ids": scope_ids,
+                        "course_block": self._course_block_for_scope(scope_ids),
+                        "catalog_keywords": list(concept["keywords"]),
+                        "catalog_source_type": "SUPPLEMENTAL_RELATION",
+                    }
+                )
+        return points
+
+    def exploration_scene_catalog(self) -> list[dict[str, Any]]:
+        return [dict(point) for point in self.exploration_points]
+
+    def _relevant_exploration_points(self, text: str) -> list[dict[str, Any]]:
+        lecture_matches = self.match_concepts(text, limit=len(self.lectures))
+        supplemental_matches = self.match_supplemental_concepts(
+            text,
+            limit=len(self.supplemental_concepts),
+        )
+        if not lecture_matches and not supplemental_matches:
+            return list(self.exploration_points)
+
+        lecture_ids = {str(item["id"]) for item in lecture_matches}
+        supplemental_ids = {
+            str(item["supplemental_concept_id"]) for item in supplemental_matches
+        }
+        for concept in supplemental_matches:
+            lecture_ids.update(str(item) for item in concept["course_scope_concept_ids"])
+        return [
+            point
+            for point in self.exploration_points
+            if str(point.get("concept_id") or "") in lecture_ids
+            or str(point.get("supplemental_concept_id") or "") in supplemental_ids
+        ]
+
+    @staticmethod
+    def _sample_seed(seed_key: str, excluded_count: int) -> int:
+        digest = hashlib.sha256(
+            f"{seed_key}|{excluded_count}".encode("utf-8")
+        ).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    def brainstorm_options(
+        self,
+        text: str,
+        limit: int = 3,
+        *,
+        exclude_option_ids: set[str] | None = None,
+        seed_key: str = "",
+    ) -> list[dict[str, Any]]:
+        """Sample unique, course-grounded points while avoiding previously shown ones."""
+
+        if limit <= 0:
+            return []
+        excluded = {str(item) for item in (exclude_option_ids or set()) if str(item)}
+        relevant = self._relevant_exploration_points(text)
+        remaining = [
+            point for point in relevant if str(point["option_id"]) not in excluded
+        ]
+        if len(remaining) < limit:
+            known_ids = {str(point["option_id"]) for point in remaining}
+            remaining.extend(
+                point
+                for point in self.exploration_points
+                if str(point["option_id"]) not in excluded
+                and str(point["option_id"]) not in known_ids
+            )
+        if len(remaining) < limit:
+            remaining = list(relevant or self.exploration_points)
+
+        rng = random.Random(self._sample_seed(seed_key, len(excluded)))
+        no_specific_match = len(relevant) == len(self.exploration_points)
+        if no_specific_match and limit == 3:
+            sampled: list[dict[str, Any]] = []
+            for block in ("electrostatics", "magnetism", "electromagnetics"):
+                block_points = [
+                    point for point in remaining if point.get("course_block") == block
+                ]
+                if block_points:
+                    sampled.append(rng.choice(block_points))
+            if len(sampled) == 3:
+                rng.shuffle(sampled)
+                return [dict(point) for point in sampled]
+
+        count = min(limit, len(remaining))
+        return [dict(point) for point in rng.sample(remaining, count)]
 
     def standard_comparison_suggestions(
         self,
@@ -450,6 +562,40 @@ class LectureKnowledgeBase:
                         errors.append(
                             f"supplemental concept {concept_id} has invalid pages for {source_id}: {pages}"
                         )
+        expected_scene_count = sum(
+            len(lecture.get("brainstorm_axes", [])) for lecture in self.lectures
+        ) + sum(
+            len(concept.get("relationship_examples", []))
+            for concept in self.supplemental_concepts
+        )
+        if len(self.exploration_points) != expected_scene_count:
+            errors.append(
+                "exploration scene catalog does not cover every lecture axis and supplemental relation"
+            )
+        scene_catalog_ids: set[str] = set()
+        scene_option_ids: set[str] = set()
+        required_point_fields = {
+            "catalog_scene_id",
+            "catalog_scene_number",
+            "option_id",
+            "direction",
+            "focus",
+            "course_block",
+            "catalog_source_type",
+        }
+        for expected_number, point in enumerate(self.exploration_points, start=1):
+            if any(point.get(field) in (None, "") for field in required_point_fields):
+                errors.append(f"exploration point {expected_number} has an empty field")
+            scene_id = str(point.get("catalog_scene_id") or "")
+            option_id = str(point.get("option_id") or "")
+            if scene_id in scene_catalog_ids:
+                errors.append(f"duplicate exploration scene id: {scene_id}")
+            if option_id in scene_option_ids:
+                errors.append(f"duplicate exploration option id: {option_id}")
+            scene_catalog_ids.add(scene_id)
+            scene_option_ids.add(option_id)
+            if scene_id != f"ECE329-S{expected_number:03d}":
+                errors.append(f"exploration scene id sequence is broken at {expected_number}")
         return errors
 
 

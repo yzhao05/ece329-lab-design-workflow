@@ -16,6 +16,8 @@ This directory contains compact, deployable reference catalogs. Source PDFs are 
 - `source_manifest.json`: identity and extraction policy for the course-scope lecture notes.
 - `supplemental_sources.json`: enabled supplemental sources and multi-source Stage 1 relationship catalog.
 
+At startup, the workflow materializes a 138-item Stage 1 exploration catalog from all 117 lecture `brainstorm_axes` and all 21 supplemental `relationship_examples`. Entries receive stable internal IDs `ECE329-S001`–`ECE329-S138`. A turn samples three unseen entries, prioritizing the current topic, and relabels them only as `图景 A/B/C` for the student; internal IDs are never student-facing.
+
 ## Supplemental-source policy
 
 - A supplemental concept must map to at least one valid `course_scope_concept_id`.

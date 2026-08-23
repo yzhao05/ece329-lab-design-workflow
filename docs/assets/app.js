@@ -205,6 +205,14 @@ const DEMO_GUIDED_STAGE_ENTRY_QUESTIONS = Object.freeze({
   STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "请先用两到三句话写出这个实验想研究什么、为什么值得研究，以及它与ECE329课程内容有什么联系。",
 });
 
+const DEMO_GUIDED_STAGE_REFERENCE_STEPS = Object.freeze({
+  VARIABLES_AND_CONDITIONS: ["列出主动改变的量", "列出准备观察或比较的现象", "固定其余会影响比较的条件"],
+  CONCEPTUAL_PROCEDURE: ["建立可重复的基准条件", "逐步改变前面确定的条件", "用相同方式观察并记录", "比较各组结果并联系课程关系解释"],
+  EXPECTED_DATA_VISUALIZATION: ["以前面确定的改变量作为横轴或控制量", "显示最重要的观察量", "并列保留的基础情形", "标明这是理论预测而非实测数据"],
+  RESULT_INTERPRETATION: ["解释符合预期的结果", "检查偏离预期时的条件或假设", "区分模型局限与物理差异"],
+  DESIGN_VALUE_AND_LIMITATIONS: ["说明核心学习价值", "指出理想化条件", "区分设计能说明和不能推出的内容"],
+});
+
 const dom = {
   connectionBadge: document.querySelector("#connectionBadge"),
   offlineNotice: document.querySelector("#offlineNotice"),
@@ -787,17 +795,20 @@ async function reloadApiDesignState() {
 }
 
 function isAdvanceIntent(message) {
-  const normalized = String(message || "").trim();
-  const blockedTransition = /(?:先|暂时)?(?:不|别)(?:要|想|用)?[\s，,。；;！!]*(?:现在|马上|再)?[\s，,。；;！!]*(?:继续|推进|往下|进入|下一(?:步|阶段|部分|环节))|(?:不能|无法|没法|没能).{0,8}(?:继续|推进|往下|进入|下一(?:步|阶段|部分|环节))|(?:为什么|怎么|为何).{0,16}(?:还没|没有|不能|无法|没能).{0,12}(?:继续|推进|进入|下一(?:步|阶段|部分|环节))|(?:继续|推进|进入|下一(?:步|阶段|部分|环节)).{0,24}(?:失败|不了|没反应|没进入|没有进入|重复|卡住|卡在)/.test(normalized);
-  if (blockedTransition) return false;
-  const standardTransition = /确认.*(下一|进入|继续|完成)|进入下一阶段|继续下一阶段|继续小点|完成本阶段|完成总结/.test(message);
-  const ideaTransition = /(?:想法|方向|大纲).{0,12}(?:已)?(?:完善|完成|确认|没问题).{0,16}(?:进入|继续).{0,12}(?:变量与条件|下一阶段)|(?:可以|请|现在|直接|确认|同意|接受|准备好).{0,8}(?:进入|继续).{0,12}(?:变量与条件|下一阶段)|(?:进入|继续).{0,12}变量与条件/.test(message);
-  const semanticTransition = /下一(?:步|阶段|部分|环节)|(?:进入|转到|切换到|前往|开始).{0,10}(?:后面|后续|变量与条件)|(?:往下走|往下进行|继续推进|推进到|推进至)/.test(normalized);
-  const shortTransition = /^(?:好的?|可以|行|没问题|确认|同意|接受)?[\s，,。；;！!]*(?:(?:那|那么)[\s，,。；;！!]*)?(?:我们[\s，,。；;！!]*)?(?:就[\s，,。；;！!]*)?(?:继续|推进)(?:吧|了|呀|啊)?[。！!]*$/.test(normalized);
+  // The browser only marks a few unambiguous commands. Conversational
+  // paraphrases are resolved by the backend together with pending_action.
+  const normalized = String(message || "").toLowerCase().replace(/[\s，,。；;！!？?]/g, "");
+  const explicitTransition = new Set([
+    "继续",
+    "下一步",
+    "进入下一阶段",
+    "继续下一阶段",
+    "完成本阶段",
+  ]).has(normalized);
   const completedIdeaConfirmation = state.stageIndex === 0
     && state.ideaDevelopmentStatus?.complete === true
-    && /^(?:好的?|可以(?:了)?|行|没问题|确认|同意|接受|就这样(?:吧)?|完成(?:了)?|没有(?:要|需要|什么)?(?:改|修改|补充)(?:的)?(?:了)?)[。！!]*$/.test(normalized);
-  return standardTransition || ideaTransition || semanticTransition || shortTransition || completedIdeaConfirmation;
+    && new Set(["确认", "同意", "接受", "就这样", "完成了"]).has(normalized);
+  return explicitTransition || completedIdeaConfirmation;
 }
 
 function buildTurnRequest(message) {
@@ -897,12 +908,9 @@ function createDemoResponse(message) {
   const selectedPriorOption = !firstTurn && state.stageIndex === 0
     ? resolveDemoOptionReference(message, state.quickActions, state.pendingOptionId)
     : null;
-  const combinedSceneRelations = !firstTurn && state.stageIndex === 0
-    ? resolveDemoSceneCombination(message, (state.evidence || FALLBACK_EVIDENCE).options)
-    : [];
   state.pendingOptionId = null;
   let inputCategory = classifyDemoStageOneInput(message, directEvidence);
-  if (selectedPriorOption || combinedSceneRelations.length) {
+  if (selectedPriorOption) {
     inputCategory = "COURSE_CONTENT";
   }
   if (
@@ -937,7 +945,7 @@ function createDemoResponse(message) {
     if (inputCategory === "UNREASONABLE_REQUEST") {
       guidedIntroduction = "这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。";
     } else if (noDirection) {
-      guidedIntroduction = "暂时没有具体方向也没关系。我们可以先从ECE329课上学习的电磁场、电磁波和传输线中寻找你感兴趣的关系。";
+      guidedIntroduction = "好的，那我来帮助你拓展思路。暂时没有具体方向也没关系。我们可以先从ECE329课上学习的电磁场、电磁波和传输线中寻找你感兴趣的关系。";
     } else if (inputCategory === "OUT_OF_SCOPE") {
       guidedIntroduction = "你提出的主题不属于ECE329课程的内容范围，因此不适合作为这门课实验设计的核心。ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。";
     } else {
@@ -1018,38 +1026,6 @@ function createDemoResponse(message) {
       },
       quick_actions: status.complete ? ["确认想法完善并进入变量与条件"] : [],
       warnings: [],
-      _runtime_source: "demo",
-    };
-  }
-
-  if (
-    combinedSceneRelations.length
-    && state.mode === "GUIDED_DESIGN"
-    && state.stageIndex === 0
-  ) {
-    state.stageOnePhase = "INTEREST_DESCRIPTION";
-    state.stageOneSelectedRelations = combinedSceneRelations;
-    state.stageOneCorePhenomenon = null;
-    state.stageOneStandardComparisons = [];
-    state.pendingDirection = combinedSceneRelations.join(" + ");
-    state.quickActions = [];
-    return {
-      assistant_message: `你组合的课程关系已经分别保留：${combinedSceneRelations.join("；")}。接下来只需要说明你希望这几条关系共同解释什么核心现象；它们不会在后续描述中被拆成二选一。`,
-      student_task: "请用自己的话描述这个组合中你最想理解的核心现象。",
-      current_stage: STAGES[0][0],
-      interaction_state: state.mode,
-      knowledge_references: [evidence],
-      stage_payload: {
-        input_category: "COURSE_CONTENT",
-        brainstorm_phase: "INTEREST_DESCRIPTION",
-        selected_course_relations: combinedSceneRelations,
-        combination_intent: combinedSceneRelations.length > 1,
-        alternative_ideas: [],
-        exploration_scenes: [],
-        ready_for_next_stage: false,
-      },
-      quick_actions: [],
-      warnings: ["组合中的每条课程关系都会继续保留。"],
       _runtime_source: "demo",
     };
   }
@@ -1196,8 +1172,12 @@ function createDemoResponse(message) {
   if (guidedStageEntered) {
     const [stageId] = STAGES[state.stageIndex];
     const preservedIdea = state.stageOneCorePhenomenon || state.pendingDirection || "前面已经完善的实验想法";
+    const referenceSteps = DEMO_GUIDED_STAGE_REFERENCE_STEPS[stageId] || [];
+    const referenceText = referenceSteps.length
+      ? `根据前面已经明确的信息，可以先用下面这套可修改的结构作为参考，它不是需要照抄的标准答案：\n${referenceSteps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n你可以直接说明哪些环节要保留、删改或补充，也可以按自己的顺序重组。\n\n`
+      : "";
     return {
-      assistant_message: `现在进入“${currentWorkspaceTitle(state.stageIndex)}”。前面确定的实验方向已经保留：${preservedIdea}。\n\n${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "请先用自己的话描述你对当前部分的想法；我会在这个基础上继续帮你完善。"}`,
+      assistant_message: `现在进入“${currentWorkspaceTitle(state.stageIndex)}”。前面确定的实验方向已经保留：${preservedIdea}。\n\n${referenceText}${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "请先用自己的话描述你对当前部分的想法；我会在这个基础上继续帮你完善。"}`,
       student_task: null,
       current_stage: stageId,
       handled_stage: stageId,
@@ -1206,6 +1186,7 @@ function createDemoResponse(message) {
         guided_entry: true,
         awaiting_student_description: true,
         preserved_idea_summary: preservedIdea,
+        reference_draft: referenceSteps,
       },
       quick_actions: [],
       warnings: [],
@@ -1309,60 +1290,18 @@ function detectDemoEmvrIntent(text) {
 }
 
 function isDemoNoDirectionRequest(text) {
-  const normalized = text.trim();
-  const noDirection = /还没有.{0,6}(方向|想法)|没有.{0,6}(具体|明确).{0,6}(方向|想法)|不知道.{0,10}(研究|选|做什么)|帮我.{0,4}(想|brainstorm)|随便.{0,6}(推荐|举例|给.*方向)/i;
-  return !normalized || noDirection.test(normalized);
+  const normalized = String(text || "").replace(/[\s，,。；;！!？?]/g, "");
+  return !normalized || new Set(["没有方向", "还没有想法"]).has(normalized);
 }
 
-function resolveDemoOptionReference(text, options, selectedOptionId = null) {
+function resolveDemoOptionReference(_text, options, selectedOptionId = null) {
   if (!Array.isArray(options) || !options.length) return null;
   const normalizedOptions = options.map(normalizeQuickAction);
   if (selectedOptionId) {
     const selected = normalizedOptions.find((option) => option.optionId === selectedOptionId);
     if (selected) return selected;
   }
-  const normalized = text.trim();
-  const ordinalToken = "(\\d+|[一二三四五六七八九十]{1,3})";
-  const patterns = [
-    new RegExp(`第\\s*${ordinalToken}\\s*(?:个|项|类|条|种|方向|例子)`, "i"),
-    new RegExp(`第\\s*${ordinalToken}\\s*$`, "i"),
-    new RegExp(`(?:选|选择|研究|想要|考虑)\\s*(?:第\\s*)?${ordinalToken}\\s*(?:个|项|类|条|种|方向|例子)`, "i"),
-    new RegExp(`(?:选|选择)\\s*(?:第\\s*)?${ordinalToken}\\s*$`, "i"),
-    new RegExp(`(?:上面|刚才|之前).{0,6}${ordinalToken}\\s*(?:个|项|类|条|种|方向|例子)`, "i"),
-  ];
-  for (const pattern of patterns) {
-    const match = normalized.match(pattern);
-    if (!match) continue;
-    const ordinal = parseDemoOrdinal(match[1]);
-    const index = ordinal === null ? -1 : ordinal - 1;
-    return index >= 0 && index < normalizedOptions.length ? normalizedOptions[index] : null;
-  }
   return null;
-}
-
-function parseDemoOrdinal(raw) {
-  if (/^\d+$/.test(raw)) {
-    const value = Number(raw);
-    return value > 0 ? value : null;
-  }
-  const digits = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
-  if (raw === "十") return 10;
-  if (raw.includes("十")) {
-    const [left, right] = raw.split("十", 2);
-    if ((left && !digits[left]) || (right && !digits[right])) return null;
-    return (left ? digits[left] : 1) * 10 + (right ? digits[right] : 0);
-  }
-  return digits[raw] || null;
-}
-
-function resolveDemoSceneCombination(text, options) {
-  if (!Array.isArray(options) || !options.length) return [];
-  const labels = [...text.matchAll(/图景\s*([A-Z])/gi)]
-    .map((match) => match[1].toUpperCase());
-  const indexes = [...new Set(labels.map((label) => label.charCodeAt(0) - 65))];
-  return indexes
-    .filter((index) => index >= 0 && index < options.length)
-    .map((index) => String(options[index]));
 }
 
 function inferDemoStandardComparisons(text) {
@@ -1387,89 +1326,16 @@ function inferDemoStandardComparisons(text) {
   }];
 }
 
-function updateDemoStandardComparisonDecisions(text, comparisons, controlTurn = false) {
-  const rejectsBundle = /(?:不采用|不保留|不考虑|不需要|无需|不用|不要|取消)(?:这组|这个|整组|全部)?(?:基本|标准)?(?:case|情况|情形|对照|比较)|不需要.{0,6}(?:分类|分情况)讨论|(?:这些|上述|所有|全部).{0,4}都不要/i.test(text);
-  const acceptsBundle = /(?:接受|采纳|同意|保留|采用|恢复).{0,8}(?:这组|这个|整组|全部)?(?:基本|标准)?(?:case|情况|情形|对照|比较)|(?:全部|所有|这些|上述).{0,5}(?:都要|都考虑|都保留|一起做|同时做)/i.test(text);
+function updateDemoStandardComparisonDecisions(_text, comparisons, _controlTurn = false) {
+  // The static GitHub Pages demo has no semantic model. It preserves the
+  // current proposal and leaves natural-language edits to the connected API.
   return (comparisons || []).map((comparison) => {
-    const item = {
+    return {
       ...comparison,
       cases: [...(comparison.cases || [])],
       recommended_cases: [...(comparison.recommended_cases || comparison.cases || [])],
     };
-    const recommended = item.recommended_cases || item.cases || [];
-    const aliases = item.case_aliases || {};
-    const labelsFor = (caseName) => [caseName, ...(aliases[caseName] || [])];
-    const mentioned = recommended.filter((caseName) => (
-      labelsFor(caseName).some((label) => label && text.includes(label))
-    ));
-    const onlyInstruction = /(?:只|仅).{0,8}(?:保留|采用|考虑|研究|观察|比较|看|做)/.test(text);
-    const removed = [];
-    const restored = [];
-    const replacements = [];
-    recommended.forEach((caseName) => {
-      labelsFor(caseName).some((label) => {
-        const escaped = escapeRegularExpression(label);
-        const removePattern = new RegExp(`(?:不采用|不保留|不考虑|不要|不用|排除|去掉|删除|移除)[^，,。；;！？?]{0,3}${escaped}|${escaped}[^，,。；;！？?]{0,3}(?:不采用|不保留|不考虑|不要|不用|排除|去掉|删除|移除)`, "i");
-        const restorePattern = new RegExp(`(?:加入|加回|恢复|重新采用|重新保留|也保留)[^，,。；;！？?]{0,3}${escaped}|${escaped}[^，,。；;！？?]{0,3}(?:加入|加回|恢复|重新采用|重新保留)`, "i");
-        if (removePattern.test(text)) {
-          removed.push(caseName);
-          return true;
-        }
-        if (restorePattern.test(text)) {
-          restored.push(caseName);
-          return true;
-        }
-        return false;
-      });
-    });
-    recommended.forEach((oldCase) => {
-      recommended.forEach((newCase) => {
-        if (oldCase === newCase) return;
-        labelsFor(oldCase).forEach((oldLabel) => {
-          labelsFor(newCase).forEach((newLabel) => {
-            const pattern = new RegExp(`(?:把)?${escapeRegularExpression(oldLabel)}[^，,。；;！？?]{0,4}(?:换成|替换为|改成)${escapeRegularExpression(newLabel)}`, "i");
-            if (pattern.test(text)) replacements.push([oldCase, newCase]);
-          });
-        });
-      });
-    });
-    const onlyCases = mentioned.filter((caseName) => !removed.includes(caseName));
-    const mentionsAllAsGroup = /(?:都|一起|同时).{0,5}(?:要|考虑|保留|采用|研究|观察|比较|看|做)?/.test(text)
-      && new Set(mentioned).size === new Set(recommended).size;
-    if (rejectsBundle) {
-      item.cases = [];
-      item.adoption_status = "REJECTED";
-    } else if (replacements.length) {
-      replacements.forEach(([oldCase, newCase]) => {
-        item.cases = item.cases.filter((caseName) => caseName !== oldCase);
-        if (!item.cases.includes(newCase)) item.cases.push(newCase);
-      });
-      item.adoption_status = item.cases.length === recommended.length
-        ? "ACCEPTED"
-        : "MODIFIED";
-    } else if (onlyInstruction && onlyCases.length) {
-      item.cases = [...new Set(onlyCases)];
-      item.adoption_status = item.cases.length === recommended.length
-        ? "ACCEPTED"
-        : "MODIFIED";
-    } else if (removed.length) {
-      item.cases = item.cases.filter((caseName) => !removed.includes(caseName));
-      item.adoption_status = item.cases.length ? "MODIFIED" : "REJECTED";
-    } else if (restored.length) {
-      item.cases = [...new Set([...item.cases, ...restored])];
-      item.adoption_status = item.cases.length === recommended.length
-        ? "ACCEPTED"
-        : "MODIFIED";
-    } else if (acceptsBundle || mentionsAllAsGroup || (controlTurn && item.adoption_status === "PENDING")) {
-      item.cases = [...recommended];
-      item.adoption_status = "ACCEPTED";
-    }
-    return item;
   });
-}
-
-function escapeRegularExpression(text) {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function formatDemoStandardComparisons(comparisons) {
@@ -1527,11 +1393,11 @@ function buildDemoIdeaDevelopmentStatus(outline, ideaText) {
   const definitions = [
     ["direction_outline", "实验现象与大纲雏形", true, outline.core_phenomenon],
     ["course_mapping", "课程映射", true, outline.course_relationships.join("；")],
-    ["learning_objective", "学习目标", /学生|理解|掌握|解释|判断|学习目标/.test(ideaText), ideaText],
-    ["research_question", "研究问题", /关系|影响|比较|变化|差异|区别/.test(ideaText), ideaText],
+    ["learning_objective", "学习目标", false, ""],
+    ["research_question", "研究问题", false, ""],
     ["theoretical_framework", "理论依据", true, "根据课程资料匹配的核心理论关系"],
-    ["hypothesis", "假设与预期趋势", /假设|预测|预计|增大|减小|变强|变弱|趋势/.test(ideaText), ideaText],
-    ["conceptual_structure", "概念实验结构", /场源|边界|导体|介质|负载|线圈|电荷|对象|对照/.test(ideaText), ideaText],
+    ["hypothesis", "假设与预期趋势", false, ""],
+    ["conceptual_structure", "概念实验结构", false, ""],
   ];
   const status = {
     mode: "DYNAMIC_COMPLETENESS",
@@ -1561,41 +1427,14 @@ function updateDemoIdeaDevelopmentStatus(status, message) {
     active.source = "STUDENT";
     clarified.push(active.facet_id);
   }
-  const patterns = {
-    learning_objective: /学生|理解|掌握|解释|判断|学习目标/,
-    research_question: /关系|影响|比较|变化|差异|区别/,
-    theoretical_framework: /理论|公式|方程|定律|边界条件/,
-    hypothesis: /假设|预测|预计|增大|减小|变强|变弱|趋势/,
-    conceptual_structure: /场源|边界|导体|介质|负载|线圈|电荷|对象|对照/,
-  };
-  Object.entries(patterns).forEach(([facetId, pattern]) => {
-    const facet = status.facets.find((item) => item.facet_id === facetId);
-    if (facet && pattern.test(message)) {
-      if (facet.status !== "CLEAR") clarified.push(facetId);
-      facet.status = "CLEAR";
-      facet.evidence = message.trim();
-      facet.source = "STUDENT";
-    }
-  });
   status.last_clarified_facet_ids = [...new Set(clarified)];
   refreshDemoIdeaDevelopmentStatus(status);
 }
 
-function isSubstantiveDemoFacetAnswer(facetId, message) {
-  const text = message.trim();
-  if (text.length < 6 || /^(继续|下一步|好的|可以|没问题|不知道|不确定|没想好|暂时没有|还不清楚)[。！!？?]*$/.test(text)) {
-    return false;
-  }
-  const patterns = {
-    learning_objective: /理解|解释|判断|比较|计算|分析|掌握|能够|学会/,
-    research_question: /比较|影响|关系|差异|区别|变化|改变|如何|怎样|是否|随.+(?:变|增|减)|与|和|、/,
-    hypothesis: /预计|预期|预测|假设|会|将|增大|减小|增强|减弱|移动|趋于|因为|由于|所以/,
-    conceptual_structure: /包含|包括|组成|场源|激励|对象|边界|导体|介质|负载|线圈|电荷|对照|参照/,
-    course_mapping: /ECE329|课程|静电场|磁场|电磁波|传输线|边界条件/i,
-    theoretical_framework: /理论|公式|方程|定律|边界条件|高斯|法拉第|安培|麦克斯韦|反射系数/,
-    direction_outline: /研究|探究|观察|比较|现象|关系|变化/,
-  };
-  return Boolean(patterns[facetId]?.test(text));
+function isSubstantiveDemoFacetAnswer(_facetId, message) {
+  const normalized = String(message || "").replace(/[\s，,。；;！!？?]/g, "");
+  if (normalized.length < 6) return false;
+  return !new Set(["继续", "下一步", "好的", "可以", "没问题", "不知道"]).has(normalized);
 }
 
 function refreshDemoIdeaDevelopmentStatus(status) {

@@ -12,8 +12,15 @@ from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .dialogue_state import (
+    ALL_INTENTS,
+    resolved_intent,
+    serialize_intent_input,
+    validate_resolved_intent,
+)
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
+    NO_DIRECTION_ACKNOWLEDGEMENT,
     RuleBasedStageGenerator,
     _format_experiment_outline_seed,
     _format_standard_comparison_status,
@@ -115,22 +122,6 @@ EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
         "builder_pack_handoff",
     ),
 }
-
-
-def _comparison_status_is_visible(
-    comparison: dict[str, Any],
-    message: str,
-) -> bool:
-    status = str(comparison.get("adoption_status") or "PENDING").upper()
-    if status == "PENDING":
-        return "建议" in message and "默认" in message
-    if status == "ACCEPTED":
-        return bool(re.search(r"已采纳|已接受|已确认|已按.{0,8}保留", message))
-    if status == "MODIFIED":
-        return bool(re.search(r"按你的决定|只保留|已修改|已删改", message))
-    if status == "REJECTED":
-        return bool(re.search(r"不采用|不纳入|已移除|已拒绝", message))
-    return False
 
 
 def _validated_model_standard_comparisons(
@@ -313,6 +304,31 @@ def _response_schema() -> dict[str, Any]:
     }
 
 
+def _intent_response_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "intent": {"type": "string", "enum": list(ALL_INTENTS)},
+            "target": {"type": ["string", "null"]},
+            "resolved_value_json": {"type": ["string", "null"]},
+            "semantic_updates_json": {"type": ["string", "null"]},
+            "advance_requested": {"type": "boolean"},
+            "preserve_current_design": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": [
+            "intent",
+            "target",
+            "resolved_value_json",
+            "semantic_updates_json",
+            "advance_requested",
+            "preserve_current_design",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    }
+
+
 def _extract_output_text(response: dict[str, Any]) -> str:
     direct = response.get("output_text")
     if isinstance(direct, str) and direct.strip():
@@ -489,6 +505,9 @@ def _validate_lecture_grounding(
     output: StepOutput,
     prompt_packet: dict[str, Any],
 ) -> None:
+    visible_text = " ".join(
+        [output.assistant_message, output.student_task or "", *output.warnings]
+    ).casefold()
     retrieval = prompt_packet["context"]["knowledge_retrieval"]
     allowed_concepts = {
         item["concept_id"]
@@ -612,6 +631,19 @@ def _validate_lecture_grounding(
             raise ModelOutputError(
                 "A course-content request must remain in the course-content category"
             )
+        if prompt_packet["context"].get("stage_one_no_direction") is True:
+            if input_category != COURSE_CONTENT:
+                raise ModelOutputError(
+                    "A no-direction request must be treated as course-content brainstorming"
+                )
+            if re.search(
+                r"(?:不属于|不在|超出).{0,16}ECE329|ECE329.{0,16}(?:不属于|不在|超出)",
+                visible_text,
+                re.IGNORECASE,
+            ):
+                raise ModelOutputError(
+                    "A no-direction reply cannot be presented as outside the course scope"
+                )
         if preclassified_category not in {
             COURSE_CONTENT,
             UNREASONABLE_REQUEST,
@@ -644,6 +676,10 @@ def _validate_lecture_grounding(
                     "Every Stage 1 alternative must exactly reuse a retrieved brainstorm option"
                 )
         if phase == BREADTH_EXPLORATION:
+            if len(alternatives) != 3:
+                raise ModelOutputError(
+                    "Breadth exploration must contain exactly three sampled alternatives"
+                )
             if len(exploration_scenes) != len(alternatives):
                 raise ModelOutputError(
                     "Breadth exploration requires one scene per grounded alternative"
@@ -659,6 +695,7 @@ def _validate_lecture_grounding(
                 "illustrative_extension",
                 "extension_scope",
             }
+            expected_labels = ["图景 A", "图景 B", "图景 C"]
             for index, scene in enumerate(exploration_scenes):
                 if not isinstance(scene, dict):
                     raise ModelOutputError("Every Stage 1 exploration scene must be an object")
@@ -674,6 +711,10 @@ def _validate_lecture_grounding(
                 if scene_id in seen_scene_ids:
                     raise ModelOutputError("Stage 1 exploration scene ids must be unique")
                 seen_scene_ids.add(scene_id)
+                if str(scene.get("label") or "").strip() != expected_labels[index]:
+                    raise ModelOutputError(
+                        "Displayed exploration scenes must be relabeled A, B, and C"
+                    )
                 if scene.get("course_anchor") != alternatives[index]:
                     raise ModelOutputError(
                         "Every Stage 1 scene must exactly bind its matching course alternative"
@@ -687,6 +728,10 @@ def _validate_lecture_grounding(
                         "Stage 1 scenes must contain a concrete, vivid physical picture"
                     )
             visible_message = output.assistant_message
+            if re.search(r"ECE329-S\d{3}", visible_message, re.IGNORECASE):
+                raise ModelOutputError(
+                    "Internal exploration scene numbers cannot appear in student-facing text"
+                )
             if "图景" not in visible_message or not any(
                 phrase in visible_message
                 for phrase in ("组合", "改造", "交换", "叠加")
@@ -850,10 +895,6 @@ def _validate_lecture_grounding(
                                 raise ModelOutputError(
                                     "A ready Stage 1 summary omitted a standard comparison case"
                                 )
-                        if not _comparison_status_is_visible(comparison, visible):
-                            raise ModelOutputError(
-                                "A baseline comparison decision is not stated correctly"
-                            )
                         if status == "PENDING" and re.search(
                             r"自动.{0,4}纳入",
                             visible,
@@ -1035,6 +1076,14 @@ def _step_output_from_response(
                 output.stage_payload["deepening_connections"] = deepcopy(
                     packet["context"]["knowledge_retrieval"]["brainstorm_options"]
                 )
+            if packet["context"].get("stage_one_no_direction") is True:
+                if not output.assistant_message.startswith(
+                    NO_DIRECTION_ACKNOWLEDGEMENT
+                ):
+                    output.assistant_message = (
+                        f"{NO_DIRECTION_ACKNOWLEDGEMENT}\n\n"
+                        f"{output.assistant_message}"
+                    )
             selected_relations = stage_one_thread.get("selected_course_relations", [])
             relation_directions = [
                 str(item.get("direction") or item.get("focus") or "").strip()
@@ -1064,38 +1113,9 @@ def _step_output_from_response(
                 else []
             )
             if ready_for_next_stage and comparison_summary:
-                statuses_visible = all(
-                    _comparison_status_is_visible(
-                        comparison,
-                        output.assistant_message,
-                    )
-                    and all(
-                        str(case).strip() in output.assistant_message
-                        for case in (
-                            comparison.get(
-                                "recommended_cases",
-                                comparison.get("cases", []),
-                            )
-                            if str(comparison.get("adoption_status") or "PENDING").upper()
-                            == "PENDING"
-                            else comparison.get("cases", [])
-                        )
-                        if str(case).strip()
-                    )
-                    for comparison in standard_comparisons
-                    if isinstance(comparison, dict)
-                )
-                if not statuses_visible or re.search(
-                    r"自动.{0,4}纳入",
-                    output.assistant_message,
-                ):
+                if not output.assistant_message.startswith(comparison_summary):
                     output.assistant_message = (
                         f"{comparison_summary}\n\n{output.assistant_message}"
-                    )
-                    output.assistant_message = re.sub(
-                        r"自动(?:同时)?纳入",
-                        "建议默认纳入",
-                        output.assistant_message,
                     )
             if ready_for_next_stage:
                 if re.search(
@@ -1153,6 +1173,24 @@ def _step_output_from_response(
                         f"当前仍围绕“{selected_focus}”讨论。\n\n"
                         f"{output.assistant_message}"
                     )
+    resolved_turn = packet["context"].get("resolved_intent")
+    pending_action = packet["context"].get("pending_action")
+    if isinstance(resolved_turn, dict) and str(resolved_turn.get("intent")) in {
+        "ACCEPT_PREVIOUS_PROPOSAL",
+        "MODIFY_PREVIOUS_PROPOSAL",
+        "REJECT_PREVIOUS_PROPOSAL",
+    }:
+        previous_task = str(
+            pending_action.get("question") if isinstance(pending_action, dict) else ""
+        ).strip()
+        visible_reply = f"{output.assistant_message} {output.student_task or ''}"
+        if (
+            re.search(r"还需要先听听|请先描述你期待看到|请先用自己的话描述", visible_reply)
+            or (previous_task and previous_task in visible_reply)
+        ):
+            raise ModelOutputError(
+                "A contextual guided reply cannot reset or repeat the previous question"
+            )
     _validate_stage_constraints(session, output)
     _validate_lecture_grounding(session, output, packet)
     return output
@@ -1172,7 +1210,122 @@ class OpenAIStageGenerator:
     _chain_resets: int = field(default=0, init=False, repr=False)
     _output_rejections: int = field(default=0, init=False, repr=False)
     _repair_successes: int = field(default=0, init=False, repr=False)
+    _intent_api_successes: int = field(default=0, init=False, repr=False)
+    _intent_api_failures: int = field(default=0, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def resolve_intent(
+        self,
+        session: DesignSession,
+        user_message: str,
+        pending_action: dict[str, Any] | None,
+        carried_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Classify one turn before the deterministic workflow state machine runs."""
+
+        intent_input = serialize_intent_input(
+            session,
+            user_message,
+            pending_action,
+            carried_context,
+        )
+        payload = {
+            "model": self.model,
+            "instructions": (
+                "你只负责识别学生本轮对话意图，不回答课程问题，也不决定阶段编号。"
+                "必须结合previous_question、pending_action、carried_context和user_message。"
+                "可选意图只有ANSWER_CURRENT_QUESTION、ACCEPT_PREVIOUS_PROPOSAL、"
+                "MODIFY_PREVIOUS_PROPOSAL、REJECT_PREVIOUS_PROPOSAL、ADVANCE_STAGE、"
+                "REQUEST_MORE_EXAMPLES、RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、UNCLEAR。"
+                "凡是必须依赖上一轮才能理解的表达都要走这一套语义判断，包括指代某个或多个选项、"
+                "组合前述图景、表示暂无方向、回答或撤回想法完整性要点、接受或局部修改建议、"
+                "继续推进、索取其他例子、返回前项和更换主题；不能用孤立词语代替上下文判断。"
+                "类似‘沿用刚才安排’‘两个都留下’‘不用改，接着做’应根据上一项待办解析，"
+                "不能按孤立关键词判断。只有语义确实不足时才返回UNCLEAR。"
+                "no_direction表示学生当前没有可供继续完善的实验方向，或不知道从哪里开始；"
+                "必须依据整句话的含义判断，暂时想不到、脑中空白、希望先看课程例子等只是"
+                "可能表达而不是固定口令。若学生已经提出明确课程主题，只是在询问如何继续，"
+                "则no_direction必须为false。被判为no_direction的输入仍属于课程想法探索，"
+                "不得判成课外主题。"
+                "resolved_value_json必须是JSON序列化后的值；没有值时为null。"
+                "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
+                "selected_option_ids（必须来自pending_action中的真实option_id）、"
+                "no_direction、facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
+                "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING）、"
+                "comparison_updates（comparison_id和cases必须来自pending_action或carried_context，"
+                "action只能为ACCEPT、MODIFY、REJECT）。不得臆造ID或把宽泛主题当成已回答学习目标。"
+                "没有结构化更新时semantic_updates_json为null。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": intent_input}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_context_intent",
+                    "schema": _intent_response_schema(),
+                    "strict": True,
+                }
+            },
+            "max_output_tokens": 500,
+            "store": False,
+        }
+        try:
+            response = self.transport.create(payload)
+        except ModelServiceError:
+            with self._metrics_lock:
+                self._intent_api_failures += 1
+            raise
+        try:
+            raw = json.loads(_extract_output_text(response))
+        except (json.JSONDecodeError, ModelOutputError) as exc:
+            with self._metrics_lock:
+                self._intent_api_failures += 1
+            raise ModelOutputError("Intent model output was invalid") from exc
+        if not isinstance(raw, dict):
+            with self._metrics_lock:
+                self._intent_api_failures += 1
+            raise ModelOutputError("Intent model output must be an object")
+        resolved_value = None
+        encoded_value = raw.get("resolved_value_json")
+        if isinstance(encoded_value, str):
+            try:
+                resolved_value = json.loads(encoded_value)
+            except json.JSONDecodeError as exc:
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise ModelOutputError("Intent resolved_value_json was invalid") from exc
+        semantic_updates: dict[str, Any] = {}
+        encoded_updates = raw.get("semantic_updates_json")
+        if isinstance(encoded_updates, str):
+            try:
+                parsed_updates = json.loads(encoded_updates)
+            except json.JSONDecodeError as exc:
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise ModelOutputError("Intent semantic_updates_json was invalid") from exc
+            if not isinstance(parsed_updates, dict):
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise ModelOutputError("Intent semantic_updates_json must encode an object")
+            semantic_updates = parsed_updates
+        candidate = resolved_intent(
+            str(raw.get("intent") or "UNCLEAR"),
+            target=str(raw.get("target") or "") or None,
+            resolved_value=resolved_value,
+            advance_requested=raw.get("advance_requested"),
+            preserve_current_design=raw.get("preserve_current_design", True),
+            confidence=raw.get("confidence", 0.0),
+            source="SEMANTIC_MODEL",
+            semantic_updates=semantic_updates,
+        )
+        validated = validate_resolved_intent(candidate, pending_action)
+        with self._metrics_lock:
+            self._intent_api_successes += 1
+        return validated
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
@@ -1313,6 +1466,8 @@ class OpenAIStageGenerator:
             chain_resets = self._chain_resets
             output_rejections = self._output_rejections
             repair_successes = self._repair_successes
+            intent_successes = self._intent_api_successes
+            intent_failures = self._intent_api_failures
         return {
             "provider": "openai",
             "model": self.model,
@@ -1323,6 +1478,8 @@ class OpenAIStageGenerator:
             "response_chain_resets": chain_resets,
             "output_rejections": output_rejections,
             "repair_successes": repair_successes,
+            "intent_api_successes": intent_successes,
+            "intent_api_failures": intent_failures,
         }
 
 
@@ -1333,6 +1490,30 @@ class FallbackStageGenerator:
     _fallback_calls: int = field(default=0, init=False, repr=False)
     _last_fallback_reason: str | None = field(default=None, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def resolve_intent(
+        self,
+        session: DesignSession,
+        user_message: str,
+        pending_action: dict[str, Any] | None,
+        carried_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return self.primary.resolve_intent(
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            )
+        except ModelServiceError:
+            with self._metrics_lock:
+                self._fallback_calls += 1
+                self._last_fallback_reason = "intent_service_unavailable"
+            return resolved_intent(
+                "UNCLEAR",
+                confidence=0.0,
+                source="INTENT_SERVICE_UNAVAILABLE",
+            )
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         try:
@@ -1372,6 +1553,8 @@ class FallbackStageGenerator:
             "response_chain_resets": primary_info["response_chain_resets"],
             "output_rejections": primary_info["output_rejections"],
             "repair_successes": primary_info["repair_successes"],
+            "intent_api_successes": primary_info["intent_api_successes"],
+            "intent_api_failures": primary_info["intent_api_failures"],
             "fallback_calls": fallback_calls,
             "last_fallback_reason": last_fallback_reason,
         }

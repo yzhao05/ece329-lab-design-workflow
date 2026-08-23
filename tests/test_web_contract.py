@@ -52,7 +52,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("确认想法完善并进入变量与条件", self.app_js)
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(
-            self.index_html.count("v=20260823-direct-student-address"),
+            self.index_html.count("v=20260824-unified-semantics"),
             3,
         )
 
@@ -66,18 +66,19 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("现在进入“实验想法完善”的小点2", self.app_js)
 
     def test_natural_idea_completion_message_is_recognized(self) -> None:
-        self.assertIn("const ideaTransition", self.app_js)
-        self.assertIn("const blockedTransition", self.app_js)
-        self.assertIn("const semanticTransition", self.app_js)
+        self.assertIn("const explicitTransition", self.app_js)
         self.assertIn("const completedIdeaConfirmation", self.app_js)
-        self.assertIn("想法|方向|大纲", self.app_js)
-        self.assertIn("变量与条件|下一阶段", self.app_js)
+        self.assertIn("Conversational", self.app_js)
+        self.assertNotIn("const semanticTransition", self.app_js)
 
     def test_guided_stage_entry_waits_for_student_description(self) -> None:
         self.assertIn("DEMO_GUIDED_STAGE_ENTRY_QUESTIONS", self.app_js)
+        self.assertIn("DEMO_GUIDED_STAGE_REFERENCE_STEPS", self.app_js)
         self.assertIn("awaiting_student_description: true", self.app_js)
         self.assertIn("哪些量应该主动改变", self.app_js)
         self.assertIn("你认为在这个实验中", self.app_js)
+        self.assertIn("可修改的结构作为参考", self.app_js)
+        self.assertIn("建立可重复的基准条件", self.app_js)
         self.assertNotIn("你认为学生从建立比较基准", self.app_js)
         self.assertNotIn("你最希望学生", self.app_js)
         self.assertIn(
@@ -116,7 +117,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("我不能执行", self.app_js)
         self.assertIn("classifyDemoStageOneInput", self.app_js)
         self.assertIn("resolveDemoOptionReference", self.app_js)
-        self.assertIn("function parseDemoOrdinal(raw)", self.app_js)
+        self.assertNotIn("function parseDemoOrdinal(raw)", self.app_js)
         self.assertIn("你已经把方向收到了", self.app_js)
         self.assertIn("请先用自己的话说说", self.app_js)
         self.assertIn('return "UNREASONABLE_REQUEST"', self.app_js)
@@ -139,18 +140,17 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("提出一个自己的ECE329课内设想", self.app_js)
         self.assertIn("response.stage_payload?.exploration_scenes", self.app_js)
         self.assertIn("scene.course_anchor?.option_id", self.app_js)
-        self.assertIn("function resolveDemoSceneCombination(text, options)", self.app_js)
+        self.assertNotIn("function resolveDemoSceneCombination", self.app_js)
         self.assertIn("function inferDemoStandardComparisons(text)", self.app_js)
         self.assertIn("function updateDemoStandardComparisonDecisions", self.app_js)
         self.assertIn("function formatDemoStandardComparisons", self.app_js)
         self.assertIn("const DEMO_BASELINE_COMPARISONS", self.app_js)
-        self.assertIn("function escapeRegularExpression", self.app_js)
+        self.assertNotIn("function escapeRegularExpression", self.app_js)
         self.assertNotIn("const sameOnly", self.app_js)
         self.assertNotIn("const oppositeOnly", self.app_js)
         self.assertIn("建议默认把", self.app_js)
         self.assertIn('adoption_status: "PENDING"', self.app_js)
         self.assertNotIn("自动同时纳入", self.app_js)
-        self.assertIn("共同解释什么核心现象", self.app_js)
 
     def test_failed_api_request_preserves_real_session(self) -> None:
         self.assertIn("当前设计已保留，请稍后重试", self.app_js)

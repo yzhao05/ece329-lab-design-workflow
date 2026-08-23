@@ -18,6 +18,7 @@ from ece329_workflow.openai_generator import (
     OpenAIStageGenerator,
     generator_from_environment,
 )
+from ece329_workflow.prompts import build_prompt_packet
 
 
 class FakeTransport:
@@ -66,7 +67,11 @@ def guided_session(stage_index: int = 0) -> DesignSession:
 
 
 def valid_output(**overrides: Any) -> dict[str, Any]:
-    brainstorm = KNOWLEDGE.brainstorm_options("研究传输线驻波", limit=1)
+    brainstorm = KNOWLEDGE.brainstorm_options(
+        "研究传输线驻波",
+        limit=3,
+        seed_key="design_test:0",
+    )
     scenes = build_exploration_scenes(brainstorm)
     output: dict[str, Any] = {
         "assistant_message": (
@@ -91,7 +96,135 @@ def valid_output(**overrides: Any) -> dict[str, Any]:
     return output
 
 
+def retrieved_brainstorm_options(
+    message: str,
+    session: DesignSession | None = None,
+) -> list[dict[str, Any]]:
+    packet = build_prompt_packet(session or guided_session(), message)
+    return packet["context"]["knowledge_retrieval"]["brainstorm_options"]
+
+
 class OpenAIStageGeneratorTests(unittest.TestCase):
+    def test_context_intent_resolver_uses_a_separate_structured_request(self) -> None:
+        transport = FakeTransport(
+            {
+                "intent": "ADVANCE_STAGE",
+                "target": "variable_plan",
+                "resolved_value_json": None,
+                "semantic_updates_json": json.dumps(
+                    {
+                        "no_direction": False,
+                        "selected_option_ids": [],
+                        "facet_updates": [],
+                        "comparison_updates": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                "advance_requested": True,
+                "preserve_current_design": True,
+                "confidence": 0.97,
+            }
+        )
+        generator = OpenAIStageGenerator(transport=transport, model="test-model")
+        session = guided_session(stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS))
+        pending = {
+            "type": "CONFIRM_OR_MODIFY",
+            "subject": "variable_plan",
+            "proposal": ["距离", "电场线形状"],
+            "question": "是否保留当前变量安排？",
+            "allowed_intents": ["ADVANCE_STAGE", "ACCEPT_PREVIOUS_PROPOSAL"],
+        }
+
+        result = generator.resolve_intent(
+            session,
+            "沿用刚才的安排，继续往下整理",
+            pending,
+            {"independent_variable": ["距离"]},
+        )
+
+        self.assertEqual(result["intent"], "ADVANCE_STAGE")
+        self.assertFalse(result["semantic_updates"]["no_direction"])
+        request = transport.requests[0]
+        self.assertEqual(request["text"]["format"]["name"], "ece329_context_intent")
+        self.assertFalse(request["store"])
+        self.assertNotIn("previous_response_id", request)
+        serialized = request["input"][0]["content"][0]["text"]
+        self.assertIn("pending_action", serialized)
+        self.assertIn("沿用刚才的安排", serialized)
+        self.assertIn("no_direction表示学生当前没有可供继续完善的实验方向", request["instructions"])
+        self.assertIn("不得判成课外主题", request["instructions"])
+
+    def test_semantic_no_direction_gets_a_friendly_course_brainstorm_lead(self) -> None:
+        session = guided_session()
+        message = "完全没头绪，先帮我打开思路"
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                message,
+                options=[],
+                idea_context=session.design_context["idea"],
+                semantic_updates={"no_direction": True},
+            )
+        )
+        options = retrieved_brainstorm_options(message, session)
+        transport = FakeTransport(
+            valid_output(
+                stage_payload_json=json.dumps(
+                    {
+                        "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                        "input_category": "COURSE_CONTENT",
+                        "brainstorm_phase": "BREADTH_EXPLORATION",
+                        "alternative_ideas": options,
+                        "exploration_scenes": build_exploration_scenes(options),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
+        output = OpenAIStageGenerator(transport=transport).generate(session, message)
+
+        self.assertTrue(
+            output.assistant_message.startswith("好的，那我来帮助你拓展思路")
+        )
+        self.assertEqual(output.stage_payload["input_category"], "COURSE_CONTENT")
+        self.assertNotIn("不属于ECE329", output.assistant_message)
+
+    def test_semantic_no_direction_rejects_a_contradictory_scope_message(self) -> None:
+        session = guided_session()
+        message = "我现在完全不知道可以研究什么"
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                message,
+                options=[],
+                idea_context=session.design_context["idea"],
+                semantic_updates={"no_direction": True},
+            )
+        )
+        options = retrieved_brainstorm_options(message, session)
+        transport = FakeTransport(
+            valid_output(
+                assistant_message=(
+                    "你提出的主题不属于ECE329课程范围。下面是可改造、可组合的物理图景。"
+                ),
+                stage_payload_json=json.dumps(
+                    {
+                        "brainstorm_activity": "RELATIONSHIP_DISCOVERY",
+                        "input_category": "COURSE_CONTENT",
+                        "brainstorm_phase": "BREADTH_EXPLORATION",
+                        "alternative_ideas": options,
+                        "exploration_scenes": build_exploration_scenes(options),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(
+                transport=transport,
+                repair_attempts=0,
+            ).generate(session, message)
+
     def test_generator_builds_responses_request_and_parses_json(self) -> None:
         transport = FakeTransport(valid_output())
         generator = OpenAIStageGenerator(transport=transport, model="test-model")
@@ -321,7 +454,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             )
 
     def test_out_of_scope_model_response_must_state_boundary(self) -> None:
-        broad_options = KNOWLEDGE.broad_entry_points()
+        broad_options = retrieved_brainstorm_options("我想研究有机化学反应速率")
         broad_scenes = build_exploration_scenes(broad_options)
         missing_boundary = FakeTransport(
             valid_output(
@@ -344,7 +477,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             )
 
     def test_ambiguous_preclassification_allows_model_semantic_course_judgment(self) -> None:
-        broad_options = KNOWLEDGE.broad_entry_points()
+        broad_options = retrieved_brainstorm_options("我想研究一种材料里的变化")
         broad_scenes = build_exploration_scenes(broad_options)
         transport = FakeTransport(
             valid_output(
@@ -440,7 +573,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         self.assertEqual(output.stage_payload["brainstorm_phase"], "DEPTH_EXPANSION")
         self.assertEqual(output.stage_payload["alternative_ideas"], [])
-        self.assertEqual(output.stage_payload["deepening_connections"], options)
+        expected_connections = retrieved_brainstorm_options(message, session)
+        self.assertEqual(
+            output.stage_payload["deepening_connections"],
+            expected_connections,
+        )
 
     def test_ready_combined_direction_rejects_another_forced_choice(self) -> None:
         session = guided_session()
@@ -609,7 +746,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             OpenAIStageGenerator(transport=transport).generate(session, message)
 
     def test_valid_out_of_scope_model_response_keeps_three_course_examples(self) -> None:
-        broad_options = KNOWLEDGE.broad_entry_points()
+        broad_options = retrieved_brainstorm_options("我想研究有机化学反应速率")
         broad_scenes = build_exploration_scenes(broad_options)
         transport = FakeTransport(
             valid_output(

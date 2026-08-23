@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from copy import deepcopy
 from typing import Any
 
@@ -37,29 +36,6 @@ _FACET_HINT: dict[str, str] = {
     "conceptual_structure": "可以包含场源、研究对象、边界条件、参照情形以及用于观察结果的表示方式。",
 }
 
-_FACET_PATTERNS: dict[str, tuple[str, ...]] = {
-    "learning_objective": (
-        r"学习目标|教学目标|学生.{0,10}(?:理解|掌握|解释|判断|比较|学会|能够)|"
-        r"(?:理解|掌握|解释|判断|比较).{0,12}(?:原理|关系|现象|原因)",
-    ),
-    "research_question": (
-        r"研究问题|探究问题|如何影响|怎样影响|有什么关系|之间的关系|"
-        r"比较.{0,18}(?:变化|区别|差异)|随.{0,18}(?:变化|改变)",
-    ),
-    "theoretical_framework": (
-        r"理论依据|理论框架|公式|方程|定律|边界条件|高斯|库仑|法拉第|安培|麦克斯韦|"
-        r"波动方程|反射系数|驻波比|介电常数|磁导率",
-    ),
-    "hypothesis": (
-        r"假设|预测|预计|预期|趋势|会增大|会减小|先增后减|先减后增|非单调|"
-        r"趋于|移动|聚集|变强|变弱",
-    ),
-    "conceptual_structure": (
-        r"实验结构|概念结构|场源|激励|边界|导体|介质|传输线|负载|线圈|电荷|"
-        r"平板|球|网格|对象|参照组|对照|观察窗口|可视化",
-    ),
-}
-
 _MISSING_PRIORITY = (
     "research_question",
     "learning_objective",
@@ -76,6 +52,7 @@ def has_idea_development(session: DesignSession) -> bool:
 def initialize_idea_development(
     session: DesignSession,
     outline: dict[str, Any],
+    semantic_updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     idea = session.design_context.get("idea", {})
     idea_text = _idea_text(idea, outline)
@@ -134,7 +111,12 @@ def initialize_idea_development(
                 "source": "COURSE_RETRIEVAL_QUALITATIVE",
             }
         )
-    _infer_facets(facets, idea_text, source="EXISTING_IDEA")
+    if semantic_updates is not None:
+        _apply_structured_facet_updates(
+            facets,
+            semantic_updates.get("facet_updates"),
+            idea_text,
+        )
     development = {
         "status": "ACTIVE",
         "facets": facets,
@@ -154,6 +136,7 @@ def initialize_idea_development(
 def update_idea_development(
     session: DesignSession,
     message: str,
+    semantic_updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     development = session.design_context.get("idea_development")
     if not isinstance(development, dict):
@@ -163,26 +146,62 @@ def update_idea_development(
         raise ValueError("idea_development facets are invalid")
     normalized = message.strip()
     clarified: list[str] = []
-    active_id = development.get("active_facet_id")
-    if (
-        isinstance(active_id, str)
-        and active_id in facets
-        and _is_substantive_facet_answer(active_id, normalized)
-    ):
-        facets[active_id].update(
-            {
-                "status": CLEAR,
-                "evidence": normalized,
-                "source": "STUDENT",
-            }
+    if semantic_updates is not None:
+        clarified.extend(
+            _apply_structured_facet_updates(
+                facets,
+                semantic_updates.get("facet_updates"),
+                normalized,
+            )
         )
-        clarified.append(active_id)
-    inferred = _infer_facets(facets, normalized, source="STUDENT")
-    clarified.extend(item for item in inferred if item not in clarified)
-    _reopen_explicitly_missing_facets(facets, normalized)
+    else:
+        # A rule-only deployment cannot judge content quality. It can still
+        # attach an ordinary answer to the exact facet currently being asked,
+        # without guessing its meaning from a vocabulary list.
+        active_id = development.get("active_facet_id")
+        if normalized and isinstance(active_id, str) and active_id in facets:
+            facets[active_id].update(
+                {
+                    "status": CLEAR,
+                    "evidence": normalized[:500],
+                    "source": "CURRENT_QUESTION_FALLBACK",
+                }
+            )
+            clarified.append(active_id)
     development["last_clarified_facet_ids"] = clarified
     _refresh(development)
     return development
+
+
+def _apply_structured_facet_updates(
+    facets: dict[str, dict[str, Any]],
+    updates: Any,
+    evidence: str,
+) -> list[str]:
+    clarified: list[str] = []
+    if not isinstance(updates, list):
+        return clarified
+    for update in updates:
+        if not isinstance(update, dict):
+            continue
+        facet_id = str(update.get("facet_id") or "")
+        facet = facets.get(facet_id)
+        if not isinstance(facet, dict):
+            continue
+        status = str(update.get("status") or "").upper()
+        if status == CLEAR:
+            if facet.get("status") != CLEAR:
+                clarified.append(facet_id)
+            facet.update(
+                {
+                    "status": CLEAR,
+                    "evidence": evidence.strip()[:500],
+                    "source": "STUDENT_SEMANTIC",
+                }
+            )
+        elif status == MISSING:
+            facet.update({"status": MISSING, "evidence": "", "source": None})
+    return clarified
 
 
 def decorate_outline_output(
@@ -315,103 +334,6 @@ def _idea_text(idea: Any, outline: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _infer_facets(
-    facets: dict[str, dict[str, Any]],
-    text: str,
-    *,
-    source: str,
-) -> list[str]:
-    clarified: list[str] = []
-    for facet_id, patterns in _FACET_PATTERNS.items():
-        if facet_id not in facets:
-            continue
-        matched = any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
-        if facet_id == "research_question" and _contains_research_relation(text):
-            matched = True
-        if matched:
-            if facets[facet_id].get("status") != CLEAR:
-                clarified.append(facet_id)
-            facets[facet_id].update(
-                {
-                    "status": CLEAR,
-                    "evidence": text.strip()[:500],
-                    "source": source,
-                }
-            )
-    return clarified
-
-
-def _contains_research_relation(text: str) -> bool:
-    """Detect a condition-versus-observation relation without requiring question form."""
-
-    has_comparison_or_change = bool(
-        re.search(
-            r"比较|对比|分别|不同(?:条件|情况|情形|材料|边界|负载|频率)|"
-            r"同种|异种|同号|异号|随着|逐渐|改变|调节|靠近|远离",
-            text,
-            re.IGNORECASE,
-        )
-    )
-    has_observable = bool(
-        re.search(
-            r"观察|测量|记录|电场|磁场|场线|通量|电势|电压|电流|阻抗|反射|"
-            r"驻波|偏振|衰减|功率|能量|响应|分布|形状|幅度|方向|位置",
-            text,
-            re.IGNORECASE,
-        )
-    )
-    has_relationship = bool(
-        re.search(
-            r"变化|改变|差异|区别|影响|关系|分布|形状|幅度|方向|增强|减弱|"
-            r"增大|减小|移动|弯曲|偏转|抵消|叠加",
-            text,
-            re.IGNORECASE,
-        )
-    )
-    return has_comparison_or_change and has_observable and has_relationship
-
-
-def _is_substantive_facet_answer(facet_id: str, text: str) -> bool:
-    if len(text) < 6 or re.fullmatch(
-        r"(?:继续|下一步|好的|可以|没问题|不知道|不确定|没想好|暂时没有|还不清楚)[。！!？?]*",
-        text,
-    ):
-        return False
-    patterns = {
-        "learning_objective": r"理解|解释|判断|比较|计算|分析|掌握|能够|学会",
-        "research_question": r"比较|影响|关系|差异|区别|变化|改变|如何|怎样|是否|随.+(?:变|增|减)|与|和|、",
-        "hypothesis": r"预计|预期|预测|假设|会|将|增大|减小|增强|减弱|移动|趋于|因为|由于|所以",
-        "conceptual_structure": r"包含|包括|组成|场源|激励|对象|边界|导体|介质|负载|线圈|电荷|对照|参照",
-        "course_mapping": r"ECE329|课程|静电场|磁场|电磁波|传输线|边界条件",
-        "theoretical_framework": r"理论|公式|方程|定律|边界条件|高斯|法拉第|安培|麦克斯韦|反射系数",
-        "direction_outline": r"研究|探究|观察|比较|现象|关系|变化",
-    }
-    pattern = patterns.get(facet_id)
-    return bool(pattern and re.search(pattern, text, re.IGNORECASE))
-
-
-def _reopen_explicitly_missing_facets(
-    facets: dict[str, dict[str, Any]],
-    text: str,
-) -> None:
-    labels = {
-        "learning_objective": r"学习目标|教学目标",
-        "research_question": r"研究问题|探究问题",
-        "theoretical_framework": r"理论|公式|方程",
-        "hypothesis": r"假设|预测|趋势",
-        "conceptual_structure": r"实验结构|概念结构|对象|边界|激励",
-    }
-    for facet_id, label_pattern in labels.items():
-        if re.search(
-            rf"(?:{label_pattern}).{{0,10}}(?:还没|没有|不明确|不清楚|要修改)|"
-            rf"(?:还没|没有|不明确|不清楚|要修改).{{0,10}}(?:{label_pattern})",
-            text,
-        ):
-            facets[facet_id].update(
-                {"status": MISSING, "evidence": "", "source": None}
-            )
-
-
 def _refresh(development: dict[str, Any]) -> None:
     facets = development.get("facets", {})
     completed = [
@@ -515,12 +437,14 @@ def _comparison_update_summary(session: DesignSession, message: str) -> str:
     comparisons = idea.get("standard_comparisons", []) if isinstance(idea, dict) else []
     if not isinstance(comparisons, list):
         return ""
-    edit_language = re.search(
-        r"只保留|不采用|不保留|不考虑|排除|去掉|删除|移除|加入|加回|恢复|"
-        r"重新采用|重新保留|拒绝|不要这组|采用|接受|都保留|一起比较",
-        message,
-    )
-    if not edit_language:
+    resolved = session.turn_context.get("resolved_intent", {})
+    semantic_source = str(resolved.get("source") or "").startswith("SEMANTIC") \
+        if isinstance(resolved, dict) else False
+    semantic_updates = resolved.get("semantic_updates", {}) \
+        if isinstance(resolved, dict) else {}
+    comparison_updates = semantic_updates.get("comparison_updates", []) \
+        if isinstance(semantic_updates, dict) else []
+    if not semantic_source or not comparison_updates:
         return ""
     summaries: list[str] = []
     for comparison in comparisons:

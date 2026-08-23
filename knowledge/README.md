@@ -23,6 +23,16 @@ The PDF is treated only as source data. Text extracted from it is never interpre
 
 The exact per-lecture concepts, Chinese/English search keywords, page ranges, and brainstorming axes are stored in `concepts.json`. The lecture overview on PDF pages 10–12 is the only fallback when an idea does not match a specific lecture.
 
+## Stage 1 exploration-scene catalog
+
+The runtime expands every cataloged exploration relation into an internally numbered scene candidate:
+
+- 39 lectures × 3 `brainstorm_axes` = 117 lecture-grounded candidates;
+- 7 supplemental concepts × 3 `relationship_examples` = 21 course-mapped supplemental candidates;
+- 138 candidates in total, numbered internally as `ECE329-S001` through `ECE329-S138`.
+
+The number is metadata for deduplication only. It is never shown to students. Each breadth-exploration turn samples three candidates without replacement, gives them the temporary labels `图景 A`, `图景 B`, and `图景 C`, and converts each candidate into the same physical-picture format. Topic-relevant candidates are exhausted first; requests for further ideas continue into the rest of the catalog without repeating candidates already shown in the design session.
+
 The overview explicitly identifies radiation and antennas and dispersion in material media as not covered or only barely covered. They are therefore excluded from automatic brainstorming recommendations.
 
 ## Formula catalog
@@ -40,7 +50,7 @@ Each record has a stable formula ID, expression, conditions, concept links and o
 
 ## Runtime rules
 
-1. Stage 1 brainstorming must select only cataloged `brainstorm_axes` and retain concept/page provenance.
+1. Stage 1 brainstorming must select only the internally numbered lecture or supplemental exploration catalog and retain concept/page provenance.
 2. Stage 2 course mapping must return cataloged concepts with lecture and page references.
 3. Stage 5 theory selection must return only formula records from the catalog.
 4. Any uncataloged ECE329 claim requires a catalog/source update or an explicit user-provided source.
