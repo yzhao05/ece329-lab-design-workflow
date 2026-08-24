@@ -123,6 +123,249 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_stage_level_confirmation_advances_without_micro_confirmation_loop(self) -> None:
+        class CompletionGenerator(ScriptedSemanticGenerator):
+            def __init__(self) -> None:
+                super().__init__(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    semantic_updates={"pending_answer_status": "CLEAR"},
+                )
+
+            def generate(self, session, user_message):
+                return StepOutput(
+                    assistant_message="距离作为唯一自变量，场线和通量作为观察量。",
+                    stage_payload={
+                        "independent_variable": "两个源之间的距离",
+                        "stage_readiness": {
+                            "ready_for_confirmation": True,
+                            "remaining_gaps": [],
+                        },
+                    },
+                    student_task="还可以怎样补充控制条件？",
+                )
+
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                if pending_action and pending_action.get("type") == "CONFIRM_STAGE_OR_MODIFY":
+                    return resolved_intent(
+                        UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                        confidence=0.98,
+                        source="SEMANTIC_TEST",
+                    )
+                return super().resolve_intent(
+                    session,
+                    user_message,
+                    pending_action,
+                    carried_context,
+                )
+
+        engine = WorkflowEngine(generator=CompletionGenerator())
+        session = DesignSession(
+            design_id="design_stage_confirmation_advance",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={"idea": {"main_direction": "比较两个电荷源"}},
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine.store.save(session)
+
+        ready = engine.process_turn(
+            session.design_id,
+            {"message": "拖拽改变两个源的距离，观察电场线和通量"},
+        )
+        self.assertTrue(ready["stage_payload"]["stage_ready_for_confirmation"])
+        self.assertIn("不用再逐项确认", ready["assistant_message"])
+        pending = current_pending_action(engine.store.get(session.design_id))
+        assert pending is not None
+        self.assertEqual(pending["type"], "CONFIRM_STAGE_OR_MODIFY")
+        self.assertTrue(pending["advance_on_accept"])
+
+        advanced = engine.process_turn(session.design_id, {"message": "确认"})
+        self.assertEqual(
+            advanced["transitioned_from_stage"],
+            Stage.VARIABLES_AND_CONDITIONS.value,
+        )
+        self.assertEqual(advanced["current_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+
+    def test_legacy_micro_confirmation_can_advance_after_upgrade(self) -> None:
+        generator = ScriptedSemanticGenerator(UserIntent.ACCEPT_PREVIOUS_PROPOSAL)
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="design_legacy_micro_confirmation",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={
+                "idea": {"main_direction": "比较两个电荷源"},
+                "guided_stage_drafts": {
+                    Stage.VARIABLES_AND_CONDITIONS.value: {
+                        "independent_variable": "两个源之间的距离"
+                    }
+                },
+            },
+        )
+        old_output = StepOutput(
+            assistant_message="距离是唯一自变量。",
+            stage_payload={"independent_variable": "两个源之间的距离"},
+            student_task="你确认一下自变量是否只保留距离。",
+        )
+        save_pending_action(session, session.current_stage, old_output)
+        session.stage_outputs[session.current_stage.value] = {
+            **old_output.to_dict(),
+            "revision": 1,
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": "合适"})
+
+        self.assertEqual(
+            result["transitioned_from_stage"],
+            Stage.VARIABLES_AND_CONDITIONS.value,
+        )
+        self.assertEqual(result["current_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+
+    def test_guided_entry_uses_structured_facts_not_conversation_commands(self) -> None:
+        session = DesignSession(
+            design_id="design_structured_entry_basis",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.CONCEPTUAL_PROCEDURE),
+            design_context={
+                "idea": {"main_direction": "比较两个电荷源靠近时的场分布"},
+                "student_decisions": {
+                    Stage.VARIABLES_AND_CONDITIONS.value: [
+                        {
+                            "message": "保留全部环节。改变距离并观察场线",
+                            "before_revision": 1,
+                        },
+                        {"message": "确认", "before_revision": 2},
+                    ]
+                },
+                "guided_stage_drafts": {
+                    Stage.VARIABLES_AND_CONDITIONS.value: {
+                        "independent_variable": "两个源之间的距离",
+                        "observations": ["电场线", "中间平面通量"],
+                        "controlled_variables": ["电荷量"],
+                    }
+                },
+            },
+        )
+
+        output = guided_stage_entry_output(session)
+
+        self.assertNotIn("保留全部环节", output.assistant_message)
+        self.assertNotIn("设计依据包括：确认", output.assistant_message)
+        self.assertIn("两个源之间的距离", output.assistant_message)
+        self.assertIn("中间平面通量", output.assistant_message)
+        self.assertNotIn("你可以直接说明哪些环节", output.assistant_message)
+
+    def test_request_for_possible_result_is_reference_not_student_design_fact(self) -> None:
+        class ReferenceGenerator(ScriptedSemanticGenerator):
+            def __init__(self) -> None:
+                super().__init__(UserIntent.REQUEST_MORE_EXAMPLES)
+
+            def generate(self, session, user_message):
+                return StepOutput(
+                    assistant_message=(
+                        "一种可修改的理论参考是：异种电荷条件下，中间平面通量可能随距离减小而增大；"
+                        "这只是理论预测，不是实测结果。"
+                    ),
+                    stage_payload={
+                        "reference_prediction": "通量可能随距离减小而增大",
+                        "stage_readiness": {
+                            "ready_for_confirmation": True,
+                            "remaining_gaps": [],
+                        },
+                    },
+                    student_task="你可以检查这个参考是否符合前面确定的物理关系。",
+                    visualization={"data_kind": "theoretical_prediction"},
+                )
+
+        engine = WorkflowEngine(generator=ReferenceGenerator())
+        session = DesignSession(
+            design_id="design_reference_result_request",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.EXPECTED_DATA_VISUALIZATION),
+            design_context={"idea": {"main_direction": "比较电荷源距离与通量"}},
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "不知道，请给出你认为的一种可能"},
+        )
+
+        self.assertIn("一种可修改的理论参考", result["assistant_message"])
+        self.assertNotIn("不知道，请给出", str(result["stage_payload"]))
+        self.assertTrue(result["stage_payload"]["stage_ready_for_confirmation"])
+        stored = engine.get_design(session.design_id)["design_context"]
+        stage_decisions = stored.get("student_decisions", {}).get(
+            Stage.EXPECTED_DATA_VISUALIZATION.value,
+            [],
+        )
+        self.assertEqual(stage_decisions, [])
+        pending = current_pending_action(engine.store.get(session.design_id))
+        assert pending is not None
+        self.assertEqual(pending["type"], "CONFIRM_STAGE_OR_MODIFY")
+
+    def test_rule_based_fallback_answers_reference_request_from_carried_context(self) -> None:
+        generator = ScriptedSemanticGenerator(UserIntent.REQUEST_MORE_EXAMPLES)
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="design_fallback_reference_request",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.EXPECTED_DATA_VISUALIZATION),
+            design_context={
+                "idea": {"main_direction": "比较两个场源靠近时的场分布"},
+                "guided_stage_drafts": {
+                    Stage.VARIABLES_AND_CONDITIONS.value: {
+                        "independent_variable": "两个源之间的距离",
+                        "observations": ["电场线", "中间区域场强"],
+                    }
+                },
+            },
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "我还不确定，你先给一个你认为合适的显示方式"},
+        )
+
+        self.assertIn("能直接拿来改的理论参考", result["assistant_message"])
+        self.assertIn("两个源之间的距离", result["assistant_message"])
+        self.assertNotIn("我还不确定", str(result["stage_payload"]))
+        self.assertTrue(result["stage_payload"]["reference_only"])
+        self.assertEqual(result["stage_payload"]["stage_readiness"]["ready_for_confirmation"], False)
+        stored = engine.get_design(session.design_id)["design_context"]
+        self.assertEqual(
+            stored.get("student_decisions", {}).get(
+                Stage.EXPECTED_DATA_VISUALIZATION.value,
+                [],
+            ),
+            [],
+        )
+
     def test_context_dependent_short_acceptance_uses_semantic_resolution(self) -> None:
         open_question = {
             "type": "ANSWER_STAGE_QUESTION",
@@ -139,12 +382,7 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIsNone(deterministic_intent("确认", open_question))
 
         open_question["candidate_answer"] = "建立基准后改变条件并记录结果"
-        confirmed = deterministic_intent("确认", open_question)
-        assert confirmed is not None
-        self.assertEqual(
-            confirmed["intent"],
-            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
-        )
+        self.assertIsNone(deterministic_intent("确认", open_question))
 
         proposal_confirmation = {
             "type": "CONFIRM_OR_MODIFY",
@@ -152,11 +390,70 @@ class DialogueStateTests(unittest.TestCase):
             "proposal": {"complete": True},
             "allowed_intents": [UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value],
         }
-        accepted = deterministic_intent("保留", proposal_confirmation)
-        assert accepted is not None
+        self.assertIsNone(deterministic_intent("保留", proposal_confirmation))
+        explicit_ui_event = deterministic_intent(
+            "按钮显示文字不参与判断",
+            proposal_confirmation,
+            complete_stage=True,
+        )
+        assert explicit_ui_event is not None
+        self.assertEqual(explicit_ui_event["intent"], UserIntent.ADVANCE_STAGE.value)
+
+        mode_event = deterministic_intent(
+            "按钮文字可以任意变化",
+            proposal_confirmation,
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        assert mode_event is not None
         self.assertEqual(
-            accepted["intent"],
-            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+            mode_event["intent"],
+            UserIntent.SET_INTERACTION_STATE.value,
+        )
+        self.assertEqual(
+            mode_event["semantic_updates"]["interaction_state_request"],
+            InteractionState.EMVR_DIRECT.value,
+        )
+
+    def test_semantic_mode_and_course_scope_are_schema_validated(self) -> None:
+        validated = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "interaction_state_request": "EMVR_DIRECT",
+                    "course_scope_status": "COURSE_CONTENT",
+                },
+            ),
+            None,
+        )
+        self.assertEqual(
+            validated["semantic_updates"]["interaction_state_request"],
+            "EMVR_DIRECT",
+        )
+        self.assertEqual(
+            validated["semantic_updates"]["course_scope_status"],
+            "COURSE_CONTENT",
+        )
+
+        rejected = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "interaction_state_request": "ARBITRARY_MODE",
+                    "course_scope_status": "ARBITRARY_SCOPE",
+                },
+            ),
+            None,
+        )
+        self.assertIsNone(
+            rejected["semantic_updates"]["interaction_state_request"]
+        )
+        self.assertEqual(
+            rejected["semantic_updates"]["course_scope_status"],
+            "UNCERTAIN",
         )
 
     def test_candidate_confirmation_closes_every_stage_one_student_facet(self) -> None:
@@ -183,7 +480,7 @@ class DialogueStateTests(unittest.TestCase):
                         self.intent_calls += 1
                         if self.intent_calls == 1:
                             return resolved_intent(
-                                UserIntent.ANSWER_CURRENT_QUESTION,
+                                UserIntent.UNCLEAR,
                                 target=facet_id,
                                 confidence=0.96,
                                 source="SEMANTIC_TEST",
@@ -277,7 +574,7 @@ class DialogueStateTests(unittest.TestCase):
                         self.intent_calls += 1
                         if self.intent_calls == 1:
                             return resolved_intent(
-                                UserIntent.ANSWER_CURRENT_QUESTION,
+                                UserIntent.UNCLEAR,
                                 target=stage.value,
                                 confidence=0.96,
                                 source="SEMANTIC_TEST",
@@ -313,7 +610,7 @@ class DialogueStateTests(unittest.TestCase):
                     "assistant_message": entry.assistant_message,
                 }
                 engine.store.save(session)
-                candidate = f"这是学生为{stage.value}提供的具体说明"
+                candidate = "这是我对这一部分提供的具体说明，其中包含明确的物理判断"
 
                 ambiguous = engine.process_turn(
                     session.design_id,
@@ -381,7 +678,14 @@ class DialogueStateTests(unittest.TestCase):
                 self.assertEqual(
                     valid["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
                 )
-                self.assertEqual(omitted["intent"], UserIntent.UNCLEAR.value)
+                self.assertEqual(
+                    omitted["intent"],
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                )
+                self.assertEqual(
+                    omitted["semantic_updates"]["pending_answer_status"],
+                    "CLEAR",
+                )
 
     def test_later_stage_repeated_question_is_removed_after_valid_answer(self) -> None:
         class RepeatingQuestionGenerator(ScriptedSemanticGenerator):
@@ -437,12 +741,24 @@ class DialogueStateTests(unittest.TestCase):
                 if self.generation_count == 1:
                     return StepOutput(
                         assistant_message="先保留主动改变量。",
-                        stage_payload={"independent_variable": "两个源之间的距离"},
+                        stage_payload={
+                            "independent_variable": "两个源之间的距离",
+                            "stage_readiness": {
+                                "ready_for_confirmation": False,
+                                "remaining_gaps": ["controlled_conditions"],
+                            },
+                        },
                         student_task="还需要保持哪些条件不变？",
                     )
                 return StepOutput(
                     assistant_message="控制条件也已补充。",
-                    stage_payload={"controlled_variables": ["电荷量", "观察方式"]},
+                    stage_payload={
+                        "controlled_variables": ["电荷量", "观察方式"],
+                        "stage_readiness": {
+                            "ready_for_confirmation": True,
+                            "remaining_gaps": [],
+                        },
+                    },
                     student_task=None,
                 )
 
@@ -664,7 +980,7 @@ class DialogueStateTests(unittest.TestCase):
                 self.intent_calls += 1
                 if self.intent_calls == 1:
                     return resolved_intent(
-                        UserIntent.ANSWER_CURRENT_QUESTION,
+                        UserIntent.UNCLEAR,
                         target="research_question",
                         confidence=0.96,
                         source="SEMANTIC_TEST",
@@ -740,7 +1056,7 @@ class DialogueStateTests(unittest.TestCase):
         )
         self.assertEqual(resolved["source"], "CONFIRMED_PENDING_ANSWER")
 
-    def test_missing_facet_decision_clarifies_instead_of_blaming_student_answer(self) -> None:
+    def test_missing_facet_decision_recovers_without_questioning_student_intent(self) -> None:
         generator = ScriptedSemanticGenerator(
             UserIntent.ANSWER_CURRENT_QUESTION,
             semantic_updates={"facet_updates": [], "comparison_updates": []},
@@ -758,15 +1074,15 @@ class DialogueStateTests(unittest.TestCase):
             },
         )
 
-        self.assertTrue(result["stage_payload"]["clarification_required"])
-        self.assertIn("还没有准确判断", result["assistant_message"])
-        self.assertNotIn("研究问题还需要同时出现", result["assistant_message"])
+        self.assertFalse(result["stage_payload"].get("clarification_required", False))
+        self.assertIn("研究问题已经很具体", result["assistant_message"])
+        self.assertNotIn("还没有准确判断", result["assistant_message"])
         stored = engine.get_design(session.design_id)["design_context"][
             "idea_development"
         ]
-        self.assertEqual(stored["active_facet_id"], "research_question")
+        self.assertEqual(stored["facets"]["research_question"]["status"], "CLEAR")
 
-    def test_repeated_semantic_omission_does_not_repeat_same_clarification(self) -> None:
+    def test_semantic_omission_is_recovered_on_first_answer(self) -> None:
         generator = ScriptedSemanticGenerator(
             UserIntent.ANSWER_CURRENT_QUESTION,
             semantic_updates={"facet_updates": [], "comparison_updates": []},
@@ -779,16 +1095,11 @@ class DialogueStateTests(unittest.TestCase):
             session.design_id,
             {"message": "缩短两个源的距离，观察场线空间分布"},
         )
-        second = engine.process_turn(
-            session.design_id,
-            {"message": "上一句说的就是我想比较和观察的内容"},
-        )
-
-        self.assertNotEqual(first["assistant_message"], second["assistant_message"])
-        self.assertIn("不需要再次重写整段", second["assistant_message"])
+        self.assertFalse(first["stage_payload"].get("clarification_required", False))
+        self.assertIn("研究问题已经很具体", first["assistant_message"])
         pending = current_pending_action(engine.store.get(session.design_id))
         assert pending is not None
-        self.assertEqual(pending["subject"], "research_question")
+        self.assertNotEqual(pending["subject"], "research_question")
 
     def test_comparison_only_edit_does_not_have_to_answer_active_facet(self) -> None:
         session = idea_facet_session("design_separate_comparison_edit")
@@ -844,8 +1155,8 @@ class DialogueStateTests(unittest.TestCase):
             {"message": "现在还是不知道怎样写研究问题"},
         )
 
-        self.assertIn("只确认“研究问题”", first["assistant_message"])
-        self.assertIn("不再让你重写整段“研究问题”", second["assistant_message"])
+        self.assertIn("不用重写前面的内容", first["assistant_message"])
+        self.assertIn("先给你一个更具体的起点", second["assistant_message"])
         self.assertNotEqual(first["assistant_message"], second["assistant_message"])
 
     def test_semantic_comparison_update_uses_validated_ids_and_cases(self) -> None:
@@ -988,6 +1299,8 @@ class DialogueStateTests(unittest.TestCase):
         self.assertTrue(result["stage_payload"]["clarification_required"])
         self.assertNotIn("参考结构", result["assistant_message"])
         self.assertNotIn("pending_action", result["assistant_message"])
+        self.assertNotIn("你刚才是在", result["assistant_message"])
+        self.assertNotIn("请说明上一句", result["assistant_message"])
 
     def test_carried_context_is_structured_and_internal_state_is_not_public(self) -> None:
         session = variable_stage_session("design_internal_state")

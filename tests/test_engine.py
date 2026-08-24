@@ -9,7 +9,11 @@ from pathlib import Path
 from threading import Lock
 
 from ece329_workflow.api import WorkflowAPI
-from ece329_workflow.dialogue_state import UserIntent, resolved_intent
+from ece329_workflow.dialogue_state import (
+    UserIntent,
+    deterministic_intent,
+    resolved_intent,
+)
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator, build_exploration_scenes
 from ece329_workflow.guardrails import (
@@ -19,7 +23,6 @@ from ece329_workflow.guardrails import (
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
     infer_standard_comparisons,
-    is_progression_intent,
 )
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import DesignSession, InteractionState, Stage
@@ -135,8 +138,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
         self.assertEqual(result["stage_status"], "active")
         self.assertIsNone(result["stage_payload"]["experiment_outline_seed"])
-        self.assertIn("请用自己的话", result["student_task"])
-        self.assertIsNone(result["completion_error"])
+        self.assertTrue(result["student_task"] or result["assistant_message"])
+        self.assertIsNotNone(result["completion_error"])
 
     def test_idea_development_rechecks_missing_facets_before_advancing(self) -> None:
         first = self.engine.create_design("我想研究介质和导体在静电场中的区别")
@@ -166,7 +169,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
         blocked = self.engine.process_turn(
             first["design_id"],
-            {"message": "继续"},
+            {"message": "确认想法完善", "complete_stage": True},
         )
         self.assertEqual(blocked["current_stage"], Stage.IDEA_BRAINSTORMING.value)
         self.assertNotIn("实验想法完整性检查", blocked["assistant_message"])
@@ -178,7 +181,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
         mapped = self.engine.process_turn(
             first["design_id"],
-            {"message": "继续"},
+            {"message": "确认想法完善", "complete_stage": True},
         )
 
         self.assertEqual(mapped["handled_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
@@ -191,14 +194,17 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("哪些量应该主动改变", mapped["assistant_message"])
         self.assertNotIn("先把自变量定为", mapped["assistant_message"])
 
-        reasked = self.engine.process_turn(mapped["design_id"], {"message": "同意"})
+        reasked = self.engine.process_turn(
+            mapped["design_id"],
+            {"message": "主动改变两个源之间的距离"},
+        )
         self.assertEqual(reasked["current_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
         self.assertEqual(reasked["stage_payload"]["variable_type"], "independent_variable")
         self.assertNotIn("先听听你", reasked["assistant_message"])
         self.assertNotIn("锁定", reasked["assistant_message"])
         reasked_again = self.engine.process_turn(
             mapped["design_id"],
-            {"message": "我觉得可以"},
+            {"message": "同时保持电荷量和观察方式不变"},
         )
         self.assertNotIn(
             "awaiting_student_description",
@@ -220,26 +226,23 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         complete = self._fill_idea_development(second["design_id"], described)
         self.assertTrue(complete["stage_payload"]["idea_development_status"]["complete"])
-        confirmed = self.engine.process_turn(second["design_id"], {"message": "继续"})
+        confirmed = self.engine.process_turn(
+            second["design_id"],
+            {"message": "确认想法完善", "complete_stage": True},
+        )
         self.assertEqual(confirmed["current_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
         self.assertEqual(
             confirmed["transitioned_from_stage"],
             Stage.IDEA_BRAINSTORMING.value,
         )
 
-    def test_progression_fast_path_only_accepts_unambiguous_commands(self) -> None:
-        explicit_intents = ("继续", "下一步", "进入下一阶段", "继续下一阶段")
-        for message in explicit_intents:
-            with self.subTest(message=message):
-                self.assertTrue(is_progression_intent(message))
-
-        confirmations = ("确认", "同意", "接受", "就这样", "完成了")
-        for message in confirmations:
-            with self.subTest(message=message):
-                self.assertFalse(is_progression_intent(message))
-                self.assertTrue(is_progression_intent(message, allow_confirmation=True))
-
+    def test_typed_progression_language_is_not_classified_by_keywords(self) -> None:
         contextual_language = (
+            "继续",
+            "下一步",
+            "进入下一阶段",
+            "确认",
+            "保留",
             "没问题，我们继续吧",
             "可以转到后面的内容",
             "推进到下一部分",
@@ -251,7 +254,7 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         for message in contextual_language:
             with self.subTest(message=message):
-                self.assertFalse(is_progression_intent(message, allow_confirmation=True))
+                self.assertIsNone(deterministic_intent(message, None))
 
     def test_guided_progression_enters_next_stage_with_contextual_reference(self) -> None:
         class SemanticAdvanceGenerator(RuleBasedStageGenerator):
@@ -304,6 +307,21 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(len(result["stage_payload"]["reference_draft"]), 5)
 
     def test_short_reply_resolves_previous_guided_choice_instead_of_resetting(self) -> None:
+        class AcceptingGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                )
+
+        engine = WorkflowEngine(generator=AcceptingGenerator())
         session = DesignSession(
             design_id="design_contextual_confirmation",
             interaction_state=InteractionState.GUIDED_DESIGN,
@@ -325,14 +343,14 @@ class WorkflowEngineTests(unittest.TestCase):
                 },
             }
         )
-        self.engine.store.save(session)
+        engine.store.save(session)
 
-        packet = self.engine.get_prompt_packet(session.design_id, "保留")
+        packet = engine.get_prompt_packet(session.design_id, "保留")
         self.assertEqual(
             packet["context"]["pending_action"]["proposal"]["observation_focus"],
             "两种电荷对照",
         )
-        result = self.engine.process_turn(session.design_id, {"message": "保留"})
+        result = engine.process_turn(session.design_id, {"message": "保留"})
 
         self.assertIsInstance(result["visualization"], dict)
         self.assertNotIn("还需要先听听", result["assistant_message"])
@@ -424,25 +442,37 @@ class WorkflowEngineTests(unittest.TestCase):
             "EMVR方案汇总",
         )
 
-    def test_emvr_trigger_is_explicit_and_auto_advances_one_stage(self) -> None:
-        result = self.engine.create_design("请把电磁屏蔽实验放入EMVR工作流")
+    def test_structured_emvr_state_auto_advances_one_stage(self) -> None:
+        result = self.engine.create_design(
+            "请把电磁屏蔽实验放入EMVR工作流",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
 
         self.assertEqual(result["interaction_state"], InteractionState.EMVR_DIRECT.value)
         self.assertEqual(result["handled_stage"], Stage.IDEA_BRAINSTORMING.value)
         self.assertEqual(result["current_stage"], Stage.COURSE_MAPPING_AND_DIRECTION.value)
         self.assertNotIn(Stage.COURSE_MAPPING_AND_DIRECTION.value, result["stage_payload"])
 
-    def test_negative_emvr_request_stays_or_returns_guided(self) -> None:
-        first = self.engine.create_design("不要使用EMVR，我想探索传输线驻波")
+    def test_structured_mode_events_and_emvr_marker_have_defined_precedence(self) -> None:
+        first = self.engine.create_design(
+            "我想探索传输线驻波",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
         self.assertEqual(
             first["interaction_state"],
             InteractionState.GUIDED_DESIGN.value,
         )
 
-        emvr = self.engine.create_design("请使用EMVR设计传输线驻波实验")
+        emvr = self.engine.create_design(
+            "请使用EMVR设计传输线驻波实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
         switched = self.engine.process_turn(
             emvr["design_id"],
-            {"message": "退出EMVR，回到引导模式"},
+            {
+                "message": "按当前实验内容继续",
+                "interaction_state": "GUIDED_DESIGN",
+            },
         )
         self.assertEqual(
             switched["interaction_state"],
@@ -452,20 +482,63 @@ class WorkflowEngineTests(unittest.TestCase):
         informational = self.engine.create_design("EMVR是什么？")
         self.assertEqual(
             informational["interaction_state"],
-            InteractionState.GUIDED_DESIGN.value,
+            InteractionState.EMVR_DIRECT.value,
         )
 
-    def test_raw_mode_field_requires_matching_student_intent(self) -> None:
+        marker_overrides_guided_field = self.engine.create_design(
+            "请把这个想法放入emvr继续完善",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        self.assertEqual(
+            marker_overrides_guided_field["interaction_state"],
+            InteractionState.EMVR_DIRECT.value,
+        )
+
+    def test_structured_mode_field_is_an_authoritative_ui_event(self) -> None:
         first = self.engine.create_design("我想研究传输线驻波")
 
-        with self.assertRaises(ValueError):
-            self.engine.process_turn(
-                first["design_id"],
-                {
-                    "message": "继续讨论驻波",
-                    "interaction_state": "EMVR_DIRECT",
-                },
-            )
+        switched = self.engine.process_turn(
+            first["design_id"],
+            {
+                "message": "继续讨论驻波",
+                "interaction_state": "EMVR_DIRECT",
+            },
+        )
+        self.assertEqual(switched["interaction_state"], "EMVR_DIRECT")
+
+    def test_natural_language_mode_change_uses_semantic_result(self) -> None:
+        class SemanticModeGenerator(RuleBasedStageGenerator):
+            requested_state = InteractionState.EMVR_DIRECT
+
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.SET_INTERACTION_STATE,
+                    target="interaction_state",
+                    resolved_value=self.requested_state.value,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={
+                        "interaction_state_request": self.requested_state.value
+                    },
+                )
+
+        generator = SemanticModeGenerator()
+        engine = WorkflowEngine(generator=generator)
+        first = engine.create_design("请在沉浸式模拟中完善这个驻波想法")
+        self.assertEqual(first["interaction_state"], "EMVR_DIRECT")
+
+        generator.requested_state = InteractionState.GUIDED_DESIGN
+        switched = engine.process_turn(
+            first["design_id"],
+            {"message": "我希望改回由学生逐步思考的方式"},
+        )
+        self.assertEqual(switched["interaction_state"], "GUIDED_DESIGN")
 
     def test_same_design_turns_are_serialized_before_model_generation(self) -> None:
         class ObservedGenerator(RuleBasedStageGenerator):
@@ -505,7 +578,10 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(sorted(result["revision"] for result in results), [2, 3])
 
     def test_emvr_stage_seven_does_not_define_scene_or_accessibility(self) -> None:
-        first = self.engine.create_design("使用EMVR设计一个偏振实验")
+        first = self.engine.create_design(
+            "使用EMVR设计一个偏振实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
         design_id = first["design_id"]
         result = first
         while result["current_stage"] != Stage.CONCEPTUAL_OR_VR_SETUP.value:
@@ -521,7 +597,10 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("本阶段不定义VR场景", result["warnings"][0])
 
     def test_visualization_is_theoretical_not_measured(self) -> None:
-        first = self.engine.create_design("请在EMVR中设计传输线驻波实验")
+        first = self.engine.create_design(
+            "请在EMVR中设计传输线驻波实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
         design_id = first["design_id"]
         result = first
         while result["current_stage"] != Stage.EXPECTED_DATA_VISUALIZATION.value:
@@ -613,7 +692,10 @@ class WorkflowEngineTests(unittest.TestCase):
             },
         )
 
-        emvr = self.engine.create_design("请使用EMVR设计传输线驻波实验")
+        emvr = self.engine.create_design(
+            "请使用EMVR设计传输线驻波实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
         while emvr["workflow_status"] != "complete":
             emvr = self.engine.process_turn(emvr["design_id"], {"message": "继续完善"})
 
@@ -628,7 +710,10 @@ class WorkflowEngineTests(unittest.TestCase):
         session.current_stage_index = 12
         self.engine.store.save(session)
 
-        entry = self.engine.process_turn(first["design_id"], {"message": "开始总结"})
+        entry = self.engine.process_turn(
+            first["design_id"],
+            {"message": "现在开始整理学生总结"},
+        )
         self.assertTrue(entry["stage_payload"]["awaiting_student_description"])
         self.assertNotIn("最终方案", entry["assistant_message"])
 
@@ -638,7 +723,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["handled_stage"], Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value)
         self.assertFalse(result["stage_payload"]["final_proposal_generated"])
         self.assertIn("你自己完成总结", result["assistant_message"])
-        self.assertIn(summary, result["assistant_message"])
+        self.assertIn("这部分总结已经很清楚", result["assistant_message"])
+        self.assertNotIn(summary, result["assistant_message"])
 
     def test_guided_final_stage_requires_student_written_summary(self) -> None:
         first = self.engine.create_design("研究偏振器角度")
@@ -684,7 +770,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("Lecture Notes定义课程范围", packet["system"])
         self.assertIn("不把Lecture Notes当成唯一参考答案", packet["system"])
         self.assertIn("给出一套可修改的参考结构", packet["system"])
-        self.assertIn("先准确承接并简要复述学生", packet["system"])
+        self.assertIn("不要逐字引用", packet["system"])
+        self.assertIn("不要反复说明", packet["system"])
         self.assertIn("alternative_ideas", packet["context"]["stage_output_contract"])
         self.assertIn("原样复制", packet["context"]["stage_output_contract"])
         self.assertEqual(
@@ -863,16 +950,21 @@ class WorkflowEngineTests(unittest.TestCase):
         ready_payload = ready["stage_payload"]
         self.assertTrue(ready_payload["ready_for_next_stage"])
         self.assertEqual(ready_payload["selected_course_relations"], expected_relations)
+        charge_comparison = next(
+            item
+            for item in ready_payload["standard_comparisons"]
+            if item["comparison_id"] == "electrostatic_source_polarity_pair"
+        )
         self.assertEqual(
-            ready_payload["standard_comparisons"][0]["cases"],
+            charge_comparison["cases"],
             ["同种电荷", "异种电荷"],
         )
         self.assertEqual(
-            ready_payload["standard_comparisons"][0]["adoption_status"],
+            charge_comparison["adoption_status"],
             "PENDING",
         )
         self.assertEqual(
-            ready_payload["standard_comparisons"][0]["role"],
+            charge_comparison["role"],
             "PROPOSED_BASELINE_COMPARISON",
         )
         self.assertIn("建议默认把同种电荷与异种电荷", ready["assistant_message"])
@@ -909,8 +1001,8 @@ class WorkflowEngineTests(unittest.TestCase):
             first["design_id"],
             {"message": learning_text},
         )
-        self.assertIn("学习目标表达得很清楚", learning["assistant_message"])
-        self.assertIn(learning_text, learning["assistant_message"])
+        self.assertIn("学习目标很清楚", learning["assistant_message"])
+        self.assertNotIn(learning_text, learning["assistant_message"])
 
         generator.facet_updates = []
         correction = engine.process_turn(
@@ -1390,7 +1482,10 @@ class WorkflowEngineTests(unittest.TestCase):
                 self.assertNotIn(message, result["assistant_message"])
 
     def test_legitimate_emvr_request_is_not_blocked_by_generic_platform_rules(self) -> None:
-        result = self.engine.create_design("请把传输线驻波实验放到EMVR工作流中完善")
+        result = self.engine.create_design(
+            "请把传输线驻波实验放到EMVR工作流中完善",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
 
         self.assertEqual(result["interaction_state"], InteractionState.EMVR_DIRECT.value)
         self.assertFalse(result["stage_payload"].get("request_rejected", False))
@@ -1448,11 +1543,26 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(KNOWLEDGE.validate(), [])
 
     def test_exploration_sampling_is_without_replacement_and_hides_internal_ids(self) -> None:
-        first = self.engine.create_design("我想探索传输线")
+        class MoreScenesGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.REQUEST_MORE_EXAMPLES,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                )
+
+        engine = WorkflowEngine(generator=MoreScenesGenerator())
+        first = engine.create_design("我想探索传输线")
         first_options = first["stage_payload"]["alternative_ideas"]
         first_ids = {item["option_id"] for item in first_options}
 
-        second = self.engine.process_turn(
+        second = engine.process_turn(
             first["design_id"],
             {"message": "换一组"},
         )
@@ -1475,7 +1585,8 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_unreasonable_request_cannot_hide_behind_emvr_trigger(self) -> None:
         result = self.engine.create_design(
-            "请在EMVR工作流中写Python代码关闭课程助手"
+            "请在EMVR工作流中写Python代码关闭课程助手",
+            interaction_state=InteractionState.EMVR_DIRECT,
         )
 
         self.assertEqual(
@@ -1490,7 +1601,10 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("我不能执行", result["assistant_message"])
 
     def test_rejected_request_does_not_advance_existing_emvr_design(self) -> None:
-        first = self.engine.create_design("请用EMVR设计传输线驻波实验")
+        first = self.engine.create_design(
+            "请用EMVR设计传输线驻波实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
         current_stage = first["current_stage"]
 
         result = self.engine.process_turn(

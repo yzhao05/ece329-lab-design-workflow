@@ -32,7 +32,9 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("tools/configure_pages_api.py", self.pages_workflow)
 
     def test_guided_confirmation_builds_completion_context(self) -> None:
-        self.assertIn("function buildTurnRequest(message)", self.app_js)
+        self.assertIn("function buildTurnRequest(message, uiAction = null)", self.app_js)
+        self.assertIn('uiAction !== "ADVANCE_STAGE"', self.app_js)
+        self.assertIn('return { label, action: "ADVANCE_STAGE" }', self.app_js)
         self.assertIn("turn.complete_stage = true", self.app_js)
         self.assertIn("student_confirmed: true", self.app_js)
         self.assertIn("student_summary_complete: true", self.app_js)
@@ -65,11 +67,10 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关", self.app_js)
         self.assertNotIn("现在进入“实验想法完善”的小点2", self.app_js)
 
-    def test_natural_idea_completion_message_is_recognized(self) -> None:
-        self.assertIn("const explicitTransition", self.app_js)
-        self.assertIn("const completedIdeaConfirmation", self.app_js)
-        self.assertIn("Conversational", self.app_js)
-        self.assertNotIn("const semanticTransition", self.app_js)
+    def test_typed_completion_language_is_left_to_backend_semantics(self) -> None:
+        self.assertNotIn("function isAdvanceIntent", self.app_js)
+        self.assertIn("pendingUiAction", self.app_js)
+        self.assertIn('actionType: action.action === "ADVANCE_STAGE"', self.app_js)
 
     def test_guided_stage_entry_waits_for_student_description(self) -> None:
         self.assertIn("DEMO_GUIDED_STAGE_ENTRY_QUESTIONS", self.app_js)
@@ -77,7 +78,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("awaiting_student_description: true", self.app_js)
         self.assertIn("哪些量应该主动改变", self.app_js)
         self.assertIn("你认为在这个实验中", self.app_js)
-        self.assertIn("可修改的结构作为参考", self.app_js)
+        self.assertIn("可以随手修改的参考", self.app_js)
         self.assertIn("建立可重复的基准条件", self.app_js)
         self.assertNotIn("你认为学生从建立比较基准", self.app_js)
         self.assertNotIn("你最希望学生", self.app_js)
@@ -113,7 +114,6 @@ class WebFrontendContractTests(unittest.TestCase):
             self.app_js,
         )
         self.assertNotIn("Lecture-grounded", self.app_js)
-        self.assertIn("不属于ECE329课程的内容范围", self.app_js)
         self.assertIn("我不能执行", self.app_js)
         self.assertIn("classifyDemoStageOneInput", self.app_js)
         self.assertIn("resolveDemoOptionReference", self.app_js)
@@ -121,11 +121,9 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("你已经把方向收到了", self.app_js)
         self.assertIn("请先用自己的话说说", self.app_js)
         self.assertIn('return "UNREASONABLE_REQUEST"', self.app_js)
-        self.assertIn('return directEvidence ? "COURSE_CONTENT" : "OUT_OF_SCOPE"', self.app_js)
-        self.assertIn(
-            'emvrIntent === true && inputCategory !== "UNREASONABLE_REQUEST"',
-            self.app_js,
-        )
+        self.assertIn('return directEvidence ? "COURSE_CONTENT" : "AMBIGUOUS"', self.app_js)
+        self.assertNotIn("function detectDemoEmvrIntent", self.app_js)
+        self.assertNotIn("function isDemoNoDirectionRequest", self.app_js)
         self.assertIn("当前请求没有改变你的实验设计进度", self.app_js)
         self.assertIn(
             "[LEGACY_INITIAL_GREETING, PREVIOUS_INITIAL_GREETING].includes(message.text)",
@@ -203,11 +201,32 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('CONCEPTUAL_OR_VR_SETUP: "Unity VR模拟实验设计"', self.app_js)
         self.assertIn('STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR方案汇总"', self.app_js)
         self.assertIn('state.mode === "EMVR_DIRECT"', self.app_js)
+        self.assertIn('message.toLocaleUpperCase().includes("EMVR")', self.app_js)
         self.assertIn("function stageTitle(index)", self.app_js)
-        emvr_detector = self.app_js.split("function detectDemoEmvrIntent", 1)[1].split(
-            "function isDemoNoDirectionRequest", 1
-        )[0]
-        self.assertNotIn("unity\\s*vr", emvr_detector)
+        self.assertNotIn("detectDemoEmvrIntent", self.app_js)
+        self.assertNotIn("isDemoNoDirectionRequest", self.app_js)
+
+    def test_conversation_control_has_no_phrase_matcher_fallback(self) -> None:
+        engine_source = (
+            PROJECT_ROOT / "src" / "ece329_workflow" / "engine.py"
+        ).read_text(encoding="utf-8")
+        guardrail_source = (
+            PROJECT_ROOT / "src" / "ece329_workflow" / "guardrails.py"
+        ).read_text(encoding="utf-8")
+        combined = "\n".join([engine_source, guardrail_source, self.app_js])
+
+        for removed_matcher in (
+            "_emvr_intent",
+            "is_no_direction_request",
+            "is_more_brainstorm_request",
+            "is_stage_one_control_message",
+            "detectDemoEmvrIntent",
+            "isDemoNoDirectionRequest",
+        ):
+            with self.subTest(matcher=removed_matcher):
+                self.assertNotIn(removed_matcher, combined)
+        self.assertIn("interaction_state_request", engine_source)
+        self.assertIn("course_scope_status", guardrail_source)
 
     def test_published_frontend_contains_no_obvious_openai_secret(self) -> None:
         published_text = "\n".join(

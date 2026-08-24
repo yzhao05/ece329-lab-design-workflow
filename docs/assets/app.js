@@ -264,6 +264,7 @@ function initialState() {
     quickActions: [],
     notes: [],
     pendingOptionId: null,
+    pendingUiAction: null,
     pendingDirection: null,
     stageOnePhase: "BREADTH_EXPLORATION",
     stageOneSelectedRelations: [],
@@ -518,7 +519,7 @@ function createMessageElement(message) {
 function renderQuickActions() {
   dom.quickActions.replaceChildren();
   (state.quickActions || []).forEach((action) => {
-    const { label, optionId } = normalizeQuickAction(action);
+    const { label, optionId, actionType } = normalizeQuickAction(action);
     if (!label) return;
     const button = document.createElement("button");
     button.type = "button";
@@ -527,6 +528,7 @@ function renderQuickActions() {
     button.addEventListener("click", () => {
       dom.chatInput.value = label;
       state.pendingOptionId = optionId;
+      state.pendingUiAction = actionType;
       autoGrowInput();
       dom.chatInput.focus();
     });
@@ -535,11 +537,14 @@ function renderQuickActions() {
 }
 
 function normalizeQuickAction(action) {
-  if (typeof action === "string") return { label: action, optionId: null };
-  if (!action || typeof action !== "object") return { label: "", optionId: null };
+  if (typeof action === "string") return { label: action, optionId: null, actionType: null };
+  if (!action || typeof action !== "object") {
+    return { label: "", optionId: null, actionType: null };
+  }
   return {
     label: String(action.label || action.focus || action.direction || "").trim(),
     optionId: typeof action.option_id === "string" ? action.option_id : null,
+    actionType: action.action === "ADVANCE_STAGE" ? "ADVANCE_STAGE" : null,
   };
 }
 
@@ -639,11 +644,15 @@ async function handleSubmit(event) {
   const message = dom.chatInput.value.trim();
   if (!message || dom.sendButton.disabled) return;
 
-  if (state.stageIndex === 0 && !isAdvanceIntent(message) && !state.pendingDirection) {
+  const uiAction = state.pendingUiAction;
+  const isUiAdvance = uiAction === "ADVANCE_STAGE";
+  const retryAction = isUiAdvance ? advanceQuickAction(message) : message;
+  state.pendingUiAction = null;
+  if (state.stageIndex === 0 && !isUiAdvance && !state.pendingDirection) {
     state.pendingDirection = message;
   }
   const isSummaryContribution = (
-    state.stageIndex === STAGES.length - 1 && !isAdvanceIntent(message)
+    state.stageIndex === STAGES.length - 1 && !isUiAdvance
   );
   state.lastStudentInput = message;
   addMessage("user", message);
@@ -658,11 +667,11 @@ async function handleSubmit(event) {
       await checkConnection();
     }
     if (apiBase() && connectionState === "online") {
-      response = await sendToApi(message);
+      response = await sendToApi(message, uiAction);
       response._runtime_source = "api";
     } else if (!apiBase()) {
       await wait(420);
-      response = createDemoResponse(message);
+      response = createDemoResponse(message, uiAction);
     } else {
       throw new ApiError("Backend is not ready", 0, "backend_unavailable");
     }
@@ -698,7 +707,7 @@ async function handleSubmit(event) {
         ["稍后重试"],
         { meta: "ECE329 Agent" },
       );
-      state.quickActions = [message];
+      state.quickActions = [retryAction];
       return;
     }
     if (error instanceof ApiError && error.status === 409) {
@@ -709,7 +718,7 @@ async function handleSubmit(event) {
         ["状态已刷新"],
         { meta: "ECE329 Agent" },
       );
-      state.quickActions = [message];
+      state.quickActions = [retryAction];
       return;
     }
     setConnectionState("error", "课程服务暂时不可用");
@@ -722,7 +731,7 @@ async function handleSubmit(event) {
       ["连接失败"],
       { meta: "ECE329 Agent" },
     );
-    state.quickActions = [message];
+    state.quickActions = [retryAction];
     showToast("请求失败，当前设计已保留");
   } finally {
     setBusy(false);
@@ -732,7 +741,7 @@ async function handleSubmit(event) {
   }
 }
 
-async function sendToApi(message) {
+async function sendToApi(message, uiAction = null) {
   if (!state.designId || state.sessionKind === "demo" || state.designId.startsWith("demo_")) {
     return createApiDesign(message);
   }
@@ -740,7 +749,7 @@ async function sendToApi(message) {
   if (!token) {
     throw new ApiError("Missing design access token", 401, "access_denied");
   }
-  const turn = buildTurnRequest(message);
+  const turn = buildTurnRequest(message, uiAction);
   return apiRequest(`/v1/designs/${encodeURIComponent(state.designId)}/turns`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -794,30 +803,13 @@ async function reloadApiDesignState() {
   }
 }
 
-function isAdvanceIntent(message) {
-  // The browser only marks a few unambiguous commands. Conversational
-  // paraphrases are resolved by the backend together with pending_action.
-  const normalized = String(message || "").toLowerCase().replace(/[\s，,。；;！!？?]/g, "");
-  const explicitTransition = new Set([
-    "继续",
-    "下一步",
-    "进入下一阶段",
-    "继续下一阶段",
-    "完成本阶段",
-  ]).has(normalized);
-  const completedIdeaConfirmation = state.stageIndex === 0
-    && state.ideaDevelopmentStatus?.complete === true
-    && new Set(["确认", "同意", "接受", "就这样", "完成了"]).has(normalized);
-  return explicitTransition || completedIdeaConfirmation;
-}
-
-function buildTurnRequest(message) {
+function buildTurnRequest(message, uiAction = null) {
   const turn = { message };
   if (state.pendingOptionId) {
     turn.selected_option_id = state.pendingOptionId;
     state.pendingOptionId = null;
   }
-  if (state.mode !== "GUIDED_DESIGN" || !isAdvanceIntent(message)) return turn;
+  if (state.mode !== "GUIDED_DESIGN" || uiAction !== "ADVANCE_STAGE") return turn;
 
   turn.complete_stage = true;
   if (state.stageIndex === 0) {
@@ -900,10 +892,9 @@ function demoBreadthTask() {
   return "哪幅图景触发了你的联想，或者你想怎样组合、替换其中的对象，提出一个自己的ECE329课内设想？";
 }
 
-function createDemoResponse(message) {
+function createDemoResponse(message, uiAction = null) {
   const firstTurn = !state.designId;
   let guidedStageEntered = false;
-  const emvrIntent = detectDemoEmvrIntent(message);
   const directEvidence = findDemoKnowledge(message);
   const selectedPriorOption = !firstTurn && state.stageIndex === 0
     ? resolveDemoOptionReference(message, state.quickActions, state.pendingOptionId)
@@ -921,15 +912,15 @@ function createDemoResponse(message) {
   ) {
     inputCategory = "COURSE_CONTENT";
   }
-  if (emvrIntent !== null && inputCategory !== "UNREASONABLE_REQUEST") {
-    inputCategory = "COURSE_CONTENT";
-  }
-  const noDirection = isDemoNoDirectionRequest(message);
-  const emvr = emvrIntent === true && inputCategory !== "UNREASONABLE_REQUEST";
+  const advanceRequested = uiAction === "ADVANCE_STAGE";
+  // This is the only text marker handled directly by the page. All other
+  // conversational intent belongs to the connected API's contextual resolver.
+  const emvr = inputCategory !== "UNREASONABLE_REQUEST"
+    && (uiAction === "SET_EMVR_DIRECT" || message.toLocaleUpperCase().includes("EMVR"));
+  const needsBreadthSupport = inputCategory === "AMBIGUOUS";
   const evidence = inputCategory === "COURSE_CONTENT"
     ? (directEvidence || state.evidence || FALLBACK_EVIDENCE)
     : (state.evidence || FALLBACK_EVIDENCE);
-  const advanceRequested = isAdvanceIntent(message);
 
   if (firstTurn) {
     state.designId = `demo_${Date.now().toString(36)}`;
@@ -944,10 +935,8 @@ function createDemoResponse(message) {
     let guidedIntroduction;
     if (inputCategory === "UNREASONABLE_REQUEST") {
       guidedIntroduction = "这个请求试图控制课程助手、改变它的工作方式，或让它执行与ECE329实验设计无关的操作，我不能执行。我们把讨论回到ECE329课上学习的电磁场、电磁波和传输线。";
-    } else if (noDirection) {
+    } else if (needsBreadthSupport) {
       guidedIntroduction = "好的，那我来帮助你拓展思路。暂时没有具体方向也没关系。我们可以先从ECE329课上学习的电磁场、电磁波和传输线中寻找你感兴趣的关系。";
-    } else if (inputCategory === "OUT_OF_SCOPE") {
-      guidedIntroduction = "你提出的主题不属于ECE329课程的内容范围，因此不适合作为这门课实验设计的核心。ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。";
     } else {
       guidedIntroduction = `“${message}”属于ECE329课程相关内容，可以继续从不同的物理关系中展开。现在先不确定变量、公式或实验结构，而是找出你真正感兴趣的物理联系。`;
     }
@@ -969,10 +958,6 @@ function createDemoResponse(message) {
       warnings: [],
       _runtime_source: "demo",
     };
-  }
-
-  if (inputCategory !== "UNREASONABLE_REQUEST" && emvrIntent !== null) {
-    state.mode = emvrIntent ? "EMVR_DIRECT" : "GUIDED_DESIGN";
   }
 
   if (inputCategory === "UNREASONABLE_REQUEST") {
@@ -997,6 +982,10 @@ function createDemoResponse(message) {
       request_rejected: true,
       _runtime_source: "demo",
     };
+  }
+
+  if (emvr && state.mode !== "EMVR_DIRECT") {
+    state.mode = "EMVR_DIRECT";
   }
 
   if (
@@ -1024,7 +1013,9 @@ function createDemoResponse(message) {
         alternative_ideas: [],
         exploration_scenes: [],
       },
-      quick_actions: status.complete ? ["确认想法完善并进入变量与条件"] : [],
+      quick_actions: status.complete
+        ? [advanceQuickAction("确认想法完善并进入变量与条件")]
+        : [],
       warnings: [],
       _runtime_source: "demo",
     };
@@ -1129,7 +1120,7 @@ function createDemoResponse(message) {
         ready_for_next_stage: true,
       },
       quick_actions: state.ideaDevelopmentStatus.complete
-        ? ["确认想法完善并进入变量与条件"]
+        ? [advanceQuickAction("确认想法完善并进入变量与条件")]
         : [],
       warnings: [],
       _runtime_source: "demo",
@@ -1174,10 +1165,10 @@ function createDemoResponse(message) {
     const preservedIdea = state.stageOneCorePhenomenon || state.pendingDirection || "前面已经完善的实验想法";
     const referenceSteps = DEMO_GUIDED_STAGE_REFERENCE_STEPS[stageId] || [];
     const referenceText = referenceSteps.length
-      ? `根据前面已经明确的信息，可以先用下面这套可修改的结构作为参考，它不是需要照抄的标准答案：\n${referenceSteps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n你可以直接说明哪些环节要保留、删改或补充，也可以按自己的顺序重组。\n\n`
+      ? `我先把前面的线索顺成一个可以随手修改的参考：\n${referenceSteps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n合适的部分可以留下，想改的地方也可以直接换掉。\n\n`
       : "";
     return {
-      assistant_message: `现在进入“${currentWorkspaceTitle(state.stageIndex)}”。前面确定的实验方向已经保留：${preservedIdea}。\n\n${referenceText}${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "请先用自己的话描述你对当前部分的想法；我会在这个基础上继续帮你完善。"}`,
+      assistant_message: `好，我们接着把“${preservedIdea}”往下发展，这次先看“${currentWorkspaceTitle(state.stageIndex)}”。\n\n${referenceText}${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "先说说你对这一部分的想法，我会在这个基础上继续帮你完善。"}`,
       student_task: null,
       current_stage: stageId,
       handled_stage: stageId,
@@ -1241,7 +1232,7 @@ function createDemoResponse(message) {
     };
   }
   return {
-    assistant_message: `已记录你本轮的想法：“${message}”。\n\n我们会继续围绕ECE329课上所学的“${evidence.title}”展开。${prompt}`,
+    assistant_message: `明白，我们就沿着ECE329课上所学的“${evidence.title}”继续。${prompt}`,
     current_stage: STAGES[state.stageIndex][0],
     interaction_state: state.mode,
     knowledge_references: [evidence],
@@ -1276,22 +1267,9 @@ function classifyDemoStageOneInput(text, directEvidence) {
   if (unreasonablePatterns.some((pattern) => pattern.test(normalized))) {
     return "UNREASONABLE_REQUEST";
   }
-  if (isDemoNoDirectionRequest(normalized)) return "COURSE_CONTENT";
-  return directEvidence ? "COURSE_CONTENT" : "OUT_OF_SCOPE";
-}
-
-function detectDemoEmvrIntent(text) {
-  const normalized = text.trim().toLocaleLowerCase();
-  const negative = /(?:不要|不需要|不用|退出|取消|关闭|移除).{0,12}\bemvr\b|\bemvr\b.{0,12}(?:不要|不需要|不用|退出|取消|关闭|移除)|\b(?:do\s*not|don't|without|disable|leave|exit)\b.{0,20}\bemvr\b/i;
-  if (negative.test(normalized)) return false;
-  if (!/\bemvr\b/i.test(normalized)) return null;
-  const positive = /(?:放入|使用|采用|切换|进入|启用|按照|通过|需要).{0,16}\bemvr\b|\bemvr\b.{0,16}(?:工作流|模式|设计|实验|完善)|\b(?:use|enable|enter|switch\s+to|with)\b.{0,20}\bemvr\b/i;
-  return positive.test(normalized) || normalized === "emvr" ? true : null;
-}
-
-function isDemoNoDirectionRequest(text) {
-  const normalized = String(text || "").replace(/[\s，,。；;！!？?]/g, "");
-  return !normalized || new Set(["没有方向", "还没有想法"]).has(normalized);
+  // The static preview has no semantic model. Unknown text remains ambiguous
+  // and receives breadth support; it is never classified by command phrases.
+  return directEvidence ? "COURSE_CONTENT" : "AMBIGUOUS";
 }
 
 function resolveDemoOptionReference(_text, options, selectedOptionId = null) {
@@ -1433,8 +1411,7 @@ function updateDemoIdeaDevelopmentStatus(status, message) {
 
 function isSubstantiveDemoFacetAnswer(_facetId, message) {
   const normalized = String(message || "").replace(/[\s，,。；;！!？?]/g, "");
-  if (normalized.length < 6) return false;
-  return !new Set(["继续", "下一步", "好的", "可以", "没问题", "不知道"]).has(normalized);
+  return normalized.length >= 6;
 }
 
 function refreshDemoIdeaDevelopmentStatus(status) {
@@ -1613,7 +1590,9 @@ function deriveQuickActions(response) {
   if (state.stageIndex === 0) {
     const development = response.stage_payload?.idea_development_status;
     if (development) {
-      return development.complete ? ["确认想法完善并进入变量与条件"] : [];
+      return development.complete
+        ? [advanceQuickAction("确认想法完善并进入变量与条件")]
+        : [];
     }
     const alternatives = (response.stage_payload?.alternative_ideas || [])
       .map((item) => ({
@@ -1641,10 +1620,14 @@ function deriveQuickActions(response) {
   if (state.stageIndex === STAGES.length - 1) {
     return String(state.pendingSummary || "").trim().length >= 20
       && (state.summarySections || []).filter((section) => String(section).trim().length >= 10).length >= 2
-      ? ["确认完成总结"]
+      ? [advanceQuickAction("确认完成总结")]
       : [];
   }
-  return [guidedAdvanceLabel(state.stageIndex)];
+  return [advanceQuickAction(guidedAdvanceLabel(state.stageIndex))];
+}
+
+function advanceQuickAction(label) {
+  return { label, action: "ADVANCE_STAGE" };
 }
 
 function guidedAdvanceLabel(stageIndex) {
@@ -1822,6 +1805,7 @@ function formatAxisLabel(axis, fallback) {
 dom.chatForm.addEventListener("submit", handleSubmit);
 dom.chatInput.addEventListener("input", () => {
   state.pendingOptionId = null;
+  state.pendingUiAction = null;
   autoGrowInput();
 });
 dom.chatInput.addEventListener("keydown", (event) => {

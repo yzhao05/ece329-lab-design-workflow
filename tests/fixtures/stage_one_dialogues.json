@@ -53,9 +53,9 @@
     "expected_category": "COURSE_CONTENT"
   },
   {
-    "id": "negative_emvr_intent",
+    "id": "emvr_marker_precedence",
     "initial": "不要使用EMVR，我想探索传输线驻波",
-    "expected_category": "COURSE_CONTENT",
-    "expected_mode": "GUIDED_DESIGN"
+    "expected_category": null,
+    "expected_mode": "EMVR_DIRECT"
   }
 ]

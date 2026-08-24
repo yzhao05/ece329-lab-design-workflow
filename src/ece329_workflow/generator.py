@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Protocol
 
-from .dialogue_state import build_carried_context
+from .dialogue_state import UserIntent, build_carried_context
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -13,8 +13,6 @@ from .guardrails import (
     UNREASONABLE_REQUEST,
     classify_stage_one_input,
     course_example_options,
-    is_no_direction_request,
-    is_stage_one_control_message,
     shown_exploration_option_ids,
 )
 from .knowledge_base import KNOWLEDGE
@@ -55,15 +53,6 @@ _GUIDED_STAGE_ENTRY_QUESTIONS: dict[Stage, str] = {
         "最后的方案由你自己总结。请先用两到三句话写出这个实验想研究什么、为什么值得研究，"
         "以及它与ECE329课程内容有什么联系。"
     ),
-}
-
-_GUIDED_STAGE_ACKNOWLEDGEMENT: dict[Stage, str] = {
-    Stage.VARIABLES_AND_CONDITIONS: "你已经提出了自己对变量与条件的判断",
-    Stage.CONCEPTUAL_PROCEDURE: "你描述的实验流程思路是",
-    Stage.EXPECTED_DATA_VISUALIZATION: "你希望理论预测窗口重点呈现的是",
-    Stage.RESULT_INTERPRETATION: "你对结果解释的初步判断是",
-    Stage.DESIGN_VALUE_AND_LIMITATIONS: "你指出的设计价值或限制是",
-    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "你这一部分的总结是",
 }
 
 _GUIDED_STAGE_REFERENCE_STEPS: dict[Stage, tuple[str, ...]] = {
@@ -111,31 +100,6 @@ def _student_idea_summary(session: DesignSession) -> str:
     return "前面已经完善的实验想法"
 
 
-def _prior_student_context(session: DesignSession, limit: int = 2) -> list[str]:
-    decisions = session.design_context.get("student_decisions", {})
-    excerpts: list[str] = []
-    if isinstance(decisions, dict):
-        ordered: list[dict[str, Any]] = []
-        for stage_items in decisions.values():
-            if isinstance(stage_items, list):
-                ordered.extend(item for item in stage_items if isinstance(item, dict))
-        ordered.sort(key=lambda item: int(item.get("before_revision", -1)))
-        for item in reversed(ordered):
-            message = str(item.get("message") or "").strip()
-            if message:
-                excerpts.append(message[-180:])
-            if len(excerpts) >= limit:
-                break
-    if not excerpts:
-        for item in reversed(session.history):
-            message = str(item.get("user_message") or "").strip()
-            if message:
-                excerpts.append(message[-180:])
-            if len(excerpts) >= limit:
-                break
-    return list(reversed(excerpts))
-
-
 def _compact_context_items(value: Any, limit: int = 3) -> str:
     if isinstance(value, str):
         items = [value]
@@ -159,6 +123,26 @@ def _compact_context_items(value: Any, limit: int = 3) -> str:
         items = []
     cleaned = list(dict.fromkeys(item.strip() for item in items if item.strip()))
     return "、".join(cleaned[:limit])
+
+
+def _confirmed_context_summary(carried: dict[str, Any], limit: int = 3) -> list[str]:
+    """Use structured design facts, never raw conversational control phrases."""
+
+    summaries: list[str] = []
+    labels = (
+        ("研究方向", carried.get("research_direction")),
+        ("主动改变量", carried.get("independent_variable")),
+        ("观察量", carried.get("observations")),
+        ("控制条件", carried.get("controlled_conditions")),
+        ("流程", carried.get("procedure_steps")),
+    )
+    for label, value in labels:
+        compact = _compact_context_items(value)
+        if compact:
+            summaries.append(f"{label}：{compact}")
+        if len(summaries) >= limit:
+            break
+    return summaries
 
 
 def _contextual_reference_steps(
@@ -207,32 +191,31 @@ def guided_stage_entry_output(
         Stage.DESIGN_VALUE_AND_LIMITATIONS: "设计价值与局限",
         Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "学生总结",
     }.get(session.current_stage, "当前阶段")
-    prior_context = _prior_student_context(session)
     carried = build_carried_context(session)
+    prior_context = _confirmed_context_summary(carried)
     reference_steps = _contextual_reference_steps(
         session.current_stage,
         carried,
     )
     opening = (
-        f"我们仍在整理“{title}”，前面已经确定的内容不会丢失。"
+        f"我们接着看“{title}”。刚才已经谈清楚的内容都还在，不用重新来一遍。"
         if retry
-        else f"现在进入“{title}”。前面确定的实验方向已经保留：{_student_idea_summary(session)}。"
+        else f"好，我们接着把“{_student_idea_summary(session)}”往下发展，这次先看“{title}”。"
     )
     if reference_steps:
         numbered = "\n".join(
             f"{index}. {step}" for index, step in enumerate(reference_steps, start=1)
         )
         basis_text = (
-            f"前面已经明确的设计依据包括：{'；'.join(prior_context)}。\n"
+            f"我们已经有这些线索：{'；'.join(prior_context)}。\n"
             if prior_context
             else ""
         )
         reference_text = (
-            "根据前面已经明确的信息，可以先用下面这套可修改的结构作为参考，"
-            "它不是需要照抄的标准答案：\n"
+            "我先把这些线索顺成一个可以随手修改的参考：\n"
             f"{basis_text}"
             f"{numbered}\n\n"
-            "你可以直接说明哪些环节要保留、删改或补充，也可以按自己的顺序重组。"
+            "你可以保留合适的部分，也可以直接换掉其中某一步。"
         )
     else:
         reference_text = ""
@@ -260,6 +243,7 @@ def guided_stage_entry_output(
                     "MODIFY_PREVIOUS_PROPOSAL",
                     "REJECT_PREVIOUS_PROPOSAL",
                     "ADVANCE_STAGE",
+                    "REQUEST_MORE_EXAMPLES",
                     "RETURN_TO_PREVIOUS_POINT",
                     "NEW_TOPIC",
                     "UNCLEAR",
@@ -278,10 +262,14 @@ def prepend_guided_acknowledgement(
     """Make guided replies visibly respond to the student's own reasoning."""
 
     excerpt = " ".join(student_message.split())
-    if len(excerpt) > 150:
-        excerpt = f"{excerpt[:147]}……"
-    lead = _GUIDED_STAGE_ACKNOWLEDGEMENT.get(stage, "我理解你这一轮的想法是")
-    acknowledgement = f"{lead}：“{excerpt}”。"
+    acknowledgement = {
+        Stage.VARIABLES_AND_CONDITIONS: "明白了，我会沿着你说的变量关系继续整理。",
+        Stage.CONCEPTUAL_PROCEDURE: "这个流程思路很清楚，我们就在它的基础上往下接。",
+        Stage.EXPECTED_DATA_VISUALIZATION: "明白，你想看的重点已经清楚了，我们继续把画面补完整。",
+        Stage.RESULT_INTERPRETATION: "这个解释方向可以接着用，我们再看看它能否覆盖不同结果。",
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: "这个判断抓住了重点，我们继续看看还有没有遗漏的边界。",
+        Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "这部分总结已经很清楚了，我们接着检查有没有遗漏。",
+    }.get(stage, "明白，我们就沿着这个想法继续。")
     if excerpt and excerpt not in output.assistant_message:
         output.assistant_message = f"{acknowledgement}\n\n{output.assistant_message}"
     output.stage_payload["student_input_acknowledged"] = True
@@ -295,10 +283,12 @@ def _idea(session: DesignSession, user_message: str) -> str:
             value = idea_context.get(key)
             if value:
                 return str(value)
+    resolved = session.turn_context.get("resolved_intent", {})
+    resolved_name = str(resolved.get("intent") or "") if isinstance(resolved, dict) else ""
     if (
         session.current_stage is Stage.IDEA_BRAINSTORMING
         and user_message.strip()
-        and not is_stage_one_control_message(user_message)
+        and resolved_name in {"ANSWER_CURRENT_QUESTION", "MODIFY_PREVIOUS_PROPOSAL", "NEW_TOPIC"}
     ):
         return user_message.strip()
     if isinstance(idea_context, dict) and idea_context.get("original"):
@@ -547,6 +537,134 @@ def _visualization(idea: str, emvr: bool) -> dict[str, Any]:
     }
 
 
+def _guided_reference_output(session: DesignSession) -> StepOutput:
+    """Give a contextual example without treating the request as a decision."""
+
+    stage = session.current_stage
+    carried = build_carried_context(session)
+    idea = _student_idea_summary(session)
+    variable = _compact_context_items(carried.get("independent_variable"))
+    observations = _compact_context_items(carried.get("observations"))
+    controls = _compact_context_items(carried.get("controlled_conditions"))
+    comparisons = _compact_context_items(carried.get("baseline_comparisons"))
+    follow_up = "你可以直接说哪里符合你的想法，或者指出一处想改的地方。"
+    readiness = {
+        "ready_for_confirmation": False,
+        "remaining_gaps": ["student_review_of_reference"],
+    }
+
+    if stage is Stage.VARIABLES_AND_CONDITIONS:
+        message = (
+            "当然可以，我先按前面讨论的方向搭一个可修改的版本："
+            f"把{variable or '最能体现研究变化的量'}作为主动改变量，"
+            f"重点观察{observations or '与研究问题直接相关的场或响应'}，"
+            f"并让{controls or '源、几何、材料和观察方式'}在各组比较中保持一致。"
+            "这只是一个起点，你不需要从空白开始列变量表。"
+        )
+        payload = {
+            "reference_variable_roles": {
+                "independent_variable": variable or "前面确定的变化主轴",
+                "observations": observations or "目标场或响应",
+                "controlled_conditions": controls or "其余影响比较的条件",
+            },
+            "stage_readiness": readiness,
+        }
+        visualization = None
+    elif stage is Stage.CONCEPTUAL_PROCEDURE:
+        steps = _contextual_reference_steps(stage, carried)
+        message = (
+            "可以。我先把前面的信息顺成一套可改的参考流程：\n"
+            + "\n".join(f"{index}. {step}" for index, step in enumerate(steps, 1))
+            + "\n它不是标准答案，主要是让你更容易看出哪里需要增删或调整顺序。"
+        )
+        payload = {
+            "reference_procedure_steps": steps,
+            "stage_readiness": readiness,
+        }
+        visualization = None
+    elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        message = (
+            "可以，我先给你一个能直接拿来改的理论参考："
+            f"用{variable or '主要改变量'}作为横轴或交互控制量，"
+            f"把{observations or '最关心的响应'}作为曲线、场图或通量显示；"
+            f"{comparisons or '前面保留的基础情形'}可以并排呈现，方便看出差异。"
+            "具体曲线形状还要服从前面确定的物理关系；这里展示的是理论预测，不是实测数据。"
+        )
+        payload = {
+            "reference_prediction_view": {
+                "control": variable or "主要改变量",
+                "observations": observations or "目标响应",
+                "comparisons": comparisons or "基础比较情形",
+            },
+            "stage_readiness": readiness,
+        }
+        visualization = _visualization(idea, emvr=False)
+    elif stage is Stage.RESULT_INTERPRETATION:
+        message = (
+            "可以先用这套思路判断可能结果：如果观察到的变化与预测一致，"
+            "就说明前面选定的课程关系能够解释主要趋势；如果趋势不明显或方向相反，"
+            f"先检查{controls or '控制条件和理想化假设'}，再判断是否需要修改解释。"
+            "这样既保留一种你可以参考的结果，也不会把未经验证的趋势说成事实。"
+        )
+        payload = {
+            "reference_result_cases": [
+                "结果与理论趋势一致",
+                "变化不明显或与理论趋势不同",
+            ],
+            "stage_readiness": readiness,
+        }
+        visualization = None
+    elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
+        message = (
+            "可以先从两个角度看：它的价值在于把抽象的ECE329物理关系变成可比较的现象；"
+            "它的边界则来自理想化模型、有限的显示方式，以及没有被纳入比较的条件。"
+            "你可以保留这两个角度，再把它们改成更贴合当前实验的表述。"
+        )
+        payload = {
+            "reference_review_dimensions": ["课程理解价值", "模型与展示边界"],
+            "stage_readiness": readiness,
+        }
+        visualization = None
+    else:
+        message = (
+            "我可以帮你检查总结是否覆盖研究对象、课程关系、比较方式和预期现象，"
+            "但最后的总结仍由你来写。你可以先写两三句话，我再帮你找遗漏。"
+        )
+        payload = {
+            "summary_checklist": ["研究对象", "课程关系", "比较方式", "预期现象"],
+            "final_proposal_generated": False,
+            "stage_readiness": readiness,
+        }
+        visualization = None
+
+    return StepOutput(
+        assistant_message=message,
+        stage_payload={
+            **payload,
+            "reference_only": True,
+            "pending_action": {
+                "type": "CONFIRM_OR_MODIFY",
+                "subject": stage.value,
+                "proposal": payload,
+                "question": follow_up,
+                "advance_on_accept": False,
+                "allowed_intents": [
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.ADVANCE_STAGE.value,
+                    UserIntent.REQUEST_MORE_EXAMPLES.value,
+                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                    UserIntent.NEW_TOPIC.value,
+                    UserIntent.UNCLEAR.value,
+                ],
+            },
+        },
+        student_task=follow_up,
+        visualization=visualization,
+    )
+
+
 class RuleBasedStageGenerator:
     """A safe fallback generator.
 
@@ -568,6 +686,13 @@ class RuleBasedStageGenerator:
             return self._unreasonable_request_output(session)
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             return self._generate_emvr(session, user_message)
+        resolved = session.turn_context.get("resolved_intent", {})
+        if (
+            session.current_stage is not Stage.IDEA_BRAINSTORMING
+            and isinstance(resolved, dict)
+            and resolved.get("intent") == UserIntent.REQUEST_MORE_EXAMPLES.value
+        ):
+            return _guided_reference_output(session)
         return self._generate_guided(session, user_message)
 
     @staticmethod
@@ -715,12 +840,7 @@ class RuleBasedStageGenerator:
             if input_kind == COURSE_CONTENT and retrieval_text:
                 idea = current_focus or topic_anchor or idea
                 options = _topic_options(retrieval_text, session)
-            # Online/API turns receive the semantic decision through turn_context.
-            # The exact matcher remains only as an offline compatibility fallback.
-            no_direction = bool(
-                stage_one_context.get("stage_one_no_direction") is True
-                or is_no_direction_request(user_message)
-            )
+            no_direction = stage_one_context.get("stage_one_no_direction") is True
             if input_kind != COURSE_CONTENT:
                 shown = shown_exploration_option_ids(session.history)
                 options = course_example_options(
@@ -948,34 +1068,64 @@ class RuleBasedStageGenerator:
             )
         if stage is Stage.VARIABLES_AND_CONDITIONS:
             return StepOutput(
-                assistant_message="我会先根据你提出的内容整理变量角色，再只追问其中最需要补充的一点。",
-                stage_payload={"variable_type": "independent_variable"},
-                student_task="你刚才提到的量中，哪一个是主动改变的，它准备怎样变化？",
+                assistant_message="我先把你提到的量按“主动改变、重点观察、保持不变”整理一下，再补最关键的一处。",
+                stage_payload={
+                    "variable_type": "independent_variable",
+                    "stage_readiness": {
+                        "ready_for_confirmation": True,
+                        "remaining_gaps": [],
+                    },
+                },
+                student_task="这里最想主动改变的是哪个量？你打算让它怎样变化？",
             )
         if stage is Stage.CONCEPTUAL_PROCEDURE:
             return StepOutput(
-                assistant_message="我会沿着你描述的顺序整理比较逻辑，并先补清一个关键环节。",
-                stage_payload={"procedure_unit": "reference_condition"},
-                student_task="在你描述的流程中，哪一步用来建立后续比较所需的基准？",
+                assistant_message="你给出的顺序已经能形成一条比较线索，我先帮你把基准、改变条件和观察结果接起来。",
+                stage_payload={
+                    "procedure_unit": "reference_condition",
+                    "stage_readiness": {
+                        "ready_for_confirmation": True,
+                        "remaining_gaps": [],
+                    },
+                },
+                student_task="按你的思路，哪一步最适合作为后面比较的起点？",
             )
         if stage is Stage.EXPECTED_DATA_VISUALIZATION:
             visualization = _visualization(idea, emvr=False)
             return StepOutput(
-                assistant_message="这是预期数据窗口的结构草图；它只表示理论预测，不是实测数据。",
-                stage_payload={"observation_focus": "relationship_shape"},
-                student_task="根据你的假设，你认为理论曲线最可能呈现什么形状？",
+                assistant_message="我先按你的观察重点搭了一个理论预测窗口。它用来帮助比较趋势，不代表真实测量结果。",
+                stage_payload={
+                    "observation_focus": "relationship_shape",
+                    "stage_readiness": {
+                        "ready_for_confirmation": True,
+                        "remaining_gaps": [],
+                    },
+                },
+                student_task="结合前面的物理判断，你觉得图中最值得看清的是哪一种变化？",
                 visualization=visualization,
             )
         if stage is Stage.RESULT_INTERPRETATION:
             return StepOutput(
-                assistant_message="我会先保留你的解释思路，再围绕一种可能结果继续追问。",
-                stage_payload={"result_case": "no_clear_change"},
-                student_task="如果因变量没有随自变量明显变化，你认为最值得先检查哪一个理论假设？",
+                assistant_message="你的解释思路可以作为主线。我们再用一种不同结果检验一下它是否站得住。",
+                stage_payload={
+                    "result_case": "no_clear_change",
+                    "stage_readiness": {
+                        "ready_for_confirmation": True,
+                        "remaining_gaps": [],
+                    },
+                },
+                student_task="如果预期中的变化并不明显，你会先检查哪个条件或物理假设？",
             )
         if stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
             return StepOutput(
-                assistant_message="我会从你指出的价值与限制出发，先把一个最关键的边界说明清楚。",
-                stage_payload={"review_dimension": "model_limitation"},
+                assistant_message="你指出的价值和限制已经能形成一组对照，我们先把最影响结论的边界说清楚。",
+                stage_payload={
+                    "review_dimension": "model_limitation",
+                    "stage_readiness": {
+                        "ready_for_confirmation": True,
+                        "remaining_gaps": [],
+                    },
+                },
                 student_task="你的设计依赖的哪个理想化假设最可能限制结论？",
             )
         return StepOutput(

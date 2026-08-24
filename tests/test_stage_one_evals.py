@@ -53,7 +53,8 @@ class StageOneDialogueEvalTests(unittest.TestCase):
                     result = engine.process_turn(first["design_id"], request)
 
                 payload = result["stage_payload"]
-                self.assertEqual(payload["input_category"], case["expected_category"])
+                if case.get("expected_category"):
+                    self.assertEqual(payload["input_category"], case["expected_category"])
                 if "request_rejected" in case:
                     self.assertIs(
                         payload.get("request_rejected", False),

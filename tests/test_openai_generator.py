@@ -156,6 +156,9 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("沿用刚才的安排", serialized)
         self.assertIn("no_direction表示学生当前没有可供继续完善的实验方向", request["instructions"])
         self.assertIn("不得判成课外主题", request["instructions"])
+        self.assertIn("给出一个可能、参考、示例或你的判断", request["instructions"])
+        self.assertIn("只返回实质设计内容", request["instructions"])
+        self.assertIn("CONFIRM_STAGE_OR_MODIFY", request["instructions"])
 
     def test_intent_resolver_repairs_an_omitted_active_facet_decision(self) -> None:
         base = {
@@ -379,6 +382,46 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("不把Lecture Notes当成唯一参考答案", request["instructions"])
         serialized_input = request["input"][0]["content"][0]["text"]
         self.assertIn('"current_stage": "IDEA_BRAINSTORMING"', serialized_input)
+
+    def test_later_guided_stage_requires_structured_readiness(self) -> None:
+        session = guided_session(
+            stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS)
+        )
+        missing = valid_output(
+            assistant_message="距离作为主动改变量，场线形状作为观察量。",
+            stage_payload_json=json.dumps(
+                {"independent_variable": "两个源之间的距离"},
+                ensure_ascii=False,
+            ),
+            student_task="还需要补充哪些控制条件？",
+        )
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(
+                transport=FakeTransport(missing),
+                repair_attempts=0,
+            ).generate(session, "改变距离并观察电场线")
+
+        complete = valid_output(
+            assistant_message="距离作为主动改变量，场线形状作为观察量。",
+            stage_payload_json=json.dumps(
+                {
+                    "independent_variable": "两个源之间的距离",
+                    "stage_readiness": {
+                        "ready_for_confirmation": True,
+                        "remaining_gaps": [],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            student_task="请整体检查这部分变量安排。",
+        )
+        output = OpenAIStageGenerator(
+            transport=FakeTransport(complete),
+            repair_attempts=0,
+        ).generate(session, "改变距离并观察电场线")
+        self.assertTrue(
+            output.stage_payload["stage_readiness"]["ready_for_confirmation"]
+        )
 
     def test_emvr_stage_one_uses_direct_design_contract(self) -> None:
         transport = FakeTransport(

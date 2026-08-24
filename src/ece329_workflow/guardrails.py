@@ -15,17 +15,6 @@ INTEREST_DESCRIPTION = "INTEREST_DESCRIPTION"
 DEPTH_EXPANSION = "DEPTH_EXPANSION"
 
 
-_STAGE_ONE_CONTROL_MESSAGES = {
-    "继续",
-    "继续完善下一阶段",
-    "确认本阶段并进入下一阶段",
-    "确认当前方向并进入下一阶段",
-    "确认大纲雏形并继续小点2",
-    "确认想法完善并进入变量与条件",
-    "进入下一阶段",
-    "完成本阶段",
-}
-
 _UNREASONABLE_REQUEST_PATTERNS = (
     # Attempts to inspect or alter the assistant rather than design an ECE329 lab.
     r"(工作流|workflow|\bagent\b|智能体).{0,12}(提示|内部|规则|原理|关闭|修改|绕过|任意输出)",
@@ -55,14 +44,14 @@ _UNREASONABLE_REQUEST_PATTERNS = (
 
 
 def preclassify_stage_one_input(text: str) -> str:
+    """Return hard-safety or retrieval evidence, not conversational intent."""
+
     normalized = text.strip()
     if any(
         re.search(pattern, normalized, re.IGNORECASE)
         for pattern in _UNREASONABLE_REQUEST_PATTERNS
     ):
         return UNREASONABLE_REQUEST
-    if is_no_direction_request(normalized):
-        return COURSE_CONTENT
     if (
         KNOWLEDGE.match_concepts(normalized, limit=1)
         or KNOWLEDGE.match_supplemental_concepts(normalized, limit=1)
@@ -72,40 +61,10 @@ def preclassify_stage_one_input(text: str) -> str:
 
 
 def classify_stage_one_input(text: str) -> str:
+    """Conservative rule-only fallback used when no semantic model is present."""
+
     preclassification = preclassify_stage_one_input(text)
     return OUT_OF_SCOPE if preclassification == AMBIGUOUS else preclassification
-
-
-def is_no_direction_request(text: str) -> bool:
-    normalized = re.sub(r"[\s，,。！!？?]+", "", text).casefold()
-    return not normalized or normalized in {"没有方向", "还没有想法"}
-
-
-def is_more_brainstorm_request(text: str) -> bool:
-    """Fast path for explicit commands; contextual variants use the resolver."""
-
-    normalized = re.sub(r"[\s，,。！!？?]+", "", text).casefold()
-    return normalized in {"再来一组", "换一组"}
-
-
-def is_stage_one_control_message(text: str) -> bool:
-    normalized = re.sub(r"[\s，,。；;！!？?]+", "", text).casefold()
-    return normalized in {
-        re.sub(r"[\s，,。；;！!？?]+", "", item).casefold()
-        for item in _STAGE_ONE_CONTROL_MESSAGES
-    }
-
-
-def is_progression_intent(text: str, *, allow_confirmation: bool = False) -> bool:
-    """Fast path only; natural-language variants use semantic resolution."""
-
-    normalized = re.sub(r"[\s，,。；;！!？?]+", "", text).casefold()
-    if normalized in {"继续", "下一步", "进入下一阶段", "继续下一阶段"}:
-        return True
-    return bool(
-        allow_confirmation
-        and normalized in {"确认", "同意", "接受", "就这样", "完成了"}
-    )
 
 
 def resolve_option_id(
@@ -207,9 +166,13 @@ def build_stage_one_turn_context(
 
     idea = idea_context if isinstance(idea_context, dict) else {}
     no_direction = bool(
-        semantic_updates.get("no_direction") is True
+        isinstance(semantic_updates, dict)
+        and semantic_updates.get("no_direction") is True
+    )
+    semantic_scope = (
+        str(semantic_updates.get("course_scope_status") or "UNCERTAIN")
         if isinstance(semantic_updates, dict)
-        else is_no_direction_request(text)
+        else "UNCERTAIN"
     )
     semantic_option_ids = (
         semantic_updates.get("selected_option_ids", [])
@@ -231,9 +194,13 @@ def build_stage_one_turn_context(
         if len(semantic_options) > 1
         else []
     )
-    preclassification = (
-        COURSE_CONTENT if no_direction else preclassify_stage_one_input(text)
-    )
+    lexical_preclassification = preclassify_stage_one_input(text)
+    if lexical_preclassification == UNREASONABLE_REQUEST:
+        preclassification = UNREASONABLE_REQUEST
+    elif no_direction or semantic_scope == COURSE_CONTENT:
+        preclassification = COURSE_CONTENT
+    else:
+        preclassification = lexical_preclassification
     previous_focus = str(
         idea.get("current_focus")
         or idea.get("main_direction")
@@ -255,6 +222,8 @@ def build_stage_one_turn_context(
     )
     if preclassification == UNREASONABLE_REQUEST:
         effective_classification = UNREASONABLE_REQUEST
+    elif semantic_scope == OUT_OF_SCOPE and not contextual_continuation:
+        effective_classification = OUT_OF_SCOPE
     elif resolved is not None or resolved_scene_relations or (
         preclassification == AMBIGUOUS and contextual_continuation
     ):
@@ -263,12 +232,20 @@ def build_stage_one_turn_context(
         effective_classification = OUT_OF_SCOPE
     else:
         effective_classification = preclassification
-    prompt_preclassification = (
-        COURSE_CONTENT
-        if effective_classification == COURSE_CONTENT
-        and (resolved is not None or resolved_scene_relations or contextual_continuation)
-        else preclassification
-    )
+    if semantic_scope == OUT_OF_SCOPE:
+        prompt_preclassification = AMBIGUOUS
+    elif (
+        effective_classification == COURSE_CONTENT
+        and (
+            semantic_scope == COURSE_CONTENT
+            or resolved is not None
+            or resolved_scene_relations
+            or contextual_continuation
+        )
+    ):
+        prompt_preclassification = COURSE_CONTENT
+    else:
+        prompt_preclassification = preclassification
 
     selected_text = "——".join(
         str(resolved.get(key, "")).strip()
@@ -308,10 +285,6 @@ def build_stage_one_turn_context(
     normalized = text.strip()
     more_brainstorm_requested = bool(
         resolved_intent_name == "REQUEST_MORE_EXAMPLES"
-        or (
-            semantic_updates is None
-            and is_more_brainstorm_request(normalized)
-        )
     )
     history = idea.get("focus_history", [])
     focus_history = [str(item).strip() for item in history if str(item).strip()] \
@@ -324,10 +297,6 @@ def build_stage_one_turn_context(
             "ADVANCE_STAGE",
             "RETURN_TO_PREVIOUS_POINT",
         }
-        or (
-            semantic_updates is None
-            and is_stage_one_control_message(normalized)
-        )
     )
     if no_direction or control_turn or more_brainstorm_requested:
         focus_component = ""
@@ -443,6 +412,7 @@ def build_stage_one_turn_context(
 
     return {
         "stage_one_preclassification": prompt_preclassification,
+        "semantic_course_scope": semantic_scope,
         "effective_input_category": effective_classification,
         "raw_stage_one_preclassification": preclassification,
         "resolved_stage_one_reference": resolved,

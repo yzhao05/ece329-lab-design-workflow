@@ -423,6 +423,29 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
             raise ModelOutputError(
                 f"Guided stage {stage.value} is missing its required design artifact"
             )
+        if stage not in {
+            Stage.IDEA_BRAINSTORMING,
+            Stage.COURSE_MAPPING_AND_DIRECTION,
+            Stage.LEARNING_OBJECTIVES,
+            Stage.RESEARCH_QUESTION,
+            Stage.THEORETICAL_FRAMEWORK,
+            Stage.HYPOTHESIS,
+            Stage.CONCEPTUAL_OR_VR_SETUP,
+            Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+        }:
+            readiness = output.stage_payload.get("stage_readiness")
+            if (
+                not isinstance(readiness, dict)
+                or not isinstance(readiness.get("ready_for_confirmation"), bool)
+                or not isinstance(readiness.get("remaining_gaps"), list)
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in readiness.get("remaining_gaps", [])
+                )
+            ):
+                raise ModelOutputError(
+                    "A later guided stage must return structured stage_readiness"
+                )
     else:
         required_fields = EMVR_REQUIRED_PAYLOAD_FIELDS.get(stage, ())
         missing_fields = [
@@ -1216,6 +1239,25 @@ def _step_output_from_response(
                     )
     resolved_turn = packet["context"].get("resolved_intent")
     pending_action = packet["context"].get("pending_action")
+    latest_user_message = str(packet.get("latest_user_message") or "").strip()
+    if (
+        session.interaction_state is InteractionState.GUIDED_DESIGN
+        and session.current_stage is not Stage.IDEA_BRAINSTORMING
+        and len(latest_user_message) >= 36
+        and latest_user_message in output.assistant_message
+    ):
+        raise ModelOutputError(
+            "A guided reply must respond to the student's content without quoting the full input"
+        )
+    if (
+        session.interaction_state is InteractionState.GUIDED_DESIGN
+        and session.current_stage is not Stage.IDEA_BRAINSTORMING
+    ):
+        visible_reply = f"{output.assistant_message}\n{output.student_task or ''}"
+        if len(re.findall(r"[？?]", visible_reply)) > 1:
+            raise ModelOutputError(
+                "A guided reply outside Stage 1 may ask only one student-facing question"
+            )
     if isinstance(resolved_turn, dict) and str(resolved_turn.get("intent")) in {
         "ANSWER_CURRENT_QUESTION",
         "ACCEPT_PREVIOUS_PROPOSAL",
@@ -1278,24 +1320,46 @@ class OpenAIStageGenerator:
                 "必须结合previous_question、pending_action、carried_context和user_message。"
                 "可选意图只有ANSWER_CURRENT_QUESTION、ACCEPT_PREVIOUS_PROPOSAL、"
                 "MODIFY_PREVIOUS_PROPOSAL、REJECT_PREVIOUS_PROPOSAL、ADVANCE_STAGE、"
-                "REQUEST_MORE_EXAMPLES、RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、UNCLEAR。"
+                "REQUEST_MORE_EXAMPLES、RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、"
+                "SET_INTERACTION_STATE、UNCLEAR。"
                 "凡是必须依赖上一轮才能理解的表达都要走这一套语义判断，包括指代某个或多个选项、"
                 "组合前述图景、表示暂无方向、回答或撤回想法完整性要点、接受或局部修改建议、"
                 "继续推进、索取其他例子、返回前项和更换主题；不能用孤立词语代替上下文判断。"
                 "类似‘沿用刚才安排’‘两个都留下’‘不用改，接着做’应根据上一项待办解析，"
                 "不能按孤立关键词判断。只有语义确实不足时才返回UNCLEAR。"
+                "学生明确表示暂时不知道并要求你给出一个可能、参考、示例或你的判断时，应返回"
+                "REQUEST_MORE_EXAMPLES；这不是学生对当前问题给出的设计答案，不得返回"
+                "ANSWER_CURRENT_QUESTION，也不得把请求文字作为resolved_value。"
+                "pending_action.type为CONFIRM_STAGE_OR_MODIFY时，‘是’‘确认’‘合适’‘就这样’等"
+                "语义同意当前阶段安排的回复必须返回ACCEPT_PREVIOUS_PROPOSAL，不得当作新的"
+                "阶段内容；程序会据此进入下一阶段。"
                 "no_direction表示学生当前没有可供继续完善的实验方向，或不知道从哪里开始；"
                 "必须依据整句话的含义判断，暂时想不到、脑中空白、希望先看课程例子等只是"
                 "可能表达而不是固定口令。若学生已经提出明确课程主题，只是在询问如何继续，"
                 "则no_direction必须为false。被判为no_direction的输入仍属于课程想法探索，"
                 "不得判成课外主题。"
-                "resolved_value_json必须是JSON序列化后的值；没有值时为null。"
+                "resolved_value_json必须是JSON序列化后的值；没有值时为null。若一条消息同时包含"
+                "‘保留/沿用/删改’等会话操作和实质设计内容，在ANSWER_CURRENT_QUESTION或"
+                "MODIFY_PREVIOUS_PROPOSAL下只返回实质设计内容，不要把会话操作写入该字段。"
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自pending_action中的真实option_id）、"
-                "no_direction、facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
+                "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
+                "facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
                 "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING）、"
                 "comparison_updates（comparison_id和cases必须来自pending_action或carried_context，"
-                "action只能为ACCEPT、MODIFY、REJECT）。不得臆造ID或把宽泛主题当成已回答学习目标。"
+                "action只能为ACCEPT、MODIFY、REJECT），以及interaction_state_request"
+                "（只能为GUIDED_DESIGN、EMVR_DIRECT或null）。不得臆造ID或把宽泛主题当成已回答学习目标。"
+                "程序会把包含EMVR标记的安全输入直接切换为EMVR_DIRECT；不要推翻这个明确状态。"
+                "对于不含该标记的其他模式表达，仍需依据整句话语义设置interaction_state_request，"
+                "不能靠扩充词表猜测。若这句话只有模式切换而没有实验内容，intent返回"
+                "SET_INTERACTION_STATE；若同时包含实质实验想法，仍按该实质内容返回"
+                "ANSWER_CURRENT_QUESTION或NEW_TOPIC，并同时设置interaction_state_request。"
+                "course_scope_status必须结合整句话、carried_context.current_course_evidence和"
+                "scope_summary判断：与课程概念存在合理物理联系就返回COURSE_CONTENT；明确属于"
+                "其他课程且无法与ECE329建立实验核心关系才返回OUT_OF_SCOPE；证据不足返回UNCERTAIN。"
+                "不能因为没有命中某个词、用户只说序号或使用了代词就判OUT_OF_SCOPE；此时必须结合"
+                "previous_question、pending_action和已保存方向。没有具体思路属于课程内头脑风暴，"
+                "course_scope_status返回COURSE_CONTENT并把no_direction设为true。"
                 "当pending_action.type为ANSWER_IDEA_FACET时，subject就是当前唯一需要判断的facet。"
                 "若intent为ANSWER_CURRENT_QUESTION或MODIFY_PREVIOUS_PROPOSAL，facet_updates必须且只需"
                 "包含对这个subject的CLEAR或MISSING判断：学生的回答在语义上已经回答previous_question"
@@ -1327,7 +1391,7 @@ class OpenAIStageGenerator:
                     "strict": True,
                 }
             },
-            "max_output_tokens": 500,
+            "max_output_tokens": 600,
             "store": False,
         }
         try:

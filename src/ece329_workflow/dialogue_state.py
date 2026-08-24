@@ -19,6 +19,7 @@ class UserIntent(str, Enum):
     REQUEST_MORE_EXAMPLES = "REQUEST_MORE_EXAMPLES"
     RETURN_TO_PREVIOUS_POINT = "RETURN_TO_PREVIOUS_POINT"
     NEW_TOPIC = "NEW_TOPIC"
+    SET_INTERACTION_STATE = "SET_INTERACTION_STATE"
     UNCLEAR = "UNCLEAR"
 
 
@@ -235,11 +236,6 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         or idea.get("original")
         or ""
     ).strip()
-    recent_student_decisions = [
-        str(item.get("user_message") or "").strip()
-        for item in session.history[-8:]
-        if str(item.get("user_message") or "").strip()
-    ]
     return {
         "research_direction": direction,
         "course_relationships": deepcopy(
@@ -284,7 +280,6 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             if isinstance(session.design_context.get("idea_development"), dict)
             else {}
         ),
-        "recent_student_decisions": recent_student_decisions,
     }
 
 
@@ -342,6 +337,7 @@ def _normalize_pending_action(
         "status": "PENDING",
         "created_at_revision": revision,
         "repeat_count": 1,
+        "advance_on_accept": bool(raw.get("advance_on_accept", False)),
     }
 
 
@@ -380,6 +376,7 @@ def save_pending_action(
                     UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
                     UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
                     UserIntent.ADVANCE_STAGE.value,
+                    UserIntent.REQUEST_MORE_EXAMPLES.value,
                     UserIntent.RETURN_TO_PREVIOUS_POINT.value,
                     UserIntent.NEW_TOPIC.value,
                     UserIntent.UNCLEAR.value,
@@ -414,16 +411,24 @@ def save_pending_action(
 
 
 def deterministic_intent(
-    user_message: str,
-    pending_action: dict[str, Any] | None,
+    _user_message: str,
+    _pending_action: dict[str, Any] | None,
     *,
     selected_option_id: str | None = None,
     complete_stage: bool = False,
+    interaction_state: InteractionState | None = None,
 ) -> dict[str, Any] | None:
-    """Fast path only for unambiguous commands; contextual language is not guessed."""
+    """Handle explicit UI events only; typed language always uses semantic resolution."""
 
-    normalized = re.sub(r"[\s，,。；;！!？?]+", "", user_message).casefold()
-    if complete_stage or normalized in {"继续", "下一步", "进入下一阶段", "继续下一阶段"}:
+    if interaction_state is not None:
+        return resolved_intent(
+            UserIntent.SET_INTERACTION_STATE,
+            target="interaction_state",
+            resolved_value=interaction_state.value,
+            confidence=1.0,
+            semantic_updates={"interaction_state_request": interaction_state.value},
+        )
+    if complete_stage:
         return resolved_intent(UserIntent.ADVANCE_STAGE, confidence=1.0)
     if selected_option_id:
         return resolved_intent(
@@ -432,30 +437,6 @@ def deterministic_intent(
             resolved_value=selected_option_id,
             confidence=1.0,
         )
-    answer_pending = bool(
-        pending_action
-        and pending_action.get("type")
-        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
-    )
-    confirms_saved_answer = bool(
-        answer_pending
-        and str(pending_action.get("candidate_answer") or "").strip()
-    )
-    if (
-        pending_action
-        and normalized in {"确认", "同意", "接受", "保留"}
-        and (not answer_pending or confirms_saved_answer)
-    ):
-        return resolved_intent(
-            UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
-            target=str(pending_action.get("subject") or ""),
-            resolved_value=deepcopy(pending_action.get("proposal")),
-            confidence=1.0,
-        )
-    if normalized in {"再来一组", "换一组"}:
-        return resolved_intent(UserIntent.REQUEST_MORE_EXAMPLES, confidence=1.0)
-    if normalized in {"返回上一步", "回到上一阶段"}:
-        return resolved_intent(UserIntent.RETURN_TO_PREVIOUS_POINT, confidence=1.0)
     return None
 
 
@@ -465,6 +446,13 @@ def fallback_intent(
 ) -> dict[str, Any]:
     """Conservative offline behavior when no semantic model is available."""
 
+    compact = re.sub(r"[\s，,。；;！!？?]+", "", user_message)
+    if len(compact) < 6:
+        return resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.3,
+            source="CONSERVATIVE_FALLBACK",
+        )
     # Offline/rule-only deployments cannot reliably infer contextual intent.
     # Treat the message as an answer instead of inventing a decision; the
     # deterministic state machine will therefore preserve the current stage.
@@ -520,10 +508,22 @@ def validate_resolved_intent(
         in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
         and str(pending_action.get("candidate_answer") or "").strip()
     )
-    if intent not in allowed and not confirms_saved_candidate and intent not in {
+    requests_reference_for_open_question = bool(
+        intent == UserIntent.REQUEST_MORE_EXAMPLES.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+    )
+    if (
+        intent not in allowed
+        and not confirms_saved_candidate
+        and not requests_reference_for_open_question
+        and intent not in {
         UserIntent.NEW_TOPIC.value,
         UserIntent.RETURN_TO_PREVIOUS_POINT.value,
-    }:
+        UserIntent.SET_INTERACTION_STATE.value,
+        }
+    ):
         intent = UserIntent.UNCLEAR.value
     try:
         confidence = float(raw.get("confidence", 0.0))
@@ -569,19 +569,42 @@ def validate_resolved_intent(
             pending_action,
         )
     ):
-        # An omitted facet decision is an incomplete semantic result, not
-        # evidence that the student's answer was inadequate. Keep the state
-        # unchanged and ask one short clarification instead of repeating the
-        # same completeness question.
-        intent = UserIntent.UNCLEAR.value
-        semantic_updates = {}
+        # If the semantic resolver confidently identified an ordinary reply
+        # as the answer to the currently pending question, a missing status is
+        # a structured-output omission. Do not make the student classify or
+        # repeat their own answer; bind it to the exact pending question.
+        if (
+            confidence >= 0.8
+            and intent == UserIntent.ANSWER_CURRENT_QUESTION.value
+        ):
+            required_facet = required_pending_facet_id(pending_action)
+            if required_facet is not None:
+                semantic_updates["facet_updates"] = [
+                    {"facet_id": required_facet, "status": "CLEAR"}
+                ]
+            elif (
+                isinstance(pending_action, dict)
+                and pending_action.get("type") == "ANSWER_STAGE_QUESTION"
+            ):
+                semantic_updates["pending_answer_status"] = "CLEAR"
+            source = "SEMANTIC_RECOVERED_ANSWER_STATUS"
+        else:
+            intent = UserIntent.UNCLEAR.value
+            semantic_updates = {}
+    advance_requested = raw.get("advance_requested")
+    if (
+        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("advance_on_accept") is True
+    ):
+        advance_requested = True
     return resolved_intent(
         intent,
         target=str(raw.get("target") or pending_action.get("subject") or "")
         if pending_action
         else str(raw.get("target") or ""),
         resolved_value=resolved_value,
-        advance_requested=raw.get("advance_requested"),
+        advance_requested=advance_requested,
         preserve_current_design=raw.get("preserve_current_design", True),
         confidence=confidence,
         source=source,
@@ -625,6 +648,8 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
                     else [],
                 }
             )
+    requested_state = str(raw.get("interaction_state_request") or "").upper()
+    course_scope_status = str(raw.get("course_scope_status") or "").upper()
     return {
         "selected_option_ids": selected_option_ids,
         "no_direction": raw.get("no_direction") is True,
@@ -635,6 +660,20 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             if str(raw.get("pending_answer_status") or "").upper()
             in {"CLEAR", "MISSING"}
             else None
+        ),
+        "interaction_state_request": (
+            requested_state
+            if requested_state in {
+                InteractionState.GUIDED_DESIGN.value,
+                InteractionState.EMVR_DIRECT.value,
+            }
+            else None
+        ),
+        "course_scope_status": (
+            course_scope_status
+            if course_scope_status
+            in {"COURSE_CONTENT", "OUT_OF_SCOPE", "UNCERTAIN"}
+            else "UNCERTAIN"
         ),
     }
 
@@ -848,18 +887,17 @@ def clarification_output(
                 repeat_count = int(pending_action.get("repeat_count", 1))
             except (TypeError, ValueError):
                 repeat_count = 1
+            question = str(pending_action.get("question") or "").strip()
             if repeat_count > 2:
                 message = (
-                    f"你刚才的说明可能已经包含“{title}”，不需要再次重写整段。"
-                    f"请只确认“上一句就是我的{title}”，或告诉我“暂时还不知道{title}”，"
-                    "我会按你的意思继续整理。"
+                    f"“{title}”这一点先不要求你重复。"
+                    "如果暂时没有想法，可以请我先给一个课程内参考；"
+                    "也可以直接补充一个你认为重要的新细节。"
                 )
             else:
-                message = (
-                    f"我还没有准确判断你刚才是在补充“{title}”，还是想调整其他内容。"
-                    "请直接说明你的回答对应当前问题；如果暂时不知道，也可以明确告诉我，"
-                    "我会换一种方式帮助你梳理。"
-                )
+                focus = question or f"请用一句话说明你对“{title}”的想法。"
+                message = f"我们先聚焦“{title}”：{focus}"
+                message += " 如果暂时没有想法，我可以先给一个课程内参考。"
             return StepOutput(
                 assistant_message=message,
                 stage_payload={"clarification_required": True},
@@ -873,15 +911,12 @@ def clarification_output(
                 repeat_count = 1
             if repeat_count > 2:
                 message = (
-                    "你刚才的说明可能已经回答了当前问题，不需要重新写一遍。"
-                    "请只确认“上一句就是我的回答”，或告诉我“暂时还没有想法”，"
-                    "我会据此继续整理当前部分。"
+                    "这一点先不要求你重复。你可以请我给一个可修改的参考，"
+                    "也可以直接补充一个新的关键细节。"
                 )
             else:
-                message = (
-                    "我还没有准确判断你刚才是在回答当前问题，还是在修改前面的安排。"
-                    "请说明上一句是否就是你的回答；如果暂时没有想法，也可以直接告诉我。"
-                )
+                message = f"当前还需要明确：{question or '请补充这一阶段最关键的设计内容。'}"
+                message += " 如果暂时没有想法，我可以先给一个可修改的参考。"
             return StepOutput(
                 assistant_message=message,
                 stage_payload={"clarification_required": True},
@@ -912,6 +947,7 @@ def serialize_intent_input(
     return json.dumps(
         {
             "current_stage": session.current_stage.value,
+            "interaction_state": session.interaction_state.value,
             "previous_question": previous_question,
             "pending_action": pending_action,
             "carried_context": carried_context,

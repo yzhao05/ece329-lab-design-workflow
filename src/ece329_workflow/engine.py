@@ -35,12 +35,9 @@ from .guardrails import (
     INTEREST_DESCRIPTION,
     UNREASONABLE_REQUEST,
     build_stage_one_turn_context,
-    classify_stage_one_input,
-    is_no_direction_request,
-    is_progression_intent,
-    is_stage_one_control_message,
     latest_stage_one_options,
     latest_stage_one_scenes,
+    preclassify_stage_one_input,
 )
 from .idea_development import (
     build_gap_output,
@@ -57,6 +54,7 @@ from .models import (
     InteractionState,
     Stage,
     StageCompletionError,
+    StepOutput,
     TurnRequest,
     WorkflowStatus,
 )
@@ -85,6 +83,16 @@ _GUIDED_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("review_dimension", "limitations"),
 }
 
+
+def _contains_emvr_marker(text: str) -> bool:
+    """Return whether the user explicitly included the EMVR mode marker.
+
+    This is intentionally the only natural-language mode shortcut.  All other
+    conversational meaning is resolved from ``pending_action`` and context.
+    """
+
+    return "EMVR" in text.upper()
+
 _TRANSIENT_GUIDED_PAYLOAD_KEYS = {
     "guided_entry",
     "awaiting_student_description",
@@ -94,49 +102,10 @@ _TRANSIENT_GUIDED_PAYLOAD_KEYS = {
     "clarification_required",
     "student_input_acknowledged",
     "repeated_question_avoided",
+    "stage_ready_for_confirmation",
+    "stage_readiness",
     "contextual_continuation",
 }
-
-
-def _emvr_intent(text: str) -> bool | None:
-    """Return an explicit EMVR opt-in/out intent; bare absence returns None."""
-
-    normalized = text.casefold()
-    if "emvr" not in normalized:
-        return None
-    negative_patterns = (
-        r"(?:不|不要|不想|无需|不需要|拒绝|取消|退出|关闭|停止).{0,12}emvr",
-        r"emvr.{0,12}(?:不要|不需要|取消|退出|关闭|停止)",
-        r"(?:do\s+not|don't|without|avoid|disable|stop|leave|exit|not).{0,20}emvr",
-        r"emvr.{0,20}(?:off|disabled|stop|leave|exit|not)",
-    )
-    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in negative_patterns):
-        return False
-    positive_patterns = (
-        r"(?:放入|使用|采用|切换|进入|启用|按照|通过|想用|要用).{0,16}emvr",
-        r"emvr.{0,16}(?:模式下|工作流中|设计|完善|构建|完成)",
-        r"(?:use|enable|enter|switch\s+to|with).{0,20}emvr",
-    )
-    if normalized.strip() == "emvr":
-        return True
-    if any(re.search(pattern, normalized, re.IGNORECASE) for pattern in positive_patterns):
-        return True
-    return None
-
-
-def _is_pure_stage_transition(text: str) -> bool:
-    normalized = re.sub(r"[\s，,。；;！!？?]+", "", text).casefold()
-    return normalized in {
-        "继续",
-        "下一步",
-        "进入下一阶段",
-        "继续下一阶段",
-        "继续完善下一阶段",
-        "确认本阶段并进入下一阶段",
-        "确认当前方向并进入下一阶段",
-        "确认想法完善并进入变量与条件",
-        "完成本阶段",
-    }
 
 
 def _normalized_question(text: str) -> str:
@@ -178,6 +147,77 @@ def _remove_repeated_guided_question(
         )
     output.student_task = None
     output.stage_payload["repeated_question_avoided"] = True
+
+
+def _guided_stage_has_minimum_content(
+    session: DesignSession,
+    stage: Stage,
+    output: StepOutput,
+) -> bool:
+    if stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        return isinstance(output.visualization, dict) or isinstance(
+            session.stage_outputs.get(stage.value, {}).get("visualization"),
+            dict,
+        )
+    required_fields = _GUIDED_COMPLETION_FIELDS.get(stage)
+    if not required_fields:
+        return False
+    drafts = session.design_context.get("guided_stage_drafts", {})
+    draft = drafts.get(stage.value, {}) if isinstance(drafts, dict) else {}
+    combined = deepcopy(draft) if isinstance(draft, dict) else {}
+    _deep_merge(combined, output.stage_payload)
+    return any(combined.get(field) for field in required_fields)
+
+
+def _prepare_guided_stage_completion(
+    session: DesignSession,
+    stage: Stage,
+    output: StepOutput,
+) -> None:
+    """Create one stage-level decision from structured answer state and artifacts."""
+
+    readiness = output.stage_payload.get("stage_readiness")
+    ready_for_confirmation = bool(
+        isinstance(readiness, dict)
+        and readiness.get("ready_for_confirmation") is True
+        and readiness.get("remaining_gaps") == []
+    )
+    if (
+        session.interaction_state is not InteractionState.GUIDED_DESIGN
+        or stage in {
+            Stage.IDEA_BRAINSTORMING,
+            Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+        }
+        or not ready_for_confirmation
+        or not _guided_stage_has_minimum_content(session, stage, output)
+    ):
+        return
+    completion_task = (
+        "如果这部分和你的想法一致，直接告诉我继续就可以；"
+        "如果想改，也只要指出要调整的地方。"
+    )
+    output.assistant_message = (
+        f"{output.assistant_message.rstrip()}\n\n"
+        "这一部分已经能连起来了，不用再逐项确认。"
+    )
+    output.student_task = completion_task
+    output.stage_payload["stage_ready_for_confirmation"] = True
+    output.stage_payload["pending_action"] = {
+        "type": "CONFIRM_STAGE_OR_MODIFY",
+        "subject": stage.value,
+        "proposal": {"stage": stage.value, "ready": True},
+        "question": completion_task,
+        "advance_on_accept": True,
+        "allowed_intents": [
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.ADVANCE_STAGE.value,
+            UserIntent.REQUEST_MORE_EXAMPLES.value,
+            UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            UserIntent.NEW_TOPIC.value,
+            UserIntent.UNCLEAR.value,
+        ],
+    }
 
 
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -239,24 +279,73 @@ class WorkflowEngine:
             pending,
             selected_option_id=request.selected_option_id,
             complete_stage=request.complete_stage,
+            interaction_state=request.interaction_state,
         )
         if direct is not None:
             return validate_resolved_intent(direct, pending), pending
         resolver = getattr(self.generator, "resolve_intent", None)
         if callable(resolver):
+            carried_context = build_carried_context(session)
+            carried_context["current_course_evidence"] = {
+                "lecture_concepts": [
+                    {
+                        "id": item.get("id"),
+                        "title": item.get("title"),
+                        "concepts": item.get("concepts", []),
+                    }
+                    for item in KNOWLEDGE.match_concepts(message, limit=4)
+                ],
+                "supplemental_concepts": [
+                    {
+                        "id": item.get("supplemental_concept_id"),
+                        "title": item.get("title"),
+                        "concepts": item.get("concepts", []),
+                    }
+                    for item in KNOWLEDGE.match_supplemental_concepts(
+                        message,
+                        limit=4,
+                    )
+                ],
+                "scope_summary": (
+                    "ECE329 covers electrostatics, electric potential and materials; "
+                    "magnetostatics and induction; Maxwell equations, electromagnetic "
+                    "waves, polarization, interfaces, conductors, and transmission lines."
+                ),
+            }
             semantic = resolver(
                 session,
                 message,
                 pending,
-                build_carried_context(session),
+                carried_context,
             )
             return validate_resolved_intent(semantic, pending), pending
-        # Compatibility fallback for offline/rule-only deployments. It is not
-        # extended with conversational paraphrases; ordinary text remains an
-        # answer to the current question instead of being guessed as a command.
-        if is_progression_intent(message):
-            return resolved_intent(UserIntent.ADVANCE_STAGE, confidence=0.9), pending
+        # Offline/rule-only deployments cannot resolve conversational commands.
+        # Explicit UI actions still arrive through complete_stage above; typed
+        # language remains an answer instead of being guessed from keywords.
         return validate_resolved_intent(fallback_intent(message, pending), pending), pending
+
+    @staticmethod
+    def _interaction_state_from_intent(
+        turn_intent: dict[str, Any],
+    ) -> InteractionState | None:
+        """Read a validated mode request from structured intent output."""
+
+        updates = turn_intent.get("semantic_updates", {})
+        requested = (
+            updates.get("interaction_state_request")
+            if isinstance(updates, dict)
+            else None
+        )
+        if (
+            requested is None
+            and turn_intent.get("intent")
+            == UserIntent.SET_INTERACTION_STATE.value
+        ):
+            requested = turn_intent.get("resolved_value")
+        try:
+            return InteractionState(str(requested)) if requested else None
+        except ValueError:
+            return None
 
     @staticmethod
     def _return_to_previous_stage(session: DesignSession) -> None:
@@ -297,17 +386,15 @@ class WorkflowEngine:
         if not idea.strip():
             raise ValueError("idea must not be empty")
         requested_state = self._coerce_state(interaction_state)
-        emvr_intent = _emvr_intent(idea)
-        if requested_state is InteractionState.EMVR_DIRECT and emvr_intent is not True:
-            raise ValueError("EMVR_DIRECT requires an explicit EMVR request in idea")
-        if requested_state is InteractionState.GUIDED_DESIGN and emvr_intent is True:
-            raise ValueError("interaction_state conflicts with the explicit EMVR request")
-        state = (
-            InteractionState.EMVR_DIRECT
-            if emvr_intent is True
-            and classify_stage_one_input(idea) != UNREASONABLE_REQUEST
-            else InteractionState.GUIDED_DESIGN
-        )
+        # Structured API/UI state remains authoritative except for the single
+        # public shortcut requested by the product: any safe message that
+        # contains the literal marker "EMVR" enters EMVR mode.
+        state = requested_state or InteractionState.GUIDED_DESIGN
+        input_kind = preclassify_stage_one_input(idea)
+        if input_kind == UNREASONABLE_REQUEST:
+            state = InteractionState.GUIDED_DESIGN
+        elif _contains_emvr_marker(idea):
+            state = InteractionState.EMVR_DIRECT
         access_token = secrets.token_urlsafe(32)
         session = DesignSession(
             design_id=f"design_{uuid.uuid4().hex[:12]}",
@@ -355,22 +442,9 @@ class WorkflowEngine:
         message = request.message.strip()
         if not message:
             raise ValueError("message must not be empty")
-        input_kind = classify_stage_one_input(message)
-        emvr_intent = _emvr_intent(message)
-        if input_kind != UNREASONABLE_REQUEST:
-            if request.interaction_state is not None:
-                expected_intent = (
-                    request.interaction_state is InteractionState.EMVR_DIRECT
-                )
-                if emvr_intent is not expected_intent:
-                    raise ValueError(
-                        "interaction_state requires a matching explicit mode request"
-                    )
-                session.interaction_state = request.interaction_state
-            elif emvr_intent is True:
-                session.interaction_state = InteractionState.EMVR_DIRECT
-            elif emvr_intent is False:
-                session.interaction_state = InteractionState.GUIDED_DESIGN
+        # This deterministic pass is only the hard safety gate. Course scope
+        # is resolved later from structured semantic output plus retrieval.
+        input_kind = preclassify_stage_one_input(message)
 
         idea_before_patch = session.design_context.get("idea", {})
         authoritative_course_scope = bool(
@@ -378,14 +452,6 @@ class WorkflowEngine:
             and idea_before_patch.get("course_scope_confirmed") is True
         )
         _deep_merge(session.design_context, request.context_patch)
-        if (
-            session.interaction_state is InteractionState.GUIDED_DESIGN
-            and session.current_stage in IDEA_DEVELOPMENT_STAGES[1:]
-        ):
-            # Migrate pre-change sessions back into the single dynamic idea
-            # development stage. Existing stage outputs remain available as
-            # evidence, but no fixed substep order is preserved.
-            session.current_stage_index = 0
         if (
             session.current_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -412,8 +478,106 @@ class WorkflowEngine:
                 request,
                 message,
             )
+        interaction_state_changed = False
+        if input_kind != UNREASONABLE_REQUEST:
+            if _contains_emvr_marker(message):
+                # Keep the state transition visible in the structured turn
+                # record while preserving any substantive experiment intent
+                # returned by the contextual resolver.
+                marker_updates = turn_intent.setdefault("semantic_updates", {})
+                if not isinstance(marker_updates, dict):
+                    marker_updates = {}
+                    turn_intent["semantic_updates"] = marker_updates
+                marker_updates["interaction_state_request"] = (
+                    InteractionState.EMVR_DIRECT.value
+                )
+                turn_intent["emvr_marker_applied"] = True
+                if turn_intent.get("intent") == UserIntent.UNCLEAR.value:
+                    turn_intent.update(
+                        {
+                            "intent": UserIntent.SET_INTERACTION_STATE.value,
+                            "target": "interaction_state",
+                            "resolved_value": InteractionState.EMVR_DIRECT.value,
+                            "confidence": 1.0,
+                            "source": "EMVR_MARKER",
+                        }
+                    )
+                requested_interaction_state = InteractionState.EMVR_DIRECT
+            else:
+                requested_interaction_state = self._interaction_state_from_intent(
+                    turn_intent
+                )
+            if (
+                requested_interaction_state is not None
+                and requested_interaction_state is not session.interaction_state
+            ):
+                session.interaction_state = requested_interaction_state
+                interaction_state_changed = True
+                pending_action = None
+                dialogue = session.model_context.get("dialogue_state")
+                if isinstance(dialogue, dict):
+                    dialogue.pop("pending_action", None)
+        if (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage in IDEA_DEVELOPMENT_STAGES[1:]
+        ):
+            # Guided mode treats the former fixed Stages 2-7 as facets of the
+            # dynamic first stage. The state transition is based on the
+            # resolver's structured result, never on wording in the message.
+            session.current_stage_index = 0
+        if (
+            turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+            and isinstance(pending_action, dict)
+            and pending_action.get("type") == "ANSWER_STAGE_QUESTION"
+            and pending_action.get("subject") == session.current_stage.value
+        ):
+            stored_output = session.stage_outputs.get(session.current_stage.value, {})
+            stored_payload = (
+                stored_output.get("stage_payload", {})
+                if isinstance(stored_output, dict)
+                else {}
+            )
+            compatibility_output = StepOutput(
+                assistant_message="",
+                stage_payload=(
+                    deepcopy(stored_payload)
+                    if isinstance(stored_payload, dict)
+                    else {}
+                ),
+                visualization=(
+                    deepcopy(stored_output.get("visualization"))
+                    if isinstance(stored_output, dict)
+                    and isinstance(stored_output.get("visualization"), dict)
+                    else None
+                ),
+            )
+            if _guided_stage_has_minimum_content(
+                session,
+                session.current_stage,
+                compatibility_output,
+            ):
+                turn_intent["advance_requested"] = True
+                pending_action["advance_on_accept"] = True
         apply_resolved_intent(session, turn_intent, pending_action, message)
         intent_name = str(turn_intent.get("intent") or UserIntent.UNCLEAR.value)
+        resolved_value = turn_intent.get("resolved_value")
+        resolved_student_message = (
+            resolved_value.strip()
+            if (
+                isinstance(resolved_value, str)
+                and resolved_value.strip()
+                and intent_name
+                in {
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                }
+                and (
+                    str(turn_intent.get("source") or "").startswith("SEMANTIC")
+                    or turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+                )
+            )
+            else message
+        )
         semantic_updates = (
             deepcopy(turn_intent.get("semantic_updates", {}))
             if (
@@ -422,11 +586,7 @@ class WorkflowEngine:
             )
             else None
         )
-        content_intent_name = (
-            UserIntent.ANSWER_CURRENT_QUESTION.value
-            if request.complete_stage and not _is_pure_stage_transition(message)
-            else intent_name
-        )
+        content_intent_name = intent_name
 
         if intent_name == UserIntent.NEW_TOPIC.value:
             self._start_new_topic(session, message)
@@ -489,14 +649,14 @@ class WorkflowEngine:
                 completion_error = str(exc)
         handled_stage = session.current_stage
         stage_one_control_turn = bool(
-            (semantic_updates is None and is_stage_one_control_message(message))
-            or content_intent_name
+            content_intent_name
             in {
                 UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
                 UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
                 UserIntent.ADVANCE_STAGE.value,
                 UserIntent.REQUEST_MORE_EXAMPLES.value,
                 UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                UserIntent.SET_INTERACTION_STATE.value,
             }
         )
         dynamic_idea_turn = bool(
@@ -517,9 +677,7 @@ class WorkflowEngine:
             }
         ):
             idea_answer_message = (
-                str(turn_intent.get("resolved_value") or "").strip()
-                if turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
-                else message
+                resolved_student_message
             )
             update_idea_development(
                 session,
@@ -535,7 +693,7 @@ class WorkflowEngine:
         if dynamic_idea_turn:
             idea_context = session.design_context.get("idea", {})
             stage_one_context = build_stage_one_turn_context(
-                message,
+                resolved_student_message,
                 options=latest_stage_one_options(session.history),
                 scenes=latest_stage_one_scenes(session.history),
                 idea_context=idea_context if isinstance(idea_context, dict) else {},
@@ -562,7 +720,7 @@ class WorkflowEngine:
             idea_context = session.design_context.get("idea", {})
             turn_context.update(
                 build_stage_one_turn_context(
-                    message,
+                    resolved_student_message,
                     options=latest_stage_one_options(session.history),
                     scenes=latest_stage_one_scenes(session.history),
                     idea_context=idea_context if isinstance(idea_context, dict) else {},
@@ -576,7 +734,7 @@ class WorkflowEngine:
             self._record_student_decision(
                 session,
                 handled_stage,
-                message,
+                resolved_student_message,
                 request.selected_option_id,
                 content_intent_name,
             )
@@ -594,6 +752,7 @@ class WorkflowEngine:
             and (
                 transitioned_from_stage is not None
                 or not handled_stage_seen
+                or interaction_state_changed
             )
         )
         clarification_turn = intent_name == UserIntent.UNCLEAR.value
@@ -602,20 +761,30 @@ class WorkflowEngine:
             and input_kind != UNREASONABLE_REQUEST
         )
         if clarification_turn:
-            pending_action = record_pending_clarification(
-                session,
-                message,
-            ) or pending_action
-            output = clarification_output(pending_action)
+            if (
+                turn_intent.get("source") == "CONSERVATIVE_FALLBACK"
+                and handled_stage is Stage.IDEA_BRAINSTORMING
+                and has_idea_development(session)
+            ):
+                output = build_gap_output(session, "")
+            else:
+                pending_action = record_pending_clarification(
+                    session,
+                    message,
+                ) or pending_action
+                output = clarification_output(pending_action)
             session.turn_context = {}
             completion_error = None
         elif dynamic_idea_turn:
             confirmed_answer = (
-                str(turn_intent.get("resolved_value") or "").strip()
+                resolved_student_message
                 if turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
                 else ""
             )
-            output = build_gap_output(session, confirmed_answer or message)
+            output = build_gap_output(
+                session,
+                confirmed_answer or resolved_student_message,
+            )
             session.turn_context = {}
             if stage_one_control_turn:
                 completion_error = None
@@ -624,9 +793,7 @@ class WorkflowEngine:
             session.turn_context = {}
         else:
             generation_message = (
-                str(turn_intent.get("resolved_value") or "").strip()
-                if turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
-                else message
+                resolved_student_message
             )
             try:
                 output = self.generator.generate(session, generation_message)
@@ -649,6 +816,18 @@ class WorkflowEngine:
                     pending_action,
                     generation_message,
                 )
+            if (
+                session.interaction_state is InteractionState.GUIDED_DESIGN
+                and handled_stage is not Stage.IDEA_BRAINSTORMING
+                and transitioned_from_stage is None
+                and intent_name
+                in {
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.REQUEST_MORE_EXAMPLES.value,
+                }
+            ):
+                _prepare_guided_stage_completion(session, handled_stage, output)
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(
@@ -682,12 +861,6 @@ class WorkflowEngine:
                         session.design_context["idea_development"]
                     ),
                 )
-            # When a substantive answer also carries a premature completion
-            # flag, keep guiding without surfacing a transport-style error.
-            # A pure advance command still reports the missing design content.
-            if not _is_pure_stage_transition(message):
-                completion_error = None
-
         if output.stage_payload.get("clarification_required") is not True:
             save_pending_action(session, handled_stage, output)
         _persist_guided_stage_draft(session, handled_stage, output.stage_payload)
@@ -704,6 +877,12 @@ class WorkflowEngine:
                 "interaction_state": session.interaction_state.value,
                 "user_message": message,
                 "selected_option_id": request.selected_option_id,
+                "resolved_intent": {
+                    "intent": intent_name,
+                    "target": turn_intent.get("target"),
+                    "advance_requested": turn_intent.get("advance_requested") is True,
+                    "source": turn_intent.get("source"),
+                },
                 "transitioned_from_stage": (
                     transitioned_from_stage.value
                     if transitioned_from_stage is not None
@@ -952,16 +1131,22 @@ class WorkflowEngine:
             payload = output.get("stage_payload") if isinstance(output, dict) else None
             if not isinstance(payload, dict) or payload.get("input_category") != COURSE_CONTENT:
                 continue
+            resolved = item.get("resolved_intent")
+            if isinstance(resolved, dict) and resolved.get("intent") in {
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            }:
+                continue
             candidate = str(
                 payload.get("current_focus")
                 or payload.get("current_idea_summary")
-                or item.get("user_message")
                 or ""
             ).strip()
             if (
                 candidate
-                and not is_no_direction_request(candidate)
-                and not is_stage_one_control_message(candidate)
                 and (not focus_history or focus_history[-1] != candidate)
             ):
                 focus_history.append(candidate)

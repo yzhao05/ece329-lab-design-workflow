@@ -379,9 +379,9 @@ def _student_facing_next_turn(
 ) -> str:
     if status.get("complete") is True:
         return (
-            "现在，这个实验想法中的研究对象、课程依据、学习目标和预期现象已经能够相互对应。"
-            "请整体看一遍；如果与自己的想法一致，直接告诉我进入“变量与条件”。"
-            "如果还有想调整的地方，也可以直接说明。"
+            "现在，研究对象、课程关系、学习目标和预期现象已经能互相对上了。"
+            "你可以整体看一遍；觉得没问题就告诉我继续到“变量与条件”，"
+            "想调整哪里也可以直接说。"
         )
     active = str(status.get("active_facet_id") or "")
     facet = status.get("facets_by_id", {}).get(active, {})
@@ -389,12 +389,11 @@ def _student_facing_next_turn(
     if repeat_count > 0:
         if repeat_count > 1:
             return (
-                f"我们先不再让你重写整段“{title}”。请只指出上一句中哪一部分"
-                "是在回答当前问题；如果暂时还不能确定，也可以直接说暂时保留这个缺口，"
-                "我会先帮助你换一个角度梳理。"
+                f"“{title}”暂时卡住也没关系，我先给你一个更具体的起点。"
+                f"{_focused_facet_clarification(active)}"
             )
         return (
-            f"为了避免让你重复改写同一段内容，我们现在只确认“{title}”。"
+            f"“{title}”这里不用重写前面的内容，我们换一个更直接的角度。"
             f"{_focused_facet_clarification(active)}"
         )
     prefix = (
@@ -408,25 +407,22 @@ def _student_facing_next_turn(
 def _focused_facet_clarification(facet_id: str) -> str:
     prompts = {
         "learning_objective": (
-            "请说明这项实验最终希望你能够解释、判断或比较什么；如果上一句已经表达清楚，"
-            "也可以直接说明那一句就是你的学习目标。"
+            "可以从“完成后我能解释哪条物理关系”来想。你希望自己最终能解释、判断或比较什么？"
         ),
         "research_question": (
-            "请确认上一句是否已经同时说明了准备改变或比较的条件，以及要观察的现象；"
-            "如果是，可以直接说明那一句就是你的研究问题。"
+            "可以把它写成“当比较条件变化时，准备观察的现象怎样变化”。在你的想法里，"
+            "这两个位置分别是什么？"
         ),
         "hypothesis": (
-            "请确认上一句是否已经同时给出了预期变化和物理理由；如果是，可以直接说明"
-            "那一句就是你的预测。"
+            "先不用追求精确数值。你预计会看到什么变化，又准备借哪条物理关系解释它？"
         ),
         "conceptual_structure": (
-            "请确认上一句是否已经列出了完成比较所需的主要对象、边界或激励；如果是，"
-            "可以直接说明沿用上一句。"
+            "把画面想成一张简图：要完成这组比较，里面至少需要哪些对象、边界或激励？"
         ),
     }
     return prompts.get(
         facet_id,
-        "请确认上一句是否已经回答当前问题；如果已经回答，可以直接说明沿用上一句。",
+        "可以先抓住一个最重要的物理关系，用自己的话说明它怎样连接到这个实验想法。",
     )
 
 
@@ -512,22 +508,19 @@ def _student_facing_retry(status: dict[str, Any], message: str) -> str:
 
 
 def _student_facing_acknowledgement(
-    message: str,
+    _message: str,
     clarified_titles: list[str],
 ) -> str:
-    excerpt = " ".join(message.split())
-    if len(excerpt) > 150:
-        excerpt = f"{excerpt[:147]}……"
     title_text = "、".join(f"“{title}”" for title in clarified_titles)
     if clarified_titles == ["学习目标"]:
-        return f"这个学习目标表达得很清楚：“{excerpt}”。"
+        return "这个学习目标很清楚：接下来的设计要能帮助你真正解释这条物理关系。"
     if clarified_titles == ["研究问题"]:
-        return f"这个研究问题已经很具体：“{excerpt}”。"
+        return "这个研究问题已经很具体，比较条件和准备观察的现象都对上了。"
     if clarified_titles == ["假设与预期趋势"]:
-        return f"你的预测已经同时给出了现象和判断：“{excerpt}”。"
+        return "你的预测既说清了可能的现象，也给出了判断依据，我们可以继续往下看。"
     if clarified_titles == ["概念实验结构"]:
-        return f"你已经把实验中的主要组成说得很具体：“{excerpt}”。"
-    return f"你的回答很清楚：“{excerpt}”。这已经把{title_text}说明得更具体。"
+        return "主要对象和它们之间的关系已经清楚了，这套结构可以继续沿用。"
+    return f"这部分回答已经把{title_text}说明得更具体。"
 
 
 def _comparison_update_summary(session: DesignSession, message: str) -> str:
