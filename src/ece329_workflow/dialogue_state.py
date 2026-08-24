@@ -228,6 +228,17 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
     outline = session.design_context.get("experiment_outline_seed", {})
     idea = idea if isinstance(idea, dict) else {}
     outline = outline if isinstance(outline, dict) else {}
+    development = session.design_context.get("idea_development", {})
+    development = development if isinstance(development, dict) else {}
+    facets = development.get("facets", {})
+    facets = facets if isinstance(facets, dict) else {}
+
+    def facet_evidence(facet_id: str) -> str:
+        facet = facets.get(facet_id, {})
+        if not isinstance(facet, dict) or facet.get("status") != "CLEAR":
+            return ""
+        return str(facet.get("evidence") or "").strip()
+
     direction = str(
         idea.get("main_direction")
         or idea.get("direction_summary")
@@ -243,6 +254,10 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             or idea.get("selected_course_relations")
             or []
         ),
+        "learning_objective": facet_evidence("learning_objective"),
+        "research_question": facet_evidence("research_question"),
+        "hypothesis": facet_evidence("hypothesis"),
+        "conceptual_structure": facet_evidence("conceptual_structure"),
         "baseline_comparisons": deepcopy(
             outline.get("baseline_comparisons")
             or idea.get("standard_comparisons")
@@ -250,7 +265,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         ),
         "independent_variable": _find_payload_values(
             session,
-            {"independent_variable", "variable_type", "adjustable_quantity_in_vr"},
+            {"independent_variable", "adjustable_quantity_in_vr"},
         ),
         "observations": _find_payload_values(
             session,
@@ -276,9 +291,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             else {}
         ),
         "idea_development": deepcopy(
-            session.design_context.get("idea_development", {})
-            if isinstance(session.design_context.get("idea_development"), dict)
-            else {}
+            development
         ),
     }
 

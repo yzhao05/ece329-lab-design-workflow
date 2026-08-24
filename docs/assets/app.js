@@ -190,19 +190,19 @@ const DEMO_STAGE_PROMPTS = [
   "实验中由什么对象或条件产生目标电磁场？",
   "你准备主动改变的一个量是什么？",
   "改变主要变量前，需要建立什么基准状态？",
-  "你预计理论曲线最可能呈现什么形状？",
-  "如果结果没有明显变化，最值得先检查哪个理论假设？",
-  "这个设计依赖的哪个理想化假设最可能限制结论？",
-  "请先用两到三句话总结实验想研究什么，以及为什么值得研究。",
+  "对照前面提出的研究问题和预期，哪一种图或场分布最容易看出关键变化？",
+  "如果显示结果符合或偏离前面的预期，各自能说明什么？",
+  "对照最初的学习目标，现在的设计能否支撑它，又受哪种理想化条件限制？",
+  "请把研究对象、主要比较和ECE329课程关系用一小段话串起来。",
 ];
 
 const DEMO_GUIDED_STAGE_ENTRY_QUESTIONS = Object.freeze({
   VARIABLES_AND_CONDITIONS: "先不急着列完整变量表。按照你的理解，这个实验中哪些量应该主动改变、哪些现象需要观察，又有哪些条件应该保持不变？可以先说你认为最重要的部分。",
   CONCEPTUAL_PROCEDURE: "先不急着写标准流程。你认为在这个实验中，从建立比较基准到改变条件、观察现象和比较结果，需要经历哪些关键环节？请先按自己的思路描述。",
-  EXPECTED_DATA_VISUALIZATION: "在生成理论预测窗口前，你希望窗口重点呈现哪些量之间的关系，或者最希望从图中看清哪一种变化？",
-  RESULT_INTERPRETATION: "对于这个实验可能出现的结果，你认为哪些现象最需要解释，又会先从什么课程关系寻找原因？",
-  DESIGN_VALUE_AND_LIMITATIONS: "请先按你的判断描述：这个实验最有价值的学习收获是什么，又有哪些理想化条件、展示方式或设计边界可能限制结论？",
-  STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "请先用两到三句话写出这个实验想研究什么、为什么值得研究，以及它与ECE329课程内容有什么联系。",
+  EXPECTED_DATA_VISUALIZATION: "前面已经有研究问题和预期趋势了。你觉得用一条曲线、几幅场分布图，还是两种显示配合起来，最容易判断预期有没有出现？如果暂时不确定，我可以先按已有变量搭一版参考。",
+  RESULT_INTERPRETATION: "回到前面提出的预期：如果显示结果与它一致，能支持哪部分解释；如果不一致，又该先检查条件、模型还是原来的判断？",
+  DESIGN_VALUE_AND_LIMITATIONS: "最初的学习目标已经保留下来了，这里不用再重复。请看看现在的变量、流程和显示是否足以实现它，并指出一个最可能限制结论的理想化条件。",
+  STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "请用一小段话把这个实验研究什么、比较或观察什么，以及它和ECE329哪部分内容有关串起来；不用再重复学习收获。",
 });
 
 const DEMO_GUIDED_STAGE_REFERENCE_STEPS = Object.freeze({
@@ -210,7 +210,7 @@ const DEMO_GUIDED_STAGE_REFERENCE_STEPS = Object.freeze({
   CONCEPTUAL_PROCEDURE: ["建立可重复的基准条件", "逐步改变前面确定的条件", "用相同方式观察并记录", "比较各组结果并联系课程关系解释"],
   EXPECTED_DATA_VISUALIZATION: ["以前面确定的改变量作为横轴或控制量", "显示最重要的观察量", "并列保留的基础情形", "标明这是理论预测而非实测数据"],
   RESULT_INTERPRETATION: ["解释符合预期的结果", "检查偏离预期时的条件或假设", "区分模型局限与物理差异"],
-  DESIGN_VALUE_AND_LIMITATIONS: ["说明核心学习价值", "指出理想化条件", "区分设计能说明和不能推出的内容"],
+  DESIGN_VALUE_AND_LIMITATIONS: ["对照阶段1的学习目标检查现有设计是否足以支撑它", "指出一个关键理想化条件", "区分设计能说明和不能推出的内容"],
 });
 
 const dom = {
@@ -827,7 +827,7 @@ function buildTurnRequest(message, uiAction = null) {
     const sections = (state.summarySections || [])
       .map((section) => String(section).trim())
       .filter((section) => section.length >= 10);
-    if (summary.length >= 20 && sections.length >= 2) {
+    if (summary.length >= 20 && sections.length >= 1) {
       turn.context_patch = {
         synthesis: {
           student_summary: summary,
@@ -1165,10 +1165,10 @@ function createDemoResponse(message, uiAction = null) {
     const preservedIdea = state.stageOneCorePhenomenon || state.pendingDirection || "前面已经完善的实验想法";
     const referenceSteps = DEMO_GUIDED_STAGE_REFERENCE_STEPS[stageId] || [];
     const referenceText = referenceSteps.length
-      ? `我先把前面的线索顺成一个可以随手修改的参考：\n${referenceSteps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n合适的部分可以留下，想改的地方也可以直接换掉。\n\n`
+      ? `我先把已有线索顺成一份可以随手修改的参考：\n${referenceSteps.map((step, index) => `${index + 1}. ${step}`).join("\n")}\n\n觉得合适的部分可以留下；想改哪里，直接告诉我就行。\n\n`
       : "";
     return {
-      assistant_message: `好，我们接着把“${preservedIdea}”往下发展，这次先看“${currentWorkspaceTitle(state.stageIndex)}”。\n\n${referenceText}${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "先说说你对这一部分的想法，我会在这个基础上继续帮你完善。"}`,
+      assistant_message: `好，前面的实验想法已经保留下来了。我们接着看看“${currentWorkspaceTitle(state.stageIndex)}”。\n\n${referenceText}${DEMO_GUIDED_STAGE_ENTRY_QUESTIONS[stageId] || "先说说你对这一部分的想法，我会在这个基础上继续帮你完善。"}`,
       student_task: null,
       current_stage: stageId,
       handled_stage: stageId,
@@ -1227,6 +1227,38 @@ function createDemoResponse(message, uiAction = null) {
         exploration_scenes: scenes,
         ready_for_next_stage: false,
       },
+      warnings: [],
+      _runtime_source: "demo",
+    };
+  }
+  if (state.mode === "GUIDED_DESIGN" && state.stageIndex === STAGES.length - 1) {
+    if (advanceRequested && String(state.pendingSummary || "").trim().length >= 20) {
+      return {
+        assistant_message: "你的总结已经按原意保留，整个实验设计流程到这里完成。",
+        current_stage: STAGES[state.stageIndex][0],
+        handled_stage: STAGES[state.stageIndex][0],
+        interaction_state: state.mode,
+        workflow_status: "complete",
+        stage_payload: {
+          student_summary_confirmed: true,
+          final_proposal_generated: false,
+        },
+        quick_actions: [],
+        warnings: [],
+        _runtime_source: "demo",
+      };
+    }
+    return {
+      assistant_message: "这段总结已经把你的研究问题、主要比较和课程关系串起来了。我保留了你的原意，没有替你改写成另一份方案。",
+      student_task: "如果这就是你想保留的最终总结，直接确认完成；想调整的话，也可以继续补充。",
+      current_stage: STAGES[state.stageIndex][0],
+      handled_stage: STAGES[state.stageIndex][0],
+      interaction_state: state.mode,
+      stage_payload: {
+        student_summary_received: true,
+        final_proposal_generated: false,
+      },
+      quick_actions: [advanceQuickAction("确认总结并完成")],
       warnings: [],
       _runtime_source: "demo",
     };
@@ -1560,7 +1592,7 @@ function applyResponse(response, userMessage) {
 }
 
 function composeAssistantText(response) {
-  const base = response.assistant_message || response.message || "Agent已处理当前阶段。";
+  const base = response.assistant_message || response.message || "这一部分已经整理好了。";
   const parts = [base];
   const shouldShowStudentTask = state.stageIndex !== 0;
   const studentTask = shouldShowStudentTask && typeof response.student_task === "string"
@@ -1572,7 +1604,7 @@ function composeAssistantText(response) {
     : [];
   if (warnings.length) parts.push(`提示：${warnings.join("；")}`);
   if (response.completion_error && state.stageIndex !== 0) {
-    parts.push(`尚未推进：${response.completion_error}`);
+    parts.push(`这一步还差一点：${response.completion_error}`);
   }
   return parts.join("\n\n");
 }
@@ -1618,8 +1650,11 @@ function deriveQuickActions(response) {
     return [];
   }
   if (state.stageIndex === STAGES.length - 1) {
+    if (response.stage_payload?.student_summary_received === true) {
+      return [advanceQuickAction("确认总结并完成")];
+    }
     return String(state.pendingSummary || "").trim().length >= 20
-      && (state.summarySections || []).filter((section) => String(section).trim().length >= 10).length >= 2
+      && (state.summarySections || []).filter((section) => String(section).trim().length >= 10).length >= 1
       ? [advanceQuickAction("确认完成总结")]
       : [];
   }

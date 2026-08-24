@@ -348,7 +348,13 @@ class LectureKnowledgeBase:
             for _, item in scored[:limit]
         ]
 
-    def scene_components(self, direction: str, index: int) -> tuple[str, str, str, str]:
+    def scene_components(
+        self,
+        direction: str,
+        index: int,
+        *,
+        excluded_signatures: set[str] | None = None,
+    ) -> tuple[str, str, str, str]:
         """Select a course-grounded scene by catalog terms, with a generic fallback.
 
         Scene routing lives in data so adding another ECE329 concept does not require a
@@ -366,15 +372,38 @@ class LectureKnowledgeBase:
             if matches:
                 score = sum(max(1, len(keyword)) for keyword in matches)
                 candidates.append((score, -order, template))
-        if candidates:
-            template = max(candidates, key=lambda item: (item[0], item[1]))[2]
-        else:
-            template = self.generic_scene_frames[index % len(self.generic_scene_frames)]
+        excluded = excluded_signatures or set()
+        ranked_templates = [
+            item[2]
+            for item in sorted(candidates, key=lambda item: (item[0], item[1]), reverse=True)
+        ]
+        generic_templates = [
+            self.generic_scene_frames[(index + offset) % len(self.generic_scene_frames)]
+            for offset in range(len(self.generic_scene_frames))
+        ]
+        choices = [*ranked_templates, *generic_templates]
+        template = next(
+            (
+                item
+                for item in choices
+                if self._scene_signature(item) not in excluded
+            ),
+            choices[0],
+        )
         return (
             str(template["title"]),
             str(template["physical_picture"]),
             str(template["thinking_prompt"]),
             str(template["illustrative_extension"]),
+        )
+
+    @staticmethod
+    def _scene_signature(template: dict[str, Any]) -> str:
+        """Identify the visible physical frame, independent of course anchor."""
+
+        return "|".join(
+            " ".join(str(template.get(field) or "").split()).casefold()
+            for field in ("title", "physical_picture", "thinking_prompt")
         )
 
     def concept_references(self, text: str, limit: int = 3) -> list[dict[str, Any]]:

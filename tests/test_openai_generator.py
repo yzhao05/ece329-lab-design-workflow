@@ -360,11 +360,16 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaises(ModelOutputError):
-            OpenAIStageGenerator(
-                transport=transport,
-                repair_attempts=0,
-            ).generate(session, message)
+        output = OpenAIStageGenerator(
+            transport=transport,
+            repair_attempts=0,
+        ).generate(session, message)
+
+        self.assertTrue(
+            output.assistant_message.startswith("好的，那我来帮助你拓展思路")
+        )
+        self.assertNotIn("不属于ECE329", output.assistant_message)
+        self.assertEqual(output.stage_payload["input_category"], "COURSE_CONTENT")
 
     def test_generator_builds_responses_request_and_parses_json(self) -> None:
         transport = FakeTransport(valid_output())

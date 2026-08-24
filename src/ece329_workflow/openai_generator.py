@@ -24,8 +24,10 @@ from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
     NO_DIRECTION_ACKNOWLEDGEMENT,
     RuleBasedStageGenerator,
+    _format_exploration_scenes,
     _format_experiment_outline_seed,
     _format_standard_comparison_status,
+    build_exploration_scenes,
     build_experiment_outline_seed,
 )
 from .guardrails import (
@@ -739,6 +741,7 @@ def _validate_lecture_grounding(
                     "Breadth exploration requires one scene per grounded alternative"
                 )
             seen_scene_ids: set[str] = set()
+            seen_physical_frames: set[str] = set()
             scene_string_fields = {
                 "scene_id",
                 "label",
@@ -765,6 +768,15 @@ def _validate_lecture_grounding(
                 if scene_id in seen_scene_ids:
                     raise ModelOutputError("Stage 1 exploration scene ids must be unique")
                 seen_scene_ids.add(scene_id)
+                physical_signature = "|".join(
+                    " ".join(str(scene.get(field) or "").split()).casefold()
+                    for field in ("title", "physical_picture", "thinking_prompt")
+                )
+                if physical_signature in seen_physical_frames:
+                    raise ModelOutputError(
+                        "Stage 1 exploration scenes must use distinct visible physical frames"
+                    )
+                seen_physical_frames.add(physical_signature)
                 if str(scene.get("label") or "").strip() != expected_labels[index]:
                     raise ModelOutputError(
                         "Displayed exploration scenes must be relabeled A, B, and C"
@@ -1075,6 +1087,46 @@ def _step_output_from_response(
     if (
         session.current_stage is Stage.IDEA_BRAINSTORMING
         and session.interaction_state is InteractionState.GUIDED_DESIGN
+        and output.stage_payload.get("brainstorm_phase") == BREADTH_EXPLORATION
+    ):
+        alternatives = output.stage_payload.get("alternative_ideas")
+        if (
+            isinstance(alternatives, list)
+            and len(alternatives) == 3
+            and all(isinstance(item, dict) for item in alternatives)
+        ):
+            # Scene wording is rendered from the catalog in one place.  This
+            # prevents two distinct option IDs from being shown through the
+            # same physical frame and keeps the visible A/B/C labels stable.
+            scenes = build_exploration_scenes(alternatives)
+            output.stage_payload["exploration_scenes"] = scenes
+            category = output.stage_payload.get("input_category")
+            if category == UNREASONABLE_REQUEST:
+                introduction = (
+                    "这个请求会改变课程助手的用途，或让它执行与ECE329实验设计无关的操作，"
+                    "我不能执行。我们把讨论带回ECE329课上学习的物理关系。"
+                )
+            elif category == OUT_OF_SCOPE:
+                introduction = (
+                    "你提到的主题不属于ECE329课程内容，不能直接作为这门课实验设计的核心。"
+                    "下面用三个课内图景帮你换一个方向。"
+                )
+            else:
+                introduction = (
+                    "这个想法可以从几种不同的ECE329物理关系展开。我们先不急着定变量、"
+                    "公式或流程，而是看看哪一种画面最能触发你的兴趣。"
+                )
+            output.assistant_message = (
+                f"{introduction}\n\n"
+                "下面不是标准答案，三个图景都可以继续改造、交换或组合：\n\n"
+                f"{_format_exploration_scenes(scenes)}"
+            )
+            output.student_task = (
+                "哪幅图景最接近你想研究的现象？你也可以组合其中两个，或直接说出自己的改法。"
+            )
+    if (
+        session.current_stage is Stage.IDEA_BRAINSTORMING
+        and session.interaction_state is InteractionState.GUIDED_DESIGN
     ):
         stage_one_thread = packet["context"].get("stage_one_thread", {})
         if isinstance(stage_one_thread, dict):
@@ -1375,6 +1427,9 @@ class OpenAIStageGenerator:
                 "ANSWER_CURRENT_QUESTION，semantic_updates_json必须包含pending_answer_status："
                 "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
                 "当前问题时才填MISSING。不能因为措辞与问题示例不同而遗漏或填MISSING。"
+                "若subject=STUDENT_SYNTHESIS_OR_EMVR_OUTPUT，一段学生自己写的总结只要已经串联"
+                "研究问题或对象、主要比较或观察现象，以及ECE329课程关系，就应返回CLEAR；"
+                "不得要求拆成多轮，也不得因为没有逐字重复‘为什么值得研究’而返回UNCLEAR。"
                 "没有结构化更新时semantic_updates_json为null。"
             ),
             "input": [
@@ -1406,8 +1461,15 @@ class OpenAIStageGenerator:
             with self._metrics_lock:
                 self._intent_api_failures += 1
             raise
-        if pending_question_decision_missing(
-            str(raw.get("intent") or "UNCLEAR"),
+        raw_intent = str(raw.get("intent") or "UNCLEAR")
+        unresolved_open_question = bool(
+            raw_intent == "UNCLEAR"
+            and isinstance(pending_action, dict)
+            and pending_action.get("type")
+            in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        )
+        if unresolved_open_question or pending_question_decision_missing(
+            raw_intent,
             semantic_updates,
             pending_action,
         ):
@@ -1428,10 +1490,11 @@ class OpenAIStageGenerator:
                         )
                         if pending_type == "ANSWER_IDEA_FACET"
                         else (
-                            "上一份结构化判断遗漏了当前阶段问题的回答状态。请重新判断同一条"
-                            "学生消息：若它在语义上回答了previous_question，在"
-                            "semantic_updates_json中返回pending_answer_status=CLEAR；只有明确"
-                            "没有想法或确实没有回答时才返回MISSING。"
+                            "上一份结构化判断没有解决当前阶段的开放问题。请重新判断同一条"
+                            "学生消息：若它在语义上回答了previous_question，intent返回"
+                            "ANSWER_CURRENT_QUESTION，并在semantic_updates_json中返回"
+                            "pending_answer_status=CLEAR；只有明确没有想法或确实没有回答时"
+                            "才返回MISSING。不要仅因为学生用陈述句或综合段落作答就返回UNCLEAR。"
                         )
                     ) + (
                         "如果pending_action中已有candidate_answer，而学生是在确认、沿用或指认"

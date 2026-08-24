@@ -64,6 +64,7 @@ ready_for_confirmation是布尔值，remaining_gaps是尚未明确内容的稳�
 必要内容已经形成且remaining_gaps为空时才设为true；不得根据student_task或assistant_message中的
 “确认、合适、保留”等文字判断。程序状态机将校验该对象并决定是否生成阶段级确认，模型不得自行修改阶段编号。
 在变量、流程、可视化等后续阶段，常规且低风险的组织细节应由助手根据已确定内容给出可修改的默认参考，例如建立基准、每次只改变一个量、保持观察方式一致、默认显示一种视图但允许随时切换。把这些默认安排说明为“可调整的参考”并让学生决定是否采纳即可；不要把显示先后、是否来回切换、基础比较推进顺序等常规细节拆成连续选择题。只有会实质改变研究问题、物理关系、比较范围或学习目标的取舍才需要学生进一步决定。
+阶段4及以后必须读取idea_development中已经明确的研究问题、学习目标和假设：可视化用于判断预期是否出现，结果解释用于检验原有物理理由，价值与局限用于检查现有设计能否实现既定学习目标。不得再次把“想研究什么、想学到什么、为什么值得研究”作为新的空白问题重复询问。
 EMVR_DIRECT状态下直接完善当前阶段，并面向Unity VR模拟实验设计。
 阶段1在GUIDED_DESIGN下允许多轮brainstorm，未经学生确认不得收敛。
 阶段1必须维护context.stage_one_thread中的topic_anchor、current_focus、focus_history和brainstorm_phase。除非学生明确表示更换主题，否则“第三个”“对称性和方向”“先看边界形状”这类回答都是对当前实验想法的选择或细化，不是新实验；回复应先承接已经讨论的关系，再只推进一层。不得重复询问学生已经选定的上位方向，也不得把已经选定的细化内容重新列成多个入口。
@@ -208,6 +209,8 @@ def _stage_output_contract(
             "visualization_json必须编码一个理论可视化对象，包含"
             "data_type=theoretical_prediction或illustrative_synthetic_data、measured=false、"
             "坐标轴、series和明确的非实测免责声明；stage_payload_json仍只描述阶段10。"
+            "显示方式必须回应前面已经确定的研究问题或假设，帮助判断预期是否出现，"
+            "不得让学生重新陈述学习目标。"
         )
     if stage is Stage.RESULT_INTERPRETATION:
         return (
@@ -217,7 +220,8 @@ def _stage_output_contract(
     if stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
         return (
             "stage_payload_json必须包含review_dimension或limitations，本轮只处理一个反思角度。"
-            "先回应学生自己指出的价值或限制，再帮助补充一个尚未考虑的边界。"
+            "先读取阶段1已经明确的学习目标，检查现有设计能否实现它；不要再次询问学习收获。"
+            "再帮助补充一个尚未考虑的边界。"
         )
     if (
         stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
@@ -225,7 +229,8 @@ def _stage_output_contract(
     ):
         return (
             "stage_payload_json必须包含final_proposal_generated=false；只检查并引导学生当前"
-            "总结部分，不得生成完整实验方案。"
+            "总结部分，不得生成完整实验方案。总结只需串联已经确定的研究问题、比较方式、"
+            "预期现象和课程关系，不得再次要求学生另写学习收获或研究价值。"
         )
     if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
         return (

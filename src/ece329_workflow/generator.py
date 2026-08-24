@@ -38,20 +38,21 @@ _GUIDED_STAGE_ENTRY_QUESTIONS: dict[Stage, str] = {
         "需要经历哪些关键环节？请先按自己的思路描述。"
     ),
     Stage.EXPECTED_DATA_VISUALIZATION: (
-        "在生成理论预测窗口前，你希望窗口重点呈现哪些量之间的关系，或者最希望从图中"
-        "看清哪一种变化？请先描述你期待看到的内容。"
+        "前面已经有研究问题和预期趋势了。你觉得用一条曲线、几幅场分布图，"
+        "还是两种显示配合起来，最容易判断预期有没有出现？如果暂时不确定，"
+        "我可以先按已有变量搭一版参考。"
     ),
     Stage.RESULT_INTERPRETATION: (
-        "先从你的物理判断出发：对于这个实验可能出现的结果，你认为哪些现象最需要解释，"
-        "以及你会先从什么课程关系寻找原因？"
+        "回到前面提出的预期：如果显示结果与它一致，能支持哪部分解释；"
+        "如果不一致，又该先检查条件、模型还是原来的判断？"
     ),
     Stage.DESIGN_VALUE_AND_LIMITATIONS: (
-        "请先按你的判断描述：这个实验最有价值的学习收获是什么，又有哪些理想化条件、"
-        "展示方式或设计边界可能限制结论？"
+        "前面已经明确了学习目标，这里不再重复回答“能学到什么”。"
+        "请看看现有变量、流程和显示是否真能实现这个目标，并指出一个最可能限制结论的理想化条件。"
     ),
     Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: (
-        "最后的方案由你自己总结。请先用两到三句话写出这个实验想研究什么、为什么值得研究，"
-        "以及它与ECE329课程内容有什么联系。"
+        "最后请用自己的话把已经确定的研究问题、基础比较、预期现象和课程关系串成一段简短总结。"
+        "不需要再次单独说明学习收获，也不需要写实现步骤。"
     ),
 }
 
@@ -79,7 +80,7 @@ _GUIDED_STAGE_REFERENCE_STEPS: dict[Stage, tuple[str, ...]] = {
         "最后区分模型局限、展示误差与真正的物理差异",
     ),
     Stage.DESIGN_VALUE_AND_LIMITATIONS: (
-        "说明这个设计帮助理解的核心课程关系",
+        "对照阶段1的学习目标，检查现有变量、流程和显示是否足以支撑它",
         "指出它依赖的理想化条件",
         "区分概念展示能说明什么，以及不能据此推出什么",
     ),
@@ -100,7 +101,11 @@ def _student_idea_summary(session: DesignSession) -> str:
     return "前面已经完善的实验想法"
 
 
-def _compact_context_items(value: Any, limit: int = 3) -> str:
+def _compact_context_items(
+    value: Any,
+    limit: int = 3,
+    item_length: int = 90,
+) -> str:
     if isinstance(value, str):
         items = [value]
     elif isinstance(value, list):
@@ -122,6 +127,10 @@ def _compact_context_items(value: Any, limit: int = 3) -> str:
     else:
         items = []
     cleaned = list(dict.fromkeys(item.strip() for item in items if item.strip()))
+    cleaned = [
+        item if len(item) <= item_length else f"{item[: item_length - 1]}…"
+        for item in cleaned
+    ]
     return "、".join(cleaned[:limit])
 
 
@@ -163,13 +172,53 @@ def _contextual_reference_steps(
         ]
     if stage is Stage.CONCEPTUAL_PROCEDURE:
         return [
-            f"建立基准状态{f'（{controls}保持一致）' if controls else ''}",
+            f"建立基准状态{f'（保持：{controls}）' if controls else ''}",
             f"逐步改变{variable or '前面确定的变化主轴'}",
             f"用一致方式记录{observations or '目标现象'}",
             f"完成{comparisons or '已经保留的基础情形'}并排比较",
             "结合ECE329课上所学关系解释差异",
         ]
     return list(_GUIDED_STAGE_REFERENCE_STEPS.get(stage, ()))
+
+
+def _contextual_stage_question(
+    stage: Stage,
+    carried: dict[str, Any],
+) -> str:
+    """Connect later-stage questions to decisions already made in Stage 1."""
+
+    objective = str(carried.get("learning_objective") or "").strip()
+    research_question = str(carried.get("research_question") or "").strip()
+    hypothesis = str(carried.get("hypothesis") or "").strip()
+    if stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        anchor = hypothesis or research_question
+        return (
+            f"前面你已经提出“{anchor}”。上面的显示参考就是为了看清这个变化。"
+            "你觉得它能不能帮助你判断预期有没有出现？如果还不够，直接说最想补哪种画面；"
+            "如果暂时拿不准，我也可以先搭一版。"
+            if anchor
+            else _GUIDED_STAGE_ENTRY_QUESTIONS[stage]
+        )
+    if stage is Stage.RESULT_INTERPRETATION:
+        return (
+            f"前面的预期是“{hypothesis}”。先把它当成检查结果的参照："
+            "你觉得结果一致或不一致时，最应该保留或重新检查哪一部分解释？"
+            "如果还没有判断，我可以先示范一种可能结果。"
+            if hypothesis
+            else _GUIDED_STAGE_ENTRY_QUESTIONS[stage]
+        )
+    if stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
+        return (
+            f"你前面希望做到“{objective}”，现有变量、流程和显示也都围绕这个目标组织起来了。"
+            "现在只差看看它的边界：你觉得哪一种理想化条件最可能让结论不再成立？"
+            "如果一时想不到，我可以先给一个贴合当前实验的参考。"
+            if objective
+            else _GUIDED_STAGE_ENTRY_QUESTIONS[stage]
+        )
+    return _GUIDED_STAGE_ENTRY_QUESTIONS.get(
+        stage,
+        "先说说你对这一部分的想法，我会在这个基础上继续帮你完善。",
+    )
 
 
 def guided_stage_entry_output(
@@ -179,10 +228,6 @@ def guided_stage_entry_output(
 ) -> StepOutput:
     """Offer a contextual scaffold, then invite the student to revise it."""
 
-    question = _GUIDED_STAGE_ENTRY_QUESTIONS.get(
-        session.current_stage,
-        "请先用自己的话描述你对当前部分的想法；我会在这个基础上继续帮你完善。",
-    )
     title = {
         Stage.VARIABLES_AND_CONDITIONS: "变量与条件",
         Stage.CONCEPTUAL_PROCEDURE: "概念实验流程",
@@ -192,6 +237,7 @@ def guided_stage_entry_output(
         Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "学生总结",
     }.get(session.current_stage, "当前阶段")
     carried = build_carried_context(session)
+    question = _contextual_stage_question(session.current_stage, carried)
     prior_context = _confirmed_context_summary(carried)
     reference_steps = _contextual_reference_steps(
         session.current_stage,
@@ -200,7 +246,7 @@ def guided_stage_entry_output(
     opening = (
         f"我们接着看“{title}”。刚才已经谈清楚的内容都还在，不用重新来一遍。"
         if retry
-        else f"好，我们接着把“{_student_idea_summary(session)}”往下发展，这次先看“{title}”。"
+        else f"好，前面的实验想法已经保留下来了。我们接着看看“{title}”。"
     )
     if reference_steps:
         numbered = "\n".join(
@@ -212,10 +258,10 @@ def guided_stage_entry_output(
             else ""
         )
         reference_text = (
-            "我先把这些线索顺成一个可以随手修改的参考：\n"
+            "我先把已有线索顺成一份可以随手修改的参考：\n"
             f"{basis_text}"
             f"{numbered}\n\n"
-            "你可以保留合适的部分，也可以直接换掉其中某一步。"
+            "觉得合适的部分可以留下；想改哪里，直接告诉我就行。"
         )
     else:
         reference_text = ""
@@ -252,28 +298,6 @@ def guided_stage_entry_output(
         },
         student_task=None,
     )
-
-
-def prepend_guided_acknowledgement(
-    output: StepOutput,
-    stage: Stage,
-    student_message: str,
-) -> StepOutput:
-    """Make guided replies visibly respond to the student's own reasoning."""
-
-    excerpt = " ".join(student_message.split())
-    acknowledgement = {
-        Stage.VARIABLES_AND_CONDITIONS: "明白了，我会沿着你说的变量关系继续整理。",
-        Stage.CONCEPTUAL_PROCEDURE: "这个流程思路很清楚，我们就在它的基础上往下接。",
-        Stage.EXPECTED_DATA_VISUALIZATION: "明白，你想看的重点已经清楚了，我们继续把画面补完整。",
-        Stage.RESULT_INTERPRETATION: "这个解释方向可以接着用，我们再看看它能否覆盖不同结果。",
-        Stage.DESIGN_VALUE_AND_LIMITATIONS: "这个判断抓住了重点，我们继续看看还有没有遗漏的边界。",
-        Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "这部分总结已经很清楚了，我们接着检查有没有遗漏。",
-    }.get(stage, "明白，我们就沿着这个想法继续。")
-    if excerpt and excerpt not in output.assistant_message:
-        output.assistant_message = f"{acknowledgement}\n\n{output.assistant_message}"
-    output.stage_payload["student_input_acknowledged"] = True
-    return output
 
 
 def _idea(session: DesignSession, user_message: str) -> str:
@@ -441,8 +465,17 @@ def _format_experiment_outline_seed(outline: dict[str, Any]) -> str:
     )
 
 
-def _scene_components(direction: str, index: int) -> tuple[str, str, str, str]:
-    return KNOWLEDGE.scene_components(direction, index)
+def _scene_components(
+    direction: str,
+    index: int,
+    *,
+    excluded_signatures: set[str] | None = None,
+) -> tuple[str, str, str, str]:
+    return KNOWLEDGE.scene_components(
+        direction,
+        index,
+        excluded_signatures=excluded_signatures,
+    )
 
 
 def build_exploration_scenes(
@@ -452,12 +485,20 @@ def build_exploration_scenes(
 
     labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     scenes: list[dict[str, Any]] = []
+    used_signatures: set[str] = set()
     for index, option in enumerate(options):
         direction = str(option.get("direction") or "ECE329课程关系").strip()
         focus = _clean_focus_text(option.get("focus"))
         title, physical_frame, thinking_prompt, extension = _scene_components(
             f"{direction} {focus}",
             index,
+            excluded_signatures=used_signatures,
+        )
+        used_signatures.add(
+            "|".join(
+                " ".join(item.split()).casefold()
+                for item in (title, physical_frame, thinking_prompt)
+            )
         )
         focus_sentence = (
             f"这个画面围绕“{direction}”展开，课程内可以追问：{focus}？"
@@ -547,6 +588,7 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
     observations = _compact_context_items(carried.get("observations"))
     controls = _compact_context_items(carried.get("controlled_conditions"))
     comparisons = _compact_context_items(carried.get("baseline_comparisons"))
+    objective = str(carried.get("learning_objective") or "").strip()
     follow_up = "你可以直接说哪里符合你的想法，或者指出一处想改的地方。"
     readiness = {
         "ready_for_confirmation": False,
@@ -562,6 +604,9 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
             "这只是一个起点，你不需要从空白开始列变量表。"
         )
         payload = {
+            "independent_variable": variable or "前面确定的变化主轴",
+            "observations": [observations or "目标场或响应"],
+            "controlled_variables": [controls or "其余影响比较的条件"],
             "reference_variable_roles": {
                 "independent_variable": variable or "前面确定的变化主轴",
                 "observations": observations or "目标场或响应",
@@ -578,6 +623,7 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
             + "\n它不是标准答案，主要是让你更容易看出哪里需要增删或调整顺序。"
         )
         payload = {
+            "procedure_steps": steps,
             "reference_procedure_steps": steps,
             "stage_readiness": readiness,
         }
@@ -607,6 +653,7 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
             "这样既保留一种你可以参考的结果，也不会把未经验证的趋势说成事实。"
         )
         payload = {
+            "result_case": "prediction_supported_or_needs_revision",
             "reference_result_cases": [
                 "结果与理论趋势一致",
                 "变化不明显或与理论趋势不同",
@@ -616,11 +663,13 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
         visualization = None
     elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
         message = (
-            "可以先从两个角度看：它的价值在于把抽象的ECE329物理关系变成可比较的现象；"
-            "它的边界则来自理想化模型、有限的显示方式，以及没有被纳入比较的条件。"
-            "你可以保留这两个角度，再把它们改成更贴合当前实验的表述。"
+            f"前面已经把学习目标说成“{objective or '解释当前实验中的核心物理关系'}”，"
+            "这里不用再重复一遍。可以直接检查两点：现有比较和显示是否足以支撑这个目标；"
+            "结论是否会受到理想化模型、有限显示方式，以及未纳入比较条件的限制。"
         )
         payload = {
+            "review_dimension": "learning_value_and_model_limits",
+            "limitations": ["理想化模型", "有限的显示方式", "未纳入比较的条件"],
             "reference_review_dimensions": ["课程理解价值", "模型与展示边界"],
             "stage_readiness": readiness,
         }
@@ -1129,12 +1178,35 @@ class RuleBasedStageGenerator:
                 student_task="你的设计依赖的哪个理想化假设最可能限制结论？",
             )
         return StepOutput(
-            assistant_message="最后由你自己完成总结；我会逐部分检查，不会替你生成整份方案。",
+            assistant_message=(
+                "这段总结已经把研究问题、主要比较、预期现象和课程关系串起来了。"
+                "我保留了你的原意，没有替你改写成另一份方案。"
+            ),
             stage_payload={
-                "current_summary_section": "实验想法与设计动机",
+                "student_summary_received": True,
                 "final_proposal_generated": False,
+                "pending_action": {
+                    "type": "CONFIRM_STAGE_OR_MODIFY",
+                    "subject": Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
+                    "proposal": {"student_summary_complete": True},
+                    "question": (
+                        "如果这就是你想保留的最终总结，直接告诉我确认完成；"
+                        "想调整的话，也可以直接补充或改写。"
+                    ),
+                    "advance_on_accept": True,
+                    "allowed_intents": [
+                        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                        UserIntent.ADVANCE_STAGE.value,
+                        UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                        UserIntent.UNCLEAR.value,
+                    ],
+                },
             },
-            student_task="请先用两到三句话总结实验想研究什么，以及为什么值得研究。",
+            student_task=(
+                "如果这就是你想保留的最终总结，直接告诉我确认完成；"
+                "想调整的话，也可以直接补充或改写。"
+            ),
         )
 
     def _generate_emvr(self, session: DesignSession, user_message: str) -> StepOutput:

@@ -27,7 +27,6 @@ from .dialogue_state import (
 from .generator import (
     StageGenerator,
     guided_stage_entry_output,
-    prepend_guided_acknowledgement,
 )
 from .guardrails import (
     BREADTH_EXPLORATION,
@@ -83,6 +82,39 @@ _GUIDED_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("review_dimension", "limitations"),
 }
 
+_GUIDED_COMPLETION_HINTS: dict[Stage, str] = {
+    Stage.COURSE_MAPPING_AND_DIRECTION: (
+        "课程联系还没有整理清楚。请先说明这个想法主要对应ECE329中的哪一类物理关系。"
+    ),
+    Stage.LEARNING_OBJECTIVES: (
+        "学习目标还差一点。请先说明完成这个实验后，你希望能够解释、判断或比较什么。"
+    ),
+    Stage.RESEARCH_QUESTION: (
+        "研究问题还没有完整连起来。请说清准备比较什么条件，以及观察什么现象。"
+    ),
+    Stage.THEORETICAL_FRAMEWORK: (
+        "理论依据还没有确定。请先指出最能解释当前现象的一条ECE329课程关系。"
+    ),
+    Stage.HYPOTHESIS: (
+        "预期趋势还不够明确。请说明关键条件变化时，你预计观察结果会怎样变化。"
+    ),
+    Stage.CONCEPTUAL_OR_VR_SETUP: (
+        "实验结构还差一个清楚的组成说明。请补充需要哪些对象、条件或观察方式。"
+    ),
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "变量关系还没有完全说明。请补充主动改变的量，或准备观察的结果。"
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: (
+        "实验流程还缺少可比较的关键环节。请补充基准、改变条件、观察或比较中的一项。"
+    ),
+    Stage.RESULT_INTERPRETATION: (
+        "结果解释还没有形成。请先说明结果符合预期或偏离预期时，分别可能意味着什么。"
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+        "设计边界还没有说清楚。请补充一个可能限制结论的理想化条件或展示局限。"
+    ),
+}
+
 
 def _contains_emvr_marker(text: str) -> bool:
     """Return whether the user explicitly included the EMVR mode marker.
@@ -100,7 +132,6 @@ _TRANSIENT_GUIDED_PAYLOAD_KEYS = {
     "reference_basis",
     "pending_action",
     "clarification_required",
-    "student_input_acknowledged",
     "repeated_question_avoided",
     "stage_ready_for_confirmation",
     "stage_readiness",
@@ -130,20 +161,16 @@ def _remove_repeated_guided_question(
     assistant_repeated = previous in assistant
     if not task_repeated and not assistant_repeated:
         return
-    excerpt = " ".join(student_message.split())
-    if len(excerpt) > 120:
-        excerpt = f"{excerpt[:117]}……"
-    acknowledgement = f"你刚才的回答“{excerpt}”已经保留。" if excerpt else "你刚才的回答已经保留。"
+    acknowledgement = "收到，这一部分已经按你的意思更新了。"
     if assistant_repeated:
         output.assistant_message = (
-            f"{acknowledgement}当前阶段的整理内容已经据此更新，"
-            "不需要再次回答同一个问题。你可以继续补充尚未说明的部分，"
-            "或在准备好后进入下一阶段。"
+            f"{acknowledgement}不用再回答同一个问题；"
+            "还想补充就接着说，觉得已经合适也可以继续下一步。"
         )
     else:
         output.assistant_message = (
             f"{output.assistant_message}\n\n{acknowledgement}"
-            "这一问不再重复；你可以继续补充，或在准备好后进入下一阶段。"
+            "这一问不再重复；还想补充就接着说，觉得合适也可以继续下一步。"
         )
     output.student_task = None
     output.stage_payload["repeated_question_avoided"] = True
@@ -255,6 +282,80 @@ def _persist_guided_stage_draft(
         draft = {}
         drafts[stage.value] = draft
     _deep_merge(draft, persistent)
+
+
+def _persist_guided_student_summary(
+    session: DesignSession,
+    message: str,
+    semantic_updates: dict[str, Any] | None,
+) -> bool:
+    """Save a student-written final summary after semantic completeness review."""
+
+    if (
+        session.interaction_state is not InteractionState.GUIDED_DESIGN
+        or session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+        or not isinstance(semantic_updates, dict)
+        or semantic_updates.get("pending_answer_status") != "CLEAR"
+        or not message.strip()
+    ):
+        return False
+    synthesis = session.design_context.setdefault("synthesis", {})
+    if not isinstance(synthesis, dict):
+        synthesis = {}
+        session.design_context["synthesis"] = synthesis
+    summary = message.strip()
+    synthesis.update(
+        {
+            "student_summary": summary,
+            "student_summary_sections": [summary],
+            "student_summary_complete": True,
+            "completion_source": "SEMANTIC_SUMMARY_REVIEW",
+        }
+    )
+    return True
+
+
+def _guided_summary_review_output() -> StepOutput:
+    task = (
+        "如果这就是你想保留的最终总结，直接告诉我确认完成；"
+        "想调整的话，也可以直接补充或改写。"
+    )
+    return StepOutput(
+        assistant_message=(
+            "这段总结已经把研究问题、主要比较、预期现象和课程关系串起来了。"
+            "我保留了你的原意，没有替你改写成另一份方案。"
+        ),
+        stage_payload={
+            "student_summary_received": True,
+            "final_proposal_generated": False,
+            "pending_action": {
+                "type": "CONFIRM_STAGE_OR_MODIFY",
+                "subject": Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
+                "proposal": {"student_summary_complete": True},
+                "question": task,
+                "advance_on_accept": True,
+                "allowed_intents": [
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.ADVANCE_STAGE.value,
+                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                    UserIntent.UNCLEAR.value,
+                ],
+            },
+        },
+        student_task=task,
+    )
+
+
+def _guided_summary_completion_output() -> StepOutput:
+    return StepOutput(
+        assistant_message="你的总结已经按原意保留，整个实验设计流程到这里完成。",
+        stage_payload={
+            "student_summary_confirmed": True,
+            "final_proposal_generated": False,
+        },
+        student_task=None,
+    )
 
 
 class WorkflowEngine:
@@ -587,6 +688,16 @@ class WorkflowEngine:
             else None
         )
         content_intent_name = intent_name
+        summary_completed_this_turn = False
+        if intent_name in {
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        }:
+            summary_completed_this_turn = _persist_guided_student_summary(
+                session,
+                resolved_student_message,
+                semantic_updates,
+            )
 
         if intent_name == UserIntent.NEW_TOPIC.value:
             self._start_new_topic(session, message)
@@ -610,6 +721,14 @@ class WorkflowEngine:
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
             and explicit_transition_intent
+        )
+        final_summary_confirmation_turn = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            and explicit_transition_intent
+            and isinstance(session.design_context.get("synthesis"), dict)
+            and session.design_context["synthesis"].get("student_summary_complete")
+            is True
         )
         if pre_transition_attempted:
             previous_stage = session.current_stage
@@ -760,7 +879,15 @@ class WorkflowEngine:
             intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             and input_kind != UNREASONABLE_REQUEST
         )
-        if clarification_turn:
+        if final_summary_confirmation_turn:
+            output = _guided_summary_completion_output()
+            session.turn_context = {}
+            completion_error = None
+        elif summary_completed_this_turn:
+            output = _guided_summary_review_output()
+            session.turn_context = {}
+            completion_error = None
+        elif clarification_turn:
             if (
                 turn_intent.get("source") == "CONSERVATIVE_FALLBACK"
                 and handled_stage is Stage.IDEA_BRAINSTORMING
@@ -801,16 +928,21 @@ class WorkflowEngine:
                 session.turn_context = {}
             if (
                 session.interaction_state is InteractionState.GUIDED_DESIGN
+                and handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+                and output.stage_payload.get("student_summary_received") is True
+            ):
+                _persist_guided_student_summary(
+                    session,
+                    generation_message,
+                    {"pending_answer_status": "CLEAR"},
+                )
+            if (
+                session.interaction_state is InteractionState.GUIDED_DESIGN
                 and handled_stage is not Stage.IDEA_BRAINSTORMING
                 and transitioned_from_stage is None
                 and substantive_guided_reply
                 and intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             ):
-                prepend_guided_acknowledgement(
-                    output,
-                    handled_stage,
-                    generation_message,
-                )
                 _remove_repeated_guided_question(
                     output,
                     pending_action,
@@ -1281,7 +1413,7 @@ class WorkflowEngine:
             stage_output = session.stage_outputs.get(stage.value, {})
             if not isinstance(stage_output.get("visualization"), dict):
                 raise StageCompletionError(
-                    "阶段10尚未完成：需要先生成理论预测可视化窗口。"
+                    "理论预测图还没有形成。请先确定要显示哪些量，以及怎样比较不同情形。"
                 )
         required_fields = _GUIDED_COMPLETION_FIELDS.get(stage)
         if required_fields:
@@ -1296,7 +1428,10 @@ class WorkflowEngine:
                 combined_payload.get(field) for field in required_fields
             ):
                 raise StageCompletionError(
-                    f"当前阶段尚未形成必要设计内容：需要至少包含{', '.join(required_fields)}之一。"
+                    _GUIDED_COMPLETION_HINTS.get(
+                        stage,
+                        "这一部分还没有整理完整。请先补充一个与当前问题直接相关的设计判断。",
+                    )
                 )
         if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
             synthesis = session.design_context.get("synthesis", {})
@@ -1312,15 +1447,15 @@ class WorkflowEngine:
                 or not isinstance(summary, str)
                 or len(summary.strip()) < 20
                 or not isinstance(sections, list)
-                or len(sections) < 2
+                or len(sections) < 1
                 or any(
                     not isinstance(section, str) or len(section.strip()) < 10
                     for section in sections
                 )
             ):
                 raise StageCompletionError(
-                    "引导状态下需要由你分至少两次完成总结，每部分至少10个字符，"
-                    "再确认完成；课程助手不会代写最终方案。"
+                    "引导状态下需要先由你写出一段完整总结，再确认完成；"
+                    "课程助手不会代写最终方案。"
                 )
 
     @staticmethod

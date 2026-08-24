@@ -722,8 +722,8 @@ class WorkflowEngineTests(unittest.TestCase):
 
         self.assertEqual(result["handled_stage"], Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value)
         self.assertFalse(result["stage_payload"]["final_proposal_generated"])
-        self.assertIn("你自己完成总结", result["assistant_message"])
-        self.assertIn("这部分总结已经很清楚", result["assistant_message"])
+        self.assertIn("这段总结已经把研究问题", result["assistant_message"])
+        self.assertIn("没有替你改写成另一份方案", result["assistant_message"])
         self.assertNotIn(summary, result["assistant_message"])
 
     def test_guided_final_stage_requires_student_written_summary(self) -> None:
@@ -760,6 +760,24 @@ class WorkflowEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(rejected["completion_error"])
         self.assertEqual(accepted["workflow_status"], "complete")
+
+    def test_completion_errors_use_student_facing_language(self) -> None:
+        first = self.engine.create_design("研究两个点电荷之间的电场分布")
+        session = self.engine.store.get(first["design_id"])
+        session.current_stage_index = list(Stage).index(
+            Stage.DESIGN_VALUE_AND_LIMITATIONS
+        )
+        self.engine.store.save(session)
+
+        result = self.engine.process_turn(
+            first["design_id"],
+            {"message": "继续", "complete_stage": True},
+        )
+
+        self.assertIn("设计边界", result["completion_error"])
+        self.assertNotIn("review_dimension", result["completion_error"])
+        self.assertNotIn("limitations", result["completion_error"])
+        self.assertNotIn("需要至少包含", result["completion_error"])
 
     def test_prompt_packet_keeps_stage_control_outside_model(self) -> None:
         first = self.engine.create_design("研究磁场")
@@ -1502,7 +1520,8 @@ class WorkflowEngineTests(unittest.TestCase):
             / "ece329_workflow"
             / "generator.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("KNOWLEDGE.scene_components(direction, index)", generator_source)
+        self.assertIn("KNOWLEDGE.scene_components(", generator_source)
+        self.assertIn("excluded_signatures=used_signatures", generator_source)
         self.assertNotIn('if "驻波" in direction', generator_source)
 
     def test_exploration_catalog_covers_every_course_and_supplement_point(self) -> None:
@@ -1529,6 +1548,19 @@ class WorkflowEngineTests(unittest.TestCase):
         for offset in range(0, len(catalog), 3):
             scenes = build_exploration_scenes(catalog[offset : offset + 3])
             self.assertEqual([scene["label"] for scene in scenes], ["图景 A", "图景 B", "图景 C"])
+            self.assertEqual(
+                len(
+                    {
+                        (
+                            scene["title"],
+                            scene["physical_picture"],
+                            scene["thinking_prompt"],
+                        )
+                        for scene in scenes
+                    }
+                ),
+                len(scenes),
+            )
             self.assertTrue(
                 all(
                     scene["physical_picture"]
@@ -1582,6 +1614,29 @@ class WorkflowEngineTests(unittest.TestCase):
             "换一组",
             second["stage_payload"]["current_focus"],
         )
+
+    def test_one_brainstorm_batch_never_reuses_the_same_physical_scene(self) -> None:
+        options = [
+            {
+                "option_id": f"test:source:{index}",
+                "direction": "静电场与电荷分布",
+                "focus": f"比较第{index}种空间电荷与场形状的关系",
+            }
+            for index in range(1, 4)
+        ]
+
+        scenes = build_exploration_scenes(options)
+        signatures = {
+            (
+                scene["title"],
+                scene["physical_picture"],
+                scene["thinking_prompt"],
+            )
+            for scene in scenes
+        }
+
+        self.assertEqual(len(scenes), 3)
+        self.assertEqual(len(signatures), 3)
 
     def test_unreasonable_request_cannot_hide_behind_emvr_trigger(self) -> None:
         result = self.engine.create_design(

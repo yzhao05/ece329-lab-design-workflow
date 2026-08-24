@@ -366,6 +366,107 @@ class DialogueStateTests(unittest.TestCase):
             [],
         )
 
+    def test_accepted_limitations_reference_can_advance_without_field_disconnect(self) -> None:
+        class LimitReferenceGenerator(ScriptedSemanticGenerator):
+            def __init__(self) -> None:
+                super().__init__(UserIntent.REQUEST_MORE_EXAMPLES)
+
+            def resolve_intent(self, session, user_message, pending_action, carried_context):
+                if self.intent is UserIntent.ACCEPT_PREVIOUS_PROPOSAL:
+                    return resolved_intent(
+                        self.intent,
+                        target=str(pending_action.get("subject") or ""),
+                        advance_requested=True,
+                        confidence=0.98,
+                        source="SEMANTIC_TEST",
+                    )
+                return super().resolve_intent(
+                    session,
+                    user_message,
+                    pending_action,
+                    carried_context,
+                )
+
+        generator = LimitReferenceGenerator()
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="design_limit_reference_accept",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.DESIGN_VALUE_AND_LIMITATIONS),
+            design_context={
+                "idea": {"main_direction": "比较两个场源靠近时的场分布"},
+                "idea_development": {
+                    "facets": {
+                        "learning_objective": {
+                            "status": "CLEAR",
+                            "evidence": "解释源间距离如何改变电场分布",
+                        }
+                    }
+                },
+            },
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine.store.save(session)
+
+        reference = engine.process_turn(
+            session.design_id,
+            {"message": "我没想到限制，你先举一个贴合当前设计的参考"},
+        )
+        self.assertIn("这里不用再重复一遍", reference["assistant_message"])
+        self.assertTrue(reference["stage_payload"]["limitations"])
+
+        generator.intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+        advanced = engine.process_turn(
+            session.design_id,
+            {"message": "这些都符合我的想法，可以继续"},
+        )
+        self.assertIsNone(advanced["completion_error"])
+        self.assertEqual(
+            advanced["current_stage"],
+            Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
+        )
+
+    def test_one_complete_student_summary_reaches_final_confirmation(self) -> None:
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={"pending_answer_status": "CLEAR"},
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="design_single_summary_completion",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT),
+            design_context={"idea": {"main_direction": "比较点电荷距离与电场分布"}},
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine.store.save(session)
+
+        summary = (
+            "我想比较同种和异种点电荷在距离变化时的电场线分布，观察中间区域场强的差异，"
+            "并用ECE329中的静电场叠加关系解释这些现象。"
+        )
+        reviewed = engine.process_turn(session.design_id, {"message": summary})
+        self.assertTrue(reviewed["stage_payload"]["student_summary_received"])
+        self.assertNotIn("请先用两到三句话", reviewed["assistant_message"])
+        self.assertIn("确认完成", reviewed["student_task"])
+
+        generator.intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+        generator.semantic_updates = {}
+        completed = engine.process_turn(session.design_id, {"message": "确认完成"})
+        self.assertEqual(completed["workflow_status"], "complete")
+        self.assertIsNone(completed["completion_error"])
+        self.assertIn("流程到这里完成", completed["assistant_message"])
+
     def test_context_dependent_short_acceptance_uses_semantic_resolution(self) -> None:
         open_question = {
             "type": "ANSWER_STAGE_QUESTION",
@@ -627,11 +728,22 @@ class DialogueStateTests(unittest.TestCase):
                 self.assertFalse(
                     confirmed["stage_payload"].get("clarification_required", False)
                 )
-                self.assertEqual(generator.generated_messages, [candidate])
-                self.assertEqual(
-                    confirmed["stage_payload"]["student_stage_answer"],
-                    candidate,
-                )
+                if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+                    self.assertEqual(generator.generated_messages, [])
+                    self.assertTrue(
+                        confirmed["stage_payload"]["student_summary_received"]
+                    )
+                    stored = engine.store.get(session.design_id)
+                    self.assertEqual(
+                        stored.design_context["synthesis"]["student_summary"],
+                        candidate,
+                    )
+                else:
+                    self.assertEqual(generator.generated_messages, [candidate])
+                    self.assertEqual(
+                        confirmed["stage_payload"]["student_stage_answer"],
+                        candidate,
+                    )
 
     def test_every_guided_public_stage_uses_structured_answer_status(self) -> None:
         guided_stages = (
