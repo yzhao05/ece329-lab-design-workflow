@@ -416,7 +416,10 @@ class WorkflowEngine:
         intent_name = str(turn_intent.get("intent") or UserIntent.UNCLEAR.value)
         semantic_updates = (
             deepcopy(turn_intent.get("semantic_updates", {}))
-            if str(turn_intent.get("source") or "").startswith("SEMANTIC")
+            if (
+                str(turn_intent.get("source") or "").startswith("SEMANTIC")
+                or turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+            )
             else None
         )
         content_intent_name = (
@@ -513,9 +516,14 @@ class WorkflowEngine:
                 UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
             }
         ):
+            idea_answer_message = (
+                str(turn_intent.get("resolved_value") or "").strip()
+                if turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+                else message
+            )
             update_idea_development(
                 session,
-                message,
+                idea_answer_message,
                 semantic_updates=semantic_updates,
             )
         turn_context: dict[str, Any] = {
@@ -594,12 +602,20 @@ class WorkflowEngine:
             and input_kind != UNREASONABLE_REQUEST
         )
         if clarification_turn:
-            pending_action = record_pending_clarification(session) or pending_action
+            pending_action = record_pending_clarification(
+                session,
+                message,
+            ) or pending_action
             output = clarification_output(pending_action)
             session.turn_context = {}
             completion_error = None
         elif dynamic_idea_turn:
-            output = build_gap_output(session, message)
+            confirmed_answer = (
+                str(turn_intent.get("resolved_value") or "").strip()
+                if turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+                else ""
+            )
+            output = build_gap_output(session, confirmed_answer or message)
             session.turn_context = {}
             if stage_one_control_turn:
                 completion_error = None
@@ -607,8 +623,13 @@ class WorkflowEngine:
             output = guided_stage_entry_output(session)
             session.turn_context = {}
         else:
+            generation_message = (
+                str(turn_intent.get("resolved_value") or "").strip()
+                if turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+                else message
+            )
             try:
-                output = self.generator.generate(session, message)
+                output = self.generator.generate(session, generation_message)
             finally:
                 session.turn_context = {}
             if (
@@ -618,11 +639,15 @@ class WorkflowEngine:
                 and substantive_guided_reply
                 and intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             ):
-                prepend_guided_acknowledgement(output, handled_stage, message)
+                prepend_guided_acknowledgement(
+                    output,
+                    handled_stage,
+                    generation_message,
+                )
                 _remove_repeated_guided_question(
                     output,
                     pending_action,
-                    message,
+                    generation_message,
                 )
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:

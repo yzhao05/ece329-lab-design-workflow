@@ -458,6 +458,7 @@ def _pending_action_for_status(status: dict[str, Any]) -> dict[str, Any]:
         "question": _next_task(status),
         "allowed_intents": [
             "ANSWER_CURRENT_QUESTION",
+            "ACCEPT_PREVIOUS_PROPOSAL",
             "MODIFY_PREVIOUS_PROPOSAL",
             "ADVANCE_STAGE",
             "REQUEST_MORE_EXAMPLES",

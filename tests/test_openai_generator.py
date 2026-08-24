@@ -242,6 +242,9 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
         self.assertIn("research_question", repair_text)
         self.assertIn("同时保留comparison_updates", repair_text)
+        instructions = transport.requests[0]["instructions"]
+        self.assertIn("research_question不要求使用问号或疑问句", instructions)
+        self.assertIn("candidate_answer", instructions)
 
     def test_intent_resolver_repairs_omitted_later_stage_answer_status(self) -> None:
         base = {
@@ -680,6 +683,50 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         self.assertEqual(output.stage_payload["brainstorm_phase"], "INTEREST_DESCRIPTION")
         self.assertEqual(output.stage_payload["alternative_ideas"], [])
+
+    def test_selected_direction_rejects_a_new_visible_scene_list(self) -> None:
+        session = guided_session()
+        options = KNOWLEDGE.brainstorm_options("研究静电场中的两个源", limit=3)
+        session.history.append(
+            {
+                "handled_stage": Stage.IDEA_BRAINSTORMING.value,
+                "user_message": "研究静电场中的两个源",
+                "output": {
+                    "stage_payload": {
+                        "input_category": "COURSE_CONTENT",
+                        "alternative_ideas": options,
+                    }
+                },
+            }
+        )
+        session.design_context["idea"].update(
+            {
+                "topic_anchor": "研究静电场中的两个源",
+                "current_focus": "研究静电场中的两个源",
+                "focus_history": ["研究静电场中的两个源"],
+                "course_scope_confirmed": True,
+                "brainstorm_phase": "BREADTH_EXPLORATION",
+            }
+        )
+        session.turn_context.update(
+            build_stage_one_turn_context(
+                str(options[0]["focus"]),
+                options=options,
+                idea_context=session.design_context["idea"],
+                selected_option_id=str(options[0]["option_id"]),
+            )
+        )
+        invalid = valid_output()
+        invalid["assistant_message"] = (
+            "图景 A｜重新列出一个方向。图景 B｜再列出另一个方向。"
+        )
+        generator = OpenAIStageGenerator(
+            transport=FakeTransport(invalid),
+            repair_attempts=0,
+        )
+
+        with self.assertRaises(ModelOutputError):
+            generator.generate(session, str(options[0]["focus"]))
 
     def test_model_depth_turn_uses_grounded_connections_without_choice_list(self) -> None:
         session = guided_session()

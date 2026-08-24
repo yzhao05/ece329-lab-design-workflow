@@ -62,6 +62,7 @@ def current_pending_action(session: DesignSession) -> dict[str, Any] | None:
 
 def record_pending_clarification(
     session: DesignSession,
+    candidate_answer: str = "",
 ) -> dict[str, Any] | None:
     """Count a clarification without replacing the decision still awaiting input."""
 
@@ -74,6 +75,14 @@ def record_pending_clarification(
     except (TypeError, ValueError):
         repeat_count = 1
     pending["repeat_count"] = max(1, repeat_count + 1)
+    normalized_candidate = candidate_answer.strip()
+    if (
+        normalized_candidate
+        and pending.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        and not str(pending.get("candidate_answer") or "").strip()
+    ):
+        pending["candidate_answer"] = normalized_candidate[:2000]
     return deepcopy(pending)
 
 
@@ -143,6 +152,7 @@ def _migrate_legacy_idea_facet_pending(
             },
             "allowed_intents": [
                 UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
                 UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
                 UserIntent.ADVANCE_STAGE.value,
                 UserIntent.REQUEST_MORE_EXAMPLES.value,
@@ -422,7 +432,20 @@ def deterministic_intent(
             resolved_value=selected_option_id,
             confidence=1.0,
         )
-    if pending_action and normalized in {"确认", "同意", "接受", "保留"}:
+    answer_pending = bool(
+        pending_action
+        and pending_action.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+    )
+    confirms_saved_answer = bool(
+        answer_pending
+        and str(pending_action.get("candidate_answer") or "").strip()
+    )
+    if (
+        pending_action
+        and normalized in {"确认", "同意", "接受", "保留"}
+        and (not answer_pending or confirms_saved_answer)
+    ):
         return resolved_intent(
             UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
             target=str(pending_action.get("subject") or ""),
@@ -490,7 +513,14 @@ def validate_resolved_intent(
     if intent not in ALL_INTENTS:
         intent = UserIntent.UNCLEAR.value
     allowed = set(pending_action.get("allowed_intents", [])) if pending_action else set(ALL_INTENTS)
-    if intent not in allowed and intent not in {
+    confirms_saved_candidate = bool(
+        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        and str(pending_action.get("candidate_answer") or "").strip()
+    )
+    if intent not in allowed and not confirms_saved_candidate and intent not in {
         UserIntent.NEW_TOPIC.value,
         UserIntent.RETURN_TO_PREVIOUS_POINT.value,
     }:
@@ -506,8 +536,28 @@ def validate_resolved_intent(
         if intent == UserIntent.UNCLEAR.value
         else _normalize_semantic_updates(raw.get("semantic_updates"))
     )
+    source = str(raw.get("source") or "SEMANTIC")
+    resolved_value = raw.get("resolved_value")
     if (
-        str(raw.get("source") or "").startswith("SEMANTIC")
+        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        and str(pending_action.get("candidate_answer") or "").strip()
+    ):
+        candidate_answer = str(pending_action["candidate_answer"]).strip()
+        intent = UserIntent.ANSWER_CURRENT_QUESTION.value
+        resolved_value = candidate_answer
+        source = "CONFIRMED_PENDING_ANSWER"
+        required_facet = required_pending_facet_id(pending_action)
+        if required_facet is not None:
+            semantic_updates["facet_updates"] = [
+                {"facet_id": required_facet, "status": "CLEAR"}
+            ]
+        else:
+            semantic_updates["pending_answer_status"] = "CLEAR"
+    if (
+        source.startswith("SEMANTIC")
         and intent
         in {
             UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -530,11 +580,11 @@ def validate_resolved_intent(
         target=str(raw.get("target") or pending_action.get("subject") or "")
         if pending_action
         else str(raw.get("target") or ""),
-        resolved_value=raw.get("resolved_value"),
+        resolved_value=resolved_value,
         advance_requested=raw.get("advance_requested"),
         preserve_current_design=raw.get("preserve_current_design", True),
         confidence=confidence,
-        source=str(raw.get("source") or "SEMANTIC"),
+        source=source,
         semantic_updates=semantic_updates,
     )
 

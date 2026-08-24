@@ -815,6 +815,16 @@ def _validate_lecture_grounding(
             raise ModelOutputError(
                 "Interest description and depth expansion cannot return choice options"
             )
+        if phase != BREADTH_EXPLORATION:
+            visible_scene_labels = re.findall(
+                r"图景\s*(?:[A-CＡ-Ｃ]|[一二三123])\s*[｜|]",
+                f"{output.assistant_message}\n{output.student_task or ''}",
+                re.IGNORECASE,
+            )
+            if len(visible_scene_labels) >= 2:
+                raise ModelOutputError(
+                    "A selected or described Stage 1 direction cannot display a new scene list"
+                )
         if input_category == COURSE_CONTENT and phase == DEPTH_EXPANSION:
             deepening_connections = output.stage_payload.get(
                 "deepening_connections"
@@ -1292,6 +1302,11 @@ class OpenAIStageGenerator:
                 "就标CLEAR；只有明确表示不知道、撤回，或确实没有回答当前问题时才标MISSING。"
                 "不能因为措辞不同于示例而标MISSING，也不能遗漏该facet。学生同一轮既明确基础对照"
                 "又回答当前facet时，comparison_updates和facet_updates必须同时保留。"
+                "research_question不要求使用问号或疑问句：只要学生说明了要比较或改变的条件以及"
+                "准备观察的现象，就必须标CLEAR；即使同一句还包含对现象形态的预测，也仍然可以同时"
+                "构成有效研究问题。pending_action若包含candidate_answer，学生用任何语义确认上一句"
+                "就是当前回答、要求沿用上一句或确认该答案时，返回ACCEPT_PREVIOUS_PROPOSAL；不得"
+                "要求学生再复述candidate_answer。"
                 "当pending_action.type为ANSWER_STAGE_QUESTION时，若intent为"
                 "ANSWER_CURRENT_QUESTION，semantic_updates_json必须包含pending_answer_status："
                 "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
@@ -1354,6 +1369,9 @@ class OpenAIStageGenerator:
                             "semantic_updates_json中返回pending_answer_status=CLEAR；只有明确"
                             "没有想法或确实没有回答时才返回MISSING。"
                         )
+                    ) + (
+                        "如果pending_action中已有candidate_answer，而学生是在确认、沿用或指认"
+                        "上一句为当前回答，应返回ACCEPT_PREVIOUS_PROPOSAL。"
                     ) + "不要回答学生，只返回完整的结构化意图结果。",
                 }
             )

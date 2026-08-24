@@ -7,6 +7,7 @@ from ece329_workflow.dialogue_state import (
     apply_resolved_intent,
     build_carried_context,
     current_pending_action,
+    deterministic_intent,
     hydrate_pending_action_from_history,
     resolved_intent,
     save_pending_action,
@@ -122,6 +123,219 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_context_dependent_short_acceptance_uses_semantic_resolution(self) -> None:
+        open_question = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.CONCEPTUAL_PROCEDURE.value,
+            "proposal": {"reference_draft": ["建立基准", "改变条件"]},
+            "question": "你认为流程需要哪些环节？",
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        self.assertIsNone(deterministic_intent("保留", open_question))
+        self.assertIsNone(deterministic_intent("确认", open_question))
+
+        open_question["candidate_answer"] = "建立基准后改变条件并记录结果"
+        confirmed = deterministic_intent("确认", open_question)
+        assert confirmed is not None
+        self.assertEqual(
+            confirmed["intent"],
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+        )
+
+        proposal_confirmation = {
+            "type": "CONFIRM_OR_MODIFY",
+            "subject": "experiment_idea_outline",
+            "proposal": {"complete": True},
+            "allowed_intents": [UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value],
+        }
+        accepted = deterministic_intent("保留", proposal_confirmation)
+        assert accepted is not None
+        self.assertEqual(
+            accepted["intent"],
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+        )
+
+    def test_candidate_confirmation_closes_every_stage_one_student_facet(self) -> None:
+        student_facets = (
+            "learning_objective",
+            "research_question",
+            "hypothesis",
+            "conceptual_structure",
+        )
+
+        for facet_id in student_facets:
+            with self.subTest(facet_id=facet_id):
+                class FacetConfirmationGenerator(RuleBasedStageGenerator):
+                    def __init__(self) -> None:
+                        self.intent_calls = 0
+
+                    def resolve_intent(
+                        self,
+                        session,
+                        user_message,
+                        pending_action,
+                        carried_context,
+                    ):
+                        self.intent_calls += 1
+                        if self.intent_calls == 1:
+                            return resolved_intent(
+                                UserIntent.ANSWER_CURRENT_QUESTION,
+                                target=facet_id,
+                                confidence=0.96,
+                                source="SEMANTIC_TEST",
+                                semantic_updates={},
+                            )
+                        return resolved_intent(
+                            UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                            target=facet_id,
+                            confidence=0.98,
+                            source="SEMANTIC_TEST",
+                        )
+
+                generator = FacetConfirmationGenerator()
+                engine = WorkflowEngine(generator=generator)
+                session = idea_facet_session(f"design_confirm_{facet_id}")
+                development = session.design_context["idea_development"]
+                for current_id, facet in development["facets"].items():
+                    if current_id in student_facets:
+                        facet.update(
+                            {
+                                "status": "MISSING" if current_id == facet_id else "CLEAR",
+                                "evidence": "" if current_id == facet_id else "已明确",
+                                "source": None if current_id == facet_id else "TEST",
+                            }
+                        )
+                development["active_facet_id"] = facet_id
+                development["missing_facet_ids"] = [facet_id]
+                development["completed_facet_ids"] = [
+                    current_id
+                    for current_id, facet in development["facets"].items()
+                    if facet["status"] == "CLEAR"
+                ]
+                development["complete"] = False
+                save_pending_action(
+                    session,
+                    Stage.IDEA_BRAINSTORMING,
+                    build_gap_output(session, ""),
+                )
+                engine.store.save(session)
+                candidate = f"这是学生针对{facet_id}给出的完整说明"
+
+                ambiguous = engine.process_turn(
+                    session.design_id,
+                    {"message": candidate},
+                )
+                self.assertTrue(
+                    ambiguous["stage_payload"]["clarification_required"]
+                )
+                confirmed = engine.process_turn(
+                    session.design_id,
+                    {"message": "刚才那段就是我对这一问的回答"},
+                )
+
+                status = confirmed["stage_payload"]["idea_development_status"]
+                self.assertEqual(
+                    status["facets_by_id"][facet_id]["status"],
+                    "CLEAR",
+                )
+                self.assertEqual(
+                    status["facets_by_id"][facet_id]["evidence"],
+                    candidate,
+                )
+                self.assertFalse(
+                    confirmed["stage_payload"].get("clarification_required", False)
+                )
+
+    def test_candidate_confirmation_closes_every_later_guided_stage_question(self) -> None:
+        guided_stages = (
+            Stage.VARIABLES_AND_CONDITIONS,
+            Stage.CONCEPTUAL_PROCEDURE,
+            Stage.EXPECTED_DATA_VISUALIZATION,
+            Stage.RESULT_INTERPRETATION,
+            Stage.DESIGN_VALUE_AND_LIMITATIONS,
+            Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+        )
+
+        for stage in guided_stages:
+            with self.subTest(stage=stage.value):
+                class StageConfirmationGenerator(RuleBasedStageGenerator):
+                    def __init__(self) -> None:
+                        self.intent_calls = 0
+                        self.generated_messages: list[str] = []
+
+                    def resolve_intent(
+                        self,
+                        session,
+                        user_message,
+                        pending_action,
+                        carried_context,
+                    ):
+                        self.intent_calls += 1
+                        if self.intent_calls == 1:
+                            return resolved_intent(
+                                UserIntent.ANSWER_CURRENT_QUESTION,
+                                target=stage.value,
+                                confidence=0.96,
+                                source="SEMANTIC_TEST",
+                                semantic_updates={},
+                            )
+                        return resolved_intent(
+                            UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                            target=stage.value,
+                            confidence=0.98,
+                            source="SEMANTIC_TEST",
+                        )
+
+                    def generate(self, session, user_message):
+                        self.generated_messages.append(user_message)
+                        return StepOutput(
+                            assistant_message="我已经沿用这段回答继续整理。",
+                            stage_payload={"student_stage_answer": user_message},
+                            student_task=None,
+                        )
+
+                generator = StageConfirmationGenerator()
+                engine = WorkflowEngine(generator=generator)
+                session = DesignSession(
+                    design_id=f"design_confirm_{stage.value}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=list(Stage).index(stage),
+                    design_context={"idea": {"main_direction": "比较静电场分布"}},
+                )
+                entry = guided_stage_entry_output(session)
+                save_pending_action(session, stage, entry)
+                session.stage_outputs[stage.value] = {
+                    "stage_payload": entry.stage_payload,
+                    "assistant_message": entry.assistant_message,
+                }
+                engine.store.save(session)
+                candidate = f"这是学生为{stage.value}提供的具体说明"
+
+                ambiguous = engine.process_turn(
+                    session.design_id,
+                    {"message": candidate},
+                )
+                self.assertTrue(
+                    ambiguous["stage_payload"]["clarification_required"]
+                )
+                confirmed = engine.process_turn(
+                    session.design_id,
+                    {"message": "沿用我上一条的说明"},
+                )
+
+                self.assertFalse(
+                    confirmed["stage_payload"].get("clarification_required", False)
+                )
+                self.assertEqual(generator.generated_messages, [candidate])
+                self.assertEqual(
+                    confirmed["stage_payload"]["student_stage_answer"],
+                    candidate,
+                )
+
     def test_every_guided_public_stage_uses_structured_answer_status(self) -> None:
         guided_stages = (
             Stage.VARIABLES_AND_CONDITIONS,
@@ -434,6 +648,97 @@ class DialogueStateTests(unittest.TestCase):
             "standard_comparisons"
         ][0]
         self.assertEqual(comparison["adoption_status"], "ACCEPTED")
+
+    def test_trail9_confirmation_reuses_candidate_research_answer(self) -> None:
+        class CandidateConfirmationGenerator(RuleBasedStageGenerator):
+            def __init__(self) -> None:
+                self.intent_calls = 0
+
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                self.intent_calls += 1
+                if self.intent_calls == 1:
+                    return resolved_intent(
+                        UserIntent.ANSWER_CURRENT_QUESTION,
+                        target="research_question",
+                        confidence=0.96,
+                        source="SEMANTIC_TEST",
+                        semantic_updates={},
+                    )
+                return resolved_intent(
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                    target="research_question",
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                )
+
+        generator = CandidateConfirmationGenerator()
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_trail9_candidate_confirmation")
+        engine.store.save(session)
+        candidate = (
+            "我想比较以下两种条件：当两个点状源带同种电荷靠近时，电场线像是被两边"
+            "挤压，而带异种电荷靠近时，更像从一条较直的过渡带开始弯过去"
+        )
+
+        first = engine.process_turn(session.design_id, {"message": candidate})
+        self.assertTrue(first["stage_payload"]["clarification_required"])
+        pending = current_pending_action(engine.store.get(session.design_id))
+        assert pending is not None
+        self.assertEqual(pending["candidate_answer"], candidate)
+
+        confirmed = engine.process_turn(
+            session.design_id,
+            {"message": "上一句就是我的研究问题"},
+        )
+
+        status = confirmed["stage_payload"]["idea_development_status"]
+        self.assertEqual(
+            status["facets_by_id"]["research_question"]["status"],
+            "CLEAR",
+        )
+        self.assertEqual(
+            status["facets_by_id"]["research_question"]["evidence"],
+            candidate,
+        )
+        self.assertNotIn("不需要再次重写", confirmed["assistant_message"])
+        self.assertFalse(confirmed["stage_payload"].get("clarification_required", False))
+
+    def test_confirmed_candidate_answer_generalizes_to_later_guided_stage(self) -> None:
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+            "candidate_answer": "主动改变距离，观察场线并保持电荷量不变",
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["pending_answer_status"], "CLEAR"
+        )
+        self.assertEqual(
+            resolved["resolved_value"], pending["candidate_answer"]
+        )
+        self.assertEqual(resolved["source"], "CONFIRMED_PENDING_ANSWER")
 
     def test_missing_facet_decision_clarifies_instead_of_blaming_student_answer(self) -> None:
         generator = ScriptedSemanticGenerator(
