@@ -28,8 +28,10 @@ class FakeTransport:
         error: Exception | None = None,
         response_id: str = "resp_test",
         errors: list[Exception] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
     ) -> None:
         self.output = output
+        self.outputs = list(outputs or [])
         self.error = error
         self.response_id = response_id
         self.errors = list(errors or [])
@@ -41,6 +43,7 @@ class FakeTransport:
             raise self.errors.pop(0)
         if self.error:
             raise self.error
+        selected_output = self.outputs.pop(0) if self.outputs else self.output
         return {
             "id": self.response_id,
             "output": [
@@ -49,7 +52,7 @@ class FakeTransport:
                     "content": [
                         {
                             "type": "output_text",
-                            "text": json.dumps(self.output, ensure_ascii=False),
+                            "text": json.dumps(selected_output, ensure_ascii=False),
                         }
                     ],
                 }
@@ -153,6 +156,92 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("沿用刚才的安排", serialized)
         self.assertIn("no_direction表示学生当前没有可供继续完善的实验方向", request["instructions"])
         self.assertIn("不得判成课外主题", request["instructions"])
+
+    def test_intent_resolver_repairs_an_omitted_active_facet_decision(self) -> None:
+        base = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "research_question",
+            "resolved_value_json": None,
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.96,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    **base,
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "facet_updates": [],
+                            "comparison_updates": [
+                                {
+                                    "comparison_id": "polarity_cases",
+                                    "action": "ACCEPT",
+                                    "cases": ["同种电荷", "异种电荷"],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    **base,
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "facet_updates": [
+                                {
+                                    "facet_id": "research_question",
+                                    "status": "CLEAR",
+                                }
+                            ],
+                            "comparison_updates": [
+                                {
+                                    "comparison_id": "polarity_cases",
+                                    "action": "ACCEPT",
+                                    "cases": ["同种电荷", "异种电荷"],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question", "title": "研究问题"},
+            "question": "你想比较什么条件，并观察哪种现象怎样改变？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        generator = OpenAIStageGenerator(transport=transport)
+
+        result = generator.resolve_intent(
+            guided_session(),
+            "在同种或异种电荷条件下缩短距离，观察场线空间分布的变化",
+            pending,
+            {
+                "idea_development": {
+                    "active_facet_id": "research_question",
+                },
+                "baseline_comparisons": [
+                    {
+                        "comparison_id": "polarity_cases",
+                        "recommended_cases": ["同种电荷", "异种电荷"],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["facet_updates"],
+            [{"facet_id": "research_question", "status": "CLEAR"}],
+        )
+        self.assertEqual(len(transport.requests), 2)
+        repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
+        self.assertIn("research_question", repair_text)
+        self.assertIn("同时保留comparison_updates", repair_text)
 
     def test_semantic_no_direction_gets_a_friendly_course_brainstorm_lead(self) -> None:
         session = guided_session()

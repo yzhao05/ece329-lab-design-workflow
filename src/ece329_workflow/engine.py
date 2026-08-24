@@ -19,6 +19,7 @@ from .dialogue_state import (
     deterministic_intent,
     fallback_intent,
     hydrate_pending_action_from_history,
+    record_pending_clarification,
     resolved_intent,
     save_pending_action,
     validate_resolved_intent,
@@ -511,6 +512,7 @@ class WorkflowEngine:
             and input_kind != UNREASONABLE_REQUEST
         )
         if clarification_turn:
+            pending_action = record_pending_clarification(session) or pending_action
             output = clarification_output(pending_action)
             session.turn_context = {}
             completion_error = None

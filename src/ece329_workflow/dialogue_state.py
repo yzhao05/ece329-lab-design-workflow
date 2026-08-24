@@ -60,14 +60,36 @@ def current_pending_action(session: DesignSession) -> dict[str, Any] | None:
     return deepcopy(pending) if isinstance(pending, dict) else None
 
 
+def record_pending_clarification(
+    session: DesignSession,
+) -> dict[str, Any] | None:
+    """Count a clarification without replacing the decision still awaiting input."""
+
+    state = dialogue_state(session)
+    pending = state.get("pending_action")
+    if not isinstance(pending, dict):
+        return None
+    try:
+        repeat_count = int(pending.get("repeat_count", 1))
+    except (TypeError, ValueError):
+        repeat_count = 1
+    pending["repeat_count"] = max(1, repeat_count + 1)
+    return deepcopy(pending)
+
+
 def hydrate_pending_action_from_history(
     session: DesignSession,
 ) -> dict[str, Any] | None:
     """Migrate a pre-upgrade conversation without exposing internal fields."""
 
     current = current_pending_action(session)
-    if current is not None or not session.history:
-        return current
+    if current is not None:
+        migrated = _migrate_legacy_idea_facet_pending(session, current)
+        if migrated != current:
+            dialogue_state(session)["pending_action"] = deepcopy(migrated)
+        return migrated
+    if not session.history:
+        return None
     previous = session.history[-1]
     if previous.get("handled_stage") != session.current_stage.value:
         return None
@@ -85,6 +107,53 @@ def hydrate_pending_action_from_history(
         ),
     )
     return save_pending_action(session, session.current_stage, output)
+
+
+def _migrate_legacy_idea_facet_pending(
+    session: DesignSession,
+    pending: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind old generic Stage 1 pending data to the facet already in progress."""
+
+    if session.current_stage != Stage.IDEA_BRAINSTORMING:
+        return pending
+    development = session.design_context.get("idea_development")
+    if not isinstance(development, dict) or development.get("complete") is True:
+        return pending
+    active = str(development.get("active_facet_id") or "")
+    if active not in _IDEA_FACET_IDS:
+        return pending
+    if (
+        pending.get("type") == "ANSWER_IDEA_FACET"
+        and pending.get("subject") == active
+    ):
+        return pending
+    facets = development.get("facets", {})
+    facet = facets.get(active, {}) if isinstance(facets, dict) else {}
+    migrated = deepcopy(pending)
+    migrated.update(
+        {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": active,
+            "proposal": {
+                "facet_id": active,
+                "title": str(facet.get("title") or "当前部分")
+                if isinstance(facet, dict)
+                else "当前部分",
+            },
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                UserIntent.NEW_TOPIC.value,
+                UserIntent.UNCLEAR.value,
+            ],
+            "status": "PENDING",
+        }
+    )
+    return migrated
 
 
 def current_resolved_intent(session: DesignSession) -> dict[str, Any] | None:
@@ -255,6 +324,7 @@ def _normalize_pending_action(
         "allowed_intents": list(dict.fromkeys(allowed)),
         "status": "PENDING",
         "created_at_revision": revision,
+        "repeat_count": 1,
     }
 
 
@@ -285,6 +355,17 @@ def save_pending_action(
         fallback_proposal=proposal,
     )
     state = dialogue_state(session)
+    previous = state.get("pending_action")
+    if (
+        isinstance(previous, dict)
+        and previous.get("type") == pending.get("type")
+        and previous.get("subject") == pending.get("subject")
+    ):
+        try:
+            previous_count = int(previous.get("repeat_count", 1))
+        except (TypeError, ValueError):
+            previous_count = 1
+        pending["repeat_count"] = max(1, previous_count + 1)
     state["pending_action"] = pending
     state["carried_context"] = build_carried_context(session)
     return deepcopy(pending)
@@ -393,6 +474,25 @@ def validate_resolved_intent(
         if intent == UserIntent.UNCLEAR.value
         else _normalize_semantic_updates(raw.get("semantic_updates"))
     )
+    if (
+        str(raw.get("source") or "").startswith("SEMANTIC")
+        and intent
+        in {
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        }
+        and pending_facet_decision_missing(
+            intent,
+            semantic_updates,
+            pending_action,
+        )
+    ):
+        # An omitted facet decision is an incomplete semantic result, not
+        # evidence that the student's answer was inadequate. Keep the state
+        # unchanged and ask one short clarification instead of repeating the
+        # same completeness question.
+        intent = UserIntent.UNCLEAR.value
+        semantic_updates = {}
     return resolved_intent(
         intent,
         target=str(raw.get("target") or pending_action.get("subject") or "")
@@ -449,6 +549,57 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         "facet_updates": facet_updates,
         "comparison_updates": comparison_updates,
     }
+
+
+def required_pending_facet_id(
+    pending_action: dict[str, Any] | None,
+) -> str | None:
+    if not isinstance(pending_action, dict):
+        return None
+    if pending_action.get("type") != "ANSWER_IDEA_FACET":
+        return None
+    subject = str(pending_action.get("subject") or "")
+    return subject if subject in _IDEA_FACET_IDS else None
+
+
+def pending_facet_decision_missing(
+    intent: UserIntent | str,
+    semantic_updates: dict[str, Any] | None,
+    pending_action: dict[str, Any] | None,
+) -> bool:
+    intent_value = intent.value if isinstance(intent, UserIntent) else str(intent)
+    if intent_value not in {
+        UserIntent.ANSWER_CURRENT_QUESTION.value,
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+    }:
+        return False
+    required_facet = required_pending_facet_id(pending_action)
+    if required_facet is None:
+        return False
+    if (
+        intent_value == UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        and isinstance(semantic_updates, dict)
+        and (
+            semantic_updates.get("comparison_updates")
+            or semantic_updates.get("selected_option_ids")
+        )
+    ):
+        # A student can edit a concrete proposal that is still visible in the
+        # conversation without answering the separate idea-facet question in
+        # the same sentence.  Treat the structured edit as its own complete
+        # action and leave the active facet pending for the next turn.
+        return False
+    updates = (
+        semantic_updates.get("facet_updates", [])
+        if isinstance(semantic_updates, dict)
+        else []
+    )
+    return not any(
+        isinstance(item, dict)
+        and item.get("facet_id") == required_facet
+        and item.get("status") in {"CLEAR", "MISSING"}
+        for item in updates
+    )
 
 
 def _apply_comparison_updates(
@@ -574,6 +725,34 @@ def clarification_output(
     pending_action: dict[str, Any] | None,
 ) -> StepOutput:
     if pending_action:
+        if pending_action.get("type") == "ANSWER_IDEA_FACET":
+            proposal = pending_action.get("proposal", {})
+            title = str(
+                proposal.get("title")
+                if isinstance(proposal, dict)
+                else ""
+            ).strip() or "当前部分"
+            try:
+                repeat_count = int(pending_action.get("repeat_count", 1))
+            except (TypeError, ValueError):
+                repeat_count = 1
+            if repeat_count > 2:
+                message = (
+                    f"你刚才的说明可能已经包含“{title}”，不需要再次重写整段。"
+                    f"请只确认“上一句就是我的{title}”，或告诉我“暂时还不知道{title}”，"
+                    "我会按你的意思继续整理。"
+                )
+            else:
+                message = (
+                    f"我还没有准确判断你刚才是在补充“{title}”，还是想调整其他内容。"
+                    "请直接说明你的回答对应当前问题；如果暂时不知道，也可以明确告诉我，"
+                    "我会换一种方式帮助你梳理。"
+                )
+            return StepOutput(
+                assistant_message=message,
+                stage_payload={"clarification_required": True},
+                student_task=None,
+            )
         question = str(pending_action.get("question") or "").strip()
         prompt = (
             "我还不能确定你想怎样处理刚才的安排。"

@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 
 from .dialogue_state import (
     ALL_INTENTS,
+    pending_facet_decision_missing,
+    required_pending_facet_id,
     resolved_intent,
     serialize_intent_input,
     validate_resolved_intent,
@@ -327,6 +329,35 @@ def _intent_response_schema() -> dict[str, Any]:
         ],
         "additionalProperties": False,
     }
+
+
+def _parse_intent_response(
+    response: dict[str, Any],
+) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    try:
+        raw = json.loads(_extract_output_text(response))
+    except json.JSONDecodeError as exc:
+        raise ModelOutputError("Intent model output was invalid") from exc
+    if not isinstance(raw, dict):
+        raise ModelOutputError("Intent model output must be an object")
+    resolved_value = None
+    encoded_value = raw.get("resolved_value_json")
+    if isinstance(encoded_value, str):
+        try:
+            resolved_value = json.loads(encoded_value)
+        except json.JSONDecodeError as exc:
+            raise ModelOutputError("Intent resolved_value_json was invalid") from exc
+    semantic_updates: dict[str, Any] = {}
+    encoded_updates = raw.get("semantic_updates_json")
+    if isinstance(encoded_updates, str):
+        try:
+            parsed_updates = json.loads(encoded_updates)
+        except json.JSONDecodeError as exc:
+            raise ModelOutputError("Intent semantic_updates_json was invalid") from exc
+        if not isinstance(parsed_updates, dict):
+            raise ModelOutputError("Intent semantic_updates_json must encode an object")
+        semantic_updates = parsed_updates
+    return raw, resolved_value, semantic_updates
 
 
 def _extract_output_text(response: dict[str, Any]) -> str:
@@ -1254,6 +1285,12 @@ class OpenAIStageGenerator:
                 "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING）、"
                 "comparison_updates（comparison_id和cases必须来自pending_action或carried_context，"
                 "action只能为ACCEPT、MODIFY、REJECT）。不得臆造ID或把宽泛主题当成已回答学习目标。"
+                "当pending_action.type为ANSWER_IDEA_FACET时，subject就是当前唯一需要判断的facet。"
+                "若intent为ANSWER_CURRENT_QUESTION或MODIFY_PREVIOUS_PROPOSAL，facet_updates必须且只需"
+                "包含对这个subject的CLEAR或MISSING判断：学生的回答在语义上已经回答previous_question"
+                "就标CLEAR；只有明确表示不知道、撤回，或确实没有回答当前问题时才标MISSING。"
+                "不能因为措辞不同于示例而标MISSING，也不能遗漏该facet。学生同一轮既明确基础对照"
+                "又回答当前facet时，comparison_updates和facet_updates必须同时保留。"
                 "没有结构化更新时semantic_updates_json为null。"
             ),
             "input": [
@@ -1280,38 +1317,43 @@ class OpenAIStageGenerator:
                 self._intent_api_failures += 1
             raise
         try:
-            raw = json.loads(_extract_output_text(response))
-        except (json.JSONDecodeError, ModelOutputError) as exc:
+            raw, resolved_value, semantic_updates = _parse_intent_response(response)
+        except ModelOutputError:
             with self._metrics_lock:
                 self._intent_api_failures += 1
-            raise ModelOutputError("Intent model output was invalid") from exc
-        if not isinstance(raw, dict):
-            with self._metrics_lock:
-                self._intent_api_failures += 1
-            raise ModelOutputError("Intent model output must be an object")
-        resolved_value = None
-        encoded_value = raw.get("resolved_value_json")
-        if isinstance(encoded_value, str):
+            raise
+        if pending_facet_decision_missing(
+            str(raw.get("intent") or "UNCLEAR"),
+            semantic_updates,
+            pending_action,
+        ):
+            required_facet = required_pending_facet_id(pending_action)
+            repair_payload = deepcopy(payload)
+            repair_payload["input"][0]["content"].append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "上一份结构化判断遗漏了当前想法完整性要点。请重新判断同一条学生消息；"
+                        f"当前必须判断的facet是{required_facet}。若学生已经在语义上回答了"
+                        "previous_question，返回CLEAR；若明确不知道、撤回或没有回答，返回MISSING。"
+                        "如同一轮还处理了基础对照，必须同时保留comparison_updates。"
+                        "不要回答学生，只返回完整的结构化意图结果。"
+                    ),
+                }
+            )
             try:
-                resolved_value = json.loads(encoded_value)
-            except json.JSONDecodeError as exc:
+                repair_response = self.transport.create(repair_payload)
+                raw, resolved_value, semantic_updates = _parse_intent_response(
+                    repair_response
+                )
+            except ModelServiceError:
                 with self._metrics_lock:
                     self._intent_api_failures += 1
-                raise ModelOutputError("Intent resolved_value_json was invalid") from exc
-        semantic_updates: dict[str, Any] = {}
-        encoded_updates = raw.get("semantic_updates_json")
-        if isinstance(encoded_updates, str):
-            try:
-                parsed_updates = json.loads(encoded_updates)
-            except json.JSONDecodeError as exc:
+                raise
+            except ModelOutputError:
                 with self._metrics_lock:
                     self._intent_api_failures += 1
-                raise ModelOutputError("Intent semantic_updates_json was invalid") from exc
-            if not isinstance(parsed_updates, dict):
-                with self._metrics_lock:
-                    self._intent_api_failures += 1
-                raise ModelOutputError("Intent semantic_updates_json must encode an object")
-            semantic_updates = parsed_updates
+                raise
         candidate = resolved_intent(
             str(raw.get("intent") or "UNCLEAR"),
             target=str(raw.get("target") or "") or None,

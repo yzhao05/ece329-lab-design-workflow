@@ -7,6 +7,7 @@ from ece329_workflow.dialogue_state import (
     apply_resolved_intent,
     build_carried_context,
     current_pending_action,
+    hydrate_pending_action_from_history,
     resolved_intent,
     save_pending_action,
     validate_resolved_intent,
@@ -14,6 +15,7 @@ from ece329_workflow.dialogue_state import (
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.idea_development import (
+    build_gap_output,
     initialize_idea_development,
     update_idea_development,
 )
@@ -82,6 +84,39 @@ def variable_stage_session(design_id: str) -> DesignSession:
             student_task="请说明是保留、修改，还是完成这一部分后继续。",
         ),
     )
+    return session
+
+
+def idea_facet_session(design_id: str) -> DesignSession:
+    session = DesignSession(
+        design_id=design_id,
+        interaction_state=InteractionState.GUIDED_DESIGN,
+        design_context={
+            "idea": {
+                "original": "研究两个电荷源靠近时电场线的变化",
+                "topic_anchor": "静电场中多个物体的相互影响",
+                "current_focus": "比较两个电荷源靠近时电场线的变化",
+                "course_scope_confirmed": True,
+                "standard_comparisons": [
+                    {
+                        "comparison_id": "polarity_cases",
+                        "recommended_cases": ["同种电荷", "异种电荷"],
+                        "cases": ["同种电荷", "异种电荷"],
+                        "adoption_status": "PENDING",
+                    }
+                ],
+            }
+        },
+    )
+    initialize_idea_development(
+        session,
+        {
+            "core_phenomenon": "两个电荷源靠近时电场线发生变化",
+            "course_relationships": ["静电场中的场源与空间分布"],
+        },
+    )
+    output = build_gap_output(session, "")
+    save_pending_action(session, Stage.IDEA_BRAINSTORMING, output)
     return session
 
 
@@ -181,6 +216,187 @@ class DialogueStateTests(unittest.TestCase):
         stored = engine.get_design(first["design_id"])["design_context"]["idea"]
         self.assertEqual(stored["topic_anchor"], "传输线中的反射和驻波")
         self.assertIn("反射", stored["current_focus"])
+
+    def test_idea_gap_pending_action_names_the_exact_active_facet(self) -> None:
+        session = idea_facet_session("design_facet_pending")
+
+        pending = current_pending_action(session)
+
+        assert pending is not None
+        self.assertEqual(pending["type"], "ANSWER_IDEA_FACET")
+        self.assertEqual(pending["subject"], "research_question")
+        self.assertEqual(pending["proposal"]["title"], "研究问题")
+
+    def test_legacy_generic_stage_one_pending_is_migrated_before_next_turn(self) -> None:
+        session = idea_facet_session("design_legacy_generic_pending")
+        session.model_context["dialogue_state"]["pending_action"].update(
+            {
+                "type": "ANSWER_CURRENT_QUESTION",
+                "subject": "idea_brainstorming",
+                "proposal": {},
+            }
+        )
+
+        pending = hydrate_pending_action_from_history(session)
+
+        assert pending is not None
+        self.assertEqual(pending["type"], "ANSWER_IDEA_FACET")
+        self.assertEqual(pending["subject"], "research_question")
+        self.assertEqual(
+            session.model_context["dialogue_state"]["pending_action"]["subject"],
+            "research_question",
+        )
+
+    def test_valid_research_answer_updates_facet_and_comparison_in_one_turn(self) -> None:
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={
+                "facet_updates": [
+                    {"facet_id": "research_question", "status": "CLEAR"}
+                ],
+                "comparison_updates": [
+                    {
+                        "comparison_id": "polarity_cases",
+                        "action": "ACCEPT",
+                        "cases": ["同种电荷", "异种电荷"],
+                    }
+                ],
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_trail8_research_answer")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {
+                "message": (
+                    "在两个电荷源带同种或异种电荷的条件下，逐渐缩短源之间的距离，"
+                    "观察场线形状、幅度或空间分布的变化"
+                )
+            },
+        )
+
+        status = result["stage_payload"]["idea_development_status"]
+        self.assertEqual(
+            status["facets_by_id"]["research_question"]["status"],
+            "CLEAR",
+        )
+        self.assertEqual(status["active_facet_id"], "learning_objective")
+        self.assertIn("研究问题已经很具体", result["assistant_message"])
+        self.assertNotIn("研究问题还需要同时出现", result["assistant_message"])
+        comparison = engine.get_design(session.design_id)["design_context"]["idea"][
+            "standard_comparisons"
+        ][0]
+        self.assertEqual(comparison["adoption_status"], "ACCEPTED")
+
+    def test_missing_facet_decision_clarifies_instead_of_blaming_student_answer(self) -> None:
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={"facet_updates": [], "comparison_updates": []},
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_missing_facet_decision")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {
+                "message": (
+                    "逐渐缩短同种或异种电荷源之间的距离，观察场线形状和空间分布"
+                )
+            },
+        )
+
+        self.assertTrue(result["stage_payload"]["clarification_required"])
+        self.assertIn("还没有准确判断", result["assistant_message"])
+        self.assertNotIn("研究问题还需要同时出现", result["assistant_message"])
+        stored = engine.get_design(session.design_id)["design_context"][
+            "idea_development"
+        ]
+        self.assertEqual(stored["active_facet_id"], "research_question")
+
+    def test_repeated_semantic_omission_does_not_repeat_same_clarification(self) -> None:
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={"facet_updates": [], "comparison_updates": []},
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_repeated_semantic_omission")
+        engine.store.save(session)
+
+        first = engine.process_turn(
+            session.design_id,
+            {"message": "缩短两个源的距离，观察场线空间分布"},
+        )
+        second = engine.process_turn(
+            session.design_id,
+            {"message": "上一句说的就是我想比较和观察的内容"},
+        )
+
+        self.assertNotEqual(first["assistant_message"], second["assistant_message"])
+        self.assertIn("不需要再次重写整段", second["assistant_message"])
+        pending = current_pending_action(engine.store.get(session.design_id))
+        assert pending is not None
+        self.assertEqual(pending["subject"], "research_question")
+
+    def test_comparison_only_edit_does_not_have_to_answer_active_facet(self) -> None:
+        session = idea_facet_session("design_separate_comparison_edit")
+        pending = current_pending_action(session)
+        assert pending is not None
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                target="polarity_cases",
+                confidence=0.97,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "comparison_updates": [
+                        {
+                            "comparison_id": "polarity_cases",
+                            "action": "MODIFY",
+                            "cases": ["同种电荷"],
+                        }
+                    ]
+                },
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"],
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["comparison_updates"][0]["cases"],
+            ["同种电荷"],
+        )
+
+    def test_repeated_explicit_missing_facet_uses_non_repeating_prompts(self) -> None:
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={
+                "facet_updates": [
+                    {"facet_id": "research_question", "status": "MISSING"}
+                ]
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_repeated_missing_facet")
+        engine.store.save(session)
+
+        first = engine.process_turn(
+            session.design_id,
+            {"message": "我还没说清楚，暂时只想到两个电荷源"},
+        )
+        second = engine.process_turn(
+            session.design_id,
+            {"message": "现在还是不知道怎样写研究问题"},
+        )
+
+        self.assertIn("只确认“研究问题”", first["assistant_message"])
+        self.assertIn("不再让你重写整段“研究问题”", second["assistant_message"])
+        self.assertNotEqual(first["assistant_message"], second["assistant_message"])
 
     def test_semantic_comparison_update_uses_validated_ids_and_cases(self) -> None:
         session = DesignSession(

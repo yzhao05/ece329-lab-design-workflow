@@ -216,6 +216,7 @@ def decorate_outline_output(
     output.stage_payload["lecture_formula_candidates"] = deepcopy(
         development.get("formula_references", [])
     )
+    output.stage_payload["pending_action"] = _pending_action_for_status(status)
     output.assistant_message = (
         f"{output.assistant_message}\n\n"
         f"{_student_facing_next_turn(status, first_review=True)}"
@@ -235,6 +236,7 @@ def build_gap_output(
         for facet_id in development.get("last_clarified_facet_ids", [])
         if facet_id in status["facets_by_id"]
     ]
+    repeated_facet_count = _pending_facet_repeat_count(session, status)
     acknowledgement = (
         _student_facing_acknowledgement(acknowledged_message, clarified_titles)
         if clarified_titles
@@ -243,7 +245,7 @@ def build_gap_output(
     comparison_update = _comparison_update_summary(session, acknowledged_message)
     assistant_message = (
         f"{acknowledgement}{comparison_update}\n\n"
-        f"{_student_facing_next_turn(status)}"
+        f"{_student_facing_next_turn(status, repeat_count=repeated_facet_count)}"
     )
     idea = session.design_context.get("idea", {})
     preserved_payload: dict[str, Any] = {}
@@ -286,6 +288,7 @@ def build_gap_output(
             "exploration_scenes": [],
             "ready_for_next_stage": bool(status["complete"]),
             "contextual_continuation": True,
+            "pending_action": _pending_action_for_status(status),
             **preserved_payload,
         },
         student_task=None,
@@ -372,6 +375,7 @@ def _student_facing_next_turn(
     status: dict[str, Any],
     *,
     first_review: bool = False,
+    repeat_count: int = 0,
 ) -> str:
     if status.get("complete") is True:
         return (
@@ -382,12 +386,105 @@ def _student_facing_next_turn(
     active = str(status.get("active_facet_id") or "")
     facet = status.get("facets_by_id", {}).get(active, {})
     title = str(facet.get("title") or "下一部分")
+    if repeat_count > 0:
+        if repeat_count > 1:
+            return (
+                f"我们先不再让你重写整段“{title}”。请只指出上一句中哪一部分"
+                "是在回答当前问题；如果暂时还不能确定，也可以直接说暂时保留这个缺口，"
+                "我会先帮助你换一个角度梳理。"
+            )
+        return (
+            f"为了避免让你重复改写同一段内容，我们现在只确认“{title}”。"
+            f"{_focused_facet_clarification(active)}"
+        )
     prefix = (
         "这个方向已经形成了可以继续发展的实验雏形。"
         if first_review
         else "我们继续沿着同一个实验方向往下完善。"
     )
     return f"{prefix} 接下来先把“{title}”说清楚：{_next_task(status)}"
+
+
+def _focused_facet_clarification(facet_id: str) -> str:
+    prompts = {
+        "learning_objective": (
+            "请说明这项实验最终希望你能够解释、判断或比较什么；如果上一句已经表达清楚，"
+            "也可以直接说明那一句就是你的学习目标。"
+        ),
+        "research_question": (
+            "请确认上一句是否已经同时说明了准备改变或比较的条件，以及要观察的现象；"
+            "如果是，可以直接说明那一句就是你的研究问题。"
+        ),
+        "hypothesis": (
+            "请确认上一句是否已经同时给出了预期变化和物理理由；如果是，可以直接说明"
+            "那一句就是你的预测。"
+        ),
+        "conceptual_structure": (
+            "请确认上一句是否已经列出了完成比较所需的主要对象、边界或激励；如果是，"
+            "可以直接说明沿用上一句。"
+        ),
+    }
+    return prompts.get(
+        facet_id,
+        "请确认上一句是否已经回答当前问题；如果已经回答，可以直接说明沿用上一句。",
+    )
+
+
+def _pending_action_for_status(status: dict[str, Any]) -> dict[str, Any]:
+    if status.get("complete") is True:
+        return {
+            "type": "CONFIRM_OR_MODIFY",
+            "subject": "experiment_idea_outline",
+            "proposal": {"complete": True},
+            "question": _next_task(status),
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "ADVANCE_STAGE",
+                "RETURN_TO_PREVIOUS_POINT",
+                "NEW_TOPIC",
+                "UNCLEAR",
+            ],
+        }
+    active = str(status.get("active_facet_id") or "")
+    facet = status.get("facets_by_id", {}).get(active, {})
+    return {
+        "type": "ANSWER_IDEA_FACET",
+        "subject": active,
+        "proposal": {
+            "facet_id": active,
+            "title": str(facet.get("title") or "当前部分"),
+        },
+        "question": _next_task(status),
+        "allowed_intents": [
+            "ANSWER_CURRENT_QUESTION",
+            "MODIFY_PREVIOUS_PROPOSAL",
+            "ADVANCE_STAGE",
+            "REQUEST_MORE_EXAMPLES",
+            "RETURN_TO_PREVIOUS_POINT",
+            "NEW_TOPIC",
+            "UNCLEAR",
+        ],
+    }
+
+
+def _pending_facet_repeat_count(
+    session: DesignSession,
+    status: dict[str, Any],
+) -> int:
+    dialogue = session.model_context.get("dialogue_state", {})
+    pending = dialogue.get("pending_action", {}) if isinstance(dialogue, dict) else {}
+    active = str(status.get("active_facet_id") or "")
+    if (
+        not isinstance(pending, dict)
+        or pending.get("type") != "ANSWER_IDEA_FACET"
+        or pending.get("subject") != active
+    ):
+        return 0
+    try:
+        return max(1, int(pending.get("repeat_count", 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _student_facing_retry(status: dict[str, Any], message: str) -> str:
