@@ -243,6 +243,52 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("research_question", repair_text)
         self.assertIn("同时保留comparison_updates", repair_text)
 
+    def test_intent_resolver_repairs_omitted_later_stage_answer_status(self) -> None:
+        base = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "VARIABLES_AND_CONDITIONS",
+            "resolved_value_json": None,
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.96,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {**base, "semantic_updates_json": None},
+                {
+                    **base,
+                    "semantic_updates_json": json.dumps(
+                        {"pending_answer_status": "CLEAR"},
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": "VARIABLES_AND_CONDITIONS",
+            "proposal": {"stage_title": "变量与条件"},
+            "question": "哪些量主动改变、观察或保持不变？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        generator = OpenAIStageGenerator(transport=transport)
+
+        result = generator.resolve_intent(
+            guided_session(),
+            "改变两个源之间的距离，观察电场线，并保持电荷量不变",
+            pending,
+            {"research_direction": "比较两个电荷源"},
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
+        self.assertEqual(len(transport.requests), 2)
+        repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
+        self.assertIn("pending_answer_status=CLEAR", repair_text)
+
     def test_semantic_no_direction_gets_a_friendly_course_brainstorm_lead(self) -> None:
         session = guided_session()
         message = "完全没头绪，先帮我打开思路"

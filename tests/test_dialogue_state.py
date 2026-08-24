@@ -14,6 +14,7 @@ from ece329_workflow.dialogue_state import (
 )
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
+from ece329_workflow.generator import guided_stage_entry_output
 from ece329_workflow.idea_development import (
     build_gap_output,
     initialize_idea_development,
@@ -121,6 +122,150 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_every_guided_public_stage_uses_structured_answer_status(self) -> None:
+        guided_stages = (
+            Stage.VARIABLES_AND_CONDITIONS,
+            Stage.CONCEPTUAL_PROCEDURE,
+            Stage.EXPECTED_DATA_VISUALIZATION,
+            Stage.RESULT_INTERPRETATION,
+            Stage.DESIGN_VALUE_AND_LIMITATIONS,
+            Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+        )
+        for stage in guided_stages:
+            with self.subTest(stage=stage.value):
+                session = DesignSession(
+                    design_id=f"design_pending_{stage.value}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=list(Stage).index(stage),
+                    design_context={"idea": {"main_direction": "静电场比较"}},
+                )
+                output = guided_stage_entry_output(session)
+                pending = save_pending_action(session, stage, output)
+                assert pending is not None
+                self.assertEqual(pending["type"], "ANSWER_STAGE_QUESTION")
+                self.assertEqual(pending["subject"], stage.value)
+
+                valid = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ANSWER_CURRENT_QUESTION,
+                        confidence=0.96,
+                        source="SEMANTIC_TEST",
+                        semantic_updates={"pending_answer_status": "CLEAR"},
+                    ),
+                    pending,
+                )
+                omitted = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ANSWER_CURRENT_QUESTION,
+                        confidence=0.96,
+                        source="SEMANTIC_TEST",
+                        semantic_updates={},
+                    ),
+                    pending,
+                )
+
+                self.assertEqual(
+                    valid["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+                )
+                self.assertEqual(omitted["intent"], UserIntent.UNCLEAR.value)
+
+    def test_later_stage_repeated_question_is_removed_after_valid_answer(self) -> None:
+        class RepeatingQuestionGenerator(ScriptedSemanticGenerator):
+            def __init__(self) -> None:
+                super().__init__(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    semantic_updates={"pending_answer_status": "CLEAR"},
+                )
+
+            def generate(self, session, user_message):
+                pending = session.turn_context["pending_action"]
+                return StepOutput(
+                    assistant_message="我先继续整理变量。",
+                    stage_payload={"independent_variable": user_message},
+                    student_task=str(pending["question"]),
+                )
+
+        session = DesignSession(
+            design_id="design_later_stage_repeat_guard",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={"idea": {"main_direction": "比较两个场源"}},
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine = WorkflowEngine(generator=RepeatingQuestionGenerator())
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "主动改变两个场源之间的距离，并观察电场线分布"},
+        )
+
+        self.assertTrue(result["stage_payload"]["repeated_question_avoided"])
+        self.assertIsNone(result["student_task"])
+        self.assertIn("这一问不再重复", result["assistant_message"])
+
+    def test_later_stage_partial_answers_accumulate_without_overwriting(self) -> None:
+        class IncrementalStageGenerator(ScriptedSemanticGenerator):
+            def __init__(self) -> None:
+                super().__init__(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    semantic_updates={"pending_answer_status": "CLEAR"},
+                )
+                self.generation_count = 0
+
+            def generate(self, session, user_message):
+                self.generation_count += 1
+                if self.generation_count == 1:
+                    return StepOutput(
+                        assistant_message="先保留主动改变量。",
+                        stage_payload={"independent_variable": "两个源之间的距离"},
+                        student_task="还需要保持哪些条件不变？",
+                    )
+                return StepOutput(
+                    assistant_message="控制条件也已补充。",
+                    stage_payload={"controlled_variables": ["电荷量", "观察方式"]},
+                    student_task=None,
+                )
+
+        session = DesignSession(
+            design_id="design_accumulated_later_stage",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={"idea": {"main_direction": "比较两个场源"}},
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.stage_outputs[session.current_stage.value] = {
+            "stage_payload": entry.stage_payload,
+            "assistant_message": entry.assistant_message,
+        }
+        engine = WorkflowEngine(generator=IncrementalStageGenerator())
+        engine.store.save(session)
+
+        engine.process_turn(
+            session.design_id,
+            {"message": "主动改变两个源之间的距离"},
+        )
+        engine.process_turn(
+            session.design_id,
+            {"message": "保持电荷量和观察方式不变"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        draft = stored.design_context["guided_stage_drafts"][
+            Stage.VARIABLES_AND_CONDITIONS.value
+        ]
+        self.assertEqual(draft["independent_variable"], "两个源之间的距离")
+        self.assertEqual(draft["controlled_variables"], ["电荷量", "观察方式"])
+        carried = build_carried_context(stored)
+        self.assertIn("两个源之间的距离", carried["independent_variable"])
+        self.assertIn("电荷量", carried["controlled_conditions"])
+
     def test_semantic_no_direction_replaces_phrase_list(self) -> None:
         paraphrases = (
             "没有思路",

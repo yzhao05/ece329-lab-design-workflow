@@ -246,6 +246,25 @@ def guided_stage_entry_output(
             "preserved_idea_summary": _student_idea_summary(session),
             "reference_draft": reference_steps,
             "reference_basis": prior_context,
+            "pending_action": {
+                "type": "ANSWER_STAGE_QUESTION",
+                "subject": session.current_stage.value,
+                "proposal": {
+                    "stage_title": title,
+                    "reference_draft": reference_steps,
+                },
+                "question": question,
+                "allowed_intents": [
+                    "ANSWER_CURRENT_QUESTION",
+                    "ACCEPT_PREVIOUS_PROPOSAL",
+                    "MODIFY_PREVIOUS_PROPOSAL",
+                    "REJECT_PREVIOUS_PROPOSAL",
+                    "ADVANCE_STAGE",
+                    "RETURN_TO_PREVIOUS_POINT",
+                    "NEW_TOPIC",
+                    "UNCLEAR",
+                ],
+            },
         },
         student_task=None,
     )

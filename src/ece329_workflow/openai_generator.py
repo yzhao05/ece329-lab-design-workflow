@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 from .dialogue_state import (
     ALL_INTENTS,
-    pending_facet_decision_missing,
+    pending_question_decision_missing,
     required_pending_facet_id,
     resolved_intent,
     serialize_intent_input,
@@ -1207,6 +1207,7 @@ def _step_output_from_response(
     resolved_turn = packet["context"].get("resolved_intent")
     pending_action = packet["context"].get("pending_action")
     if isinstance(resolved_turn, dict) and str(resolved_turn.get("intent")) in {
+        "ANSWER_CURRENT_QUESTION",
         "ACCEPT_PREVIOUS_PROPOSAL",
         "MODIFY_PREVIOUS_PROPOSAL",
         "REJECT_PREVIOUS_PROPOSAL",
@@ -1291,6 +1292,10 @@ class OpenAIStageGenerator:
                 "就标CLEAR；只有明确表示不知道、撤回，或确实没有回答当前问题时才标MISSING。"
                 "不能因为措辞不同于示例而标MISSING，也不能遗漏该facet。学生同一轮既明确基础对照"
                 "又回答当前facet时，comparison_updates和facet_updates必须同时保留。"
+                "当pending_action.type为ANSWER_STAGE_QUESTION时，若intent为"
+                "ANSWER_CURRENT_QUESTION，semantic_updates_json必须包含pending_answer_status："
+                "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
+                "当前问题时才填MISSING。不能因为措辞与问题示例不同而遗漏或填MISSING。"
                 "没有结构化更新时semantic_updates_json为null。"
             ),
             "input": [
@@ -1322,23 +1327,34 @@ class OpenAIStageGenerator:
             with self._metrics_lock:
                 self._intent_api_failures += 1
             raise
-        if pending_facet_decision_missing(
+        if pending_question_decision_missing(
             str(raw.get("intent") or "UNCLEAR"),
             semantic_updates,
             pending_action,
         ):
             required_facet = required_pending_facet_id(pending_action)
+            pending_type = str(pending_action.get("type") or "") \
+                if isinstance(pending_action, dict) else ""
             repair_payload = deepcopy(payload)
             repair_payload["input"][0]["content"].append(
                 {
                     "type": "input_text",
                     "text": (
-                        "上一份结构化判断遗漏了当前想法完整性要点。请重新判断同一条学生消息；"
-                        f"当前必须判断的facet是{required_facet}。若学生已经在语义上回答了"
-                        "previous_question，返回CLEAR；若明确不知道、撤回或没有回答，返回MISSING。"
-                        "如同一轮还处理了基础对照，必须同时保留comparison_updates。"
-                        "不要回答学生，只返回完整的结构化意图结果。"
-                    ),
+                        (
+                            "上一份结构化判断遗漏了当前想法完整性要点。请重新判断同一条学生消息；"
+                            f"当前必须判断的facet是{required_facet}。若学生已经在语义上回答了"
+                            "previous_question，在facet_updates中返回CLEAR；若明确不知道、撤回或"
+                            "没有回答，返回MISSING。如同一轮还处理了基础对照，必须同时保留"
+                            "comparison_updates。"
+                        )
+                        if pending_type == "ANSWER_IDEA_FACET"
+                        else (
+                            "上一份结构化判断遗漏了当前阶段问题的回答状态。请重新判断同一条"
+                            "学生消息：若它在语义上回答了previous_question，在"
+                            "semantic_updates_json中返回pending_answer_status=CLEAR；只有明确"
+                            "没有想法或确实没有回答时才返回MISSING。"
+                        )
+                    ) + "不要回答学生，只返回完整的结构化意图结果。",
                 }
             )
             try:

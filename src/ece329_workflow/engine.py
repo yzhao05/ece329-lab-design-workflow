@@ -85,6 +85,18 @@ _GUIDED_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("review_dimension", "limitations"),
 }
 
+_TRANSIENT_GUIDED_PAYLOAD_KEYS = {
+    "guided_entry",
+    "awaiting_student_description",
+    "preserved_idea_summary",
+    "reference_basis",
+    "pending_action",
+    "clarification_required",
+    "student_input_acknowledged",
+    "repeated_question_avoided",
+    "contextual_continuation",
+}
+
 
 def _emvr_intent(text: str) -> bool | None:
     """Return an explicit EMVR opt-in/out intent; bare absence returns None."""
@@ -127,12 +139,82 @@ def _is_pure_stage_transition(text: str) -> bool:
     }
 
 
+def _normalized_question(text: str) -> str:
+    return re.sub(r"[\s，,。；;：:！!？?、（）()\-—]+", "", text).casefold()
+
+
+def _remove_repeated_guided_question(
+    output: Any,
+    pending_action: dict[str, Any] | None,
+    student_message: str,
+) -> None:
+    """Prevent a completed guided answer from triggering the same question again."""
+
+    if not isinstance(pending_action, dict):
+        return
+    previous = _normalized_question(str(pending_action.get("question") or ""))
+    if len(previous) < 8:
+        return
+    next_task = _normalized_question(str(output.student_task or ""))
+    assistant = _normalized_question(str(output.assistant_message or ""))
+    task_repeated = bool(next_task and (next_task == previous or previous in next_task))
+    assistant_repeated = previous in assistant
+    if not task_repeated and not assistant_repeated:
+        return
+    excerpt = " ".join(student_message.split())
+    if len(excerpt) > 120:
+        excerpt = f"{excerpt[:117]}……"
+    acknowledgement = f"你刚才的回答“{excerpt}”已经保留。" if excerpt else "你刚才的回答已经保留。"
+    if assistant_repeated:
+        output.assistant_message = (
+            f"{acknowledgement}当前阶段的整理内容已经据此更新，"
+            "不需要再次回答同一个问题。你可以继续补充尚未说明的部分，"
+            "或在准备好后进入下一阶段。"
+        )
+    else:
+        output.assistant_message = (
+            f"{output.assistant_message}\n\n{acknowledgement}"
+            "这一问不再重复；你可以继续补充，或在准备好后进入下一阶段。"
+        )
+    output.student_task = None
+    output.stage_payload["repeated_question_avoided"] = True
+
+
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
             _deep_merge(target[key], value)
         else:
             target[key] = deepcopy(value)
+
+
+def _persist_guided_stage_draft(
+    session: DesignSession,
+    stage: Stage,
+    payload: dict[str, Any],
+) -> None:
+    if (
+        session.interaction_state is not InteractionState.GUIDED_DESIGN
+        or stage is Stage.IDEA_BRAINSTORMING
+        or payload.get("clarification_required") is True
+    ):
+        return
+    persistent = {
+        key: deepcopy(value)
+        for key, value in payload.items()
+        if key not in _TRANSIENT_GUIDED_PAYLOAD_KEYS
+    }
+    if not persistent:
+        return
+    drafts = session.design_context.setdefault("guided_stage_drafts", {})
+    if not isinstance(drafts, dict):
+        drafts = {}
+        session.design_context["guided_stage_drafts"] = drafts
+    draft = drafts.setdefault(stage.value, {})
+    if not isinstance(draft, dict):
+        draft = {}
+        drafts[stage.value] = draft
+    _deep_merge(draft, persistent)
 
 
 class WorkflowEngine:
@@ -537,6 +619,11 @@ class WorkflowEngine:
                 and intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             ):
                 prepend_guided_acknowledgement(output, handled_stage, message)
+                _remove_repeated_guided_question(
+                    output,
+                    pending_action,
+                    message,
+                )
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(
@@ -578,6 +665,7 @@ class WorkflowEngine:
 
         if output.stage_payload.get("clarification_required") is not True:
             save_pending_action(session, handled_stage, output)
+        _persist_guided_stage_draft(session, handled_stage, output.stage_payload)
         session.revision += 1
         output_dict = output.to_dict()
         session.stage_outputs[handled_stage.value] = {
@@ -989,8 +1077,13 @@ class WorkflowEngine:
         if required_fields:
             stage_output = session.stage_outputs.get(stage.value, {})
             payload = stage_output.get("stage_payload", {})
-            if not isinstance(payload, dict) or not any(
-                payload.get(field) for field in required_fields
+            drafts = session.design_context.get("guided_stage_drafts", {})
+            draft_payload = drafts.get(stage.value, {}) if isinstance(drafts, dict) else {}
+            combined_payload = deepcopy(draft_payload) if isinstance(draft_payload, dict) else {}
+            if isinstance(payload, dict):
+                _deep_merge(combined_payload, payload)
+            if not any(
+                combined_payload.get(field) for field in required_fields
             ):
                 raise StageCompletionError(
                     f"当前阶段尚未形成必要设计内容：需要至少包含{', '.join(required_fields)}之一。"

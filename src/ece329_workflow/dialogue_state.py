@@ -184,11 +184,18 @@ def _flatten_values(value: Any) -> list[str]:
 
 def _find_payload_values(session: DesignSession, keys: set[str]) -> list[str]:
     values: list[str] = []
+    payloads: list[dict[str, Any]] = []
+    drafts = session.design_context.get("guided_stage_drafts", {})
+    if isinstance(drafts, dict):
+        payloads.extend(
+            value for value in drafts.values() if isinstance(value, dict)
+        )
     for stage in reversed(tuple(Stage)):
         stage_output = session.stage_outputs.get(stage.value, {})
         payload = stage_output.get("stage_payload", {}) if isinstance(stage_output, dict) else {}
-        if not isinstance(payload, dict):
-            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    for payload in payloads:
         stack: list[Any] = [payload]
         while stack:
             current = stack.pop()
@@ -340,10 +347,35 @@ def save_pending_action(
         return None
     raw = output.stage_payload.pop("pending_action", None)
     raw = raw if isinstance(raw, dict) else {}
-    question = str(output.student_task or "").strip()
+    question = str(output.student_task or raw.get("question") or "").strip()
     if not question and ("？" in output.assistant_message or "?" in output.assistant_message):
         question = output.assistant_message[-600:]
     proposal = _proposal_from_output(output)
+    if proposal is None and raw.get("proposal") is not None:
+        proposal = deepcopy(raw.get("proposal"))
+    if (
+        stage is not Stage.IDEA_BRAINSTORMING
+        and question
+        and not raw.get("type")
+    ):
+        raw.update(
+            {
+                "type": "ANSWER_STAGE_QUESTION",
+                "subject": stage.value,
+                "proposal": deepcopy(proposal) if proposal is not None else {"stage": stage.value},
+                "question": question,
+                "allowed_intents": [
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.ADVANCE_STAGE.value,
+                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                    UserIntent.NEW_TOPIC.value,
+                    UserIntent.UNCLEAR.value,
+                ],
+            }
+        )
     if not question and proposal is None:
         dialogue_state(session).pop("pending_action", None)
         return None
@@ -481,7 +513,7 @@ def validate_resolved_intent(
             UserIntent.ANSWER_CURRENT_QUESTION.value,
             UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
         }
-        and pending_facet_decision_missing(
+        and pending_question_decision_missing(
             intent,
             semantic_updates,
             pending_action,
@@ -548,6 +580,12 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         "no_direction": raw.get("no_direction") is True,
         "facet_updates": facet_updates,
         "comparison_updates": comparison_updates,
+        "pending_answer_status": (
+            str(raw.get("pending_answer_status") or "").upper()
+            if str(raw.get("pending_answer_status") or "").upper()
+            in {"CLEAR", "MISSING"}
+            else None
+        ),
     }
 
 
@@ -600,6 +638,30 @@ def pending_facet_decision_missing(
         and item.get("status") in {"CLEAR", "MISSING"}
         for item in updates
     )
+
+
+def pending_question_decision_missing(
+    intent: UserIntent | str,
+    semantic_updates: dict[str, Any] | None,
+    pending_action: dict[str, Any] | None,
+) -> bool:
+    """Require a semantic answer decision for every guided question type."""
+
+    if pending_facet_decision_missing(intent, semantic_updates, pending_action):
+        return True
+    intent_value = intent.value if isinstance(intent, UserIntent) else str(intent)
+    if (
+        intent_value != UserIntent.ANSWER_CURRENT_QUESTION.value
+        or not isinstance(pending_action, dict)
+        or pending_action.get("type") != "ANSWER_STAGE_QUESTION"
+    ):
+        return False
+    status = (
+        semantic_updates.get("pending_answer_status")
+        if isinstance(semantic_updates, dict)
+        else None
+    )
+    return status not in {"CLEAR", "MISSING"}
 
 
 def _apply_comparison_updates(
@@ -754,6 +816,27 @@ def clarification_output(
                 student_task=None,
             )
         question = str(pending_action.get("question") or "").strip()
+        if pending_action.get("type") == "ANSWER_STAGE_QUESTION":
+            try:
+                repeat_count = int(pending_action.get("repeat_count", 1))
+            except (TypeError, ValueError):
+                repeat_count = 1
+            if repeat_count > 2:
+                message = (
+                    "你刚才的说明可能已经回答了当前问题，不需要重新写一遍。"
+                    "请只确认“上一句就是我的回答”，或告诉我“暂时还没有想法”，"
+                    "我会据此继续整理当前部分。"
+                )
+            else:
+                message = (
+                    "我还没有准确判断你刚才是在回答当前问题，还是在修改前面的安排。"
+                    "请说明上一句是否就是你的回答；如果暂时没有想法，也可以直接告诉我。"
+                )
+            return StepOutput(
+                assistant_message=message,
+                stage_payload={"clarification_required": True},
+                student_task=None,
+            )
         prompt = (
             "我还不能确定你想怎样处理刚才的安排。"
             "请简短说明是保留、修改、取消，还是完成当前部分后继续。"
