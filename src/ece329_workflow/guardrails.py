@@ -285,13 +285,40 @@ def build_stage_one_turn_context(
         if str(item.get("direction") or item.get("focus") or "").strip()
     )
     normalized = text.strip()
+    semantic_direction_detail = str(
+        semantic_updates.get("stage_one_direction_detail") or ""
+        if isinstance(semantic_updates, dict)
+        else ""
+    ).strip()
+    direction_detail = (
+        semantic_direction_detail
+        if scope_confirmed or resolved is not None or resolved_scene_relations
+        else ""
+    )
+    direction_locked_before_turn = bool(
+        idea.get("direction_locked") is True
+        or selected_course_relations
+        or str(idea.get("core_phenomenon") or "").strip()
+        or str(idea.get("interest_description") or "").strip()
+    )
+    direction_locked = bool(
+        direction_locked_before_turn
+        or resolved is not None
+        or resolved_scene_relations
+        or direction_detail
+    )
     pending_reference_requested = bool(
         resolved_intent_name == "REQUEST_MORE_EXAMPLES"
-        and isinstance(pending_action, dict)
-        and pending_action.get("type")
-        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
-        and resolved_intent_target
-        not in {"exploration_scenes", "BREADTH_EXPLORATION"}
+        and (
+            direction_locked
+            or (
+                isinstance(pending_action, dict)
+                and pending_action.get("type")
+                in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+                and resolved_intent_target
+                not in {"exploration_scenes", "BREADTH_EXPLORATION"}
+            )
+        )
     )
     more_brainstorm_requested = bool(
         resolved_intent_name == "REQUEST_MORE_EXAMPLES"
@@ -342,6 +369,8 @@ def build_stage_one_turn_context(
         brainstorm_phase = BREADTH_EXPLORATION
     elif control_turn:
         brainstorm_phase = previous_phase
+    elif direction_detail:
+        brainstorm_phase = DEPTH_EXPANSION
     elif resolved is not None or resolved_scene_relations:
         brainstorm_phase = INTEREST_DESCRIPTION
     elif previous_phase == INTEREST_DESCRIPTION:
@@ -357,11 +386,11 @@ def build_stage_one_turn_context(
         resolved_focus = str(
             resolved.get("direction") or resolved.get("focus") or ""
         ).strip()
-    selected_focus = resolved_focus or previous_selected_focus
+    selected_focus = resolved_focus or previous_selected_focus or direction_detail
     if brainstorm_phase == INTEREST_DESCRIPTION and not selected_focus:
         selected_focus = normalized or previous_focus or topic_anchor
     interest_description = (
-        normalized
+        direction_detail or normalized
         if brainstorm_phase == DEPTH_EXPANSION and not control_turn
         else str(idea.get("interest_description") or "").strip()
     )
@@ -369,10 +398,13 @@ def build_stage_one_turn_context(
     core_phenomenon = previous_core_phenomenon
     if (
         brainstorm_phase == DEPTH_EXPANSION
-        and previous_phase == INTEREST_DESCRIPTION
         and not control_turn
+        and (
+            previous_phase in {BREADTH_EXPLORATION, INTEREST_DESCRIPTION}
+            or not previous_core_phenomenon
+        )
     ):
-        core_phenomenon = normalized
+        core_phenomenon = direction_detail or normalized
     refinement_history = idea.get("refinement_notes", [])
     refinement_notes = (
         [str(item).strip() for item in refinement_history if str(item).strip()]
@@ -383,10 +415,13 @@ def build_stage_one_turn_context(
         brainstorm_phase == DEPTH_EXPANSION
         and previous_phase == DEPTH_EXPANSION
         and not control_turn
-        and normalized
-        and (not refinement_notes or refinement_notes[-1] != normalized)
+        and (direction_detail or normalized)
+        and (
+            not refinement_notes
+            or refinement_notes[-1] != (direction_detail or normalized)
+        )
     ):
-        refinement_notes.append(normalized)
+        refinement_notes.append(direction_detail or normalized)
     refinement_notes = refinement_notes[-6:]
     focus_parts = [topic_anchor]
     if relation_selection_text and relation_selection_text != topic_anchor:
@@ -463,6 +498,8 @@ def build_stage_one_turn_context(
         "control_turn": control_turn,
         "more_brainstorm_requested": more_brainstorm_requested,
         "pending_reference_requested": pending_reference_requested,
+        "direction_locked": direction_locked,
+        "stage_one_direction_detail": direction_detail,
         "stage_one_no_direction": no_direction,
     }
 

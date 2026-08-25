@@ -249,6 +249,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
     ).strip()
     return {
         "research_direction": direction,
+        "direction_locked": idea.get("direction_locked") is True,
         "course_relationships": deepcopy(
             outline.get("course_relationships")
             or idea.get("selected_course_relations")
@@ -679,6 +680,9 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             )
     requested_state = str(raw.get("interaction_state_request") or "").upper()
     course_scope_status = str(raw.get("course_scope_status") or "").upper()
+    stage_one_direction_detail = str(
+        raw.get("stage_one_direction_detail") or ""
+    ).strip()[:1200]
     return {
         "selected_option_ids": selected_option_ids,
         "no_direction": raw.get("no_direction") is True,
@@ -704,6 +708,15 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             in {"COURSE_CONTENT", "OUT_OF_SCOPE", "UNCERTAIN"}
             else "UNCERTAIN"
         ),
+        # This is the substantive idea expressed alongside (or instead of)
+        # an A/B/C scene reference.  Keeping it separate lets the state
+        # machine accept "I choose A because I want to compare ..." as both
+        # a direction choice and a useful design contribution, without
+        # guessing from message length or topic keywords.
+        "stage_one_direction_detail": stage_one_direction_detail or None,
+        # A locked direction may be replaced only when the semantic resolver
+        # confirms that the student explicitly abandoned or replaced it.
+        "topic_change_explicit": raw.get("topic_change_explicit") is True,
     }
 
 

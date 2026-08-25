@@ -528,6 +528,8 @@ def build_exploration_scenes(
 
 
 def _format_exploration_scenes(scenes: list[dict[str, Any]]) -> str:
+    if not scenes:
+        return ""
     blocks: list[str] = []
     for scene in scenes:
         anchor = scene["course_anchor"]
@@ -937,7 +939,10 @@ class RuleBasedStageGenerator:
                     "因此不适合作为这门课实验设计的核心。"
                     "ECE329主要学习电磁场、电磁波和传输线，你可以先参考下面三个例子。"
                 )
-            elif selected_option is not None:
+            elif (
+                selected_option is not None
+                and brainstorm_phase == INTEREST_DESCRIPTION
+            ):
                 selected_direction = str(
                     selected_option.get("direction")
                     or selected_option.get("focus")
@@ -970,8 +975,7 @@ class RuleBasedStageGenerator:
                     introduction = (
                         f"{comparison_prefix}"
                         f"{_format_experiment_outline_seed(experiment_outline_seed or {})}\n\n"
-                        "这个雏形保留了你已经确定的方向，后续讨论会继续沿着同一个物理关系展开，"
-                        "不会让你重新选择已经确定的内容。"
+                        "接下来会一直沿着这个方向完善，不会再让你重新选题。"
                     )
                 else:
                     introduction = (
@@ -1038,6 +1042,13 @@ class RuleBasedStageGenerator:
                     "standard_comparisons": standard_comparisons,
                     "direction_summary": direction_summary,
                     "interest_description": interest_description,
+                    "direction_locked": bool(
+                        stage_one_context.get("direction_locked")
+                    ),
+                    "stage_one_direction_detail": str(
+                        stage_one_context.get("stage_one_direction_detail") or ""
+                    ).strip()
+                    or None,
                     "alternative_ideas": alternatives,
                     "exploration_scenes": exploration_scenes,
                     "deepening_connections": deepening_connections,
@@ -1184,34 +1195,15 @@ class RuleBasedStageGenerator:
             )
         return StepOutput(
             assistant_message=(
-                "这段总结已经把研究问题、主要比较、预期现象和课程关系串起来了。"
-                "我保留了你的原意，没有替你改写成另一份方案。"
+                "你已经把研究问题、主要比较、预期现象和课程关系串起来了。"
+                "我按你的原意保存，这次实验设计到这里就完成了。"
             ),
             stage_payload={
                 "student_summary_received": True,
+                "student_summary_confirmed": True,
                 "final_proposal_generated": False,
-                "pending_action": {
-                    "type": "CONFIRM_STAGE_OR_MODIFY",
-                    "subject": Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
-                    "proposal": {"student_summary_complete": True},
-                    "question": (
-                        "如果这就是你想保留的最终总结，直接告诉我确认完成；"
-                        "想调整的话，也可以直接补充或改写。"
-                    ),
-                    "advance_on_accept": True,
-                    "allowed_intents": [
-                        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
-                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-                        UserIntent.ADVANCE_STAGE.value,
-                        UserIntent.RETURN_TO_PREVIOUS_POINT.value,
-                        UserIntent.UNCLEAR.value,
-                    ],
-                },
             },
-            student_task=(
-                "如果这就是你想保留的最终总结，直接告诉我确认完成；"
-                "想调整的话，也可以直接补充或改写。"
-            ),
+            student_task=None,
         )
 
     def _generate_emvr(self, session: DesignSession, user_message: str) -> StepOutput:

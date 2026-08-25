@@ -310,48 +310,21 @@ def _persist_guided_student_summary(
             "student_summary": summary,
             "student_summary_sections": [summary],
             "student_summary_complete": True,
+            "student_summary_confirmed": True,
             "completion_source": "SEMANTIC_SUMMARY_REVIEW",
         }
     )
     return True
 
 
-def _guided_summary_review_output() -> StepOutput:
-    task = (
-        "如果这就是你想保留的最终总结，直接告诉我确认完成；"
-        "想调整的话，也可以直接补充或改写。"
-    )
+def _guided_summary_completion_output() -> StepOutput:
     return StepOutput(
         assistant_message=(
-            "这段总结已经把研究问题、主要比较、预期现象和课程关系串起来了。"
-            "我保留了你的原意，没有替你改写成另一份方案。"
+            "你已经把研究问题、主要比较、预期现象和课程关系串起来了。"
+            "我按你的原意保存，这次实验设计到这里就完成了。"
         ),
         stage_payload={
             "student_summary_received": True,
-            "final_proposal_generated": False,
-            "pending_action": {
-                "type": "CONFIRM_STAGE_OR_MODIFY",
-                "subject": Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
-                "proposal": {"student_summary_complete": True},
-                "question": task,
-                "advance_on_accept": True,
-                "allowed_intents": [
-                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
-                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-                    UserIntent.ADVANCE_STAGE.value,
-                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
-                    UserIntent.UNCLEAR.value,
-                ],
-            },
-        },
-        student_task=task,
-    )
-
-
-def _guided_summary_completion_output() -> StepOutput:
-    return StepOutput(
-        assistant_message="你的总结已经按原意保留，整个实验设计流程到这里完成。",
-        stage_payload={
             "student_summary_confirmed": True,
             "final_proposal_generated": False,
         },
@@ -579,6 +552,61 @@ class WorkflowEngine:
                 session,
                 request,
                 message,
+            )
+        idea_for_direction_lock = session.design_context.get("idea", {})
+        semantic_for_direction_lock = turn_intent.get("semantic_updates", {})
+        if (
+            input_kind != UNREASONABLE_REQUEST
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and not has_idea_development(session)
+            and isinstance(idea_for_direction_lock, dict)
+            and idea_for_direction_lock.get("course_scope_confirmed") is True
+            and turn_intent.get("intent")
+            in {
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            }
+            and isinstance(turn_intent.get("resolved_value"), str)
+            and str(turn_intent.get("resolved_value") or "").strip()
+        ):
+            if not isinstance(semantic_for_direction_lock, dict):
+                semantic_for_direction_lock = {}
+                turn_intent["semantic_updates"] = semantic_for_direction_lock
+            if not str(
+                semantic_for_direction_lock.get("stage_one_direction_detail") or ""
+            ).strip():
+                semantic_for_direction_lock["stage_one_direction_detail"] = str(
+                    turn_intent["resolved_value"]
+                ).strip()
+        if (
+            input_kind != UNREASONABLE_REQUEST
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and isinstance(idea_for_direction_lock, dict)
+            and idea_for_direction_lock.get("direction_locked") is True
+            and turn_intent.get("intent") == UserIntent.NEW_TOPIC.value
+            and not (
+                isinstance(semantic_for_direction_lock, dict)
+                and semantic_for_direction_lock.get("topic_change_explicit") is True
+            )
+        ):
+            # Once the student has chosen or described a direction, incidental
+            # new objects and examples refine that same design.  Replacing the
+            # whole topic requires an explicit semantic decision, not a phrase
+            # match or a model's unsupported NEW_TOPIC label.
+            turn_intent.update(
+                {
+                    "intent": UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    "target": str(
+                        idea_for_direction_lock.get("direction_summary")
+                        or idea_for_direction_lock.get("selected_focus")
+                        or "locked_stage_one_direction"
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "source": "SEMANTIC_DIRECTION_LOCK",
+                }
             )
         interaction_state_changed = False
         if input_kind != UNREASONABLE_REQUEST:
@@ -887,8 +915,15 @@ class WorkflowEngine:
             and intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
             and isinstance(pending_action, dict)
             and pending_action.get("type") == "ANSWER_IDEA_FACET"
-            and str(turn_intent.get("target") or "")
-            not in {"exploration_scenes", "BREADTH_EXPLORATION"}
+            and (
+                str(turn_intent.get("target") or "")
+                not in {"exploration_scenes", "BREADTH_EXPLORATION"}
+                or (
+                    isinstance(session.design_context.get("idea"), dict)
+                    and session.design_context["idea"].get("direction_locked")
+                    is True
+                )
+            )
             and has_idea_development(session)
         )
         if final_summary_confirmation_turn:
@@ -896,7 +931,7 @@ class WorkflowEngine:
             session.turn_context = {}
             completion_error = None
         elif summary_completed_this_turn:
-            output = _guided_summary_review_output()
+            output = _guided_summary_completion_output()
             session.turn_context = {}
             completion_error = None
         elif clarification_turn:
@@ -947,11 +982,13 @@ class WorkflowEngine:
                 and handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
                 and output.stage_payload.get("student_summary_received") is True
             ):
-                _persist_guided_student_summary(
+                summary_completed_this_turn = _persist_guided_student_summary(
                     session,
                     generation_message,
                     {"pending_answer_status": "CLEAR"},
                 )
+                if summary_completed_this_turn:
+                    output = _guided_summary_completion_output()
             if (
                 session.interaction_state is InteractionState.GUIDED_DESIGN
                 and handled_stage is not Stage.IDEA_BRAINSTORMING
@@ -1047,6 +1084,11 @@ class WorkflowEngine:
                 and not pre_transition_attempted
             )
         ) and output.stage_payload.get("request_rejected") is not True
+        if summary_completed_this_turn:
+            # A complete student-written summary is the terminal action in
+            # guided mode.  Do not add an otherwise content-free confirmation
+            # turn after the student has already done the requested synthesis.
+            should_complete = True
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and handled_stage is Stage.IDEA_BRAINSTORMING
@@ -1372,6 +1414,7 @@ class WorkflowEngine:
             value = str(turn_context.get(key) or "").strip()
             if value:
                 idea[key] = value
+        idea["direction_locked"] = bool(turn_context.get("direction_locked"))
         for key in (
             "selected_scene_ids",
             "selected_course_relations",

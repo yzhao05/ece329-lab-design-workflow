@@ -42,6 +42,14 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("response.request_rejected !== true", self.app_js)
         self.assertIn("summary.length >= 20", self.app_js)
 
+    def test_student_summary_is_a_terminal_turn_without_reconfirmation(self) -> None:
+        self.assertIn('if (!advanceRequested && message.trim())', self.app_js)
+        self.assertIn("student_summary_confirmed: true", self.app_js)
+        self.assertIn("这次实验设计到这里就完成了", self.app_js)
+        self.assertNotIn("确认总结并完成", self.app_js)
+        self.assertNotIn("确认完成总结", self.app_js)
+        self.assertNotIn("如果这就是你想保留的最终总结", self.app_js)
+
     def test_first_seven_steps_render_as_one_expandable_public_stage(self) -> None:
         self.assertIn('title: "实验想法完善"', self.app_js)
         self.assertIn("IDEA_DEVELOPMENT_STAGE_IDS", self.app_js)
@@ -58,7 +66,7 @@ class WebFrontendContractTests(unittest.TestCase):
             2,
         )
         self.assertIn(
-            "assets/app.js?v=20260825-trail13-context",
+            "assets/app.js?v=20260825-trail15-direction-lock",
             self.index_html,
         )
 

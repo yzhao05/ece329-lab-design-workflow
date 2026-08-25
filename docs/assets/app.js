@@ -1233,9 +1233,11 @@ function createDemoResponse(message, uiAction = null) {
     };
   }
   if (state.mode === "GUIDED_DESIGN" && state.stageIndex === STAGES.length - 1) {
-    if (advanceRequested && String(state.pendingSummary || "").trim().length >= 20) {
+    if (!advanceRequested && message.trim()) {
+      state.summarySections = [message.trim()];
+      state.pendingSummary = message.trim();
       return {
-        assistant_message: "你的总结已经按原意保留，整个实验设计流程到这里完成。",
+        assistant_message: "你已经把研究问题、主要比较、预期现象和课程关系串起来了。我按你的原意保存，这次实验设计到这里就完成了。",
         current_stage: STAGES[state.stageIndex][0],
         handled_stage: STAGES[state.stageIndex][0],
         interaction_state: state.mode,
@@ -1250,16 +1252,16 @@ function createDemoResponse(message, uiAction = null) {
       };
     }
     return {
-      assistant_message: "这段总结已经把你的研究问题、主要比较和课程关系串起来了。我保留了你的原意，没有替你改写成另一份方案。",
-      student_task: "如果这就是你想保留的最终总结，直接确认完成；想调整的话，也可以继续补充。",
+      assistant_message: "请直接写出你想保留的总结；写完后这次实验设计就完成了。",
+      student_task: null,
       current_stage: STAGES[state.stageIndex][0],
       handled_stage: STAGES[state.stageIndex][0],
       interaction_state: state.mode,
       stage_payload: {
-        student_summary_received: true,
+        awaiting_student_summary: true,
         final_proposal_generated: false,
       },
-      quick_actions: [advanceQuickAction("确认总结并完成")],
+      quick_actions: [],
       warnings: [],
       _runtime_source: "demo",
     };
@@ -1656,13 +1658,7 @@ function deriveQuickActions(response) {
     return [];
   }
   if (state.stageIndex === STAGES.length - 1) {
-    if (response.stage_payload?.student_summary_received === true) {
-      return [advanceQuickAction("确认总结并完成")];
-    }
-    return String(state.pendingSummary || "").trim().length >= 20
-      && (state.summarySections || []).filter((section) => String(section).trim().length >= 10).length >= 1
-      ? [advanceQuickAction("确认完成总结")]
-      : [];
+    return [];
   }
   return [advanceQuickAction(guidedAdvanceLabel(state.stageIndex))];
 }

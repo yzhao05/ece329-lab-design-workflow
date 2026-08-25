@@ -159,6 +159,8 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("给出一个可能、参考、示例或你的判断", request["instructions"])
         self.assertIn("只返回实质设计内容", request["instructions"])
         self.assertIn("CONFIRM_STAGE_OR_MODIFY", request["instructions"])
+        self.assertIn("stage_one_direction_detail", request["instructions"])
+        self.assertIn("topic_change_explicit", request["instructions"])
 
     def test_intent_resolver_repairs_an_omitted_active_facet_decision(self) -> None:
         base = {

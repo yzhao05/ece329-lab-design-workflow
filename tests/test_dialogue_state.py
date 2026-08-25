@@ -439,7 +439,7 @@ class DialogueStateTests(unittest.TestCase):
             Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
         )
 
-    def test_one_complete_student_summary_reaches_final_confirmation(self) -> None:
+    def test_one_complete_student_summary_finishes_without_second_confirmation(self) -> None:
         generator = ScriptedSemanticGenerator(
             UserIntent.ANSWER_CURRENT_QUESTION,
             semantic_updates={"pending_answer_status": "CLEAR"},
@@ -463,17 +463,14 @@ class DialogueStateTests(unittest.TestCase):
             "我想比较同种和异种点电荷在距离变化时的电场线分布，观察中间区域场强的差异，"
             "并用ECE329中的静电场叠加关系解释这些现象。"
         )
-        reviewed = engine.process_turn(session.design_id, {"message": summary})
-        self.assertTrue(reviewed["stage_payload"]["student_summary_received"])
-        self.assertNotIn("请先用两到三句话", reviewed["assistant_message"])
-        self.assertIn("确认完成", reviewed["student_task"])
-
-        generator.intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
-        generator.semantic_updates = {}
-        completed = engine.process_turn(session.design_id, {"message": "确认完成"})
+        completed = engine.process_turn(session.design_id, {"message": summary})
+        self.assertTrue(completed["stage_payload"]["student_summary_received"])
+        self.assertTrue(completed["stage_payload"]["student_summary_confirmed"])
+        self.assertNotIn("请先用两到三句话", completed["assistant_message"])
+        self.assertNotIn("确认完成", completed.get("student_task") or "")
         self.assertEqual(completed["workflow_status"], "complete")
         self.assertIsNone(completed["completion_error"])
-        self.assertIn("流程到这里完成", completed["assistant_message"])
+        self.assertIn("到这里就完成了", completed["assistant_message"])
 
     def test_context_dependent_short_acceptance_uses_semantic_resolution(self) -> None:
         open_question = {
@@ -1198,6 +1195,75 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn("你的预测", result["assistant_message"])
         self.assertIn("实验中需要出现的对象和关系", result["assistant_message"])
         self.assertNotIn("预计关键条件发生变化时", result["assistant_message"])
+
+    def test_trail14_scene_choice_and_own_idea_lock_direction_in_one_turn(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design(
+            "我想探究静电场，看看不同物体的场线分布和相互影响"
+        )
+        selected = first["stage_payload"]["exploration_scenes"][0]["course_anchor"]
+        detail = "我对导体和介质在同样电场下的场线区别感兴趣"
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={
+                "selected_option_ids": [selected["option_id"]],
+                "course_scope_status": "COURSE_CONTENT",
+                "stage_one_direction_detail": detail,
+            },
+        )
+        engine.generator = generator
+
+        result = engine.process_turn(
+            first["design_id"],
+            {"message": f"可以基于图景A展开。{detail}"},
+        )
+
+        self.assertEqual(result["stage_payload"]["brainstorm_phase"], "DEPTH_EXPANSION")
+        self.assertEqual(result["stage_payload"]["exploration_scenes"], [])
+        self.assertEqual(result["stage_payload"]["alternative_ideas"], [])
+        self.assertTrue(result["stage_payload"]["direction_locked"])
+        self.assertEqual(result["stage_payload"]["core_phenomenon"], detail)
+        self.assertEqual(
+            result["stage_payload"]["selected_course_relations"],
+            [selected],
+        )
+        self.assertNotIn("下面不是一组标准答案", result["assistant_message"])
+        self.assertNotIn("你可以描述让你注意到它的现象", result["assistant_message"])
+        self.assertIn("实验大纲雏形", result["assistant_message"])
+        stored = engine.store.get(first["design_id"])
+        self.assertTrue(stored.design_context["idea"]["direction_locked"])
+        self.assertIn("idea_development", stored.design_context)
+
+    def test_locked_direction_turns_scene_request_into_current_facet_reference(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design("我想探索静电场中的材料响应")
+        selected = first["stage_payload"]["exploration_scenes"][0]["course_anchor"]
+        detail = "比较相同外形的导体和介质在同一外加场中的场线分布"
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={
+                "selected_option_ids": [selected["option_id"]],
+                "course_scope_status": "COURSE_CONTENT",
+                "stage_one_direction_detail": detail,
+            },
+        )
+        engine.generator = generator
+        engine.process_turn(
+            first["design_id"],
+            {"message": f"我选这个图景，并想{detail}"},
+        )
+
+        generator.intent = UserIntent.REQUEST_MORE_EXAMPLES
+        generator.target = "exploration_scenes"
+        generator.semantic_updates = {"course_scope_status": "COURSE_CONTENT"}
+        reference = engine.process_turn(
+            first["design_id"],
+            {"message": "我想先看一个贴合当前方向的参考"},
+        )
+
+        self.assertEqual(reference["stage_payload"].get("exploration_scenes", []), [])
+        self.assertNotIn("图景 A｜", reference["assistant_message"])
+        self.assertIn("不重新换题", reference["assistant_message"])
 
     def test_confirmed_candidate_answer_generalizes_to_later_guided_stage(self) -> None:
         pending = {

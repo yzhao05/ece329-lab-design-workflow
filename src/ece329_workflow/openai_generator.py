@@ -879,6 +879,13 @@ def _validate_lecture_grounding(
                     )
         stage_one_thread = prompt_packet["context"].get("stage_one_thread", {})
         if isinstance(stage_one_thread, dict):
+            if (
+                stage_one_thread.get("direction_locked") is True
+                and phase == BREADTH_EXPLORATION
+            ):
+                raise ModelOutputError(
+                    "A locked Stage 1 direction cannot return to breadth exploration"
+                )
             selected_relations = stage_one_thread.get("selected_course_relations", [])
             preserved_relation_catalog = [
                 *retrieved_brainstorm_options,
@@ -1180,6 +1187,8 @@ def _step_output_from_response(
                 "refinement_notes",
                 "direction_summary",
                 "interest_description",
+                "direction_locked",
+                "stage_one_direction_detail",
                 "ready_for_next_stage",
                 "resolved_stage_one_reference",
             ):
@@ -1270,8 +1279,7 @@ def _step_output_from_response(
                 comparison_prefix = f"{comparison_summary}\n\n" if comparison_summary else ""
                 output.assistant_message = (
                     f"{comparison_prefix}{_format_experiment_outline_seed(outline_seed)}\n\n"
-                    "这个雏形保留了你已经确定的方向，后续讨论会继续沿着同一个物理关系展开，"
-                    "不会让你重新选择已经确定的内容。"
+                    "接下来会一直沿着这个方向完善，不会再让你重新选题。"
                 )
                 output.student_task = (
                     "请检查这个大纲雏形是否准确；若有关键遗漏，请直接补充。"
@@ -1397,6 +1405,9 @@ class OpenAIStageGenerator:
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自pending_action中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
+                "stage_one_direction_detail（只在学生回应三幅图景时，同时说出了自己想研究的"
+                "具体物理现象或关系时填写其实质描述；只选A/B/C时为null）、"
+                "topic_change_explicit（只有学生明确放弃、替换当前研究方向时为true）、"
                 "facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
                 "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING）、"
                 "comparison_updates（comparison_id和cases必须来自pending_action或carried_context，"
@@ -1413,6 +1424,14 @@ class OpenAIStageGenerator:
                 "不能因为没有命中某个词、用户只说序号或使用了代词就判OUT_OF_SCOPE；此时必须结合"
                 "previous_question、pending_action和已保存方向。没有具体思路属于课程内头脑风暴，"
                 "course_scope_status返回COURSE_CONTENT并把no_direction设为true。"
+                "学生在三幅图景后可能在同一句里完成两件事：指向一个或多个图景，并进一步说明"
+                "自己的研究设想。此时selected_option_ids与stage_one_direction_detail必须同时返回；"
+                "不得只记录选项而丢掉实质想法，也不得因为说得较长就重新展示图景。学生不引用图景"
+                "但直接给出明确的课内研究设想时，也应把该设想写入stage_one_direction_detail。"
+                "一旦carried_context中的方向已锁定，后续材料、对象、边界或观察细节默认都是对当前"
+                "方向的完善，不是NEW_TOPIC。只有学生明确表示不要原方向、改做另一主题或重新开始时"
+                "才能返回NEW_TOPIC，并把topic_change_explicit设为true。请求更多帮助时应围绕已锁定"
+                "方向给参考，不得把target设为exploration_scenes。"
                 "当pending_action.type为ANSWER_IDEA_FACET时，subject就是当前唯一需要判断的facet。"
                 "REQUEST_MORE_EXAMPLES必须区分请求对象：若学生明确要另一组三幅广度图景，"
                 "target返回exploration_scenes；若学生要当前开放问题或facet的课程内参考，target"
@@ -1437,6 +1456,7 @@ class OpenAIStageGenerator:
                 "若subject=STUDENT_SYNTHESIS_OR_EMVR_OUTPUT，一段学生自己写的总结只要已经串联"
                 "研究问题或对象、主要比较或观察现象，以及ECE329课程关系，就应返回CLEAR；"
                 "不得要求拆成多轮，也不得因为没有逐字重复‘为什么值得研究’而返回UNCLEAR。"
+                "这段总结本身就是引导流程的最终动作，不需要再返回要求二次确认的意图。"
                 "没有结构化更新时semantic_updates_json为null。"
             ),
             "input": [

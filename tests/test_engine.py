@@ -827,8 +827,10 @@ class WorkflowEngineTests(unittest.TestCase):
 
         self.assertEqual(result["handled_stage"], Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value)
         self.assertFalse(result["stage_payload"]["final_proposal_generated"])
-        self.assertIn("这段总结已经把研究问题", result["assistant_message"])
-        self.assertIn("没有替你改写成另一份方案", result["assistant_message"])
+        self.assertIn("你已经把研究问题", result["assistant_message"])
+        self.assertIn("到这里就完成了", result["assistant_message"])
+        self.assertEqual(result["workflow_status"], "complete")
+        self.assertIsNone(result["student_task"])
         self.assertNotIn(summary, result["assistant_message"])
 
     def test_guided_final_stage_requires_student_written_summary(self) -> None:
