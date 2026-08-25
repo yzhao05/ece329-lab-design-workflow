@@ -39,6 +39,7 @@ from .guardrails import (
     preclassify_stage_one_input,
 )
 from .idea_development import (
+    build_facet_reference_output,
     build_gap_output,
     decorate_outline_output,
     has_idea_development,
@@ -819,14 +820,13 @@ class WorkflowEngine:
                 selected_option_id=request.selected_option_id,
                 semantic_updates=semantic_updates,
                 resolved_intent_name=content_intent_name,
+                resolved_intent_target=str(turn_intent.get("target") or ""),
+                pending_action=pending_action,
             )
             if isinstance(idea_context, dict):
                 comparisons = stage_one_context.get("standard_comparisons")
                 if isinstance(comparisons, list):
                     idea_context["standard_comparisons"] = deepcopy(comparisons)
-            if intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value:
-                stage_one_context["brainstorm_phase"] = BREADTH_EXPLORATION
-                stage_one_context["more_brainstorm_requested"] = True
             turn_context["idea_development"] = deepcopy(
                 session.design_context.get("idea_development", {})
             )
@@ -846,6 +846,8 @@ class WorkflowEngine:
                     selected_option_id=request.selected_option_id,
                     semantic_updates=semantic_updates,
                     resolved_intent_name=content_intent_name,
+                    resolved_intent_target=str(turn_intent.get("target") or ""),
+                    pending_action=pending_action,
                 )
             )
         session.turn_context = turn_context
@@ -879,6 +881,16 @@ class WorkflowEngine:
             intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             and input_kind != UNREASONABLE_REQUEST
         )
+        idea_facet_reference_turn = bool(
+            handled_stage is Stage.IDEA_BRAINSTORMING
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+            and intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+            and isinstance(pending_action, dict)
+            and pending_action.get("type") == "ANSWER_IDEA_FACET"
+            and str(turn_intent.get("target") or "")
+            not in {"exploration_scenes", "BREADTH_EXPLORATION"}
+            and has_idea_development(session)
+        )
         if final_summary_confirmation_turn:
             output = _guided_summary_completion_output()
             session.turn_context = {}
@@ -900,6 +912,10 @@ class WorkflowEngine:
                     message,
                 ) or pending_action
                 output = clarification_output(pending_action)
+            session.turn_context = {}
+            completion_error = None
+        elif idea_facet_reference_turn:
+            output = build_facet_reference_output(session)
             session.turn_context = {}
             completion_error = None
         elif dynamic_idea_turn:

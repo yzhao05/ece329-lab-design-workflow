@@ -25,6 +25,7 @@ from ece329_workflow.guardrails import (
     infer_standard_comparisons,
 )
 from ece329_workflow.knowledge_base import KNOWLEDGE
+from ece329_workflow.idea_development import initialize_idea_development
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.stages import public_stage_catalog, stage_title
 
@@ -62,6 +63,110 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["interaction_state"], InteractionState.GUIDED_DESIGN.value)
         self.assertIsNotNone(result["student_task"])
         self.assertLessEqual(result["student_task"].count("？"), 1)
+
+    def test_stage_one_reference_request_stays_with_each_pending_facet(self) -> None:
+        class ReferenceRequestGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.REQUEST_MORE_EXAMPLES,
+                    target=(pending_action or {}).get("subject"),
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                )
+
+        student_facets = (
+            "research_question",
+            "learning_objective",
+            "hypothesis",
+            "conceptual_structure",
+        )
+        for facet_id in student_facets:
+            with self.subTest(facet_id=facet_id):
+                engine = WorkflowEngine(generator=ReferenceRequestGenerator())
+                session = DesignSession(
+                    design_id=f"design_reference_{facet_id}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=0,
+                    design_context={
+                        "idea": {
+                            "original": "比较同形状导体球与介质球周围的静电场分布",
+                            "topic_anchor": "静电场与材料边界",
+                            "current_focus": "比较导体球与介质球的场线和内部场",
+                            "direction_summary": "材料性质与静电场分布的关系",
+                            "course_scope_confirmed": True,
+                            "brainstorm_phase": "DEPTH_EXPANSION",
+                        },
+                        "experiment_outline_seed": {
+                            "core_phenomenon": "导体与介质附近的静电场分布差异",
+                            "course_relationships": ["静电场、材料与边界条件"],
+                        },
+                    },
+                )
+                development = initialize_idea_development(
+                    session,
+                    session.design_context["experiment_outline_seed"],
+                )
+                for candidate_id in student_facets:
+                    development["facets"][candidate_id].update(
+                        {
+                            "status": "MISSING" if candidate_id == facet_id else "CLEAR",
+                            "evidence": "" if candidate_id == facet_id else "已由学生说明",
+                            "source": None if candidate_id == facet_id else "STUDENT_SEMANTIC",
+                        }
+                    )
+                development["active_facet_id"] = facet_id
+                development["missing_facet_ids"] = [facet_id]
+                development["completed_facet_ids"] = [
+                    key
+                    for key, value in development["facets"].items()
+                    if value.get("status") == "CLEAR"
+                ]
+                development["complete"] = False
+                session.model_context["dialogue_state"] = {
+                    "pending_action": {
+                        "type": "ANSWER_IDEA_FACET",
+                        "subject": facet_id,
+                        "proposal": {"facet_id": facet_id},
+                        "question": "请说明当前仍缺少的这一点。",
+                        "allowed_intents": [
+                            "ANSWER_CURRENT_QUESTION",
+                            "ACCEPT_PREVIOUS_PROPOSAL",
+                            "MODIFY_PREVIOUS_PROPOSAL",
+                            "REQUEST_MORE_EXAMPLES",
+                            "RETURN_TO_PREVIOUS_POINT",
+                            "NEW_TOPIC",
+                            "UNCLEAR",
+                        ],
+                    }
+                }
+                before_focus = session.design_context["idea"]["current_focus"]
+                engine.store.save(session)
+
+                result = engine.process_turn(
+                    session.design_id,
+                    {"message": "请先给我一份与当前待办相符的课程参考"},
+                )
+
+                self.assertEqual(result["stage_payload"]["reference_for_facet"], facet_id)
+                self.assertEqual(result["stage_payload"]["alternative_ideas"], [])
+                self.assertEqual(result["stage_payload"]["exploration_scenes"], [])
+                self.assertNotIn("图景 A", result["assistant_message"])
+                self.assertIn("不重新换题", result["assistant_message"])
+                stored = engine.get_design(session.design_id)
+                self.assertEqual(
+                    stored["design_context"]["idea"]["current_focus"],
+                    before_focus,
+                )
+                saved_session = engine.store.get(session.design_id)
+                pending = saved_session.model_context["dialogue_state"]["pending_action"]
+                self.assertEqual(pending["type"], "ANSWER_IDEA_FACET")
+                self.assertEqual(pending["subject"], facet_id)
 
     def test_guided_brainstorm_requires_student_confirmation(self) -> None:
         first = self.engine.create_design("研究传输线驻波")
@@ -985,8 +1090,8 @@ class WorkflowEngineTests(unittest.TestCase):
             charge_comparison["role"],
             "PROPOSED_BASELINE_COMPARISON",
         )
-        self.assertIn("建议默认把同种电荷与异种电荷", ready["assistant_message"])
-        self.assertIn("确认当前概括即表示采纳", ready["assistant_message"])
+        self.assertIn("这组对照先作为建议保留：同种电荷与异种电荷", ready["assistant_message"])
+        self.assertIn("如果符合你的想法，可以直接沿用", ready["assistant_message"])
         self.assertNotIn("自动", ready["assistant_message"])
         for relation in expected_relations:
             self.assertIn(relation["direction"], ready["assistant_message"])
@@ -1523,6 +1628,29 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("KNOWLEDGE.scene_components(", generator_source)
         self.assertIn("excluded_signatures=used_signatures", generator_source)
         self.assertNotIn('if "驻波" in direction', generator_source)
+
+        generic_titles = {
+            frame["title"] for frame in KNOWLEDGE.generic_scene_frames
+        }
+        self.assertEqual(
+            generic_titles,
+            {
+                "让一支探针穿过看不见的场",
+                "把三维空间切成一层层剖面",
+                "把两个可调条件铺成一张响应地图",
+            },
+        )
+        self.assertTrue(
+            generic_titles.isdisjoint(
+                {template["title"] for template in KNOWLEDGE.scene_templates}
+            )
+        )
+
+        initial = self.engine.create_design("我想探索静电场中的空间分布")
+        self.assertIn(
+            "如果这三个图景都没有引起你的兴趣",
+            initial["assistant_message"],
+        )
 
     def test_exploration_catalog_covers_every_course_and_supplement_point(self) -> None:
         catalog = KNOWLEDGE.exploration_scene_catalog()

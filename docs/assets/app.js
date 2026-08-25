@@ -845,19 +845,19 @@ function buildTurnRequest(message, uiAction = null) {
 function createDemoExplorationScenes(evidence) {
   const frames = [
     {
-      title: "让两个对象逐渐靠近",
-      picture: "想象把两个相关对象从相距很远慢慢移到彼此附近，并从不同方向观察周围的场或波。原先规则的空间图样会在哪里先弯曲、聚集、抵消或重新排列？",
-      extension: "可以把规则外形换成带尖角、弯折或窄缝的结构，看看画面会不会出现新的特征。",
+      title: "让一支探针穿过看不见的场",
+      picture: "想象一支能够显示方向和大小的探针缓慢穿过实验区域，每到一个位置就留下一个箭头和读数。把整条路径上的记录排在一起后，原本看不见的空间变化会怎样变成有峰值、低谷或方向翻转的轨迹？",
+      extension: "可以让探针沿直线、圆弧或闭合路径移动，比较不同路线突出哪些特征。",
     },
     {
-      title: "让材料与边界形成反差",
-      picture: "想象保持整体轮廓相近，却把其中一个区域换成另一种材料、边界或终端状态。从界面的一侧走到另一侧时，场的方向、幅度或传播图样会怎样变化？",
-      extension: "可以设想带开口的外壳、分层材料或不完全封闭的边界，作为进一步联想。",
+      title: "把三维空间切成一层层剖面",
+      picture: "想象把一个复杂的场或波分布切成许多平行薄层，并把每层上的方向、强弱或相位用颜色显示。连续翻动这些剖面时，集中区域、节点或方向变化会突然出现、移动，还是在多层之间保持相同形状？",
+      extension: "可以改变剖面的方向或间距，看看哪些空间特征会变得更清楚。",
     },
     {
-      title: "让多个来源在空间中相遇",
-      picture: "想象同时存在两个来源或两条传播路径，并缓慢改变它们的相对位置与朝向。在空间中移动观察点，哪里会出现增强、减弱、节点或方向突变？",
-      extension: "可以加入第三个对象或不对称扰动，观察原有图样是否仍保持直观的对称性。",
+      title: "把两个可调条件铺成一张响应地图",
+      picture: "想象横向改变一个条件、纵向改变另一个条件，每一种组合都在地图上留下一个颜色格子。整张图填满后，强响应形成山脊，弱响应形成谷地，还可能出现孤立峰值或弯曲分界。",
+      extension: "可以在地图上加入一条理论预测路径，比较沿路径观察和浏览完整参数空间得到的认识。",
     },
   ];
   return evidence.options.map((direction, index) => {
@@ -879,13 +879,14 @@ function createDemoExplorationScenes(evidence) {
 }
 
 function formatDemoExplorationScenes(scenes) {
-  return scenes.map((scene) => [
+  const blocks = scenes.map((scene) => [
     `${scene.label}｜${scene.title}`,
     scene.physical_picture,
     `启发性延伸：${scene.illustrative_extension}`,
     `可以继续想：${scene.thinking_prompt}`,
     `组合提示：${scene.combination_seed}`,
   ].join("\n")).join("\n\n");
+  return `${blocks}\n\n如果这三个图景都没有引起你的兴趣，也没关系。我还可以从其他ECE329课程关系中再为你展示一组不同的图景。`;
 }
 
 function demoBreadthTask() {
@@ -1359,7 +1360,7 @@ function formatDemoStandardComparisons(comparisons) {
       : "已按你的决定移除这组默认对照。";
     if (status === "ACCEPTED") return `已采纳${cases.join("与")}作为一组基本对照。`;
     return recommended.length
-      ? `建议默认把${recommended.join("与")}作为一组基本对照；确认当前概括即表示采纳，也可以直接指出要删改。`
+      ? `这组对照先作为建议保留：${recommended.join("与")}。如果符合你的想法，可以直接沿用；想删掉或替换其中一种也可以直接说。`
       : "";
   }).join("");
 }
@@ -1486,10 +1487,16 @@ function demoStudentFacingNextTurn(status, firstReview = false) {
   }
   const active = status.facets.find((facet) => facet.facet_id === status.active_facet_id);
   const title = active?.title || "下一部分";
-  const prefix = firstReview
-    ? "这个方向已经形成了可以继续发展的实验雏形。"
-    : "我们继续沿着同一个实验方向往下完善。";
-  return `${prefix} 接下来先把“${title}”说清楚：${demoIdeaDevelopmentTask(status)}`;
+  if (firstReview) {
+    return `这个方向已经有了可以继续发展的实验雏形。接下来先把“${title}”说清楚：${demoIdeaDevelopmentTask(status)}`;
+  }
+  const transitions = {
+    research_question: "接下来把这个想法收成一个能回答的研究问题：",
+    learning_objective: "接下来看看这个实验最终要帮助你弄懂什么：",
+    hypothesis: "接下来做一个有物理依据的预测：",
+    conceptual_structure: "接下来把实验中需要出现的对象和关系理清：",
+  };
+  return `${transitions[status.active_facet_id] || `接下来看看“${title}”：`}${demoIdeaDevelopmentTask(status)}`;
 }
 
 function demoStudentFacingRetry(status) {
@@ -1504,20 +1511,19 @@ function demoStudentFacingRetry(status) {
 }
 
 function demoIdeaAcknowledgement(message, clarifiedFacetIds, status) {
-  const excerpt = String(message || "").trim().replace(/\s+/g, " ");
   const titles = clarifiedFacetIds
     .map((facetId) => status.facets.find((facet) => facet.facet_id === facetId)?.title)
     .filter(Boolean);
   if (titles.length === 1 && titles[0] === "学习目标") {
-    return `这个学习目标表达得很清楚：“${excerpt}”。`;
+    return "这个学习目标很清楚，后面的设计需要真正帮助你解释这条物理关系。";
   }
   if (titles.length === 1 && titles[0] === "研究问题") {
-    return `这个研究问题已经很具体：“${excerpt}”。`;
+    return "这个研究问题已经很具体，比较条件和准备观察的现象都对上了。";
   }
   if (titles.length === 1 && titles[0] === "假设与预期趋势") {
-    return `你的预测已经同时给出了现象和判断：“${excerpt}”。`;
+    return "你的预测已经同时给出了现象和物理理由，我们可以接着往下完善。";
   }
-  return `你的回答很清楚：“${excerpt}”。这已经把${titles.map((title) => `“${title}”`).join("、")}说明得更具体。`;
+  return `这部分已经把${titles.map((title) => `“${title}”`).join("、")}说明得更具体。`;
 }
 
 function applyResponse(response, userMessage) {

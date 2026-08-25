@@ -295,6 +295,73 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
         self.assertIn("pending_answer_status=CLEAR", repair_text)
 
+    def test_intent_resolver_reviews_a_substantive_facet_answer_marked_missing(self) -> None:
+        base = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "hypothesis",
+            "resolved_value_json": None,
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    **base,
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "facet_updates": [
+                                {"facet_id": "hypothesis", "status": "MISSING"}
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                {
+                    **base,
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "facet_updates": [
+                                {"facet_id": "hypothesis", "status": "CLEAR"}
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "hypothesis",
+            "proposal": {"facet_id": "hypothesis", "title": "假设与预期趋势"},
+            "question": "预计条件变化时会出现什么趋势，物理理由是什么？",
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "REQUEST_MORE_EXAMPLES",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            (
+                "导体内部电场应接近零，介质内部仍有电场；靠近激励源时畸变会增强，"
+                "而旋转理想球体不应改变分布，因为几何仍保持对称。"
+            ),
+            pending,
+            {"research_direction": "比较导体球与介质球附近的静电场"},
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["facet_updates"],
+            [{"facet_id": "hypothesis", "status": "CLEAR"}],
+        )
+        self.assertEqual(len(transport.requests), 2)
+        repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
+        self.assertIn("不能一边返回ANSWER_CURRENT_QUESTION一边标MISSING", repair_text)
+        self.assertIn("REQUEST_MORE_EXAMPLES", repair_text)
+
     def test_semantic_no_direction_gets_a_friendly_course_brainstorm_lead(self) -> None:
         session = guided_session()
         message = "完全没头绪，先帮我打开思路"

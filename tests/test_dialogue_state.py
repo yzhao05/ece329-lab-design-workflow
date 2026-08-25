@@ -31,10 +31,12 @@ class ScriptedSemanticGenerator(RuleBasedStageGenerator):
         *,
         confidence: float = 0.97,
         semantic_updates: dict | None = None,
+        target: str | None = None,
     ) -> None:
         self.intent = intent
         self.confidence = confidence
         self.semantic_updates = semantic_updates or {}
+        self.target = target
         self.calls: list[dict] = []
 
     def resolve_intent(self, session, user_message, pending_action, carried_context):
@@ -47,7 +49,13 @@ class ScriptedSemanticGenerator(RuleBasedStageGenerator):
         )
         return resolved_intent(
             self.intent,
-            target=str(pending_action.get("subject") or "") if pending_action else None,
+            target=(
+                self.target
+                if self.target is not None
+                else str(pending_action.get("subject") or "")
+                if pending_action
+                else None
+            ),
             resolved_value=(pending_action.get("proposal") if pending_action else None),
             preserve_current_design=True,
             confidence=self.confidence,
@@ -969,7 +977,10 @@ class DialogueStateTests(unittest.TestCase):
         self.assertTrue(result["stage_payload"]["combination_intent"])
 
     def test_more_examples_semantic_intent_bypasses_gap_check_without_losing_context(self) -> None:
-        generator = ScriptedSemanticGenerator(UserIntent.ANSWER_CURRENT_QUESTION)
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target="exploration_scenes",
+        )
         engine = WorkflowEngine(generator=generator)
         first = engine.create_design("我想研究传输线中的反射和驻波")
         session = engine.store.get(first["design_id"])
@@ -1137,6 +1148,57 @@ class DialogueStateTests(unittest.TestCase):
         self.assertNotIn("不需要再次重写", confirmed["assistant_message"])
         self.assertFalse(confirmed["stage_payload"].get("clarification_required", False))
 
+    def test_trail13_substantive_hypothesis_is_saved_without_repeating_the_question(self) -> None:
+        hypothesis = (
+            "导体球周围的场线弯曲更明显，因为导体内部场为零，场线只能绕行。"
+            "介质球场线会穿进去，弯曲小一些。如果球移近电极，场强变大，弯曲应该"
+            "更明显；如果只是旋转球，球形对称所以弯曲程度不变。"
+        )
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={
+                "facet_updates": [
+                    {"facet_id": "hypothesis", "status": "CLEAR"}
+                ]
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_trail13_hypothesis")
+        development = session.design_context["idea_development"]
+        for facet_id in ("research_question", "learning_objective"):
+            development["facets"][facet_id].update(
+                {
+                    "status": "CLEAR",
+                    "evidence": "前面已经由学生说明",
+                    "source": "STUDENT_SEMANTIC",
+                }
+            )
+        development["facets"]["hypothesis"].update(
+            {"status": "MISSING", "evidence": "", "source": None}
+        )
+        development["facets"]["conceptual_structure"].update(
+            {"status": "MISSING", "evidence": "", "source": None}
+        )
+        development["active_facet_id"] = "hypothesis"
+        development["missing_facet_ids"] = ["hypothesis", "conceptual_structure"]
+        development["complete"] = False
+        save_pending_action(
+            session,
+            Stage.IDEA_BRAINSTORMING,
+            build_gap_output(session, ""),
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": hypothesis})
+
+        status = result["stage_payload"]["idea_development_status"]
+        self.assertEqual(status["facets_by_id"]["hypothesis"]["status"], "CLEAR")
+        self.assertEqual(status["facets_by_id"]["hypothesis"]["evidence"], hypothesis)
+        self.assertEqual(status["active_facet_id"], "conceptual_structure")
+        self.assertIn("你的预测", result["assistant_message"])
+        self.assertIn("实验中需要出现的对象和关系", result["assistant_message"])
+        self.assertNotIn("预计关键条件发生变化时", result["assistant_message"])
+
     def test_confirmed_candidate_answer_generalizes_to_later_guided_stage(self) -> None:
         pending = {
             "type": "ANSWER_STAGE_QUESTION",
@@ -1267,8 +1329,11 @@ class DialogueStateTests(unittest.TestCase):
             {"message": "现在还是不知道怎样写研究问题"},
         )
 
-        self.assertIn("不用重写前面的内容", first["assistant_message"])
-        self.assertIn("先给你一个更具体的起点", second["assistant_message"])
+        self.assertTrue(first["stage_payload"]["reference_only"])
+        self.assertTrue(second["stage_payload"]["reference_only"])
+        self.assertEqual(first["stage_payload"]["reference_for_facet"], "research_question")
+        self.assertEqual(second["stage_payload"]["reference_for_facet"], "research_question")
+        self.assertNotIn("图景 A", first["assistant_message"])
         self.assertNotEqual(first["assistant_message"], second["assistant_message"])
 
     def test_semantic_comparison_update_uses_validated_ids_and_cases(self) -> None:

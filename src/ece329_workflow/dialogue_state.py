@@ -604,6 +604,22 @@ def validate_resolved_intent(
         else:
             intent = UserIntent.UNCLEAR.value
             semantic_updates = {}
+    if (
+        source.startswith("SEMANTIC")
+        and pending_question_answer_needs_review(
+            intent,
+            semantic_updates,
+            pending_action,
+        )
+    ):
+        # A model must not make an open question remain missing while also
+        # claiming that the student answered it.  The semantic resolver gets
+        # one dedicated repair attempt before validation; if the contradiction
+        # survives, keep the design unchanged and offer help for the exact
+        # pending question instead of making the student repeat it.
+        intent = UserIntent.REQUEST_MORE_EXAMPLES.value
+        semantic_updates = {}
+        source = "SEMANTIC_RECOVERED_REFERENCE_REQUEST"
     advance_requested = raw.get("advance_requested")
     if (
         intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
@@ -740,6 +756,52 @@ def pending_facet_decision_missing(
         and item.get("status") in {"CLEAR", "MISSING"}
         for item in updates
     )
+
+
+def pending_question_answer_needs_review(
+    intent: UserIntent | str,
+    semantic_updates: dict[str, Any] | None,
+    pending_action: dict[str, Any] | None,
+) -> bool:
+    """Detect a semantic answer/status contradiction for any open question.
+
+    ``MISSING`` is a useful description of the design state, but it is not a
+    coherent result when the resolver has simultaneously classified the same
+    turn as the student's answer.  In that situation the semantic model must
+    review the whole turn again and choose one of two meaningful outcomes:
+    either the answer clears the pending item, or the student is requesting a
+    reference/has not answered it.  Keeping this check at the pending-action
+    layer makes it apply to every idea facet and every later guided stage.
+    """
+
+    intent_value = intent.value if isinstance(intent, UserIntent) else str(intent)
+    if intent_value not in {
+        UserIntent.ANSWER_CURRENT_QUESTION.value,
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+    } or not isinstance(pending_action, dict):
+        return False
+    pending_type = pending_action.get("type")
+    if pending_type == "ANSWER_IDEA_FACET":
+        required_facet = required_pending_facet_id(pending_action)
+        if required_facet is None:
+            return False
+        updates = (
+            semantic_updates.get("facet_updates", [])
+            if isinstance(semantic_updates, dict)
+            else []
+        )
+        return any(
+            isinstance(item, dict)
+            and item.get("facet_id") == required_facet
+            and item.get("status") == "MISSING"
+            for item in updates
+        )
+    if pending_type == "ANSWER_STAGE_QUESTION":
+        return bool(
+            isinstance(semantic_updates, dict)
+            and semantic_updates.get("pending_answer_status") == "MISSING"
+        )
+    return False
 
 
 def pending_question_decision_missing(

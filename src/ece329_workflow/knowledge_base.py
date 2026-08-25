@@ -523,6 +523,7 @@ class LectureKnowledgeBase:
                     f"{sorted(missing_scope)}"
                 )
         scene_template_ids: set[str] = set()
+        visible_scene_signatures: set[str] = set()
         required_scene_fields = {
             "title",
             "physical_picture",
@@ -549,6 +550,13 @@ class LectureKnowledgeBase:
                 for field in required_scene_fields
             ):
                 errors.append(f"scene template {template_id} has an empty scene field")
+            else:
+                signature = self._scene_signature(template)
+                if signature in visible_scene_signatures:
+                    errors.append(
+                        f"scene template {template_id} duplicates an existing visible frame"
+                    )
+                visible_scene_signatures.add(signature)
         if not self.generic_scene_frames:
             errors.append("scene templates have no generic fallback")
         for index, frame in enumerate(self.generic_scene_frames):
@@ -557,6 +565,13 @@ class LectureKnowledgeBase:
                 for field in required_scene_fields
             ):
                 errors.append(f"generic scene frame {index} has an empty scene field")
+            else:
+                signature = self._scene_signature(frame)
+                if signature in visible_scene_signatures:
+                    errors.append(
+                        f"generic scene frame {index} duplicates an existing visible frame"
+                    )
+                visible_scene_signatures.add(signature)
         source_ids = set(self._supplemental_source_by_id)
         supplemental_ids: set[str] = set()
         for concept in self.supplemental_concepts:

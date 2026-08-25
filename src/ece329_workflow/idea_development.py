@@ -295,6 +295,128 @@ def build_gap_output(
     )
 
 
+def build_facet_reference_output(session: DesignSession) -> StepOutput:
+    """Offer one course-grounded reference for the currently pending facet.
+
+    This is deliberately separate from Stage 1 breadth exploration.  A request
+    for help while answering an idea-completeness question must preserve the
+    selected experiment and the exact missing facet instead of reopening the
+    scene catalog.
+    """
+
+    development = session.design_context.get("idea_development", {})
+    status = public_idea_development_status(development)
+    active = str(status.get("active_facet_id") or "")
+    facets = status.get("facets_by_id", {})
+    research_question = str(
+        facets.get("research_question", {}).get("evidence") or ""
+    ).strip()
+    idea = session.design_context.get("idea", {})
+    outline = session.design_context.get("experiment_outline_seed", {})
+    direction = ""
+    if isinstance(idea, dict):
+        direction = str(
+            idea.get("direction_summary")
+            or idea.get("current_focus")
+            or idea.get("topic_anchor")
+            or idea.get("original")
+            or ""
+        ).strip()
+    if not direction and isinstance(outline, dict):
+        direction = str(outline.get("core_phenomenon") or "").strip()
+    course_labels = [
+        str(item.get("title") or item.get("lecture_title") or "").strip()
+        for item in development.get("course_references", [])
+        if isinstance(item, dict)
+        and str(item.get("title") or item.get("lecture_title") or "").strip()
+    ]
+    formula_labels = [
+        str(
+            item.get("name")
+            or item.get("title")
+            or item.get("expression")
+            or ""
+        ).strip()
+        for item in development.get("formula_references", [])
+        if isinstance(item, dict)
+        and str(
+            item.get("name")
+            or item.get("title")
+            or item.get("expression")
+            or ""
+        ).strip()
+    ]
+    theory_anchor = "、".join((course_labels + formula_labels)[:3])
+    if not theory_anchor:
+        theory_anchor = "前面已经匹配到的ECE329物理关系"
+    subject_text = research_question or direction or "当前实验方向"
+
+    candidates = {
+        "learning_objective": (
+            f"完成这个实验后，能够围绕“{subject_text}”比较不同情形，并借助"
+            f"“{theory_anchor}”解释观察到的差异。"
+        ),
+        "research_question": (
+            f"在“{direction or '当前实验方向'}”中，当一个主要比较条件改变时，"
+            "准备观察的场、波或响应会怎样变化？"
+        ),
+        "hypothesis": (
+            f"可以先沿着“{theory_anchor}”判断：这项改变是否真的改变了材料响应、"
+            f"边界条件或空间对称性。套回“{subject_text}”，如果物理条件确实改变，"
+            "就预测场或响应会出现怎样的可见趋势并说明原因；如果只做了不破坏对称性"
+            "的操作，也可以把“结果基本不变”写成一项对照预期。"
+        ),
+        "conceptual_structure": (
+            f"围绕“{subject_text}”，先保留场源或激励、被比较的对象或边界、一个基准情形，"
+            "以及用于观察场或响应的表示方式。"
+        ),
+    }
+    candidate = candidates.get(
+        active,
+        f"可以先用“{theory_anchor}”把当前实验中的比较条件和观察现象连接起来。",
+    )
+    titles = {
+        "learning_objective": "学习目标",
+        "research_question": "研究问题",
+        "hypothesis": "假设与预期趋势",
+        "conceptual_structure": "概念实验结构",
+    }
+    title = titles.get(active, "当前这一点")
+    base = build_gap_output(session, "")
+    base.assistant_message = (
+        f"可以，我们就接着“{direction or '你刚才确定的实验方向'}”往下看，不重新换题。\n\n"
+        f"课程内可以先这样思考“{title}”：{candidate}\n\n"
+        "这只是一条起步思路，不是标准答案。你可以把它改写成自己的判断，"
+        "也可以直接补充你不同意或想调整的地方。"
+    )
+    base.stage_payload.update(
+        {
+            "reference_only": True,
+            "reference_for_facet": active,
+            "alternative_ideas": [],
+            "exploration_scenes": [],
+            "pending_action": {
+                "type": "ANSWER_IDEA_FACET",
+                "subject": active,
+                "proposal": {"facet_id": active, "reference": candidate},
+                "candidate_answer": candidate,
+                "question": f"请沿着这份参考写出你的“{title}”，或直接说明需要调整的地方。",
+                "allowed_intents": [
+                    "ANSWER_CURRENT_QUESTION",
+                    "ACCEPT_PREVIOUS_PROPOSAL",
+                    "MODIFY_PREVIOUS_PROPOSAL",
+                    "REQUEST_MORE_EXAMPLES",
+                    "RETURN_TO_PREVIOUS_POINT",
+                    "NEW_TOPIC",
+                    "UNCLEAR",
+                ],
+            },
+        }
+    )
+    base.student_task = None
+    return base
+
+
 def public_idea_development_status(development: dict[str, Any]) -> dict[str, Any]:
     facets = development.get("facets", {})
     ordered = [
@@ -396,12 +518,19 @@ def _student_facing_next_turn(
             f"“{title}”这里不用重写前面的内容，我们换一个更直接的角度。"
             f"{_focused_facet_clarification(active)}"
         )
-    prefix = (
-        "这个方向已经形成了可以继续发展的实验雏形。"
-        if first_review
-        else "我们继续沿着同一个实验方向往下完善。"
-    )
-    return f"{prefix} 接下来先把“{title}”说清楚：{_next_task(status)}"
+    if first_review:
+        return (
+            "这个方向已经有了可以继续发展的实验雏形。"
+            f" 接下来先把“{title}”说清楚：{_next_task(status)}"
+        )
+    transitions = {
+        "research_question": "接下来把这个想法收成一个能回答的研究问题：",
+        "learning_objective": "接下来看看这个实验最终要帮助你弄懂什么：",
+        "hypothesis": "接下来做一个有物理依据的预测：",
+        "conceptual_structure": "接下来把实验中需要出现的对象和关系理清：",
+    }
+    lead = transitions.get(active, f"接下来看看“{title}”：")
+    return f"{lead}{_next_task(status)}"
 
 
 def _focused_facet_clarification(facet_id: str) -> str:

@@ -156,6 +156,8 @@ def build_stage_one_turn_context(
     selected_option_id: str | None = None,
     semantic_updates: dict[str, Any] | None = None,
     resolved_intent_name: str | None = None,
+    resolved_intent_target: str | None = None,
+    pending_action: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve a Stage 1 turn against the active idea thread.
 
@@ -283,8 +285,17 @@ def build_stage_one_turn_context(
         if str(item.get("direction") or item.get("focus") or "").strip()
     )
     normalized = text.strip()
+    pending_reference_requested = bool(
+        resolved_intent_name == "REQUEST_MORE_EXAMPLES"
+        and isinstance(pending_action, dict)
+        and pending_action.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        and resolved_intent_target
+        not in {"exploration_scenes", "BREADTH_EXPLORATION"}
+    )
     more_brainstorm_requested = bool(
         resolved_intent_name == "REQUEST_MORE_EXAMPLES"
+        and not pending_reference_requested
     )
     history = idea.get("focus_history", [])
     focus_history = [str(item).strip() for item in history if str(item).strip()] \
@@ -297,6 +308,7 @@ def build_stage_one_turn_context(
             "ADVANCE_STAGE",
             "RETURN_TO_PREVIOUS_POINT",
         }
+        or pending_reference_requested
     )
     if no_direction or control_turn or more_brainstorm_requested:
         focus_component = ""
@@ -384,7 +396,11 @@ def build_stage_one_turn_context(
     for note in refinement_notes[-2:]:
         if note not in focus_parts:
             focus_parts.append(note)
-    proposed_focus = " → ".join(item for item in focus_parts if item) or previous_focus
+    proposed_focus = (
+        previous_focus
+        if control_turn and previous_focus
+        else " → ".join(item for item in focus_parts if item) or previous_focus
+    )
     comparison_text = " ".join(
         [topic_anchor, relation_selection_text, core_phenomenon, *refinement_notes, normalized]
     )
@@ -406,8 +422,13 @@ def build_stage_one_turn_context(
         for item in inferred_comparisons
         if str(item.get("comparison_id") or "").strip() not in previous_ids
     ]
-    direction_summary = core_phenomenon or selected_focus or topic_anchor or proposed_focus
-    if refinement_notes:
+    previous_direction_summary = str(idea.get("direction_summary") or "").strip()
+    direction_summary = (
+        previous_direction_summary
+        if control_turn and previous_direction_summary
+        else core_phenomenon or selected_focus or topic_anchor or proposed_focus
+    )
+    if refinement_notes and not control_turn:
         direction_summary = f"{direction_summary}；观察重点：{'；'.join(refinement_notes[-2:])}"
 
     return {
@@ -441,6 +462,7 @@ def build_stage_one_turn_context(
         ),
         "control_turn": control_turn,
         "more_brainstorm_requested": more_brainstorm_requested,
+        "pending_reference_requested": pending_reference_requested,
         "stage_one_no_direction": no_direction,
     }
 

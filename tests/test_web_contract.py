@@ -55,7 +55,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(
             self.index_html.count("v=20260824-unified-semantics"),
-            3,
+            2,
+        )
+        self.assertIn(
+            "assets/app.js?v=20260825-trail13-context",
+            self.index_html,
         )
 
     def test_demo_rechecks_all_idea_facets_without_fixed_substep_order(self) -> None:
@@ -63,7 +67,8 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("function refreshDemoIdeaDevelopmentStatus", self.app_js)
         self.assertIn("missing_facet_ids", self.app_js)
         self.assertIn("function demoStudentFacingNextTurn", self.app_js)
-        self.assertIn("我们继续沿着同一个实验方向往下完善", self.app_js)
+        self.assertIn("接下来做一个有物理依据的预测", self.app_js)
+        self.assertNotIn("我们继续沿着同一个实验方向往下完善", self.app_js)
         self.assertNotIn("这些内容属于同一个“实验想法完善”阶段，不按固定顺序逐项闯关", self.app_js)
         self.assertNotIn("现在进入“实验想法完善”的小点2", self.app_js)
 
@@ -136,6 +141,12 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE", self.app_js)
         self.assertIn("启发性延伸", self.app_js)
         self.assertIn("提出一个自己的ECE329课内设想", self.app_js)
+        self.assertIn("如果这三个图景都没有引起你的兴趣", self.app_js)
+        self.assertIn("让一支探针穿过看不见的场", self.app_js)
+        self.assertIn("把三维空间切成一层层剖面", self.app_js)
+        self.assertIn("把两个可调条件铺成一张响应地图", self.app_js)
+        self.assertNotIn("让两个对象逐渐靠近", self.app_js)
+        self.assertNotIn("让多个来源在空间中相遇", self.app_js)
         self.assertIn("response.stage_payload?.exploration_scenes", self.app_js)
         self.assertIn("scene.course_anchor?.option_id", self.app_js)
         self.assertNotIn("function resolveDemoSceneCombination", self.app_js)
@@ -146,7 +157,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("function escapeRegularExpression", self.app_js)
         self.assertNotIn("const sameOnly", self.app_js)
         self.assertNotIn("const oppositeOnly", self.app_js)
-        self.assertIn("建议默认把", self.app_js)
+        self.assertIn("这组对照先作为建议保留", self.app_js)
         self.assertIn('adoption_status: "PENDING"', self.app_js)
         self.assertNotIn("自动同时纳入", self.app_js)
 

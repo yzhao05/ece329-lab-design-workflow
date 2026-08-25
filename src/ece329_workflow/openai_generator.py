@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from .dialogue_state import (
     ALL_INTENTS,
+    pending_question_answer_needs_review,
     pending_question_decision_missing,
     required_pending_facet_id,
     resolved_intent,
@@ -1413,9 +1414,14 @@ class OpenAIStageGenerator:
                 "previous_question、pending_action和已保存方向。没有具体思路属于课程内头脑风暴，"
                 "course_scope_status返回COURSE_CONTENT并把no_direction设为true。"
                 "当pending_action.type为ANSWER_IDEA_FACET时，subject就是当前唯一需要判断的facet。"
+                "REQUEST_MORE_EXAMPLES必须区分请求对象：若学生明确要另一组三幅广度图景，"
+                "target返回exploration_scenes；若学生要当前开放问题或facet的课程内参考，target"
+                "返回pending_action.subject。不得仅凭REQUEST_MORE_EXAMPLES这个意图重置阶段1方向。"
                 "若intent为ANSWER_CURRENT_QUESTION或MODIFY_PREVIOUS_PROPOSAL，facet_updates必须且只需"
                 "包含对这个subject的CLEAR或MISSING判断：学生的回答在语义上已经回答previous_question"
-                "就标CLEAR；只有明确表示不知道、撤回，或确实没有回答当前问题时才标MISSING。"
+                "就标CLEAR。若学生明确表示需要当前问题的课程内参考、例子或可能判断，应返回"
+                "REQUEST_MORE_EXAMPLES而不是ANSWER_CURRENT_QUESTION加MISSING；确实没有回答当前"
+                "问题时才可标MISSING。"
                 "不能因为措辞不同于示例而标MISSING，也不能遗漏该facet。学生同一轮既明确基础对照"
                 "又回答当前facet时，comparison_updates和facet_updates必须同时保留。"
                 "research_question不要求使用问号或疑问句：只要学生说明了要比较或改变的条件以及"
@@ -1426,7 +1432,8 @@ class OpenAIStageGenerator:
                 "当pending_action.type为ANSWER_STAGE_QUESTION时，若intent为"
                 "ANSWER_CURRENT_QUESTION，semantic_updates_json必须包含pending_answer_status："
                 "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
-                "当前问题时才填MISSING。不能因为措辞与问题示例不同而遗漏或填MISSING。"
+                "当前问题时才填MISSING；请求参考、例子或可能判断时必须返回"
+                "REQUEST_MORE_EXAMPLES。不能因为措辞与问题示例不同而遗漏或填MISSING。"
                 "若subject=STUDENT_SYNTHESIS_OR_EMVR_OUTPUT，一段学生自己写的总结只要已经串联"
                 "研究问题或对象、主要比较或观察现象，以及ECE329课程关系，就应返回CLEAR；"
                 "不得要求拆成多轮，也不得因为没有逐字重复‘为什么值得研究’而返回UNCLEAR。"
@@ -1468,10 +1475,19 @@ class OpenAIStageGenerator:
             and pending_action.get("type")
             in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
         )
-        if unresolved_open_question or pending_question_decision_missing(
+        answer_status_conflict = pending_question_answer_needs_review(
             raw_intent,
             semantic_updates,
             pending_action,
+        )
+        if (
+            unresolved_open_question
+            or answer_status_conflict
+            or pending_question_decision_missing(
+                raw_intent,
+                semantic_updates,
+                pending_action,
+            )
         ):
             required_facet = required_pending_facet_id(pending_action)
             pending_type = str(pending_action.get("type") or "") \
@@ -1485,16 +1501,20 @@ class OpenAIStageGenerator:
                             "上一份结构化判断遗漏了当前想法完整性要点。请重新判断同一条学生消息；"
                             f"当前必须判断的facet是{required_facet}。若学生已经在语义上回答了"
                             "previous_question，在facet_updates中返回CLEAR；若明确不知道、撤回或"
-                            "没有回答，返回MISSING。如同一轮还处理了基础对照，必须同时保留"
-                            "comparison_updates。"
+                            "没有回答，不能一边返回ANSWER_CURRENT_QUESTION一边标MISSING："
+                            "请改用UNCLEAR；若学生正在请你给一个课程内参考、例子或可能判断，"
+                            "返回REQUEST_MORE_EXAMPLES。如同一轮还处理了基础对照，必须同时"
+                            "保留comparison_updates。"
                         )
                         if pending_type == "ANSWER_IDEA_FACET"
                         else (
                             "上一份结构化判断没有解决当前阶段的开放问题。请重新判断同一条"
                             "学生消息：若它在语义上回答了previous_question，intent返回"
                             "ANSWER_CURRENT_QUESTION，并在semantic_updates_json中返回"
-                            "pending_answer_status=CLEAR；只有明确没有想法或确实没有回答时"
-                            "才返回MISSING。不要仅因为学生用陈述句或综合段落作答就返回UNCLEAR。"
+                            "pending_answer_status=CLEAR；若学生正在请求当前问题的参考、例子或"
+                            "可能判断，返回REQUEST_MORE_EXAMPLES。不能同时返回"
+                            "ANSWER_CURRENT_QUESTION和MISSING，也不要仅因为学生用陈述句或"
+                            "综合段落作答就返回UNCLEAR。"
                         )
                     ) + (
                         "如果pending_action中已有candidate_answer，而学生是在确认、沿用或指认"

@@ -394,8 +394,8 @@ def _format_standard_comparison_status(
             summaries.append(f"已采纳{'与'.join(cases)}作为一组基本对照。")
         elif recommended_cases:
             summaries.append(
-                f"建议默认把{'与'.join(recommended_cases)}作为一组基本对照；"
-                "确认当前概括即表示采纳，也可以直接指出要删改。"
+                f"这组对照先作为建议保留：{'与'.join(recommended_cases)}。"
+                "如果符合你的想法，可以直接沿用；想删掉或替换其中一种也可以直接说。"
             )
     return "".join(summaries)
 
@@ -540,7 +540,12 @@ def _format_exploration_scenes(scenes: list[dict[str, Any]]) -> str:
         )
         if not str(anchor.get("direction") or "").strip():
             raise ValueError("Every exploration scene requires a course direction")
-    return "\n\n".join(blocks)
+    invitation = (
+        "如果这三个图景都没有引起你的兴趣，也没关系。"
+        "我还可以从其他ECE329课程关系中再为你展示一组不同的图景。"
+    )
+    formatted_blocks = "\n\n".join(blocks)
+    return f"{formatted_blocks}\n\n{invitation}"
 
 
 def _visualization(idea: str, emvr: bool) -> dict[str, Any]:
@@ -1078,7 +1083,7 @@ class RuleBasedStageGenerator:
                     "idea_reference": idea,
                     "experiment_outline_seed": outline,
                 },
-                student_task="请检查这段课程映射是否准确；若没有遗漏，可以继续到学习目标小点。",
+                student_task="看看这段课程联系是否准确；没有遗漏的话，我们就继续完善学习目标。",
             )
         if stage is Stage.LEARNING_OBJECTIVES:
             return StepOutput(
