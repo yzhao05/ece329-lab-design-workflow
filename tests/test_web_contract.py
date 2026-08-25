@@ -286,6 +286,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("node --check docs/assets/app.js", self.ci_workflow)
         self.assertIn("docker build", self.ci_workflow)
 
+    def test_pages_installs_runtime_dependencies_before_tests(self) -> None:
+        install = self.pages_workflow.index("python -m pip install -e .")
+        tests = self.pages_workflow.index("python -m unittest discover")
+        self.assertLess(install, tests)
+
     def test_container_healthcheck_uses_runtime_port(self) -> None:
         self.assertIn("os.getenv('PORT', '8080')", self.dockerfile)
 
