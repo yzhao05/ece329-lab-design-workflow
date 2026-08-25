@@ -903,6 +903,76 @@ a:focus-visible {
   background: var(--teal);
 }
 
+.task-report-idea {
+  margin: 14px 0 10px;
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  line-height: 1.55;
+}
+
+.task-report-sections {
+  display: grid;
+  gap: 7px;
+}
+
+.task-report-section {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgb(239 248 246 / 55%);
+}
+
+.task-report-section summary {
+  padding: 9px 10px;
+  color: var(--navy);
+  font-size: 0.69rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.task-report-section dl {
+  display: grid;
+  gap: 7px;
+  padding: 0 10px 10px;
+  margin: 0;
+}
+
+.task-report-section dl > div {
+  display: grid;
+  gap: 2px;
+}
+
+.task-report-section dt {
+  color: var(--teal);
+  font-size: 0.61rem;
+  font-weight: 750;
+}
+
+.task-report-section dd {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.66rem;
+  line-height: 1.5;
+}
+
+.report-download-button {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  color: white;
+  background: var(--teal);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.report-download-button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .toast {
   position: fixed;
   z-index: 50;

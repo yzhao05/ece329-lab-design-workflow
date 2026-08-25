@@ -96,6 +96,7 @@ EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.HYPOTHESIS: ("research_hypothesis", "expected_trend", "limiting_cases"),
     Stage.CONCEPTUAL_OR_VR_SETUP: (
         "unity_objects",
+        "object_inventory",
         "interactions",
         "physics_layer",
         "visualization_layer",
@@ -555,6 +556,31 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         )
     ):
         raise ModelOutputError("EMVR Stage 7 contains a forbidden design field")
+    if (
+        session.interaction_state is InteractionState.EMVR_DIRECT
+        and stage is Stage.CONCEPTUAL_OR_VR_SETUP
+    ):
+        inventory = output.stage_payload.get("object_inventory")
+        required_object_fields = {
+            "object_name",
+            "category",
+            "purpose",
+            "student_interaction",
+            "physics_or_data_state",
+            "visual_feedback",
+            "required",
+        }
+        if not isinstance(inventory, list) or len(inventory) < 5:
+            raise ModelOutputError("EMVR Stage 7 requires a complete object inventory")
+        for item in inventory:
+            if (
+                not isinstance(item, dict)
+                or any(key not in item for key in required_object_fields)
+                or not isinstance(item.get("required"), bool)
+            ):
+                raise ModelOutputError(
+                    "Every EMVR object inventory item must contain the complete object contract"
+                )
 
 
 def _validate_lecture_grounding(

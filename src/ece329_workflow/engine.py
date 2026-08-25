@@ -60,6 +60,12 @@ from .models import (
 )
 from .prompts import build_prompt_packet
 from .openai_generator import generator_from_environment
+from .reporting import (
+    build_emvr_task_report,
+    render_emvr_report_pdf,
+    stage_report_section,
+    validate_emvr_report_completeness,
+)
 from .stages import (
     IDEA_DEVELOPMENT_STAGES,
     STAGES_BY_ID,
@@ -332,6 +338,207 @@ def _guided_summary_completion_output() -> StepOutput:
     )
 
 
+_EMVR_STAGE_LEADS: dict[Stage, str] = {
+    Stage.IDEA_BRAINSTORMING: "我先把你提出的现象、对象和VR操作整理成一个设计起点。",
+    Stage.COURSE_MAPPING_AND_DIRECTION: "沿用已经确定的想法，我把它和ECE329课程内容的联系整理出来了。",
+    Stage.LEARNING_OBJECTIVES: "这一步先把实验真正要支持的学习目标摆在一起，后面的交互和反馈都要能对应它们。",
+    Stage.RESEARCH_QUESTION: "结合前面的方向和学习目标，我把模拟实验要回答的问题收得更清楚了一些。",
+    Stage.THEORETICAL_FRAMEWORK: "下面把Unity中真正参与计算的量和只用于帮助理解的画面分开。",
+    Stage.HYPOTHESIS: "根据前面的课程关系，我整理了一版可以被后续显示结果检验的预期。",
+    Stage.CONCEPTUAL_OR_VR_SETUP: "现在把已有想法转成Unity VR中的对象、操作、计算和反馈关系。",
+    Stage.VARIABLES_AND_CONDITIONS: "我把参数控制、观察结果和需要固定的条件对应到了Unity交互中。",
+    Stage.CONCEPTUAL_PROCEDURE: "根据前面已经确定的对象和变量，我整理了一套可重复比较的VR学习流程。",
+    Stage.EXPECTED_DATA_VISUALIZATION: "这一步把理论预测如何显示、又如何随Unity参数更新说明清楚。",
+    Stage.RESULT_INTERPRETATION: "为了避免只看见动画却不会解释，我把几类可能结果和检查顺序整理出来了。",
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: "最后检查这套设计能帮助学生理解什么，以及哪些地方不能过度解释。",
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "你的EMVR模拟实验设计已经汇总完成，下面是最终报告中保留的主要内容。",
+}
+
+_EMVR_INTERACTIVE_ENTRY_STAGES = {
+    Stage.IDEA_BRAINSTORMING,
+    Stage.LEARNING_OBJECTIVES,
+    Stage.RESEARCH_QUESTION,
+    Stage.HYPOTHESIS,
+    Stage.CONCEPTUAL_OR_VR_SETUP,
+    Stage.VARIABLES_AND_CONDITIONS,
+    Stage.CONCEPTUAL_PROCEDURE,
+    Stage.EXPECTED_DATA_VISUALIZATION,
+    Stage.DESIGN_VALUE_AND_LIMITATIONS,
+}
+
+_EMVR_ENTRY_QUESTIONS: dict[Stage, tuple[str, str]] = {
+    Stage.IDEA_BRAINSTORMING: (
+        "先把你的模糊想法整理成VR实验的设计边界。这里不需要考虑代码或具体实现。",
+        "你希望学生进入这个VR实验后，主要操作什么对象、观察什么电磁现象，并最终理解什么关系？",
+    ),
+    Stage.LEARNING_OBJECTIVES: (
+        "课程方向已经确定，接下来需要把目标写成后续交互、计算和反馈都能支持的可检验表述。",
+        "完成这个VR实验后，你最希望学生能够解释、计算、比较或通过操作验证什么？",
+    ),
+    Stage.RESEARCH_QUESTION: (
+        "我会保留前面确定的现象和学习目标，把它们收束成一个可由VR参数与观察结果回答的问题。",
+        "在这个实验中，你认为最值得改变的条件是什么，又希望重点观察哪一种响应？",
+    ),
+    Stage.HYPOTHESIS: (
+        "研究问题和理论关系已经保留，这一步需要明确参数变化时应出现的方向性结果及适用边界。",
+        "当主要条件改变时，你预计VR中的数值、曲线或空间场分布会怎样变化，物理理由是什么？",
+    ),
+    Stage.CONCEPTUAL_OR_VR_SETUP: (
+        "现在开始整理Unity VR实验构成。我会在下一轮给出完整物体清单、交互职责、计算状态与反馈对应关系。",
+        "你希望学生在VR中完成哪些核心操作，项目里又有哪些现有对象或交互设定必须保留？",
+    ),
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "前面的对象和操作会继续保留；这里要把每个可调参数、观察量、控制条件和基准状态定义清楚。",
+        "你希望学生主动改变哪些参数，并用哪些读数、曲线或空间表现判断结果？",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: (
+        "我会根据已经确定的对象、变量和观察方式，把实验整理成可重复、可比较的VR流程。",
+        "从进入实验到完成比较，你认为学生必须亲自经历哪些关键操作或判断？",
+    ),
+    Stage.EXPECTED_DATA_VISUALIZATION: (
+        "这一步只设计理论输出和教学显示，不会把动画当作真实测量或高精度仿真。",
+        "为了看清前面的预期趋势，你希望同时保留哪些数值、曲线、场线、矢量或颜色映射？",
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+        "最后需要回到最初的学习目标，检查当前VR交互是否真正支持它，并界定模型不能说明什么。",
+        "你认为这套VR设计最有价值的空间或交互优势是什么，又有哪些理想化条件需要明确提醒学生？",
+    ),
+}
+
+
+def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput:
+    lead, question = _EMVR_ENTRY_QUESTIONS[stage]
+    context = build_carried_context(session)
+    direction = str(context.get("research_direction") or "").strip()
+    if stage is Stage.IDEA_BRAINSTORMING and (
+        not direction or direction.casefold() in {"进入emvr模式", "emvr模式", "使用emvr"}
+    ):
+        acknowledgement = "目前还没有具体实验主题，我们先确定设计起点。"
+    elif direction:
+        acknowledgement = f"我会继续沿用“{direction}”这个实验方向。"
+    else:
+        acknowledgement = "我会承接前面已经确定的实验内容。"
+    return StepOutput(
+        assistant_message=f"{acknowledgement}{lead}",
+        stage_payload={
+            "emvr_guided_entry": True,
+            "awaiting_user_design_input": True,
+            "preserved_context": deepcopy(context),
+            "pending_action": {
+                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "subject": stage.value,
+                "proposal": {"carried_context": deepcopy(context)},
+                "question": question,
+                "advance_on_accept": False,
+                "allowed_intents": [
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.REQUEST_MORE_EXAMPLES.value,
+                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                    UserIntent.NEW_TOPIC.value,
+                    UserIntent.UNCLEAR.value,
+                ],
+            },
+        },
+        student_task=question,
+    )
+
+
+def _prepare_emvr_stage_output(
+    stage: Stage,
+    output: StepOutput,
+) -> None:
+    """Make the stage artifact visible and wait for a contextual decision."""
+
+    section = stage_report_section(
+        stage,
+        output.stage_payload,
+        visualization=output.visualization,
+    )
+    output.stage_payload["emvr_report_section"] = deepcopy(section)
+    visible_items = section.get("items", [])
+    lines = []
+    for item in visible_items:
+        value = str(item.get("value") or "").strip()
+        if len(value) > 520:
+            value = f"{value[:517]}……"
+        if value:
+            lines.append(f"• {item.get('label')}：{value}")
+
+    lead = _EMVR_STAGE_LEADS[stage]
+    if lines:
+        output.assistant_message = f"{lead}\n\n" + "\n".join(lines)
+    else:
+        output.assistant_message = f"{lead}\n\n{output.assistant_message.strip()}"
+
+    if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+        output.assistant_message = (
+            f"{output.assistant_message.rstrip()}\n\n"
+            "任务报告和PDF记录的是实验目标、物体清单、交互职责、变量、流程、"
+            "理论显示与设计局限；它们用于辅助后续设计评审，不代表已经生成或实现Unity实验。"
+        )
+        output.student_task = None
+        output.stage_payload.pop("pending_action", None)
+        return
+
+    if stage is Stage.IDEA_BRAINSTORMING:
+        task = (
+            "请看看我有没有漏掉你原本想保留的现象、对象或操作；"
+            "你可以直接补充或修改，觉得这份起点准确也可以告诉我继续。"
+        )
+    else:
+        task = (
+            "这份阶段草稿会写进右侧任务报告。你可以直接指出要修改或补充的地方；"
+            "如果符合你的想法，告诉我继续就会保留它并进入下一部分。"
+        )
+    output.student_task = task
+    output.stage_payload["pending_action"] = {
+        "type": "CONFIRM_STAGE_OR_MODIFY",
+        "subject": stage.value,
+        "proposal": deepcopy(section),
+        "question": task,
+        "advance_on_accept": True,
+        "allowed_intents": [
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+            UserIntent.ADVANCE_STAGE.value,
+            UserIntent.REQUEST_MORE_EXAMPLES.value,
+            UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            UserIntent.NEW_TOPIC.value,
+            UserIntent.UNCLEAR.value,
+        ],
+    }
+
+
+def _persist_emvr_brief(
+    session: DesignSession,
+    message: str,
+    intent_name: str,
+) -> None:
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or session.current_stage is not Stage.IDEA_BRAINSTORMING
+        or intent_name
+        not in {
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.NEW_TOPIC.value,
+        }
+        or len(message.strip()) < 16
+    ):
+        return
+    emvr_design = session.design_context.setdefault("emvr_design", {})
+    if not isinstance(emvr_design, dict):
+        emvr_design = {}
+        session.design_context["emvr_design"] = emvr_design
+    emvr_design["brief"] = message.strip()
+    idea = session.design_context.setdefault("idea", {})
+    if isinstance(idea, dict):
+        idea["current_summary"] = message.strip()
+        idea["main_direction"] = message.strip()
+
+
 class WorkflowEngine:
     def __init__(
         self,
@@ -397,7 +604,17 @@ class WorkflowEngine:
         # Offline/rule-only deployments cannot resolve conversational commands.
         # Explicit UI actions still arrive through complete_stage above; typed
         # language remains an answer instead of being guessed from keywords.
-        return validate_resolved_intent(fallback_intent(message, pending), pending), pending
+        return (
+            validate_resolved_intent(
+                fallback_intent(
+                    message,
+                    pending,
+                    interaction_state=session.interaction_state,
+                ),
+                pending,
+            ),
+            pending,
+        )
 
     @staticmethod
     def _interaction_state_from_intent(
@@ -500,7 +717,7 @@ class WorkflowEngine:
     ) -> dict[str, Any]:
         session = self.store.get(design_id)
         if session.status is WorkflowStatus.COMPLETE:
-            return {
+            response = {
                 "design_id": session.design_id,
                 "interaction_state": session.interaction_state.value,
                 "status": session.status.value,
@@ -510,6 +727,15 @@ class WorkflowEngine:
                 "current_stage": session.current_stage.value,
                 "next_stage": None,
             }
+            if session.interaction_state is InteractionState.EMVR_DIRECT:
+                response.update(
+                    {
+                        "task_report": build_emvr_task_report(session),
+                        "report_ready": True,
+                        "report_url": f"/v1/designs/{session.design_id}/report.pdf",
+                    }
+                )
+            return response
         if isinstance(request, dict):
             request = self._request_from_dict(request)
         if not isinstance(request.message, str):
@@ -747,8 +973,7 @@ class WorkflowEngine:
             )
         )
         pre_transition_attempted = bool(
-            session.interaction_state is InteractionState.GUIDED_DESIGN
-            and session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
             and explicit_transition_intent
         )
         final_summary_confirmation_turn = bool(
@@ -838,6 +1063,11 @@ class WorkflowEngine:
             "pending_action": deepcopy(pending_action),
             "carried_context": build_carried_context(session),
         }
+        _persist_emvr_brief(
+            session,
+            resolved_student_message,
+            content_intent_name,
+        )
         if dynamic_idea_turn:
             idea_context = session.design_context.get("idea", {})
             stage_one_context = build_stage_one_turn_context(
@@ -904,6 +1134,15 @@ class WorkflowEngine:
                 or interaction_state_changed
             )
         )
+        emvr_stage_entry_turn = bool(
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and handled_stage in _EMVR_INTERACTIVE_ENTRY_STAGES
+            and (
+                transitioned_from_stage is not None
+                or not handled_stage_seen
+                or interaction_state_changed
+            )
+        )
         clarification_turn = intent_name == UserIntent.UNCLEAR.value
         substantive_guided_reply = bool(
             intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
@@ -932,6 +1171,10 @@ class WorkflowEngine:
             completion_error = None
         elif summary_completed_this_turn:
             output = _guided_summary_completion_output()
+            session.turn_context = {}
+            completion_error = None
+        elif emvr_stage_entry_turn:
+            output = _emvr_stage_entry_output(session, handled_stage)
             session.turn_context = {}
             completion_error = None
         elif clarification_turn:
@@ -977,6 +1220,13 @@ class WorkflowEngine:
                 output = self.generator.generate(session, generation_message)
             finally:
                 session.turn_context = {}
+            if session.interaction_state is InteractionState.EMVR_DIRECT:
+                _prepare_emvr_stage_output(handled_stage, output)
+                # If the student tried to continue from an unanswered EMVR
+                # entry question, this generated draft is the requested
+                # professional reference. Keep the stage active for review
+                # without showing a stale completion warning.
+                completion_error = None
             if (
                 session.interaction_state is InteractionState.GUIDED_DESIGN
                 and handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
@@ -1078,10 +1328,14 @@ class WorkflowEngine:
         )
 
         should_complete = (
-            session.interaction_state is InteractionState.EMVR_DIRECT
-            or (
+            (
                 (request.complete_stage or explicit_transition_intent)
                 and not pre_transition_attempted
+            )
+            or (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+                and output.stage_payload.get("proposal_status") == "complete"
             )
         ) and output.stage_payload.get("request_rejected") is not True
         if summary_completed_this_turn:
@@ -1103,12 +1357,28 @@ class WorkflowEngine:
             except StageCompletionError as exc:
                 completion_error = str(exc)
 
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            task_report = build_emvr_task_report(session)
+        else:
+            task_report = None
+
         state = session.model_context.get("dialogue_state", {})
         if isinstance(state, dict):
             state["carried_context"] = build_carried_context(session)
 
         self.store.save(session, expected_revision=expected_revision)
         next_stage = session.next_stage.value if session.next_stage else None
+        response_message = output.assistant_message
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and session.status is WorkflowStatus.COMPLETE
+        ):
+            response_message = (
+                f"{response_message.rstrip()}\n\n"
+                "完整设计总结PDF已经生成，其中包含学习目标、Unity VR实验物体清单、"
+                "交互与理论计算关系、实验流程以及设计局限。你可以在右侧“任务报告”中"
+                "展开各部分并下载PDF。"
+            )
         response = {
             "design_id": session.design_id,
             "interaction_state": session.interaction_state.value,
@@ -1123,7 +1393,7 @@ class WorkflowEngine:
             ),
             "stage_status": "completed" if handled_stage.value in session.completed_stages else "active",
             "workflow_status": session.status.value,
-            "assistant_message": output.assistant_message,
+            "assistant_message": response_message,
             "stage_payload": output.stage_payload,
             "student_task": output.student_task,
             "visualization": output.visualization,
@@ -1137,6 +1407,11 @@ class WorkflowEngine:
             "next_stage": next_stage,
             "revision": session.revision,
         }
+        if task_report is not None:
+            response["task_report"] = task_report
+            response["report_ready"] = session.status is WorkflowStatus.COMPLETE
+            if response["report_ready"]:
+                response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
         return response
 
     def _lock_for_design(self, design_id: str) -> RLock:
@@ -1145,7 +1420,20 @@ class WorkflowEngine:
         return self._session_locks[index]
 
     def get_design(self, design_id: str, include_history: bool = False) -> dict[str, Any]:
-        return self.store.get(design_id).to_dict(include_history=include_history)
+        session = self.store.get(design_id)
+        result = session.to_dict(include_history=include_history)
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            result["task_report"] = build_emvr_task_report(session)
+            result["report_ready"] = session.status is WorkflowStatus.COMPLETE
+            if result["report_ready"]:
+                result["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+        return result
+
+    def render_report_pdf(self, design_id: str) -> bytes:
+        session = self.store.get(design_id)
+        if session.status is not WorkflowStatus.COMPLETE:
+            raise StageCompletionError("EMVR设计完成后才会生成PDF总结。")
+        return render_emvr_report_pdf(session)
 
     def delete_design(self, design_id: str) -> None:
         self.store.delete(design_id)
@@ -1449,6 +1737,25 @@ class WorkflowEngine:
     @staticmethod
     def _validate_completion(session: DesignSession, stage: Stage) -> None:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
+            stage_output = session.stage_outputs.get(stage.value, {})
+            stage_payload = (
+                stage_output.get("stage_payload", {})
+                if isinstance(stage_output, dict)
+                else {}
+            )
+            if (
+                stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+                and isinstance(stage_payload, dict)
+                and stage_payload.get("awaiting_user_design_input") is True
+            ):
+                raise StageCompletionError(
+                    "请先结合当前VR实验回答这一问；如果暂时不确定，也可以让我先给一版专业参考。"
+                )
+            if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+                try:
+                    validate_emvr_report_completeness(session)
+                except ValueError as exc:
+                    raise StageCompletionError(str(exc)) from exc
             return
         if stage is Stage.IDEA_BRAINSTORMING:
             idea = session.design_context.get("idea", {})

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 authors = [{name = "ZJUI ECE329 Workflow Team"}]
-dependencies = []
+dependencies = ["reportlab>=4.2,<5"]
 
 [project.optional-dependencies]
 production = ["gunicorn>=23"]

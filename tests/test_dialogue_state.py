@@ -8,6 +8,7 @@ from ece329_workflow.dialogue_state import (
     build_carried_context,
     current_pending_action,
     deterministic_intent,
+    fallback_intent,
     hydrate_pending_action_from_history,
     resolved_intent,
     save_pending_action,
@@ -519,6 +520,32 @@ class DialogueStateTests(unittest.TestCase):
             mode_event["semantic_updates"]["interaction_state_request"],
             InteractionState.EMVR_DIRECT.value,
         )
+
+    def test_emvr_offline_revision_fallback_does_not_change_guided_mode(self) -> None:
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "subject": Stage.LEARNING_OBJECTIVES.value,
+            "proposal": {"conceptual_objective": "解释材料边界对电场的影响"},
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            ],
+        }
+        message = "我想补充对导体与介质边界响应的比较"
+
+        guided = fallback_intent(
+            message,
+            pending,
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        emvr = fallback_intent(
+            message,
+            pending,
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+
+        self.assertEqual(guided["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+        self.assertEqual(emvr["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value)
 
     def test_semantic_mode_and_course_scope_are_schema_validated(self) -> None:
         validated = validate_resolved_intent(

@@ -247,6 +247,32 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         or idea.get("original")
         or ""
     ).strip()
+    learning_objectives = _find_payload_values(
+        session,
+        {
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+        },
+    )
+    research_questions = _find_payload_values(
+        session,
+        {"main_research_question", "research_question"},
+    )
+    hypotheses = _find_payload_values(
+        session,
+        {"research_hypothesis", "expected_trend"},
+    )
+    unity_objects = _find_payload_values(
+        session,
+        {"object_name", "unity_objects"},
+    )
+    interactions = _find_payload_values(
+        session,
+        {"user_action", "student_interaction", "interactions"},
+    )
     return {
         "research_direction": direction,
         "direction_locked": idea.get("direction_locked") is True,
@@ -255,10 +281,23 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             or idea.get("selected_course_relations")
             or []
         ),
-        "learning_objective": facet_evidence("learning_objective"),
-        "research_question": facet_evidence("research_question"),
-        "hypothesis": facet_evidence("hypothesis"),
-        "conceptual_structure": facet_evidence("conceptual_structure"),
+        "learning_objective": (
+            facet_evidence("learning_objective")
+            or ("；".join(learning_objectives) if learning_objectives else "")
+        ),
+        "learning_objectives": learning_objectives,
+        "research_question": (
+            facet_evidence("research_question")
+            or (research_questions[0] if research_questions else "")
+        ),
+        "hypothesis": (
+            facet_evidence("hypothesis")
+            or ("；".join(hypotheses) if hypotheses else "")
+        ),
+        "conceptual_structure": (
+            facet_evidence("conceptual_structure")
+            or ("；".join(unity_objects) if unity_objects else "")
+        ),
         "baseline_comparisons": deepcopy(
             outline.get("baseline_comparisons")
             or idea.get("standard_comparisons")
@@ -285,6 +324,20 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "procedure_steps": _find_payload_values(
             session,
             {"procedure_steps", "reference_draft"},
+        ),
+        "unity_objects": unity_objects,
+        "interactions": interactions,
+        "visualization_plan": _find_payload_values(
+            session,
+            {
+                "visualization_layer",
+                "measurement_interface",
+                "trend_annotation",
+            },
+        ),
+        "limitations": _find_payload_values(
+            session,
+            {"limitations", "invalid_conditions", "parameter_limits"},
         ),
         "resolved_decisions": deepcopy(
             session.design_context.get("resolved_decisions", {})
@@ -362,9 +415,6 @@ def save_pending_action(
 ) -> dict[str, Any] | None:
     """Persist the assistant's next expected decision without exposing it in chat."""
 
-    if session.interaction_state is InteractionState.EMVR_DIRECT:
-        dialogue_state(session).pop("pending_action", None)
-        return None
     raw = output.stage_payload.pop("pending_action", None)
     raw = raw if isinstance(raw, dict) else {}
     question = str(output.student_task or raw.get("question") or "").strip()
@@ -457,6 +507,8 @@ def deterministic_intent(
 def fallback_intent(
     user_message: str,
     pending_action: dict[str, Any] | None,
+    *,
+    interaction_state: InteractionState | None = None,
 ) -> dict[str, Any]:
     """Conservative offline behavior when no semantic model is available."""
 
@@ -470,10 +522,24 @@ def fallback_intent(
     # Offline/rule-only deployments cannot reliably infer contextual intent.
     # Treat the message as an answer instead of inventing a decision; the
     # deterministic state machine will therefore preserve the current stage.
+    fallback_user_intent = (
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        if interaction_state is InteractionState.EMVR_DIRECT
+        and isinstance(pending_action, dict)
+        and pending_action.get("type") == "CONFIRM_STAGE_OR_MODIFY"
+        else UserIntent.ANSWER_CURRENT_QUESTION
+    )
     return resolved_intent(
-        UserIntent.ANSWER_CURRENT_QUESTION,
+        fallback_user_intent,
+        target=(
+            str(pending_action.get("subject") or "") or None
+            if isinstance(pending_action, dict)
+            else None
+        ),
+        resolved_value=user_message.strip(),
         confidence=0.62,
         source="CONSERVATIVE_FALLBACK",
+        semantic_updates={"pending_answer_status": "CLEAR"},
     )
 
 

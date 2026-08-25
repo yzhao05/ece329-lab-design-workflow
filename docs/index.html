@@ -156,6 +156,21 @@
             <li>尚未记录实验想法</li>
           </ul>
         </section>
+
+        <section id="taskReportCard" class="insight-card task-report-card" hidden>
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">EMVR TASK REPORT</p>
+              <h2>任务报告</h2>
+            </div>
+            <span id="taskReportStatus" class="data-label">整理中</span>
+          </div>
+          <p id="taskReportIdea" class="task-report-idea"></p>
+          <div id="taskReportSections" class="task-report-sections"></div>
+          <button id="downloadReportButton" class="report-download-button" type="button" hidden>
+            下载 PDF 总结
+          </button>
+        </section>
       </aside>
     </main>
 
@@ -166,6 +181,6 @@
     </noscript>
 
     <script src="assets/config.js?v=20260824-unified-semantics"></script>
-    <script src="assets/app.js?v=20260825-trail15-direction-lock"></script>
+    <script src="assets/app.js?v=20260825-emvr-report"></script>
   </body>
 </html>

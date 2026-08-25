@@ -30,6 +30,76 @@ from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.stages import public_stage_catalog, stage_title
 
 
+EMVR_STAGE_ANSWERS = {
+    Stage.IDEA_BRAINSTORMING.value: (
+        "学生通过移动实验对象和调节参数，观察空间电磁分布，并理解参数与响应之间的关系。"
+    ),
+    Stage.LEARNING_OBJECTIVES.value: (
+        "学生需要能够解释物理机制、完成理论预测、比较不同条件，并理解VR操作的物理意义。"
+    ),
+    Stage.RESEARCH_QUESTION.value: (
+        "主动改变主要电磁参数，重点观察理论数值、曲线和空间场分布的响应。"
+    ),
+    Stage.HYPOTHESIS.value: (
+        "主要参数变化后响应应按课程理论呈现单调或周期趋势，具体方向由对应公式解释。"
+    ),
+    Stage.CONCEPTUAL_OR_VR_SETUP.value: (
+        "学生需要操作源、实验对象、虚拟探测器和参数面板，并查看场可视化与数据反馈。"
+    ),
+    Stage.VARIABLES_AND_CONDITIONS.value: (
+        "学生调节主要参数，观察数值和空间分布，同时固定源、几何和其余材料条件。"
+    ),
+    Stage.CONCEPTUAL_PROCEDURE.value: (
+        "先阅读目标并建立基准，再逐项改变参数、记录结果、比较条件并解释趋势。"
+    ),
+    Stage.EXPECTED_DATA_VISUALIZATION.value: (
+        "同时保留带单位数值、理论曲线、空间场线与方向箭头，并明确标注理论预测。"
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS.value: (
+        "VR的空间观察和即时反馈最有价值，但理想边界、解析模型和视觉缩放会限制结论。"
+    ),
+}
+
+
+class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
+    """Test double that resolves conversational intent from pending state, not wording."""
+
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        pending_type = (
+            str(pending_action.get("type") or "")
+            if isinstance(pending_action, dict)
+            else ""
+        )
+        intent = (
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+            if pending_type == "CONFIRM_STAGE_OR_MODIFY"
+            else UserIntent.ANSWER_CURRENT_QUESTION
+        )
+        return resolved_intent(
+            intent,
+            target=(
+                str(pending_action.get("subject") or "") or None
+                if isinstance(pending_action, dict)
+                else None
+            ),
+            resolved_value=user_message,
+            preserve_current_design=True,
+            confidence=0.99,
+            source="SEMANTIC_TEST",
+            semantic_updates={"pending_answer_status": "CLEAR"},
+        )
+
+
+def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
+    if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
+        message = EMVR_STAGE_ANSWERS[result["current_stage"]]
+        return engine.process_turn(result["design_id"], {"message": message})
+    return engine.process_turn(
+        result["design_id"],
+        {"message": "保留这部分并继续", "complete_stage": True},
+    )
+
+
 class WorkflowEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = WorkflowEngine(generator=RuleBasedStageGenerator())
@@ -547,7 +617,7 @@ class WorkflowEngineTests(unittest.TestCase):
             "EMVR方案汇总",
         )
 
-    def test_structured_emvr_state_auto_advances_one_stage(self) -> None:
+    def test_structured_emvr_state_waits_for_review_before_advancing(self) -> None:
         result = self.engine.create_design(
             "请把电磁屏蔽实验放入EMVR工作流",
             interaction_state=InteractionState.EMVR_DIRECT,
@@ -555,8 +625,105 @@ class WorkflowEngineTests(unittest.TestCase):
 
         self.assertEqual(result["interaction_state"], InteractionState.EMVR_DIRECT.value)
         self.assertEqual(result["handled_stage"], Stage.IDEA_BRAINSTORMING.value)
-        self.assertEqual(result["current_stage"], Stage.COURSE_MAPPING_AND_DIRECTION.value)
-        self.assertNotIn(Stage.COURSE_MAPPING_AND_DIRECTION.value, result["stage_payload"])
+        self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+        self.assertEqual(result["stage_status"], "active")
+        self.assertTrue(result["student_task"])
+        self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
+        self.assertEqual(result["task_report"]["sections"], [])
+        self.assertFalse(result["report_ready"])
+        self.assertNotIn("图景", result["assistant_message"])
+        self.assertNotIn("alternative_ideas", result["stage_payload"])
+        self.assertIn("VR实验", result["student_task"])
+
+    def test_emvr_keeps_student_brief_and_shows_all_learning_goals(self) -> None:
+        first = self.engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        brief = (
+            "我想在VR中比较导体和介质进入同一外加电场后的场线变化，"
+            "并用控制器改变物体位置和距离。"
+        )
+        revised = self.engine.process_turn(first["design_id"], {"message": brief})
+
+        self.assertEqual(revised["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+        self.assertEqual(
+            self.engine.store.get(first["design_id"]).design_context["emvr_design"]["brief"],
+            brief,
+        )
+        result = revised
+        result = continue_emvr(self.engine, result)
+        result = continue_emvr(self.engine, result)
+        self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
+        result = continue_emvr(self.engine, result)
+
+        self.assertEqual(result["handled_stage"], Stage.LEARNING_OBJECTIVES.value)
+        items = result["stage_payload"]["emvr_report_section"]["items"]
+        labels = {item["label"] for item in items}
+        self.assertTrue({"概念目标", "计算目标", "分析目标", "交互目标"} <= labels)
+        self.assertIn("• 概念目标", result["assistant_message"])
+        self.assertTrue(result["student_task"])
+
+    def test_emvr2_conversation_is_interactive_contextual_and_produces_pdf(self) -> None:
+        engine = WorkflowEngine(generator=ContextAwareEMVRGenerator())
+        result = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
+        self.assertNotIn("图景", result["assistant_message"])
+        self.assertIn("实验主题", result["assistant_message"])
+
+        brief = (
+            "我想在VR里观察带电物体周围的电场线分布，并比较导体和介质在同样外加电场下的差异。"
+            "学生可以用手柄拖动物体，改变位置和距离，实时观察场线变化。"
+        )
+        result = engine.process_turn(result["design_id"], {"message": brief})
+        self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
+        self.assertIn("•", result["assistant_message"])
+        self.assertGreater(len(result["assistant_message"]), 120)
+        self.assertEqual(len(result["task_report"]["sections"]), 1)
+
+        result = engine.process_turn(result["design_id"], {"message": "沿用这份草稿并继续"})
+        self.assertEqual(result["handled_stage"], Stage.COURSE_MAPPING_AND_DIRECTION.value)
+        result = engine.process_turn(result["design_id"], {"message": "这部分保留，继续整理"})
+        self.assertEqual(result["handled_stage"], Stage.LEARNING_OBJECTIVES.value)
+        self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
+
+        goals = (
+            "保留四类目标：解释导体和介质的静电响应，依据课程关系作理论预测，"
+            "比较材料和距离改变后的场分布，并理解手柄操作所对应的物理量变化。"
+        )
+        result = engine.process_turn(result["design_id"], {"message": goals})
+        goal_labels = {
+            item["label"]
+            for item in result["stage_payload"]["emvr_report_section"]["items"]
+        }
+        self.assertTrue({"概念目标", "计算目标", "分析目标", "交互目标"} <= goal_labels)
+
+        turns = 0
+        while result["workflow_status"] != "complete":
+            if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
+                message = EMVR_STAGE_ANSWERS[result["current_stage"]]
+            else:
+                message = "保留当前草稿并继续下一部分"
+            result = engine.process_turn(result["design_id"], {"message": message})
+            turns += 1
+            self.assertLess(turns, 40)
+
+        self.assertTrue(result["report_ready"])
+        self.assertTrue(result["report_url"].endswith("/report.pdf"))
+        self.assertIn("完整设计总结PDF已经生成", result["assistant_message"])
+        self.assertIn("右侧“任务报告”", result["assistant_message"])
+        sections = result["task_report"]["sections"]
+        setup = next(section for section in sections if section["stage_id"] == Stage.CONCEPTUAL_OR_VR_SETUP.value)
+        procedure = next(section for section in sections if section["stage_id"] == Stage.CONCEPTUAL_PROCEDURE.value)
+        self.assertGreaterEqual(
+            len([item for item in setup["items"] if str(item["label"]).startswith("物体 ")]),
+            5,
+        )
+        self.assertTrue(any(item["label"] == "实验流程" for item in procedure["items"]))
+        self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
 
     def test_structured_mode_events_and_emvr_marker_have_defined_precedence(self) -> None:
         first = self.engine.create_design(
@@ -690,7 +857,7 @@ class WorkflowEngineTests(unittest.TestCase):
         design_id = first["design_id"]
         result = first
         while result["current_stage"] != Stage.CONCEPTUAL_OR_VR_SETUP.value:
-            result = self.engine.process_turn(design_id, {"message": "继续"})
+            result = continue_emvr(self.engine, result)
         result = self.engine.process_turn(design_id, {"message": "完善Unity VR设计"})
 
         payload = result["stage_payload"]
@@ -698,6 +865,19 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn("scene", payload)
         self.assertNotIn("comfort_and_accessibility", payload)
         self.assertIn("unity_objects", payload)
+        self.assertGreaterEqual(len(payload["object_inventory"]), 5)
+        required_fields = {
+            "object_name",
+            "category",
+            "purpose",
+            "student_interaction",
+            "physics_or_data_state",
+            "visual_feedback",
+            "required",
+        }
+        self.assertTrue(
+            all(required_fields <= set(item) for item in payload["object_inventory"])
+        )
         self.assertIn("physics_layer", payload)
         self.assertIn("本阶段不定义VR场景", result["warnings"][0])
 
@@ -709,7 +889,7 @@ class WorkflowEngineTests(unittest.TestCase):
         design_id = first["design_id"]
         result = first
         while result["current_stage"] != Stage.EXPECTED_DATA_VISUALIZATION.value:
-            result = self.engine.process_turn(design_id, {"message": "继续"})
+            result = continue_emvr(self.engine, result)
         result = self.engine.process_turn(design_id, {"message": "生成参考窗口"})
 
         visual = result["visualization"]
@@ -802,10 +982,23 @@ class WorkflowEngineTests(unittest.TestCase):
             interaction_state=InteractionState.EMVR_DIRECT,
         )
         while emvr["workflow_status"] != "complete":
-            emvr = self.engine.process_turn(emvr["design_id"], {"message": "继续完善"})
+            emvr = continue_emvr(self.engine, emvr)
 
         self.assertEqual(guided["workflow_status"], "complete")
         self.assertEqual(emvr["workflow_status"], "complete")
+        self.assertTrue(emvr["report_ready"])
+        self.assertTrue(emvr["report_url"].endswith("/report.pdf"))
+        report_titles = {
+            section["title"] for section in emvr["task_report"]["sections"]
+        }
+        self.assertIn("学习目标", report_titles)
+        self.assertIn("Unity VR模拟实验设计", report_titles)
+        self.assertIn("概念实验流程", report_titles)
+        session = self.engine.store.get(emvr["design_id"])
+        carried = session.model_context["dialogue_state"]["carried_context"]
+        self.assertGreaterEqual(len(carried["learning_objectives"]), 4)
+        self.assertTrue(carried["unity_objects"])
+        self.assertTrue(carried["procedure_steps"])
         self.assertEqual(len(self.engine.store.get(guided["design_id"]).completed_stages), 13)
         self.assertEqual(len(self.engine.store.get(emvr["design_id"]).completed_stages), 13)
 
@@ -1817,6 +2010,41 @@ class WorkflowEngineTests(unittest.TestCase):
 
 
 class WorkflowAPITests(unittest.TestCase):
+    def test_completed_emvr_report_pdf_is_downloadable_with_design_token(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        created = engine.create_design(
+            "请用EMVR完善一个传输线驻波模拟实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        token = created["design_access_token"]
+        result = created
+        while result["workflow_status"] != "complete":
+            result = continue_emvr(engine, result)
+
+        api = WorkflowAPI(engine)
+        captured: dict[str, object] = {}
+
+        def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+            captured["status"] = status
+            captured["headers"] = headers
+
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": f"/v1/designs/{created['design_id']}/report.pdf",
+            "QUERY_STRING": "",
+            "CONTENT_LENGTH": "0",
+            "HTTP_AUTHORIZATION": f"Bearer {token}",
+            "wsgi.input": io.BytesIO(b""),
+        }
+        body = b"".join(api(environ, start_response))
+        headers = dict(captured["headers"])
+
+        self.assertTrue(str(captured["status"]).startswith("200"))
+        self.assertEqual(headers["Content-Type"], "application/pdf")
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertTrue(body.startswith(b"%PDF"))
+        self.assertGreater(len(body), 5000)
+
     def test_health_endpoint(self) -> None:
         api = WorkflowAPI(WorkflowEngine(generator=RuleBasedStageGenerator()))
         captured: dict[str, object] = {}

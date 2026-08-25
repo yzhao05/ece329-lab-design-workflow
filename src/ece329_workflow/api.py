@@ -133,6 +133,22 @@ class WorkflowAPI:
                 result = self.engine.create_design(idea, interaction_state)
                 return self._respond(start_response, HTTPStatus.CREATED, result)
 
+            report_match = re.fullmatch(r"/v1/designs/([^/]+)/report\.pdf", path)
+            if method == "GET" and report_match:
+                design_id = report_match.group(1)
+                self._require_design_token(environ, design_id)
+                body = self.engine.render_report_pdf(design_id)
+                safe_name = f"ece329-emvr-{design_id}.pdf"
+                return self._respond_bytes(
+                    start_response,
+                    HTTPStatus.OK,
+                    body,
+                    [
+                        ("Content-Type", "application/pdf"),
+                        ("Content-Disposition", f'attachment; filename="{safe_name}"'),
+                    ],
+                )
+
             design_match = re.fullmatch(r"/v1/designs/([^/]+)", path)
             if method == "GET" and design_match:
                 self._require_design_token(environ, design_match.group(1))
@@ -285,6 +301,22 @@ class WorkflowAPI:
         else:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers.append(("Content-Length", str(len(body))))
+        start_response(f"{status.value} {status.phrase}", headers)
+        return [body]
+
+    @staticmethod
+    def _respond_bytes(
+        start_response: Callable[[str, list[tuple[str, str]]], Any],
+        status: HTTPStatus,
+        body: bytes,
+        extra_headers: list[tuple[str, str]] | None = None,
+    ) -> list[bytes]:
+        headers = [
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            *list(extra_headers or []),
+            ("Content-Length", str(len(body))),
+        ]
         start_response(f"{status.value} {status.phrase}", headers)
         return [body]
 

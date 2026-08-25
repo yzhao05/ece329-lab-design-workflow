@@ -236,6 +236,11 @@ const dom = {
   parameterValue: document.querySelector("#parameterValue"),
   chartLegendLabel: document.querySelector("#chartLegendLabel"),
   chartDescription: document.querySelector("#chartDescription"),
+  taskReportCard: document.querySelector("#taskReportCard"),
+  taskReportStatus: document.querySelector("#taskReportStatus"),
+  taskReportIdea: document.querySelector("#taskReportIdea"),
+  taskReportSections: document.querySelector("#taskReportSections"),
+  downloadReportButton: document.querySelector("#downloadReportButton"),
   toast: document.querySelector("#toast"),
 };
 
@@ -275,6 +280,9 @@ function initialState() {
     pendingSummary: null,
     summarySections: [],
     lastStudentInput: null,
+    taskReport: null,
+    reportReady: false,
+    reportUrl: null,
   };
 }
 
@@ -364,6 +372,7 @@ function render() {
   renderQuickActions();
   renderEvidence();
   renderNotes();
+  renderTaskReport();
   renderMode();
   drawChart();
 }
@@ -609,6 +618,74 @@ function renderNotes() {
   });
 }
 
+function renderTaskReport() {
+  const emvr = state.mode === "EMVR_DIRECT";
+  const report = state.taskReport;
+  dom.taskReportCard.hidden = !emvr || !report;
+  if (!emvr || !report) return;
+
+  dom.taskReportStatus.textContent = state.reportReady ? "已完成" : "整理中";
+  dom.taskReportIdea.textContent = report.idea
+    ? `当前设计：${report.idea}`
+    : "当前设计会随着对话逐步补全。";
+  dom.taskReportSections.replaceChildren();
+  (report.sections || []).forEach((section) => {
+    const details = document.createElement("details");
+    details.className = "task-report-section";
+    if (section.stage_id === STAGES[state.stageIndex]?.[0] || state.reportReady) {
+      details.open = true;
+    }
+    const summary = document.createElement("summary");
+    summary.textContent = section.title || "设计内容";
+    const list = document.createElement("dl");
+    (section.items || []).forEach((item) => {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const description = document.createElement("dd");
+      term.textContent = item.label || "内容";
+      description.textContent = item.value || "";
+      row.append(term, description);
+      list.append(row);
+    });
+    details.append(summary, list);
+    dom.taskReportSections.append(details);
+  });
+  dom.downloadReportButton.hidden = !state.reportReady || !state.reportUrl;
+}
+
+async function downloadTaskReport() {
+  if (!state.designId || !state.reportUrl || !apiBase()) return;
+  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
+  if (!token) {
+    showToast("当前设计的访问凭证已经失效，请新建设计后再试");
+    return;
+  }
+  dom.downloadReportButton.disabled = true;
+  dom.downloadReportButton.textContent = "正在生成 PDF…";
+  try {
+    const response = await fetch(`${apiBase()}${state.reportUrl}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `ece329-emvr-${state.designId}.pdf`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast("PDF 总结已下载");
+  } catch (error) {
+    console.warn("Unable to download EMVR report", error);
+    showToast("PDF 下载失败，请确认课程服务已更新后重试");
+  } finally {
+    dom.downloadReportButton.disabled = false;
+    dom.downloadReportButton.textContent = "下载 PDF 总结";
+  }
+}
+
 function renderMode() {
   const emvr = state.mode === "EMVR_DIRECT";
   dom.modeLabel.textContent = emvr ? "EMVR模式" : "引导模式";
@@ -798,6 +875,10 @@ async function reloadApiDesignState() {
     state.mode = design.interaction_state || state.mode;
     const index = STAGES.findIndex(([id]) => id === design.current_stage);
     if (index >= 0) state.stageIndex = index;
+    if (design.task_report) state.taskReport = design.task_report;
+    state.reportReady = design.report_ready === true;
+    state.reportUrl = typeof design.report_url === "string" ? design.report_url : null;
+    renderTaskReport();
   } catch (error) {
     console.warn("Unable to refresh design state", error);
   }
@@ -809,9 +890,10 @@ function buildTurnRequest(message, uiAction = null) {
     turn.selected_option_id = state.pendingOptionId;
     state.pendingOptionId = null;
   }
-  if (state.mode !== "GUIDED_DESIGN" || uiAction !== "ADVANCE_STAGE") return turn;
+  if (uiAction !== "ADVANCE_STAGE") return turn;
 
   turn.complete_stage = true;
+  if (state.mode === "EMVR_DIRECT") return turn;
   if (state.stageIndex === 0) {
     const evidence = Array.isArray(state.evidence) ? state.evidence[0] : state.evidence;
     const direction = state.pendingDirection || state.lastStudentInput || message;
@@ -1550,6 +1632,9 @@ function applyResponse(response, userMessage) {
   if (response.stage_payload?.idea_development_status) {
     state.ideaDevelopmentStatus = response.stage_payload.idea_development_status;
   }
+  if (response.task_report) state.taskReport = response.task_report;
+  state.reportReady = response.report_ready === true;
+  state.reportUrl = typeof response.report_url === "string" ? response.report_url : null;
   if (state.stageIndex === 0) {
     const inputCategory = response.stage_payload?.input_category;
     if (response.stage_payload?.brainstorm_phase) {
@@ -1597,12 +1682,15 @@ function applyResponse(response, userMessage) {
     state.visualization = response.visualization;
     dom.chartDescription.textContent = response.visualization.disclaimer || "该图表示理论预测，不是实际测量数据。";
   }
+  renderTaskReport();
 }
 
 function composeAssistantText(response) {
   const base = response.assistant_message || response.message || "这一部分已经整理好了。";
   const parts = [base];
-  const shouldShowStudentTask = state.stageIndex !== 0;
+  const shouldShowStudentTask = (
+    state.mode === "EMVR_DIRECT" || state.stageIndex !== 0
+  );
   const studentTask = shouldShowStudentTask && typeof response.student_task === "string"
     ? response.student_task.trim()
     : "";
@@ -1620,7 +1708,10 @@ function composeAssistantText(response) {
 function deriveQuickActions(response) {
   if (response.quick_actions) return response.quick_actions;
   if (response.workflow_status === "complete" || response.status === "complete") return [];
-  if (state.mode === "EMVR_DIRECT") return ["继续完善下一阶段"];
+  if (state.mode === "EMVR_DIRECT") {
+    if (response.stage_payload?.awaiting_user_design_input === true) return [];
+    return [advanceQuickAction("保留这部分并继续")];
+  }
   if (response.stage_payload?.awaiting_student_description === true) return [];
 
   if (response.current_stage && response.handled_stage && response.current_stage !== response.handled_stage) {
@@ -1853,6 +1944,7 @@ dom.chatInput.addEventListener("keydown", (event) => {
 });
 dom.resetButton.addEventListener("click", resetDesign);
 dom.chartParameter.addEventListener("input", drawChart);
+dom.downloadReportButton.addEventListener("click", downloadTaskReport);
 window.addEventListener("resize", drawChart);
 
 render();

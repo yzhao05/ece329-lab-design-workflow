@@ -66,7 +66,11 @@ ready_for_confirmation是布尔值，remaining_gaps是尚未明确内容的稳�
 “确认、合适、保留”等文字判断。程序状态机将校验该对象并决定是否生成阶段级确认，模型不得自行修改阶段编号。
 在变量、流程、可视化等后续阶段，常规且低风险的组织细节应由助手根据已确定内容给出可修改的默认参考，例如建立基准、每次只改变一个量、保持观察方式一致、默认显示一种视图但允许随时切换。把这些默认安排说明为“可调整的参考”并让学生决定是否采纳即可；不要把显示先后、是否来回切换、基础比较推进顺序等常规细节拆成连续选择题。只有会实质改变研究问题、物理关系、比较范围或学习目标的取舍才需要学生进一步决定。
 阶段4及以后必须读取idea_development中已经明确的研究问题、学习目标和假设：可视化用于判断预期是否出现，结果解释用于检验原有物理理由，价值与局限用于检查现有设计能否实现既定学习目标。不得再次把“想研究什么、想学到什么、为什么值得研究”作为新的空白问题重复询问。
-EMVR_DIRECT状态下直接完善当前阶段，并面向Unity VR模拟实验设计。
+EMVR_DIRECT状态下直接完善当前阶段，并面向Unity VR模拟实验设计。“直接完善”表示助手先给出有内容的可修改草稿，不表示替学生静默接受、连续自动推进或只返回一句完成状态。每轮必须承接design_context.emvr_design、completed_stage_outputs和carried_context，保留学生已经提出的对象、比较、学习目标与交互；不得因为进入新阶段就退回最初的泛化想法。
+EMVR_DIRECT每个非最终阶段都应把本阶段形成的具体内容写入stage_payload，并给学生一个修改或确认入口；学生确认后由状态机推进。最终阶段必须汇总此前产物，不能声称已经完成Unity实现或真实测量。
+EMVR_DIRECT沿用引导模式的上下文机制：先读取pending_action确认本轮是在回答、修改、索取参考还是确认上一草稿，再读取carried_context中的实验方向、全部学习目标、研究问题、假设、Unity对象、交互、变量、流程、显示与局限。已确认内容默认保留，只有结构化语义明确表示修改或换题时才能替换。对学生的实质补充先回应其物理或VR设计含义，再更新草稿；不得重复阶段入口或让学生复述已有信息。
+EMVR_DIRECT默认学生已经带着一个模糊实验想法进入，不执行GUIDED_DESIGN的三图景广度发散，也不在“没有思路”时提供图景库。信息不足时只围绕当前Unity VR实验问一个专业且可回答的问题，必要时可给一段贴合当前设计的参考结构，但不重新推荐实验方向。
+EMVR_DIRECT的学生可见用语可以使用Unity、XR、VR交互、参数控制、理论计算、数据绑定、场可视化等专业术语，但必须解释这些设计元素与ECE329物理意义的对应关系。只辅助设计实验，不输出代码、Prefab、场景文件或声称已经实现、编译、测试该实验。
 阶段1在GUIDED_DESIGN下允许多轮brainstorm，未经学生确认不得收敛。
 阶段1必须维护context.stage_one_thread中的topic_anchor、current_focus、focus_history和brainstorm_phase。除非学生明确表示更换主题，否则“第三个”“对称性和方向”“先看边界形状”这类回答都是对当前实验想法的选择或细化，不是新实验；回复应先承接已经讨论的关系，再只推进一层。不得重复询问学生已经选定的上位方向，也不得把已经选定的细化内容重新列成多个入口。
 学生可能在选择图景的同一句话里继续说明自己的研究设想。若context.stage_one_thread.stage_one_direction_detail非空，必须同时承接所选课程关系和这段实质想法，直接形成同一方向下的大纲雏形或进入想法完整性检查；不得只确认图景后再次要求学生重说，也不得重新展示三幅图景。context.stage_one_thread.direction_locked=true后，三幅图景的广度发散已经结束；除非resolved_intent明确且结构化地确认NEW_TOPIC，任何补充对象、材料、边界、现象和索取参考都必须留在当前方向内。
@@ -93,8 +97,10 @@ def _stage_output_contract(
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             return (
                 "stage_payload_json必须包含original_idea、target_phenomenon、"
-                "possible_vr_interactions和design_scope；直接整理当前EMVR设计起点，"
-                "但本轮不得生成后续阶段的变量表、公式、流程或最终方案。"
+                "possible_vr_interactions和design_scope；从学生已有的模糊想法整理当前EMVR"
+                "设计起点，不得返回三幅图景、课程方向选项或让学生重新从零选题。"
+                "possible_vr_interactions只概括与当前想法直接相关的操作类型。"
+                "本轮不得生成后续阶段的变量表、公式、流程或最终方案。"
             )
         phase = str(
             session.turn_context.get("brainstorm_phase") or "BREADTH_EXPLORATION"
@@ -193,7 +199,13 @@ def _stage_output_contract(
         if session.interaction_state is InteractionState.GUIDED_DESIGN:
             return "stage_payload_json必须包含module_focus；引导状态不得直接生成完整装置。"
         return (
-            "stage_payload_json必须包含unity_objects、interactions和physics_layer；"
+            "stage_payload_json必须包含unity_objects、object_inventory、interactions和physics_layer；"
+            "object_inventory必须枚举这个设计所需的全部Unity/VR实验对象和支持组件，"
+            "每项包含object_name、category、purpose、student_interaction、"
+            "physics_or_data_state、visual_feedback和required。必须覆盖XR交互基础、物理源、"
+            "实验对象或材料、探测/观察、参数控制、理论计算、场或波可视化、数据反馈以及"
+            "记录/比较/重置；若某类不适用，要在清单中说明原因，不能静默遗漏。"
+            "这些内容只描述对象职责与接口关系，不生成Prefab、脚本、代码或Unity场景。"
             "不得替学生定义VR场景，也不得加入舒适性或可访问性设计。"
         )
     if stage is Stage.VARIABLES_AND_CONDITIONS:

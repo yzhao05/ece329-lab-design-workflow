@@ -66,9 +66,20 @@ class WebFrontendContractTests(unittest.TestCase):
             2,
         )
         self.assertIn(
-            "assets/app.js?v=20260825-trail15-direction-lock",
+            "assets/app.js?v=20260825-emvr-report",
             self.index_html,
         )
+
+    def test_emvr_task_report_and_pdf_download_are_visible(self) -> None:
+        self.assertIn('id="taskReportCard"', self.index_html)
+        self.assertIn('id="taskReportSections"', self.index_html)
+        self.assertIn('id="downloadReportButton"', self.index_html)
+        self.assertIn("function renderTaskReport()", self.app_js)
+        self.assertIn("function downloadTaskReport()", self.app_js)
+        self.assertIn("response.task_report", self.app_js)
+        self.assertIn("response.report_ready === true", self.app_js)
+        self.assertIn("Authorization: `Bearer ${token}`", self.app_js)
+        self.assertIn('advanceQuickAction("保留这部分并继续")', self.app_js)
 
     def test_demo_rechecks_all_idea_facets_without_fixed_substep_order(self) -> None:
         self.assertIn("function updateDemoIdeaDevelopmentStatus", self.app_js)
@@ -174,10 +185,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("await reloadApiDesignState()", self.app_js)
         self.assertNotIn("已自动切换为本地演示回答", self.app_js)
 
-    def test_internal_stage_one_task_is_not_appended_to_chat(self) -> None:
+    def test_stage_one_task_is_visible_in_emvr_but_internal_guided_task_is_hidden(self) -> None:
         self.assertIn("function composeAssistantText(response)", self.app_js)
         self.assertIn("response.student_task", self.app_js)
-        self.assertIn("const shouldShowStudentTask = state.stageIndex !== 0", self.app_js)
+        self.assertIn('state.mode === "EMVR_DIRECT" || state.stageIndex !== 0', self.app_js)
+        self.assertIn("response.stage_payload?.awaiting_user_design_input === true", self.app_js)
         self.assertIn("response.warnings", self.app_js)
         self.assertIn("response.completion_error", self.app_js)
 
