@@ -4,6 +4,12 @@ import re
 from typing import Any, Protocol
 
 from .dialogue_state import UserIntent, build_carried_context
+from .emvr_design import (
+    EMVR_THEORY_RELATIONS,
+    emvr_formula_support_map,
+    formulas_for_emvr_relations,
+    merge_emvr_structured_requirements,
+)
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -301,6 +307,10 @@ def guided_stage_entry_output(
 
 
 def _idea(session: DesignSession, user_message: str) -> str:
+    if session.interaction_state is InteractionState.EMVR_DIRECT:
+        emvr_design = session.design_context.get("emvr_design", {})
+        if isinstance(emvr_design, dict) and emvr_design.get("brief"):
+            return str(emvr_design["brief"])
     idea_context = session.design_context.get("idea", {})
     if isinstance(idea_context, dict):
         for key in ("current_focus", "current_summary", "main_direction"):
@@ -353,6 +363,92 @@ def _course_references(text: str) -> list[dict[str, Any]]:
 
 def _formula_references(text: str) -> list[dict[str, Any]]:
     return KNOWLEDGE.formula_references(text)
+
+
+def _emvr_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return "；".join(
+            text
+            for text in (_emvr_content_text(item) for item in value.values())
+            if text
+        )
+    if isinstance(value, list):
+        return "；".join(
+            text
+            for text in (_emvr_content_text(item) for item in value)
+            if text
+        )
+    return str(value).strip() if value is not None else ""
+
+
+def _emvr_stage_input_texts(session: DesignSession, stage: Stage) -> list[str]:
+    emvr_design = session.design_context.get("emvr_design", {})
+    stage_inputs = (
+        emvr_design.get("stage_inputs", {})
+        if isinstance(emvr_design, dict)
+        else {}
+    )
+    entries = stage_inputs.get(stage.value, []) if isinstance(stage_inputs, dict) else []
+    if not isinstance(entries, list):
+        return []
+    values: list[str] = []
+    for entry in entries:
+        content = entry.get("content") if isinstance(entry, dict) else entry
+        text = _emvr_content_text(content)
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _emvr_latest_stage_input(session: DesignSession, stage: Stage) -> str:
+    values = _emvr_stage_input_texts(session, stage)
+    return values[-1] if values else ""
+
+
+def _emvr_context_text(session: DesignSession, fallback: str) -> str:
+    emvr_design = session.design_context.get("emvr_design", {})
+    parts = []
+    if isinstance(emvr_design, dict):
+        brief = _emvr_content_text(emvr_design.get("brief"))
+        if brief:
+            parts.append(brief)
+    for stage in Stage:
+        parts.extend(_emvr_stage_input_texts(session, stage))
+    if fallback.strip():
+        parts.append(fallback.strip())
+    return "\n".join(dict.fromkeys(parts))
+
+
+def _emvr_structured_requirements(session: DesignSession) -> dict[str, Any]:
+    """Return the latest complete semantic interpretation of the EMVR design."""
+
+    if session.interaction_state is not InteractionState.EMVR_DIRECT:
+        return {}
+    return merge_emvr_structured_requirements(
+        session.design_context.get("emvr_design", {})
+    )
+
+
+def _focused_emvr_topics(text: str) -> list[str]:
+    matches = KNOWLEDGE.match_concepts(text, limit=6)
+    if len(matches) > 1:
+        specific = [item for item in matches if item.get("id") != "lecture_01"]
+        if specific:
+            matches = specific
+    if matches:
+        return [str(item["title"]) for item in matches]
+    return _course_topics(text)
+
+
+def _focused_emvr_formula_references(
+    relation_ids: list[str] | tuple[str, ...],
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Select EMVR formulas from structured physical roles, never raw wording."""
+
+    return formulas_for_emvr_relations(relation_ids, limit=limit)
 
 
 ILLUSTRATIVE_EXTENSION_SCOPE = "ILLUSTRATIVE_ONLY_NOT_COURSE_EVIDENCE"
@@ -569,7 +665,7 @@ def _visualization(idea: str, emvr: bool) -> dict[str, Any]:
             {"type": "slider", "binds_to": "independent_variable"},
             {"type": "button", "action": "reset_to_reference"},
         ],
-        "annotations": ["需要由阶段5的理论关系生成数值或曲线"],
+        "annotations": ["数值或曲线必须由当前报告中已经筛选的理论关系生成"],
         "unity_binding": (
             {
                 "suggested_surface": "world-space data panel",
@@ -1209,7 +1305,16 @@ class RuleBasedStageGenerator:
     def _generate_emvr(self, session: DesignSession, user_message: str) -> StepOutput:
         stage = session.current_stage
         idea = _idea(session, user_message)
-        topics = _course_topics(idea)
+        design_text = _emvr_context_text(session, idea)
+        topics = _focused_emvr_topics(design_text)
+        stage_inputs = _emvr_stage_input_texts(session, stage)
+        latest_stage_input = stage_inputs[-1] if stage_inputs else ""
+        structured_requirements = _emvr_structured_requirements(session)
+        theory_relation_ids = structured_requirements.get(
+            "theory_relation_ids", []
+        )
+        if not isinstance(theory_relation_ids, list):
+            theory_relation_ids = []
 
         if stage is Stage.IDEA_BRAINSTORMING:
             return StepOutput(
@@ -1233,76 +1338,118 @@ class RuleBasedStageGenerator:
                 assumptions=["暂以用户提供的想法为设计边界，后续阶段再补充参数和理论模型。"],
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
+            selected_direction = latest_stage_input or (
+                f"围绕“{idea}”比较学生主动改变条件前后的空间电磁分布"
+            )
             return StepOutput(
                 assistant_message="已选择兼顾ECE329相关性、理论可解释性和VR交互价值的实验方向。",
                 stage_payload={
                     "primary_topic": topics[0],
                     "secondary_topics": topics[1:],
-                    "selected_direction": _topic_options(idea)[0],
-                    "course_references": _course_references(idea),
+                    "selected_direction": selected_direction,
+                    "student_revisions": stage_inputs,
+                    "course_references": _course_references(design_text),
                     "vr_suitability": "参数可调、结果可计算、现象可空间化展示",
                     "selection_reason": "优先保留用户原始意图，并选择能够形成明确输入—输出反馈的方向。",
                 },
             )
         if stage is Stage.LEARNING_OBJECTIVES:
+            conceptual_objective = latest_stage_input or f"解释{topics[0]}中的核心物理机制"
             return StepOutput(
                 assistant_message="已将课程学习与VR操作组织为一致的学习目标。",
                 stage_payload={
-                    "conceptual_objective": f"解释{topics[0]}中的核心物理机制",
-                    "calculation_objective": "使用ECE329关系式预测参数变化造成的响应",
-                    "analysis_objective": "比较参数设置、理论输出和空间可视化",
-                    "vr_interaction_objective": "通过有物理意义的操作改变模型输入",
-                    "observation_objective": "从数值和空间表现中解释趋势",
+                    "conceptual_objective": conceptual_objective,
+                    "calculation_objective": "依据与当前研究问题直接相关的ECE329关系式作出理论预测",
+                    "analysis_objective": "比较学生定义的条件变化、理论输出和空间电磁分布",
+                    "vr_interaction_objective": "通过学生定义的VR操作改变具有明确物理意义的模型输入",
+                    "observation_objective": "从数值和空间表现中判断预期关系是否成立",
                 },
             )
         if stage is Stage.RESEARCH_QUESTION:
+            research_focus = latest_stage_input or idea
+            changed_quantities = structured_requirements.get("changed_quantities", [])
+            observed_quantities = structured_requirements.get("observed_quantities", [])
             return StepOutput(
                 assistant_message="已形成一个可在Unity中调整参数并观察理论输出的研究问题。",
                 stage_payload={
-                    "main_research_question": "在其余条件固定时，主要电磁参数的变化如何影响目标场量或传播响应？",
-                    "adjustable_quantity_in_vr": "由阶段8确定的主要自变量",
-                    "observable_quantity_in_vr": "理论数值、曲线和空间场表现",
+                    "main_research_question": research_focus,
+                    "adjustable_quantity_in_vr": changed_quantities
+                    or [f"按学生定义的变化条件进行调整：{research_focus}"],
+                    "observable_quantity_in_vr": observed_quantities
+                    or ["研究问题中指定的理论量、场线形态和空间分布"],
+                    "comparison_cases": structured_requirements.get(
+                        "comparison_cases", []
+                    ),
                     "question_boundary": topics[0],
                 },
-                assumptions=["具体变量名称将在变量阶段依据用户设计固定。"],
+                assumptions=["后续变量设计只负责给已有研究问题补充单位、范围和控制条件，不改写问题。"],
             )
         if stage is Stage.THEORETICAL_FRAMEWORK:
-            formulas = _formula_references(idea)
+            formulas = _focused_emvr_formula_references(theory_relation_ids)
+            research_focus = _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
+            relation_labels = [
+                EMVR_THEORY_RELATIONS[relation_id]["label"]
+                for relation_id in theory_relation_ids
+                if relation_id in EMVR_THEORY_RELATIONS
+            ]
             return StepOutput(
-                assistant_message="已把物理计算与教学可视化分开，避免把动画误认为精确数值模拟。",
+                assistant_message=(
+                    "我已经只保留能直接解释当前变化条件和观察现象的课程关系。"
+                    if formulas
+                    else "目前还不能从已确认内容中判断哪些公式会真正参与这个实验；我先不替你堆叠无关公式。"
+                ),
                 stage_payload={
-                    "physical_mechanism": topics[0],
+                    "physical_mechanism": relation_labels,
                     "core_equations": formulas,
-                    "simulation_inputs": ["主要自变量", "控制参数", "基准条件"],
-                    "calculated_outputs": ["目标场量或无量纲响应", "理论趋势曲线"],
+                    "formula_support_map": emvr_formula_support_map(
+                        theory_relation_ids,
+                        structured_requirements,
+                    ),
+                    "theory_selection_status": (
+                        "selected_for_current_research"
+                        if formulas
+                        else "needs_semantic_theory_confirmation"
+                    ),
+                    "simulation_inputs": [
+                        *structured_requirements.get("changed_quantities", []),
+                        "其余保持不变的控制条件",
+                        "用于比较的基准状态",
+                    ],
+                    "calculated_outputs": structured_requirements.get(
+                        "observed_quantities", []
+                    ) or ["研究问题中指定的电磁响应"],
                     "visual_only_elements": ["方向箭头", "波前或场线动画", "颜色强度映射"],
                     "model_type": "课程层面的解析模型或预计算数据",
+                    "research_question_preserved": research_focus,
                 },
                 warnings=["视觉动画必须标明是计算映射还是教学示意。"],
             )
         if stage is Stage.HYPOTHESIS:
+            hypothesis = latest_stage_input or "学生尚未给出具体方向性假设"
             return StepOutput(
                 assistant_message="已将理论假设映射为用户调整参数后可立即观察的VR反馈。",
                 stage_payload={
-                    "research_hypothesis": "改变主要自变量将按照ECE329理论关系引起可预测响应。",
+                    "research_hypothesis": hypothesis,
                     "null_hypothesis": "在设计范围内，主要自变量变化不会造成可分辨响应。",
-                    "expected_trend": "由阶段5确定的理论关系生成，不使用伪造实测数据。",
+                    "expected_trend": hypothesis,
                     "limiting_cases": ["基准条件", "参数下限", "参数上限或模型失效边界"],
                     "vr_feedback_for_trend": ["数值更新", "曲线更新", "空间视觉编码更新"],
                 },
             )
         if stage is Stage.CONCEPTUAL_OR_VR_SETUP:
+            research_focus = _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
             return StepOutput(
                 assistant_message="已在保留用户现有场景条件的前提下，完善Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
                 stage_payload={
                     "user_original_design": idea,
                     "existing_context": "保留用户已有场景设定；工作流不新增或改写VR场景设计。",
-                    "user_role": "通过有物理意义的交互调整参数、观察结果并进行比较",
-                    "core_learning_task": f"探索参数变化与{topics[0]}响应之间的关系",
+                    "student_constraints": stage_inputs,
+                    "user_role": latest_stage_input or "通过有物理意义的交互调整参数、观察结果并进行比较",
+                    "core_learning_task": research_focus or f"探索学生定义的条件变化与{topics[0]}响应之间的关系",
                     "unity_objects": [
                         "XR Origin与控制器（若项目已有则复用）",
-                        "电磁源或激励对象",
-                        "实验对象或介质对象",
+                        "学生定义的可交互物理源或带电对象（不额外增设重复源）",
+                        "材料或边界比较对象（仅按学生设计保留）",
                         "虚拟探测器",
                         "参数控制面板",
                         "数据与理论反馈面板",
@@ -1320,18 +1467,18 @@ class RuleBasedStageGenerator:
                             "required": True,
                         },
                         {
-                            "object_name": "电磁源或激励对象",
+                            "object_name": "学生定义的可交互物理源或带电对象",
                             "category": "物理对象",
-                            "purpose": "定义模型中的源条件或入射条件",
+                            "purpose": "复用学生指定的对象来定义模型源条件，不额外创建重复电磁源",
                             "student_interaction": "按设计需要移动、旋转或调节源参数",
-                            "physics_or_data_state": "保存源强、方向、频率、相位或边界状态",
+                            "physics_or_data_state": "保存学生已定义的源强、极性、位置、方向或其他源状态",
                             "visual_feedback": "方向标记、状态颜色和当前参数读数",
                             "required": True,
                         },
                         {
-                            "object_name": "实验对象或材料对象",
+                            "object_name": "材料或边界比较对象",
                             "category": "物理对象",
-                            "purpose": "承载几何、材料和边界条件",
+                            "purpose": "承载学生设计中需要比较的几何、材料和边界条件",
                             "student_interaction": "抓取、定位、旋转或切换已定义材料预设",
                             "physics_or_data_state": "保存几何、材料参数和空间变换",
                             "visual_feedback": "轮廓、材料标签和有效状态提示",
@@ -1398,29 +1545,44 @@ class RuleBasedStageGenerator:
                         {"user_action": "记录当前设置", "physical_meaning": "保存一个比较条件", "system_response": "向数据面板添加理论预测记录"},
                     ],
                     "physics_layer": {
-                        "user_inputs": ["主要自变量", "可选控制参数"],
-                        "calculated_outputs": ["目标理论量", "派生比较量"],
-                        "model_type": "解析公式或预计算数据",
+                        "user_inputs": structured_requirements.get(
+                            "changed_quantities", []
+                        ) or [research_focus or "学生定义的变化条件"],
+                        "calculated_outputs": structured_requirements.get(
+                            "observed_quantities", []
+                        ) or ["研究问题指定的理论量"],
+                        "model_type": "根据当前交互状态重新计算的课程理论模型",
                         "real_time_updates": ["数值", "曲线", "场表现"],
+                        "update_policy": "对象或参数改变后重新计算并刷新显示，不把预设动画或固定序列当作实验结果",
                         "parameter_limits": ["限制在理论模型适用范围内"],
                         "invalid_conditions": ["参数超界时停止计算并解释原因"],
                     },
                     "visualization_layer": [
-                        {"visual_element": "箭头或曲线", "physical_quantity": "矢量场方向或传播方向", "calculated_or_illustrative": "必须在实现时明确"},
+                        {"visual_element": "箭头或曲线", "physical_quantity": "当前对象状态对应的矢量场方向或传播方向", "calculated_or_illustrative": "由当前理论输出实时映射"},
                         {"visual_element": "颜色或透明度", "physical_quantity": "归一化强度或衰减", "calculated_or_illustrative": "由理论输出映射"},
                     ],
                     "measurement_interface": ["当前参数及单位", "理论输出", "比较曲线", "模型假设提示", "记录与重置状态"],
                     "internal_experiment_states": ["INTRO", "BASELINE", "PARAMETER_ADJUSTMENT", "OBSERVATION", "DATA_RECORDING", "COMPARISON", "REFLECTION", "COMPLETE"],
-                    "design_improvements": ["确保每个交互都有物理意义", "分开数值计算与教学动画", "保留参数基准和重置闭环"],
+                    "design_improvements": [
+                        "确保每个交互都有物理意义",
+                        "学生最新修改优先于通用对象模板",
+                        "分开实时理论输出与教学示意动画",
+                        "保留参数基准和重置闭环",
+                    ],
                 },
                 warnings=["本阶段不定义VR场景，也不包含可访问性与舒适性设计。"],
             )
         if stage is Stage.VARIABLES_AND_CONDITIONS:
+            variable_definition = latest_stage_input or _emvr_latest_stage_input(
+                session,
+                Stage.RESEARCH_QUESTION,
+            )
             return StepOutput(
                 assistant_message="已把实验变量映射到Unity控制、显示和模型约束。",
                 stage_payload={
-                    "independent_variable": {"name": "主要电磁参数", "unity_control": "有单位和范围的滑块或旋钮", "range": "限制在理论适用范围"},
-                    "dependent_variable": {"name": "目标场量或传播响应", "vr_representation": "数值、曲线和空间编码"},
+                    "student_variable_definition": variable_definition,
+                    "independent_variable": {"name": variable_definition or "学生定义的主要变化条件", "unity_control": "与VR对象操作或带单位控件绑定", "range": "限制在理论适用范围"},
+                    "dependent_variable": {"name": "研究问题中指定的观察响应", "vr_representation": "数值、曲线和空间编码"},
                     "controlled_variables": ["源条件", "几何条件", "材料或边界中未被选为自变量的参数"],
                     "reference_condition": {"purpose": "建立比较基线", "unity_action": "Reset/Reference preset"},
                     "confounding_factors": ["视觉缩放与真实单位混淆", "多个参数同时变化", "超出模型范围"],
@@ -1431,6 +1593,7 @@ class RuleBasedStageGenerator:
                 assistant_message="已将实验逻辑整理为单一、可重复的VR学习闭环。",
                 stage_payload={
                     "procedure_type": "conceptual_vr_flow",
+                    "student_required_steps": stage_inputs,
                     "procedure_steps": [
                         "进入VR实验并阅读本次学习目标、研究问题与模型适用范围",
                         "检查实验对象、源、探测器和显示面板的初始状态",
@@ -1444,15 +1607,20 @@ class RuleBasedStageGenerator:
                         "回到学习目标完成反思，确认哪些结论受模型假设限制",
                     ],
                     "comparison_logic": "每次只改变主要自变量，其余条件保持锁定。",
-                    "derived_quantities": ["由阶段5理论关系定义的派生量"],
+                    "derived_quantities": ["由当前报告中已筛选的理论关系定义的派生量"],
                 },
             )
         if stage is Stage.EXPECTED_DATA_VISUALIZATION:
-            return StepOutput(
+            output = StepOutput(
                 assistant_message="已生成理论预测窗口规范，并给出与Unity参数控制器联动的接口。",
-                stage_payload={"trend_annotation": "由理论模型计算后标注", "unity_update_event": "OnSimulationParameterChanged"},
+                stage_payload={
+                    "student_visualization_requirements": stage_inputs,
+                    "trend_annotation": "由当前理论模型计算后标注",
+                    "unity_update_event": "OnSimulationParameterChanged",
+                },
                 visualization=_visualization(idea, emvr=True),
             )
+            return output
         if stage is Stage.RESULT_INTERPRETATION:
             return StepOutput(
                 assistant_message="已为不同结果情形设计物理解释和教学反馈。",
@@ -1474,6 +1642,7 @@ class RuleBasedStageGenerator:
                     "innovation": {"rating": "context_dependent", "innovative_elements": ["空间探测", "实时参数—理论反馈", "多条件叠加比较"]},
                     "vr_added_value": {"rating": "high_if_spatial", "reasoning": "只有空间观察和交互对理解有贡献时才值得使用VR"},
                     "recommended_improvements": ["删除无物理意义的交互", "优先保留一个清晰的参数—响应闭环"],
+                    "student_value_and_limit_notes": stage_inputs,
                 },
             )
         return StepOutput(
@@ -1491,12 +1660,14 @@ class RuleBasedStageGenerator:
                 "builder_pack_handoff": {
                     "purpose": "供EMVR_Blind_BuilderPack的Brief与Design阶段人工审阅，不自动启动或批准任何Gate。",
                     "lab_identity": {"title": "待用户确认", "lab_id": "待按Builder Pack规则确定", "domain": topics[0]},
-                    "learning_goals": "来自阶段3",
-                    "core_student_flow": "来自阶段9",
-                    "physics_and_presets": "来自阶段5、6和8",
-                    "objects_and_feedback": "来自阶段7",
-                    "desktop_xr_interaction_meaning": "来自阶段7的交互—物理意义映射",
-                    "initial_and_post_action_states": "来自阶段9的基准状态和第一次参数调整",
+                    "learning_goals": build_carried_context(session).get("learning_objectives", []),
+                    "core_student_flow": build_carried_context(session).get("procedure_steps", []),
+                    "physics_and_presets": _focused_emvr_formula_references(
+                        theory_relation_ids
+                    ),
+                    "objects_and_feedback": build_carried_context(session).get("unity_objects", []),
+                    "desktop_xr_interaction_meaning": build_carried_context(session).get("interactions", []),
+                    "initial_and_post_action_states": "使用报告中定义的基准条件和第一次参数调整结果",
                     "unresolved_builder_inputs": [
                         "Builder Pack要求的房间、XR Prefab和场景复用决策",
                         "真实Unity API签名及Common复用审计",

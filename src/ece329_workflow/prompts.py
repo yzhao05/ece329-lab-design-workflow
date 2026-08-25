@@ -9,6 +9,10 @@ from .dialogue_state import (
     current_resolved_intent,
     hydrate_pending_action_from_history,
 )
+from .emvr_design import (
+    formulas_for_emvr_relations,
+    merge_emvr_structured_requirements,
+)
 from .guardrails import (
     COURSE_CONTENT,
     build_stage_one_turn_context,
@@ -69,6 +73,8 @@ ready_for_confirmation是布尔值，remaining_gaps是尚未明确内容的稳�
 EMVR_DIRECT状态下直接完善当前阶段，并面向Unity VR模拟实验设计。“直接完善”表示助手先给出有内容的可修改草稿，不表示替学生静默接受、连续自动推进或只返回一句完成状态。每轮必须承接design_context.emvr_design、completed_stage_outputs和carried_context，保留学生已经提出的对象、比较、学习目标与交互；不得因为进入新阶段就退回最初的泛化想法。
 EMVR_DIRECT每个非最终阶段都应把本阶段形成的具体内容写入stage_payload，并给学生一个修改或确认入口；学生确认后由状态机推进。最终阶段必须汇总此前产物，不能声称已经完成Unity实现或真实测量。
 EMVR_DIRECT沿用引导模式的上下文机制：先读取pending_action确认本轮是在回答、修改、索取参考还是确认上一草稿，再读取carried_context中的实验方向、全部学习目标、研究问题、假设、Unity对象、交互、变量、流程、显示与局限。已确认内容默认保留，只有结构化语义明确表示修改或换题时才能替换。对学生的实质补充先回应其物理或VR设计含义，再更新草稿；不得重复阶段入口或让学生复述已有信息。
+design_context.emvr_design.stage_inputs与carried_context.emvr_stage_inputs按阶段保存学生的回答与修改，是EMVR设计的权威输入。当前阶段若出现ANSWER_CURRENT_QUESTION或MODIFY_PREVIOUS_PROPOSAL，stage_payload必须在合适的学生输入、修改或约束字段中原样保留本轮实质内容；若为修改，还必须让相关草稿字段发生可见变化并保留未被修改的部分，不得重新输出旧草稿。研究问题必须直接采用学生提出的变化条件与观察响应，不能退化成“主要参数影响目标响应”之类占位句。不得向学生显示“由阶段N确定”“来自阶段N”“待后续阶段补充”等内部依赖说明，应该直接引用已经保存的具体内容。
+理论关系只保留对当前研究对象、变化条件和预期现象有直接解释作用的公式。课程检索命中只表示公式可供核对，不表示全部公式都应写入方案；必须剔除仅因同一讲次或宽泛课程主题而命中、但不参与当前模型的关系。每条core_equations都要能说明它具体支持哪个计算输入、输出或边界条件。
 EMVR_DIRECT默认学生已经带着一个模糊实验想法进入，不执行GUIDED_DESIGN的三图景广度发散，也不在“没有思路”时提供图景库。信息不足时只围绕当前Unity VR实验问一个专业且可回答的问题，必要时可给一段贴合当前设计的参考结构，但不重新推荐实验方向。
 EMVR_DIRECT的学生可见用语可以使用Unity、XR、VR交互、参数控制、理论计算、数据绑定、场可视化等专业术语，但必须解释这些设计元素与ECE329物理意义的对应关系。只辅助设计实验，不输出代码、Prefab、场景文件或声称已经实现、编译、测试该实验。
 阶段1在GUIDED_DESIGN下允许多轮brainstorm，未经学生确认不得收敛。
@@ -188,6 +194,15 @@ def _stage_output_contract(
             "main_research_question；本轮只处理一个核心量。"
         )
     if stage is Stage.THEORETICAL_FRAMEWORK:
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            return (
+                "stage_payload_json必须包含core_equations、formula_support_map、"
+                "theory_selection_status、simulation_inputs、calculated_outputs和"
+                "visual_only_elements。core_equations只能从knowledge_retrieval.formulas"
+                "逐项原样复制；formula_support_map必须为每个formula_id说明它支持当前"
+                "实验的哪项变化量、观察量或边界条件。若formulas为空，core_equations与"
+                "formula_support_map也必须为空，不得用同讲次的其他公式补位。"
+            )
         return (
             "stage_payload_json必须编码一个包含core_equations数组的对象；若"
             "knowledge_retrieval.formulas非空，每一项必须从该数组逐项原样复制，"
@@ -338,7 +353,16 @@ def build_prompt_packet(
         retrieval_text,
         limit=5,
     )
-    formulas = KNOWLEDGE.formula_references(retrieval_text, limit=12)
+    if session.interaction_state is InteractionState.EMVR_DIRECT:
+        emvr_requirements = merge_emvr_structured_requirements(
+            session.design_context.get("emvr_design", {})
+        )
+        formulas = formulas_for_emvr_relations(
+            emvr_requirements.get("theory_relation_ids", []),
+            limit=12,
+        )
+    else:
+        formulas = KNOWLEDGE.formula_references(retrieval_text, limit=12)
     shown_option_ids = shown_exploration_option_ids(session.history)
     sample_seed = f"{session.design_id}:{len(shown_option_ids)}"
     # Scene sampling should follow the student's current topic, not the whole

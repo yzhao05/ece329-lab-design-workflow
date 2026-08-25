@@ -15,7 +15,16 @@ from ece329_workflow.dialogue_state import (
     resolved_intent,
 )
 from ece329_workflow.engine import WorkflowEngine
-from ece329_workflow.generator import RuleBasedStageGenerator, build_exploration_scenes
+from ece329_workflow.generator import (
+    RuleBasedStageGenerator,
+    _focused_emvr_formula_references,
+    build_exploration_scenes,
+)
+from ece329_workflow.emvr_design import (
+    EMVR_THEORY_RELATIONS,
+    EMVR_THEORY_RELATION_IDS,
+    normalize_emvr_design_update,
+)
 from ece329_workflow.guardrails import (
     AMBIGUOUS,
     COURSE_CONTENT,
@@ -64,17 +73,26 @@ EMVR_STAGE_ANSWERS = {
 class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
     """Test double that resolves conversational intent from pending state, not wording."""
 
+    def __init__(self) -> None:
+        self.next_intent: UserIntent | None = None
+        self.next_emvr_update: dict | None = None
+
     def resolve_intent(self, session, user_message, pending_action, carried_context):
         pending_type = (
             str(pending_action.get("type") or "")
             if isinstance(pending_action, dict)
             else ""
         )
-        intent = (
+        intent = self.next_intent or (
             UserIntent.ACCEPT_PREVIOUS_PROPOSAL
             if pending_type == "CONFIRM_STAGE_OR_MODIFY"
             else UserIntent.ANSWER_CURRENT_QUESTION
         )
+        self.next_intent = None
+        semantic_updates = {"pending_answer_status": "CLEAR"}
+        if self.next_emvr_update is not None:
+            semantic_updates["emvr_design_update"] = self.next_emvr_update
+            self.next_emvr_update = None
         return resolved_intent(
             intent,
             target=(
@@ -86,7 +104,7 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
             preserve_current_design=True,
             confidence=0.99,
             source="SEMANTIC_TEST",
-            semantic_updates={"pending_answer_status": "CLEAR"},
+            semantic_updates=semantic_updates,
         )
 
 
@@ -724,6 +742,217 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertTrue(any(item["label"] == "实验流程" for item in procedure["items"]))
         self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
+        self.assertNotRegex(
+            json.dumps(result["task_report"], ensure_ascii=False),
+            r"(?:由|来自)阶段\s*\d+|阶段\s*\d+\s*(?:确定|补充|处理)",
+        )
+
+    def test_emvr3_revisions_research_focus_and_theory_stay_connected(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        result = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        brief = (
+            "在VR中观察两个带电物体周围的电场线，比较导体与介质在外加静电场中的"
+            "场线弯曲，并通过拖拽改变物体位置和距离。"
+        )
+        result = engine.process_turn(result["design_id"], {"message": brief})
+        self.assertEqual(result["stage_payload"]["original_idea"], brief)
+        self.assertNotEqual(result["stage_payload"]["original_idea"], "进入EMVR模式")
+
+        result = engine.process_turn(result["design_id"], {"message": "保留并继续"})
+        direction_revision = "比较导体与介质界面附近的场线弯曲与分布特征"
+        generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        result = engine.process_turn(result["design_id"], {"message": direction_revision})
+        self.assertEqual(result["stage_payload"]["selected_direction"], direction_revision)
+        self.assertIn(direction_revision, result["stage_payload"]["student_revisions"])
+
+        result = engine.process_turn(result["design_id"], {"message": "保留修改并继续"})
+        goals = "解释导体与介质的场线差异，并判断VR显示是否符合静电边界规律"
+        result = engine.process_turn(result["design_id"], {"message": goals})
+        result = engine.process_turn(result["design_id"], {"message": "保留目标并继续"})
+
+        research_focus = (
+            "让两个电荷之间的距离从远到近变化，观察场线弯曲程度以及两电荷之间"
+            "连接或形成低场区域的空间分布"
+        )
+        generator.next_emvr_update = {
+            "research_summary": research_focus,
+            "changed_quantities": ["两个电荷之间的距离从远到近连续变化"],
+            "observed_quantities": ["场线弯曲程度", "两电荷之间的场线空间分布"],
+            "comparison_cases": ["同种电荷", "异种电荷"],
+            "required_behaviors": ["拖拽时实时重新计算场线"],
+            "object_constraints": ["两个带电物体本身就是场源"],
+            "theory_links": [
+                {
+                    "relation_id": "ELECTRIC_SOURCE_FIELD",
+                    "supports_design_content": "计算每个电荷在观察位置产生的电场",
+                },
+                {
+                    "relation_id": "FIELD_SUPERPOSITION",
+                    "supports_design_content": "解释两电荷场线在距离变化时的合成分布",
+                },
+            ],
+        }
+        result = engine.process_turn(result["design_id"], {"message": research_focus})
+        self.assertEqual(result["stage_payload"]["main_research_question"], research_focus)
+        self.assertIn(
+            "两个电荷之间的距离从远到近连续变化",
+            result["stage_payload"]["adjustable_quantity_in_vr"],
+        )
+        self.assertNotRegex(json.dumps(result["stage_payload"], ensure_ascii=False), r"阶段\s*8")
+
+        result = engine.process_turn(result["design_id"], {"message": "研究问题保留并继续"})
+        formula_ids = {item["id"] for item in result["stage_payload"]["core_equations"]}
+        self.assertTrue({"coulomb_point_charge", "electric_field_superposition"} <= formula_ids)
+        self.assertTrue(
+            {"lorentz_force", "ohm_law_density", "charge_relaxation"}.isdisjoint(formula_ids)
+        )
+        support_ids = {
+            item["formula_id"]
+            for item in result["stage_payload"]["formula_support_map"]
+        }
+        self.assertEqual(formula_ids, support_ids)
+        self.assertIn(
+            "解释两电荷场线在距离变化时的合成分布",
+            {
+                item["supports_design_content"]
+                for item in result["stage_payload"]["formula_support_map"]
+            },
+        )
+        self.assertIn(
+            "两个电荷之间的距离从远到近连续变化",
+            json.dumps(result["stage_payload"], ensure_ascii=False),
+        )
+
+        result = engine.process_turn(result["design_id"], {"message": "理论关系保留并继续"})
+        hypothesis = (
+            "同种电荷靠近时场线向外弯曲，异种电荷靠近时场线由正电荷连接到负电荷，"
+            "距离越近变化越明显"
+        )
+        result = engine.process_turn(result["design_id"], {"message": hypothesis})
+        self.assertEqual(result["stage_payload"]["research_hypothesis"], hypothesis)
+        self.assertEqual(result["stage_payload"]["expected_trend"], hypothesis)
+        self.assertNotRegex(json.dumps(result["stage_payload"], ensure_ascii=False), r"阶段\s*\d+")
+
+        result = engine.process_turn(result["design_id"], {"message": "假设保留并继续"})
+        setup = (
+            "学生用手柄拖动两个带电物体，改变它们之间的距离，实时观察场线；"
+            "两个带电物体本身就是电磁源"
+        )
+        result = engine.process_turn(result["design_id"], {"message": setup})
+        generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        setup_revision = "场线必须随拖拽实时重新计算；两个带电物体就是源，不额外增设源对象"
+        generator.next_emvr_update = {
+            "research_summary": research_focus,
+            "changed_quantities": ["两个电荷之间的距离从远到近连续变化"],
+            "observed_quantities": ["场线弯曲程度", "两电荷之间的场线空间分布"],
+            "comparison_cases": ["同种电荷", "异种电荷"],
+            "required_behaviors": ["场线随拖拽实时重新计算"],
+            "object_constraints": ["两个带电物体就是源", "不额外增设源对象"],
+            "theory_links": [
+                {
+                    "relation_id": "ELECTRIC_SOURCE_FIELD",
+                    "supports_design_content": "计算两个带电物体产生的电场",
+                },
+                {
+                    "relation_id": "FIELD_SUPERPOSITION",
+                    "supports_design_content": "拖拽后重新合成空间电场线",
+                },
+            ],
+        }
+        result = engine.process_turn(result["design_id"], {"message": setup_revision})
+        self.assertIn(setup_revision, result["stage_payload"]["student_constraints"])
+        source_object = result["stage_payload"]["object_inventory"][1]
+        self.assertIn("不额外创建重复电磁源", source_object["purpose"])
+        self.assertIn("不把预设动画或固定序列当作实验结果", result["stage_payload"]["physics_layer"]["update_policy"])
+
+    def test_emvr_formula_retrieval_uses_experiment_level_relevance(self) -> None:
+        electrostatic_ids = {
+            item["id"]
+            for item in _focused_emvr_formula_references(
+                ["ELECTRIC_SOURCE_FIELD", "FIELD_SUPERPOSITION", "DIELECTRIC_RESPONSE"]
+            )
+        }
+        conduction_ids = {
+            item["id"]
+            for item in _focused_emvr_formula_references(
+                ["OHMIC_CONDUCTION", "CHARGE_RELAXATION"]
+            )
+        }
+        transmission_ids = {
+            item["id"]
+            for item in _focused_emvr_formula_references(
+                ["TRANSMISSION_LINE_PROPAGATION", "TRANSMISSION_LINE_REFLECTION"]
+            )
+        }
+
+        self.assertTrue({"coulomb_point_charge", "electric_field_superposition"} <= electrostatic_ids)
+        self.assertTrue({"ohm_law_density", "charge_relaxation"} <= conduction_ids)
+        self.assertTrue({"pec_standing_wave", "telegrapher_lossless"} & transmission_ids)
+        self.assertTrue({"ohm_law_density", "charge_relaxation"}.isdisjoint(electrostatic_ids))
+        self.assertNotIn("coulomb_point_charge", transmission_ids)
+
+    def test_emvr_theory_relations_are_structured_and_not_text_matches(self) -> None:
+        self.assertIn("FIELD_SUPERPOSITION", EMVR_THEORY_RELATION_IDS)
+        self.assertEqual(_focused_emvr_formula_references([]), [])
+        # Arbitrary prose is not accepted by the formula layer.  A semantic
+        # relation decision must exist before formulas can be attached.
+        self.assertEqual(
+            _focused_emvr_formula_references(["两个电荷 欧姆定律 洛伦兹力"]),
+            [],
+        )
+        self.assertEqual(
+            normalize_emvr_design_update(
+                {"theory_relation_ids": ["OHMIC_CONDUCTION"]}
+            ),
+            {},
+        )
+
+    def test_every_emvr_theory_relation_uses_live_formula_ids(self) -> None:
+        catalog_ids = {item["id"] for item in KNOWLEDGE.formulas}
+        for relation_id, relation in EMVR_THEORY_RELATIONS.items():
+            self.assertTrue(relation["formula_ids"], relation_id)
+            self.assertTrue(
+                set(relation["formula_ids"]) <= catalog_ids,
+                relation_id,
+            )
+
+    def test_emvr_structured_requirements_do_not_leak_into_guided_mode(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        result = engine.create_design(
+            "我想探索传输线驻波",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        generator.next_emvr_update = {
+            "research_summary": "不应进入引导模式的EMVR结构",
+            "changed_quantities": ["负载阻抗"],
+            "observed_quantities": ["驻波"],
+            "theory_links": [
+                {
+                    "relation_id": "TRANSMISSION_LINE_REFLECTION",
+                    "supports_design_content": "解释负载变化后的驻波响应",
+                }
+            ],
+        }
+        result = engine.process_turn(
+            result["design_id"],
+            {"message": "我想观察负载变化与驻波之间的关系"},
+        )
+        session = engine.store.get(result["design_id"])
+        emvr_design = session.design_context.get("emvr_design", {})
+        self.assertFalse(
+            isinstance(emvr_design, dict)
+            and emvr_design.get("structured_requirements")
+        )
+        resolved = session.model_context["dialogue_state"]["resolved_intent"]
+        self.assertNotIn(
+            "emvr_design_update",
+            resolved.get("semantic_updates", {}),
+        )
 
     def test_structured_mode_events_and_emvr_marker_have_defined_precedence(self) -> None:
         first = self.engine.create_design(
@@ -1999,6 +2228,19 @@ class WorkflowEngineTests(unittest.TestCase):
         session = self.engine.store.get(first["design_id"])
         session.interaction_state = InteractionState.EMVR_DIRECT
         session.current_stage_index = 4
+        session.design_context["emvr_design"] = {
+            "structured_requirements": {
+                Stage.RESEARCH_QUESTION.value: {
+                    "research_summary": "改变传输线负载并观察反射与驻波",
+                    "changed_quantities": ["负载阻抗"],
+                    "observed_quantities": ["反射系数", "驻波分布"],
+                    "theory_relation_ids": [
+                        "TRANSMISSION_LINE_PROPAGATION",
+                        "TRANSMISSION_LINE_REFLECTION",
+                    ],
+                }
+            }
+        }
         self.engine.store.save(session)
 
         result = self.engine.process_turn(first["design_id"], {"message": "选择理论公式"})

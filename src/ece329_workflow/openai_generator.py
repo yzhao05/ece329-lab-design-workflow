@@ -21,10 +21,15 @@ from .dialogue_state import (
     serialize_intent_input,
     validate_resolved_intent,
 )
+from .emvr_design import EMVR_THEORY_RELATIONS
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
     NO_DIRECTION_ACKNOWLEDGEMENT,
     RuleBasedStageGenerator,
+    _emvr_context_text,
+    _focused_emvr_formula_references,
+    _emvr_latest_stage_input,
+    _emvr_structured_requirements,
     _format_exploration_scenes,
     _format_experiment_outline_seed,
     _format_standard_comparison_status,
@@ -89,6 +94,8 @@ EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
     ),
     Stage.THEORETICAL_FRAMEWORK: (
         "core_equations",
+        "formula_support_map",
+        "theory_selection_status",
         "simulation_inputs",
         "calculated_outputs",
         "visual_only_elements",
@@ -418,6 +425,17 @@ def _contains_forbidden_key(value: Any, forbidden: set[str]) -> bool:
 
 def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> None:
     stage = session.current_stage
+    if session.interaction_state is InteractionState.EMVR_DIRECT:
+        visible_text = json.dumps(
+            {
+                "assistant_message": output.assistant_message,
+                "stage_payload": output.stage_payload,
+                "student_task": output.student_task,
+            },
+            ensure_ascii=False,
+        )
+        if re.search(r"(?:由|来自)阶段\s*\d+|阶段\s*\d+\s*(?:确定|补充|处理)", visible_text):
+            raise ModelOutputError("EMVR output exposed an internal stage placeholder")
     visual = output.visualization
     if session.interaction_state is InteractionState.GUIDED_DESIGN:
         required_fields = GUIDED_REQUIRED_PAYLOAD_FIELDS.get(stage)
@@ -452,13 +470,45 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
                 )
     else:
         required_fields = EMVR_REQUIRED_PAYLOAD_FIELDS.get(stage, ())
+        empty_allowed = (
+            {"core_equations", "formula_support_map"}
+            if stage is Stage.THEORETICAL_FRAMEWORK
+            else set()
+        )
         missing_fields = [
-            field for field in required_fields if not output.stage_payload.get(field)
+            field
+            for field in required_fields
+            if field not in output.stage_payload
+            or (
+                field not in empty_allowed
+                and not output.stage_payload.get(field)
+            )
         ]
         if missing_fields:
             raise ModelOutputError(
                 f"EMVR stage {stage.value} is missing required fields: "
                 + ", ".join(missing_fields)
+            )
+        latest_stage_input = _emvr_latest_stage_input(session, stage)
+        resolved = session.turn_context.get("resolved_intent", {})
+        resolved_intent_name = (
+            str(resolved.get("intent") or "")
+            if isinstance(resolved, dict)
+            else ""
+        )
+        if (
+            latest_stage_input
+            and resolved_intent_name
+            in {
+                "ANSWER_CURRENT_QUESTION",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "NEW_TOPIC",
+            }
+            and latest_stage_input
+            not in json.dumps(output.stage_payload, ensure_ascii=False)
+        ):
+            raise ModelOutputError(
+                "EMVR output did not preserve the student's latest stage input"
             )
     visible_text = " ".join(
         [output.assistant_message, output.student_task or "", *output.warnings]
@@ -581,6 +631,53 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
                 raise ModelOutputError(
                     "Every EMVR object inventory item must contain the complete object contract"
                 )
+    if (
+        session.interaction_state is InteractionState.EMVR_DIRECT
+        and stage is Stage.THEORETICAL_FRAMEWORK
+    ):
+        allowed_formulas = _focused_emvr_formula_references(
+                _emvr_structured_requirements(session).get(
+                    "theory_relation_ids", []
+                ),
+            )
+        allowed_formula_ids = {
+            str(item.get("id") or "") for item in allowed_formulas
+        }
+        allowed_relations = {
+            str(item.get("id") or ""): str(
+                item.get("supports_relation_id") or ""
+            )
+            for item in allowed_formulas
+        }
+        returned_formula_ids = {
+            str(item.get("id") or "")
+            for item in output.stage_payload.get("core_equations", [])
+            if isinstance(item, dict)
+        }
+        if returned_formula_ids - allowed_formula_ids:
+            raise ModelOutputError(
+                "EMVR theory output included formulas outside the focused experiment context"
+            )
+        support_map = output.stage_payload.get("formula_support_map", [])
+        mapped_formula_ids = {
+            str(item.get("formula_id") or "")
+            for item in support_map
+            if isinstance(item, dict)
+            and str(item.get("supports_design_content") or "").strip()
+        }
+        if returned_formula_ids != mapped_formula_ids:
+            raise ModelOutputError(
+                "Every EMVR formula must state which current design content it supports"
+            )
+        if any(
+            not isinstance(item, dict)
+            or allowed_relations.get(str(item.get("formula_id") or ""))
+            != str(item.get("relation_id") or "")
+            for item in support_map
+        ):
+            raise ModelOutputError(
+                "EMVR formula support mapping used the wrong physical relation"
+            )
 
 
 def _validate_lecture_grounding(
@@ -1400,6 +1497,10 @@ class OpenAIStageGenerator:
             pending_action,
             carried_context,
         )
+        emvr_relation_catalog = {
+            relation_id: relation["label"]
+            for relation_id, relation in EMVR_THEORY_RELATIONS.items()
+        }
         payload = {
             "model": self.model,
             "instructions": (
@@ -1438,7 +1539,24 @@ class OpenAIStageGenerator:
                 "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING）、"
                 "comparison_updates（comparison_id和cases必须来自pending_action或carried_context，"
                 "action只能为ACCEPT、MODIFY、REJECT），以及interaction_state_request"
-                "（只能为GUIDED_DESIGN、EMVR_DIRECT或null）。不得臆造ID或把宽泛主题当成已回答学习目标。"
+                "（只能为GUIDED_DESIGN、EMVR_DIRECT或null），以及仅供EMVR_DIRECT使用的"
+                "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
+                "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
+                "必须根据整句含义和carried_context返回当前完整的物理设计解释，字段为："
+                "research_summary、changed_quantities、observed_quantities、comparison_cases、"
+                "required_behaviors、object_constraints和theory_links。前六项使用学生"
+                "实际表达的具体内容；例如变化方向、连续变化方式和指定观察现象都必须保留，"
+                "不能压缩成‘主要参数影响目标响应’。修改上一草稿时要结合旧值返回修改后的"
+                "完整当前值，未被修改的部分继续保留。GUIDED_DESIGN下不得返回此对象。"
+                "theory_links的每项包含relation_id与supports_design_content；后者必须明确"
+                "指出该关系支持当前哪一个变化量、观察量、比较情形或边界条件，不能只重复"
+                "关系名称。relation_id表示真正进入当前实验的物理机制，不是与主题沾边的"
+                "课程知识列表；只选择能计算、解释或约束changed_quantities、"
+                "observed_quantities或边界条件的关系。比如只有实验研究带电粒子的受力或运动时才需要"
+                "CHARGED_PARTICLE_FORCE，只有研究导电电流响应时才需要OHMIC_CONDUCTION，"
+                "只有研究自由电荷随时间消散时才需要CHARGE_RELAXATION。不能因为它们都属于"
+                "电磁学就自动加入。可用关系ID及含义为："
+                f"{json.dumps(emvr_relation_catalog, ensure_ascii=False)}。"
                 "程序会把包含EMVR标记的安全输入直接切换为EMVR_DIRECT；不要推翻这个明确状态。"
                 "对于不含该标记的其他模式表达，仍需依据整句话语义设置interaction_state_request，"
                 "不能靠扩充词表猜测。若这句话只有模式切换而没有实验内容，intent返回"

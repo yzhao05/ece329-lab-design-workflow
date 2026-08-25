@@ -537,6 +537,70 @@ def _persist_emvr_brief(
     if isinstance(idea, dict):
         idea["current_summary"] = message.strip()
         idea["main_direction"] = message.strip()
+        idea["current_focus"] = message.strip()
+
+
+def _persist_emvr_stage_input(
+    session: DesignSession,
+    stage: Stage,
+    message: str,
+    turn_intent: dict[str, Any],
+) -> None:
+    """Keep substantive EMVR answers and revisions as authoritative design input."""
+
+    if session.interaction_state is not InteractionState.EMVR_DIRECT:
+        return
+    intent_name = str(turn_intent.get("intent") or "")
+    if intent_name not in {
+        UserIntent.ANSWER_CURRENT_QUESTION.value,
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        UserIntent.NEW_TOPIC.value,
+    }:
+        return
+    resolved_value = turn_intent.get("resolved_value")
+    content: Any = resolved_value if resolved_value not in (None, "", [], {}) else message
+    if isinstance(content, str):
+        content = content.strip()
+        if not content:
+            return
+    emvr_design = session.design_context.setdefault("emvr_design", {})
+    if not isinstance(emvr_design, dict):
+        emvr_design = {}
+        session.design_context["emvr_design"] = emvr_design
+    stage_inputs = emvr_design.setdefault("stage_inputs", {})
+    if not isinstance(stage_inputs, dict):
+        stage_inputs = {}
+        emvr_design["stage_inputs"] = stage_inputs
+    entries = stage_inputs.setdefault(stage.value, [])
+    if not isinstance(entries, list):
+        entries = []
+        stage_inputs[stage.value] = entries
+    entry = {
+        "content": deepcopy(content),
+        "intent": intent_name,
+        "revision": session.revision + 1,
+    }
+    semantic_updates = turn_intent.get("semantic_updates", {})
+    structured_update = (
+        semantic_updates.get("emvr_design_update")
+        if isinstance(semantic_updates, dict)
+        else None
+    )
+    if isinstance(structured_update, dict) and structured_update:
+        entry["structured_update"] = deepcopy(structured_update)
+        structured_requirements = emvr_design.setdefault(
+            "structured_requirements", {}
+        )
+        if not isinstance(structured_requirements, dict):
+            structured_requirements = {}
+            emvr_design["structured_requirements"] = structured_requirements
+        # The most recent semantic reading is authoritative for this stage.
+        # Earlier stages remain available, so revisions do not erase unrelated
+        # requirements such as an already confirmed learning objective.
+        structured_requirements[stage.value] = deepcopy(structured_update)
+    if not entries or entries[-1].get("content") != entry["content"]:
+        entries.append(entry)
+        del entries[:-8]
 
 
 class WorkflowEngine:
@@ -873,6 +937,13 @@ class WorkflowEngine:
                 dialogue = session.model_context.get("dialogue_state")
                 if isinstance(dialogue, dict):
                     dialogue.pop("pending_action", None)
+        if session.interaction_state is InteractionState.GUIDED_DESIGN:
+            # EMVR physical-role updates are an EMVR-only state channel.  Even
+            # if a semantic service returns one unexpectedly, it must not leak
+            # into guided prompts, carried context, or design persistence.
+            mode_scoped_updates = turn_intent.get("semantic_updates")
+            if isinstance(mode_scoped_updates, dict):
+                mode_scoped_updates.pop("emvr_design_update", None)
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and session.current_stage in IDEA_DEVELOPMENT_STAGES[1:]
@@ -1067,6 +1138,12 @@ class WorkflowEngine:
             session,
             resolved_student_message,
             content_intent_name,
+        )
+        _persist_emvr_stage_input(
+            session,
+            handled_stage,
+            resolved_student_message,
+            turn_intent,
         )
         if dynamic_idea_turn:
             idea_context = session.design_context.get("idea", {})

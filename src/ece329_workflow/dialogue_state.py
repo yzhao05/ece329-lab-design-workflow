@@ -7,6 +7,7 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any, Protocol
 
+from .emvr_design import normalize_emvr_design_update
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
 
@@ -273,6 +274,19 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         session,
         {"user_action", "student_interaction", "interactions"},
     )
+    emvr_design = session.design_context.get("emvr_design", {})
+    emvr_stage_inputs = (
+        deepcopy(emvr_design.get("stage_inputs", {}))
+        if isinstance(emvr_design, dict)
+        and isinstance(emvr_design.get("stage_inputs"), dict)
+        else {}
+    )
+    emvr_structured_requirements = (
+        deepcopy(emvr_design.get("structured_requirements", {}))
+        if isinstance(emvr_design, dict)
+        and isinstance(emvr_design.get("structured_requirements"), dict)
+        else {}
+    )
     return {
         "research_direction": direction,
         "direction_locked": idea.get("direction_locked") is True,
@@ -327,6 +341,8 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         ),
         "unity_objects": unity_objects,
         "interactions": interactions,
+        "emvr_stage_inputs": emvr_stage_inputs,
+        "emvr_structured_requirements": emvr_structured_requirements,
         "visualization_plan": _find_payload_values(
             session,
             {
@@ -749,6 +765,7 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
     stage_one_direction_detail = str(
         raw.get("stage_one_direction_detail") or ""
     ).strip()[:1200]
+    emvr_design_update = normalize_emvr_design_update(raw.get("emvr_design_update"))
     return {
         "selected_option_ids": selected_option_ids,
         "no_direction": raw.get("no_direction") is True,
@@ -783,6 +800,7 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         # A locked direction may be replaced only when the semantic resolver
         # confirms that the student explicitly abandoned or replaced it.
         "topic_change_explicit": raw.get("topic_change_explicit") is True,
+        "emvr_design_update": emvr_design_update or None,
     }
 
 
