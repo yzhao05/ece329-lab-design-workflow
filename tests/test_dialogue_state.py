@@ -1670,6 +1670,75 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn(new_case, visible.assistant_message)
         self.assertNotIn("还需要把它与当前实验想法", visible.assistant_message)
 
+    def test_semantic_case_refs_replace_paraphrases_without_duplicates(self) -> None:
+        session = DesignSession(
+            design_id="design_semantic_case_identity",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "standard_comparisons": [
+                        {
+                            "comparison_id": "gauss_enclosure_cases",
+                            "recommended_cases": [
+                                "曲面完全包住同一场源",
+                                "曲面只包住部分场源区域",
+                            ],
+                            "cases": [
+                                "曲面完全包住同一场源",
+                                "曲面只包住部分场源区域",
+                                "曲面完全包住场源",
+                                "只包住部分场源",
+                            ],
+                            "case_aliases": {},
+                            "adoption_status": "MODIFIED",
+                        }
+                    ]
+                }
+            },
+        )
+        decision = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            confidence=0.99,
+            source="SEMANTIC_TEST",
+            semantic_updates={
+                "comparison_updates": [
+                    {
+                        "comparison_id": "gauss_enclosure_cases",
+                        "action": "MODIFY",
+                        "case_refs": [
+                            "gauss_enclosure_cases:case:1",
+                            "gauss_enclosure_cases:case:2",
+                        ],
+                        "renames": [
+                            {
+                                "case_ref": "gauss_enclosure_cases:case:1",
+                                "label": "曲面完全包住场源",
+                            },
+                            {
+                                "case_ref": "gauss_enclosure_cases:case:2",
+                                "label": "曲面只包住部分场源",
+                            },
+                        ],
+                        "replace_all": True,
+                    }
+                ]
+            },
+        )
+
+        apply_resolved_intent(
+            session,
+            decision,
+            None,
+            "把基础比较精简为曲面完全包住场源、曲面只包住部分场源。",
+        )
+
+        comparison = session.design_context["idea"]["standard_comparisons"][0]
+        self.assertEqual(
+            comparison["cases"],
+            ["曲面完全包住场源", "曲面只包住部分场源"],
+        )
+        self.assertEqual(comparison["adoption_status"], "MODIFIED")
+
     def test_confirmed_clarification_keeps_original_student_evidence(self) -> None:
         original_cases = ["导体", "均匀介质"]
         new_case = "分层介质"

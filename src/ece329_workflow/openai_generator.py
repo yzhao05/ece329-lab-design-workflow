@@ -505,6 +505,22 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
             if isinstance(resolved, dict)
             else ""
         )
+        semantic_updates = (
+            resolved.get("semantic_updates", {})
+            if isinstance(resolved, dict)
+            else {}
+        )
+        emvr_update = (
+            semantic_updates.get("emvr_design_update", {})
+            if isinstance(semantic_updates, dict)
+            else {}
+        )
+        field_updates = (
+            emvr_update.get("field_updates", [])
+            if isinstance(emvr_update, dict)
+            else []
+        )
+        field_updates = field_updates if isinstance(field_updates, list) else []
         if (
             latest_stage_input
             and resolved_intent_name
@@ -513,12 +529,48 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
                 "MODIFY_PREVIOUS_PROPOSAL",
                 "NEW_TOPIC",
             }
+            and not field_updates
             and latest_stage_input
             not in json.dumps(output.stage_payload, ensure_ascii=False)
         ):
             raise ModelOutputError(
                 "EMVR output did not preserve the student's latest stage input"
             )
+        payload_fields_by_design_field = {
+            "direction_summary": ("selected_direction",),
+            "research_question": ("main_research_question",),
+            "changed_quantities": (
+                "adjustable_quantity_in_vr", "independent_variable", "simulation_inputs"
+            ),
+            "observed_quantities": (
+                "observable_quantity_in_vr", "dependent_variable", "calculated_outputs"
+            ),
+            "hypothesis": ("research_hypothesis", "expected_trend"),
+            "procedure_steps": ("procedure_steps",),
+        }
+        for edit in field_updates:
+            if not isinstance(edit, dict) or edit.get("operation") == "CLEAR":
+                continue
+            field_id = str(edit.get("field_id") or "")
+            relevant_keys = payload_fields_by_design_field.get(field_id, ())
+            present_keys = [key for key in relevant_keys if key in output.stage_payload]
+            if not present_keys:
+                continue
+            expected = edit.get("value")
+            actual_text = json.dumps(
+                [output.stage_payload[key] for key in present_keys],
+                ensure_ascii=False,
+            )
+            expected_values = expected if isinstance(expected, list) else [expected]
+            if any(
+                isinstance(value, str)
+                and value.strip()
+                and value.strip() not in actual_text
+                for value in expected_values
+            ):
+                raise ModelOutputError(
+                    f"EMVR field edit was not applied to its target: {field_id}"
+                )
     visible_text = student_visible_prose.casefold()
     forbidden_student_facing_terms = (
         "knowledge_retrieval",
@@ -1548,16 +1600,30 @@ class OpenAIStageGenerator:
                 "comparison_updates（comparison_id必须来自pending_action或carried_context，"
                 "action只能为ACCEPT、MODIFY、REJECT；学生可以新增自己明确提出的比较情形，"
                 "但新增case必须逐字取自user_message，不能由模型补写；若是在现有对照上追加且"
-                "保留原项，merge_with_existing=true，否则false），以及interaction_state_request"
+                "保留原项，merge_with_existing=true，否则false。修改已有情形时优先使用"
+                "semantic_case_catalog中的case_ref表达语义身份：case_refs列出保留的身份，"
+                "renames用case_ref和学生原话中的新label改名，new_cases只放真正新增且逐字来自"
+                "user_message的情形；学生要求用一组简洁表述替换整组时replace_all=true。"
+                "canonical=false表示旧会话中的未核对自定义表述；若它与canonical=true项语义等价，"
+                "只保留canonical项并用renames记录学生希望显示的说法。同一物理情形的缩写、"
+                "完整说法或改名不是新增项，不能把新旧表述同时保留），"
+                "以及interaction_state_request"
                 "（只能为GUIDED_DESIGN、EMVR_DIRECT或null），以及仅供EMVR_DIRECT使用的"
                 "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
                 "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
-                "必须根据整句含义和carried_context返回当前完整的物理设计解释，字段为："
-                "research_summary、changed_quantities、observed_quantities、comparison_cases、"
-                "required_behaviors、object_constraints和theory_links。前六项使用学生"
+                "必须根据整句含义和carried_context.emvr_merged_requirements返回结构化物理设计解释。快照字段为："
+                "direction_summary、research_summary、research_question、learning_objectives、"
+                "changed_quantities、observed_quantities、comparison_cases、hypothesis、"
+                "required_behaviors、object_constraints、procedure_steps、"
+                "visualization_requirements、limitations和theory_links。各项使用学生"
                 "实际表达的具体内容；例如变化方向、连续变化方式和指定观察现象都必须保留，"
-                "不能压缩成‘主要参数影响目标响应’。修改上一草稿时要结合旧值返回修改后的"
-                "完整当前值，未被修改的部分继续保留。GUIDED_DESIGN下不得返回此对象。"
+                "不能压缩成‘主要参数影响目标响应’。修改请求还必须返回field_updates数组，"
+                "每项为field_id、operation和value；operation只能是REPLACE、MERGE、CLEAR，"
+                "field_id只能来自上述非theory字段。一个请求修改几项就返回几项，逐项绑定，"
+                "不能把整条消息或多个指令合并成每个字段的value。抽象要求如‘把研究问题"
+                "改成清晰的因果句’必须读取旧研究问题，生成改写后的research_question并以"
+                "REPLACE保存；value中不得包含操作说明。只改一个字段时，不得顺带重写其他字段；"
+                "明确替换时不能把旧值和新值并列。GUIDED_DESIGN下不得返回此对象。"
                 "theory_links的每项包含relation_id与supports_design_content；后者必须明确"
                 "指出该关系支持当前哪一个变化量、观察量、比较情形或边界条件，不能只重复"
                 "关系名称。relation_id表示真正进入当前实验的物理机制，不是与主题沾边的"

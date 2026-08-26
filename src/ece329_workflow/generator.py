@@ -1346,8 +1346,11 @@ class RuleBasedStageGenerator:
                 assumptions=["暂时以你提出的想法为设计边界，接下来再补充参数和理论模型。"],
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
-            selected_direction = latest_stage_input or (
-                f"围绕“{idea}”比较学生主动改变条件前后的空间电磁分布"
+            selected_direction = (
+                structured_requirements.get("direction_summary")
+                or structured_requirements.get("research_summary")
+                or latest_stage_input
+                or f"围绕“{idea}”比较学生主动改变条件前后的空间电磁分布"
             )
             return StepOutput(
                 assistant_message="已选择兼顾ECE329相关性、理论可解释性和VR交互价值的实验方向。",
@@ -1362,7 +1365,13 @@ class RuleBasedStageGenerator:
                 },
             )
         if stage is Stage.LEARNING_OBJECTIVES:
-            conceptual_objective = latest_stage_input or f"解释{topics[0]}中的核心物理机制"
+            saved_objectives = structured_requirements.get("learning_objectives", [])
+            saved_objectives = saved_objectives if isinstance(saved_objectives, list) else []
+            conceptual_objective = (
+                saved_objectives[0]
+                if saved_objectives
+                else latest_stage_input or f"解释{topics[0]}中的核心物理机制"
+            )
             return StepOutput(
                 assistant_message="已将课程学习与VR操作组织为一致的学习目标。",
                 stage_payload={
@@ -1374,7 +1383,15 @@ class RuleBasedStageGenerator:
                 },
             )
         if stage is Stage.RESEARCH_QUESTION:
-            research_focus = latest_stage_input or idea
+            # A raw turn may contain several edit instructions.  The semantic
+            # field state is authoritative, so the same sentence cannot be
+            # copied into the question, controls and observations at once.
+            research_focus = (
+                structured_requirements.get("research_question")
+                or structured_requirements.get("research_summary")
+                or latest_stage_input
+                or idea
+            )
             changed_quantities = structured_requirements.get("changed_quantities", [])
             observed_quantities = structured_requirements.get("observed_quantities", [])
             return StepOutput(
@@ -1394,7 +1411,10 @@ class RuleBasedStageGenerator:
             )
         if stage is Stage.THEORETICAL_FRAMEWORK:
             formulas = _focused_emvr_formula_references(theory_relation_ids)
-            research_focus = _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
+            research_focus = (
+                structured_requirements.get("research_question")
+                or _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
+            )
             relation_labels = [
                 EMVR_THEORY_RELATIONS[relation_id]["label"]
                 for relation_id in theory_relation_ids
@@ -1433,7 +1453,11 @@ class RuleBasedStageGenerator:
                 warnings=["视觉动画必须标明是计算映射还是教学示意。"],
             )
         if stage is Stage.HYPOTHESIS:
-            hypothesis = latest_stage_input or "学生尚未给出具体方向性假设"
+            hypothesis = (
+                structured_requirements.get("hypothesis")
+                or latest_stage_input
+                or "学生尚未给出具体方向性假设"
+            )
             return StepOutput(
                 assistant_message="这个假设已经对应到你调整参数后能够立即观察的VR反馈。",
                 stage_payload={
@@ -1445,7 +1469,10 @@ class RuleBasedStageGenerator:
                 },
             )
         if stage is Stage.CONCEPTUAL_OR_VR_SETUP:
-            research_focus = _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
+            research_focus = (
+                structured_requirements.get("research_question")
+                or _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
+            )
             return StepOutput(
                 assistant_message="你原有的场景条件已经保留；我在此基础上补全了Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
                 stage_payload={
@@ -1581,28 +1608,36 @@ class RuleBasedStageGenerator:
                 warnings=["这一部分只整理实验结构，不另外定义VR场景，也不扩展可访问性与舒适性设计。"],
             )
         if stage is Stage.VARIABLES_AND_CONDITIONS:
-            variable_definition = latest_stage_input or _emvr_latest_stage_input(
-                session,
-                Stage.RESEARCH_QUESTION,
+            saved_changed = structured_requirements.get("changed_quantities", [])
+            saved_changed = saved_changed if isinstance(saved_changed, list) else []
+            saved_observed = structured_requirements.get("observed_quantities", [])
+            saved_observed = saved_observed if isinstance(saved_observed, list) else []
+            variable_definition = (
+                "；".join(saved_changed)
+                or latest_stage_input
+                or structured_requirements.get("research_question")
+                or _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
             )
             return StepOutput(
                 assistant_message="已把实验变量映射到Unity控制、显示和模型约束。",
                 stage_payload={
                     "student_variable_definition": variable_definition,
                     "independent_variable": {"name": variable_definition or "学生定义的主要变化条件", "unity_control": "与VR对象操作或带单位控件绑定", "range": "限制在理论适用范围"},
-                    "dependent_variable": {"name": "研究问题中指定的观察响应", "vr_representation": "数值、曲线和空间编码"},
+                    "dependent_variable": {"name": "；".join(saved_observed) or "研究问题中指定的观察响应", "vr_representation": "数值、曲线和空间编码"},
                     "controlled_variables": ["源条件", "几何条件", "材料或边界中未被选为自变量的参数"],
                     "reference_condition": {"purpose": "建立比较基线", "unity_action": "Reset/Reference preset"},
                     "confounding_factors": ["视觉缩放与真实单位混淆", "多个参数同时变化", "超出模型范围"],
                 },
             )
         if stage is Stage.CONCEPTUAL_PROCEDURE:
+            saved_steps = structured_requirements.get("procedure_steps", [])
+            saved_steps = saved_steps if isinstance(saved_steps, list) else []
             return StepOutput(
                 assistant_message="已将实验逻辑整理为单一、可重复的VR学习闭环。",
                 stage_payload={
                     "procedure_type": "conceptual_vr_flow",
                     "student_required_steps": stage_inputs,
-                    "procedure_steps": [
+                    "procedure_steps": saved_steps or [
                         "进入VR实验并阅读本次学习目标、研究问题与模型适用范围",
                         "检查实验对象、源、探测器和显示面板的初始状态",
                         "加载参考条件并记录基准数值、曲线与空间场表现",

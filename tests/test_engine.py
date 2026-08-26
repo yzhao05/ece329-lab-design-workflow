@@ -23,6 +23,8 @@ from ece329_workflow.generator import (
 from ece329_workflow.emvr_design import (
     EMVR_THEORY_RELATIONS,
     EMVR_THEORY_RELATION_IDS,
+    apply_emvr_field_updates,
+    merge_emvr_structured_requirements,
     normalize_emvr_design_update,
 )
 from ece329_workflow.guardrails import (
@@ -77,6 +79,7 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
         self.next_intent: UserIntent | None = None
         self.next_emvr_update: dict | None = None
         self.next_advance_requested: bool | None = None
+        self.generated_carried_contexts: list[dict] = []
 
     def resolve_intent(self, session, user_message, pending_action, carried_context):
         pending_type = (
@@ -110,6 +113,17 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
             source="SEMANTIC_TEST",
             semantic_updates=semantic_updates,
         )
+
+    def generate(self, session, user_message):
+        self.generated_carried_contexts.append(
+            json.loads(
+                json.dumps(
+                    session.turn_context.get("carried_context", {}),
+                    ensure_ascii=False,
+                )
+            )
+        )
+        return super().generate(session, user_message)
 
 
 def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
@@ -985,6 +999,12 @@ class WorkflowEngineTests(unittest.TestCase):
         }
         result = engine.process_turn(result["design_id"], {"message": research_focus})
         self.assertEqual(result["stage_payload"]["main_research_question"], research_focus)
+        self.assertEqual(
+            generator.generated_carried_contexts[-1]["emvr_merged_requirements"][
+                "research_summary"
+            ],
+            research_focus,
+        )
         self.assertIn(
             "两个电荷之间的距离从远到近连续变化",
             result["stage_payload"]["adjustable_quantity_in_vr"],
@@ -1081,6 +1101,122 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue({"pec_standing_wave", "telegrapher_lossless"} & transmission_ids)
         self.assertTrue({"ohm_law_density", "charge_relaxation"}.isdisjoint(electrostatic_ids))
         self.assertNotIn("coulomb_point_charge", transmission_ids)
+
+    def test_emvr_atomic_field_edits_do_not_fuse_multiple_instructions(self) -> None:
+        emvr_design = {
+            "field_state": {
+                "research_question": "旧研究问题",
+                "changed_quantities": ["旧可调量"],
+                "observed_quantities": ["电场线分布"],
+            }
+        }
+        update = normalize_emvr_design_update(
+            {
+                "field_updates": [
+                    {
+                        "field_id": "research_question",
+                        "operation": "REPLACE",
+                        "value": "距离减小时，导体与介质周围的电场线分布如何变化？",
+                    },
+                    {
+                        "field_id": "changed_quantities",
+                        "operation": "REPLACE",
+                        "value": ["物体间距离", "材料属性"],
+                    },
+                ]
+            }
+        )
+
+        apply_emvr_field_updates(emvr_design, update)
+        merged = merge_emvr_structured_requirements(emvr_design)
+
+        self.assertEqual(
+            merged["research_question"],
+            "距离减小时，导体与介质周围的电场线分布如何变化？",
+        )
+        self.assertEqual(merged["changed_quantities"], ["物体间距离", "材料属性"])
+        self.assertEqual(merged["observed_quantities"], ["电场线分布"])
+        self.assertNotIn("材料属性", merged["research_question"])
+
+    def test_emvr_abstract_rewrite_replaces_only_target_field(self) -> None:
+        session = DesignSession(
+            design_id="design_emvr_targeted_rewrite",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+            design_context={
+                "idea": {"original": "比较导体与介质的静电场分布"},
+                "emvr_design": {
+                    "field_state": {
+                        "research_question": "旧研究问题",
+                        "changed_quantities": ["物体间距离"],
+                        "observed_quantities": ["电场线分布差异"],
+                    }
+                },
+            },
+        )
+        update = normalize_emvr_design_update(
+            {
+                "field_updates": [
+                    {
+                        "field_id": "research_question",
+                        "operation": "REPLACE",
+                        "value": "物体间距离减小时，导体与介质周围的电场线差异如何变化？",
+                    }
+                ]
+            }
+        )
+        apply_emvr_field_updates(session.design_context["emvr_design"], update)
+
+        output = RuleBasedStageGenerator().generate(session, "把研究问题改成因果句式")
+
+        self.assertEqual(
+            output.stage_payload["main_research_question"],
+            "物体间距离减小时，导体与介质周围的电场线差异如何变化？",
+        )
+        self.assertEqual(
+            output.stage_payload["adjustable_quantity_in_vr"], ["物体间距离"]
+        )
+        self.assertEqual(
+            output.stage_payload["observable_quantity_in_vr"], ["电场线分布差异"]
+        )
+        self.assertNotIn(
+            "改成因果句式",
+            json.dumps(output.stage_payload, ensure_ascii=False),
+        )
+
+    def test_emvr_explicit_edit_ignores_stale_untargeted_snapshot(self) -> None:
+        emvr_design = {
+            "field_state": {
+                "research_question": "旧研究问题",
+                "changed_quantities": ["已经确认的新距离范围"],
+            }
+        }
+        update = normalize_emvr_design_update(
+            {
+                "research_question": "新的因果研究问题",
+                # Simulate a stale full snapshot returned alongside a
+                # research-question-only edit.
+                "changed_quantities": ["过时的距离范围"],
+                "field_updates": [
+                    {
+                        "field_id": "research_question",
+                        "operation": "REPLACE",
+                        "value": "新的因果研究问题",
+                    }
+                ],
+            }
+        )
+
+        apply_emvr_field_updates(emvr_design, update)
+
+        self.assertEqual(
+            emvr_design["field_state"]["research_question"],
+            "新的因果研究问题",
+        )
+        self.assertEqual(
+            emvr_design["field_state"]["changed_quantities"],
+            ["已经确认的新距离范围"],
+        )
 
     def test_emvr_theory_relations_are_structured_and_not_text_matches(self) -> None:
         self.assertIn("FIELD_SUPERPOSITION", EMVR_THEORY_RELATION_IDS)

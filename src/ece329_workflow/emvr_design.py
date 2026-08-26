@@ -116,6 +116,91 @@ EMVR_THEORY_RELATIONS: dict[str, dict[str, Any]] = {
 
 EMVR_THEORY_RELATION_IDS = frozenset(EMVR_THEORY_RELATIONS)
 
+# Semantic design fields used by the intent resolver and state machine.  They
+# are deliberately independent of any wording in the student's message.
+EMVR_SCALAR_FIELDS = frozenset(
+    {"direction_summary", "research_summary", "research_question", "hypothesis"}
+)
+EMVR_LIST_FIELDS = frozenset(
+    {
+        "learning_objectives",
+        "changed_quantities",
+        "observed_quantities",
+        "comparison_cases",
+        "required_behaviors",
+        "object_constraints",
+        "procedure_steps",
+        "visualization_requirements",
+        "limitations",
+    }
+)
+EMVR_EDITABLE_FIELDS = EMVR_SCALAR_FIELDS | EMVR_LIST_FIELDS
+
+
+def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
+    if field_id in EMVR_SCALAR_FIELDS:
+        text = str(value).strip()[:1600] if isinstance(value, str) else ""
+        return text or None
+    values = value if isinstance(value, list) else [value]
+    result = list(
+        dict.fromkeys(
+            str(item).strip()[:800]
+            for item in values
+            if isinstance(item, str) and item.strip()
+        )
+    )[:20]
+    return result or None
+
+
+def apply_emvr_field_updates(
+    emvr_design: dict[str, Any],
+    structured_update: dict[str, Any],
+) -> None:
+    """Apply each semantic field edit independently and preserve siblings."""
+
+    field_state = emvr_design.setdefault("field_state", {})
+    if not isinstance(field_state, dict):
+        field_state = {}
+        emvr_design["field_state"] = field_state
+
+    raw_edits = structured_update.get("field_updates", [])
+    edits = raw_edits if isinstance(raw_edits, list) else []
+    # Snapshot fields keep older clients compatible on ordinary answer turns.
+    # Once explicit edits exist, however, only those targeted operations may
+    # mutate field_state.  A model-provided stale snapshot must not overwrite
+    # an unrelated field that the student did not ask to change.
+    if not edits:
+        for field_id in EMVR_EDITABLE_FIELDS:
+            if field_id not in structured_update:
+                continue
+            value = _nonempty_field_value(field_id, structured_update.get(field_id))
+            if value is not None:
+                field_state[field_id] = deepcopy(value)
+
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        field_id = str(edit.get("field_id") or "")
+        operation = str(edit.get("operation") or "").upper()
+        if field_id not in EMVR_EDITABLE_FIELDS:
+            continue
+        value = _nonempty_field_value(field_id, edit.get("value"))
+        if operation == "CLEAR":
+            field_state.pop(field_id, None)
+        elif operation == "REPLACE" and value is not None:
+            field_state[field_id] = deepcopy(value)
+        elif operation == "MERGE" and value is not None:
+            if field_id in EMVR_SCALAR_FIELDS:
+                prior = str(field_state.get(field_id) or "").strip()
+                addition = str(value).strip()
+                field_state[field_id] = "；".join(
+                    dict.fromkeys(item for item in (prior, addition) if item)
+                )
+            else:
+                prior_values = field_state.get(field_id, [])
+                prior_values = prior_values if isinstance(prior_values, list) else []
+                field_state[field_id] = list(dict.fromkeys([*prior_values, *value]))
+
 
 def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
     """Merge per-stage semantic readings, with later revisions authoritative."""
@@ -133,7 +218,18 @@ def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
         if not isinstance(update, dict):
             continue
         for key, value in update.items():
+            if key == "field_updates":
+                continue
             if value not in (None, "", [], {}):
+                merged[key] = deepcopy(value)
+    field_state = (
+        emvr_design.get("field_state", {})
+        if isinstance(emvr_design, dict)
+        else {}
+    )
+    if isinstance(field_state, dict):
+        for key, value in field_state.items():
+            if key in EMVR_EDITABLE_FIELDS and value not in (None, "", [], {}):
                 merged[key] = deepcopy(value)
     return merged
 
@@ -178,13 +274,39 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
         )
         seen_relations.add(relation_id)
     summary = str(raw.get("research_summary") or "").strip()[:1200]
+    scalar_values = {
+        key: str(raw.get(key) or "").strip()[:1600] or None
+        for key in EMVR_SCALAR_FIELDS
+    }
+    field_updates: list[dict[str, Any]] = []
+    raw_field_updates = raw.get("field_updates", [])
+    for item in raw_field_updates if isinstance(raw_field_updates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        field_id = str(item.get("field_id") or "").strip()
+        operation = str(item.get("operation") or "").strip().upper()
+        if field_id not in EMVR_EDITABLE_FIELDS or operation not in {
+            "REPLACE", "MERGE", "CLEAR"
+        }:
+            continue
+        value = _nonempty_field_value(field_id, item.get("value"))
+        if operation == "CLEAR" or value is not None:
+            field_updates.append(
+                {"field_id": field_id, "operation": operation, "value": deepcopy(value)}
+            )
     normalized = {
-        "research_summary": summary or None,
+        **scalar_values,
+        "research_summary": summary or scalar_values.get("research_summary"),
+        "learning_objectives": text_list("learning_objectives"),
         "changed_quantities": text_list("changed_quantities"),
         "observed_quantities": text_list("observed_quantities"),
         "comparison_cases": text_list("comparison_cases"),
         "required_behaviors": text_list("required_behaviors"),
         "object_constraints": text_list("object_constraints"),
+        "procedure_steps": text_list("procedure_steps", limit=20),
+        "visualization_requirements": text_list("visualization_requirements"),
+        "limitations": text_list("limitations"),
+        "field_updates": field_updates,
         # Relation IDs are derived from explicit semantic links.  A bare ID
         # list is intentionally ignored so a model cannot attach a theory just
         # because it is topically nearby.

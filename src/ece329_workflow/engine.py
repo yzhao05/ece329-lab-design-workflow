@@ -28,6 +28,7 @@ from .generator import (
     StageGenerator,
     guided_stage_entry_output,
 )
+from .emvr_design import apply_emvr_field_updates
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -619,6 +620,7 @@ def _persist_emvr_stage_input(
         # Earlier stages remain available, so revisions do not erase unrelated
         # requirements such as an already confirmed learning objective.
         structured_requirements[stage.value] = deepcopy(structured_update)
+        apply_emvr_field_updates(emvr_design, structured_update)
     if not entries or entries[-1].get("content") != entry["content"]:
         entries.append(entry)
         del entries[:-8]
@@ -1327,6 +1329,11 @@ class WorkflowEngine:
                     pending_action=pending_action,
                 )
             )
+        # Persisted answers, field-level EMVR edits and comparison decisions
+        # above are authoritative for the response generated in this same
+        # turn.  Refresh after every write so the online model never receives
+        # the pre-edit snapshot while the rule generator sees the new state.
+        turn_context["carried_context"] = build_carried_context(session)
         session.turn_context = turn_context
         if transitioned_from_stage is None:
             self._record_student_decision(

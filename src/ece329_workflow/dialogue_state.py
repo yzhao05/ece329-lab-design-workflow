@@ -7,7 +7,10 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any, Protocol
 
-from .emvr_design import normalize_emvr_design_update
+from .emvr_design import (
+    merge_emvr_structured_requirements,
+    normalize_emvr_design_update,
+)
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
 
@@ -309,6 +312,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         and isinstance(emvr_design.get("structured_requirements"), dict)
         else {}
     )
+    emvr_merged_requirements = merge_emvr_structured_requirements(emvr_design)
     guided_stage_inputs = session.design_context.get("guided_stage_inputs", {})
     guided_stage_inputs = (
         deepcopy(guided_stage_inputs)
@@ -371,6 +375,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "interactions": interactions,
         "emvr_stage_inputs": emvr_stage_inputs,
         "emvr_structured_requirements": emvr_structured_requirements,
+        "emvr_merged_requirements": emvr_merged_requirements,
         "guided_stage_inputs": guided_stage_inputs,
         "visualization_plan": _find_payload_values(
             session,
@@ -838,6 +843,35 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             }
             if item.get("merge_with_existing") is True:
                 normalized_comparison["merge_with_existing"] = True
+            case_refs = item.get("case_refs", [])
+            if isinstance(case_refs, list):
+                normalized_comparison["case_refs"] = list(
+                    dict.fromkeys(
+                        str(ref).strip()[:140]
+                        for ref in case_refs
+                        if isinstance(ref, str) and ref.strip()
+                    )
+                )[:12]
+            renames: list[dict[str, str]] = []
+            for rename in item.get("renames", []) \
+                if isinstance(item.get("renames"), list) else []:
+                if not isinstance(rename, dict):
+                    continue
+                case_ref = str(rename.get("case_ref") or "").strip()[:140]
+                label = str(rename.get("label") or "").strip()[:160]
+                if case_ref and label:
+                    renames.append({"case_ref": case_ref, "label": label})
+            if renames:
+                normalized_comparison["renames"] = renames
+            new_cases = item.get("new_cases", [])
+            if isinstance(new_cases, list):
+                normalized_comparison["new_cases"] = [
+                    str(case).strip()[:160]
+                    for case in new_cases
+                    if isinstance(case, str) and case.strip()
+                ][:12]
+            if item.get("replace_all") is True:
+                normalized_comparison["replace_all"] = True
             comparison_updates.append(normalized_comparison)
     requested_state = str(raw.get("interaction_state_request") or "").upper()
     course_scope_status = str(raw.get("course_scope_status") or "").upper()
@@ -1009,6 +1043,51 @@ def _normalized_evidence_text(value: str) -> str:
     return "".join(value.split()).casefold()
 
 
+def _comparison_case_catalog(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Give existing semantic cases stable turn-local identities."""
+
+    comparison_id = str(item.get("comparison_id") or "")
+    recommended = [
+        str(case).strip()
+        for case in item.get("recommended_cases", item.get("cases", []))
+        if str(case).strip()
+    ]
+    current = [
+        str(case).strip() for case in item.get("cases", []) if str(case).strip()
+    ]
+    aliases = item.get("case_aliases", {})
+    aliases = aliases if isinstance(aliases, dict) else {}
+    catalog: list[dict[str, Any]] = []
+    known: set[str] = set()
+    for index, label in enumerate(recommended, start=1):
+        catalog.append(
+            {
+                "case_ref": f"{comparison_id}:case:{index}",
+                "label": label,
+                "canonical": True,
+                "aliases": [
+                    str(alias) for alias in aliases.get(label, []) if str(alias).strip()
+                ],
+            }
+        )
+        known.add(label)
+    extra_index = 1
+    for label in current:
+        if label in known:
+            continue
+        catalog.append(
+            {
+                "case_ref": f"{comparison_id}:custom:{extra_index}",
+                "label": label,
+                "canonical": False,
+                "aliases": [],
+            }
+        )
+        known.add(label)
+        extra_index += 1
+    return catalog
+
+
 def _apply_comparison_updates(
     session: DesignSession,
     updates: Any,
@@ -1044,6 +1123,38 @@ def _apply_comparison_updates(
             if str(case).strip()
         ]
         message_evidence = _normalized_evidence_text(user_message)
+        catalog = _comparison_case_catalog(item)
+        catalog_by_ref = {
+            str(entry["case_ref"]): entry for entry in catalog
+        }
+        rename_by_ref: dict[str, str] = {}
+        raw_renames = update.get("renames", [])
+        for rename in raw_renames if isinstance(raw_renames, list) else []:
+            if not isinstance(rename, dict):
+                continue
+            case_ref = str(rename.get("case_ref") or "")
+            label = str(rename.get("label") or "").strip()
+            if (
+                case_ref in catalog_by_ref
+                and label
+                and _normalized_evidence_text(label) in message_evidence
+            ):
+                rename_by_ref[case_ref] = label
+        referenced_cases: list[str] = []
+        raw_refs = update.get("case_refs", [])
+        for case_ref in raw_refs if isinstance(raw_refs, list) else []:
+            case_ref = str(case_ref)
+            entry = catalog_by_ref.get(case_ref)
+            if entry is not None:
+                referenced_cases.append(
+                    rename_by_ref.get(case_ref, str(entry["label"]))
+                )
+        supported_new_cases: list[str] = []
+        raw_new_cases = update.get("new_cases", [])
+        for raw_case in raw_new_cases if isinstance(raw_new_cases, list) else []:
+            case = str(raw_case).strip()
+            if case and _normalized_evidence_text(case) in message_evidence:
+                supported_new_cases.append(case)
         cases = []
         if isinstance(raw_cases, list):
             for raw_case in raw_cases:
@@ -1063,7 +1174,9 @@ def _apply_comparison_updates(
         elif action == "REJECT":
             item["cases"] = []
             item["adoption_status"] = "REJECTED"
-        elif action == "MODIFY" and cases:
+        elif action == "MODIFY" and cases and not (
+            referenced_cases or supported_new_cases
+        ):
             merged_cases = (
                 [*current_cases, *cases]
                 if update.get("merge_with_existing") is True
@@ -1074,6 +1187,15 @@ def _apply_comparison_updates(
                 "ACCEPTED"
                 if set(item["cases"]) == set(recommended)
                 else "MODIFIED"
+            )
+        elif action == "MODIFY" and (referenced_cases or supported_new_cases):
+            selected = list(dict.fromkeys([*referenced_cases, *supported_new_cases]))
+            if update.get("replace_all") is True:
+                item["cases"] = selected
+            else:
+                item["cases"] = list(dict.fromkeys([*current_cases, *selected]))
+            item["adoption_status"] = (
+                "ACCEPTED" if item["cases"] == recommended else "MODIFIED"
             )
 
 
@@ -1269,13 +1391,21 @@ def serialize_intent_input(
     carried_context: dict[str, Any],
 ) -> str:
     previous_question = str(pending_action.get("question") or "") if pending_action else ""
+    intent_context = deepcopy(carried_context)
+    comparisons = intent_context.get("baseline_comparisons", [])
+    if isinstance(comparisons, list):
+        for comparison in comparisons:
+            if isinstance(comparison, dict):
+                comparison["semantic_case_catalog"] = _comparison_case_catalog(
+                    comparison
+                )
     return json.dumps(
         {
             "current_stage": session.current_stage.value,
             "interaction_state": session.interaction_state.value,
             "previous_question": previous_question,
             "pending_action": pending_action,
-            "carried_context": carried_context,
+            "carried_context": intent_context,
             "user_message": user_message,
         },
         ensure_ascii=False,
