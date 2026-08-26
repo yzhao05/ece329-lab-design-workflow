@@ -426,6 +426,7 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
             "preserved_context": deepcopy(context),
             "pending_action": {
                 "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "interaction_state": InteractionState.EMVR_DIRECT.value,
                 "subject": stage.value,
                 "proposal": {"carried_context": deepcopy(context)},
                 "question": question,
@@ -494,6 +495,7 @@ def _prepare_emvr_stage_output(
     output.student_task = task
     output.stage_payload["pending_action"] = {
         "type": "CONFIRM_STAGE_OR_MODIFY",
+        "interaction_state": InteractionState.EMVR_DIRECT.value,
         "subject": stage.value,
         "proposal": deepcopy(section),
         "question": task,
@@ -515,10 +517,12 @@ def _persist_emvr_brief(
     session: DesignSession,
     message: str,
     intent_name: str,
+    stage: Stage | None = None,
 ) -> None:
+    content_stage = stage or session.current_stage
     if (
         session.interaction_state is not InteractionState.EMVR_DIRECT
-        or session.current_stage is not Stage.IDEA_BRAINSTORMING
+        or content_stage is not Stage.IDEA_BRAINSTORMING
         or intent_name
         not in {
             UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -532,12 +536,29 @@ def _persist_emvr_brief(
     if not isinstance(emvr_design, dict):
         emvr_design = {}
         session.design_context["emvr_design"] = emvr_design
-    emvr_design["brief"] = message.strip()
+    normalized_message = message.strip()
+    original_brief = str(emvr_design.get("brief") or "").strip()
+    revisions = emvr_design.get("brief_revisions", [])
+    if not isinstance(revisions, list):
+        revisions = []
+    if intent_name == UserIntent.NEW_TOPIC.value or not original_brief:
+        original_brief = normalized_message
+        revisions = []
+    elif (
+        normalized_message != original_brief
+        and normalized_message not in revisions
+    ):
+        revisions.append(normalized_message)
+        revisions = revisions[-8:]
+    current_brief = "；补充：".join([original_brief, *revisions])
+    emvr_design["brief"] = original_brief
+    emvr_design["brief_revisions"] = revisions
+    emvr_design["current_brief"] = current_brief
     idea = session.design_context.setdefault("idea", {})
     if isinstance(idea, dict):
-        idea["current_summary"] = message.strip()
-        idea["main_direction"] = message.strip()
-        idea["current_focus"] = message.strip()
+        idea["current_summary"] = current_brief
+        idea["main_direction"] = current_brief
+        idea["current_focus"] = current_brief
 
 
 def _persist_emvr_stage_input(
@@ -603,6 +624,49 @@ def _persist_emvr_stage_input(
         del entries[:-8]
 
 
+def _persist_guided_stage_input(
+    session: DesignSession,
+    stage: Stage,
+    message: str,
+    turn_intent: dict[str, Any],
+) -> None:
+    """Preserve guided answers and revisions for later turns and stages."""
+
+    if session.interaction_state is not InteractionState.GUIDED_DESIGN:
+        return
+    intent_name = str(turn_intent.get("intent") or "")
+    if intent_name not in {
+        UserIntent.ANSWER_CURRENT_QUESTION.value,
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+    }:
+        return
+    resolved_value = turn_intent.get("resolved_value")
+    content: Any = resolved_value if resolved_value not in (None, "", [], {}) else message
+    if isinstance(content, str):
+        content = content.strip()
+        if not content:
+            return
+    stage_inputs = session.design_context.setdefault("guided_stage_inputs", {})
+    if not isinstance(stage_inputs, dict):
+        stage_inputs = {}
+        session.design_context["guided_stage_inputs"] = stage_inputs
+    entries = stage_inputs.setdefault(stage.value, [])
+    if not isinstance(entries, list):
+        entries = []
+        stage_inputs[stage.value] = entries
+    entry = {
+        "content": deepcopy(content),
+        "intent": intent_name,
+        "revision": session.revision + 1,
+    }
+    semantic_updates = turn_intent.get("semantic_updates", {})
+    if isinstance(semantic_updates, dict) and semantic_updates:
+        entry["semantic_updates"] = deepcopy(semantic_updates)
+    if not entries or entries[-1].get("content") != entry["content"]:
+        entries.append(entry)
+        del entries[:-12]
+
+
 class WorkflowEngine:
     def __init__(
         self,
@@ -620,6 +684,16 @@ class WorkflowEngine:
         message: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = hydrate_pending_action_from_history(session)
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and isinstance(pending, dict)
+            and pending.get("type")
+            in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+        ):
+            # Older persisted EMVR sessions predate the mode marker on pending
+            # confirmations. Enrich the in-memory decision context so they use
+            # the same normalization as newly created sessions.
+            pending["interaction_state"] = InteractionState.EMVR_DIRECT.value
         direct = deterministic_intent(
             message,
             pending,
@@ -786,8 +860,8 @@ class WorkflowEngine:
                 "interaction_state": session.interaction_state.value,
                 "status": session.status.value,
                 "workflow_status": session.status.value,
-                "message": "该设计工作流已经完成。",
-                "assistant_message": "该设计工作流已经完成。",
+                "message": "这份实验设计已经整理完成。",
+                "assistant_message": "这份实验设计已经整理完成。",
                 "current_stage": session.current_stage.value,
                 "next_stage": None,
             }
@@ -887,7 +961,13 @@ class WorkflowEngine:
             # match or a model's unsupported NEW_TOPIC label.
             turn_intent.update(
                 {
-                    "intent": UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    "intent": (
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+                        if isinstance(pending_action, dict)
+                        and pending_action.get("type")
+                        in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+                        else UserIntent.ANSWER_CURRENT_QUESTION.value
+                    ),
                     "target": str(
                         idea_for_direction_lock.get("direction_summary")
                         or idea_for_direction_lock.get("selected_focus")
@@ -896,6 +976,47 @@ class WorkflowEngine:
                     "advance_requested": False,
                     "preserve_current_design": True,
                     "source": "SEMANTIC_DIRECTION_LOCK",
+                }
+            )
+        emvr_design_before_turn = session.design_context.get("emvr_design", {})
+        emvr_direction_exists = bool(
+            isinstance(emvr_design_before_turn, dict)
+            and str(
+                emvr_design_before_turn.get("current_brief")
+                or emvr_design_before_turn.get("brief")
+                or ""
+            ).strip()
+        )
+        if (
+            input_kind != UNREASONABLE_REQUEST
+            and session.interaction_state is InteractionState.EMVR_DIRECT
+            and emvr_direction_exists
+            and turn_intent.get("intent") == UserIntent.NEW_TOPIC.value
+            and not (
+                isinstance(semantic_for_direction_lock, dict)
+                and semantic_for_direction_lock.get("topic_change_explicit") is True
+            )
+        ):
+            # In EMVR, additional objects, interactions, observations and
+            # questions refine the existing experiment.  Resetting the whole
+            # workflow requires an explicit semantic topic-change decision.
+            turn_intent.update(
+                {
+                    "intent": (
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+                        if isinstance(pending_action, dict)
+                        and pending_action.get("type")
+                        in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+                        else UserIntent.ANSWER_CURRENT_QUESTION.value
+                    ),
+                    "target": (
+                        str(pending_action.get("subject") or "emvr_design")
+                        if isinstance(pending_action, dict)
+                        else "emvr_design"
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "source": "SEMANTIC_EMVR_DIRECTION_LOCK",
                 }
             )
         interaction_state_changed = False
@@ -1000,7 +1121,11 @@ class WorkflowEngine:
                 }
                 and (
                     str(turn_intent.get("source") or "").startswith("SEMANTIC")
-                    or turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+                    or turn_intent.get("source")
+                    in {
+                        "CONFIRMED_PENDING_ANSWER",
+                        "CONFIRMED_PENDING_MODIFICATION",
+                    }
                 )
             )
             else message
@@ -1009,7 +1134,11 @@ class WorkflowEngine:
             deepcopy(turn_intent.get("semantic_updates", {}))
             if (
                 str(turn_intent.get("source") or "").startswith("SEMANTIC")
-                or turn_intent.get("source") == "CONFIRMED_PENDING_ANSWER"
+                or turn_intent.get("source")
+                in {
+                    "CONFIRMED_PENDING_ANSWER",
+                    "CONFIRMED_PENDING_MODIFICATION",
+                }
             )
             else None
         )
@@ -1092,6 +1221,12 @@ class WorkflowEngine:
             except StageCompletionError as exc:
                 completion_error = str(exc)
         handled_stage = session.current_stage
+        # A turn can both revise the current draft and request advancement.
+        # The reply is generated for handled_stage (the destination), while
+        # the student's content belongs to the stage that was just handled.
+        # Keeping these roles separate prevents a "修改并继续" turn from being
+        # filed under the next stage or omitted from the EMVR brief.
+        content_stage = transitioned_from_stage or handled_stage
         stage_one_control_turn = bool(
             content_intent_name
             in {
@@ -1138,10 +1273,17 @@ class WorkflowEngine:
             session,
             resolved_student_message,
             content_intent_name,
+            content_stage,
         )
         _persist_emvr_stage_input(
             session,
-            handled_stage,
+            content_stage,
+            resolved_student_message,
+            turn_intent,
+        )
+        _persist_guided_stage_input(
+            session,
+            content_stage,
             resolved_student_message,
             turn_intent,
         )

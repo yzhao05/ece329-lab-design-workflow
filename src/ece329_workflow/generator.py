@@ -86,7 +86,7 @@ _GUIDED_STAGE_REFERENCE_STEPS: dict[Stage, tuple[str, ...]] = {
         "最后区分模型局限、展示误差与真正的物理差异",
     ),
     Stage.DESIGN_VALUE_AND_LIMITATIONS: (
-        "对照阶段1的学习目标，检查现有变量、流程和显示是否足以支撑它",
+        "回看最初确定的学习目标，检查现有变量、流程和显示是否足以支撑它",
         "指出它依赖的理想化条件",
         "区分概念展示能说明什么，以及不能据此推出什么",
     ),
@@ -309,8 +309,14 @@ def guided_stage_entry_output(
 def _idea(session: DesignSession, user_message: str) -> str:
     if session.interaction_state is InteractionState.EMVR_DIRECT:
         emvr_design = session.design_context.get("emvr_design", {})
-        if isinstance(emvr_design, dict) and emvr_design.get("brief"):
-            return str(emvr_design["brief"])
+        if isinstance(emvr_design, dict):
+            current_brief = str(
+                emvr_design.get("current_brief")
+                or emvr_design.get("brief")
+                or ""
+            ).strip()
+            if current_brief:
+                return current_brief
     idea_context = session.design_context.get("idea", {})
     if isinstance(idea_context, dict):
         for key in ("current_focus", "current_summary", "main_direction"):
@@ -411,7 +417,9 @@ def _emvr_context_text(session: DesignSession, fallback: str) -> str:
     emvr_design = session.design_context.get("emvr_design", {})
     parts = []
     if isinstance(emvr_design, dict):
-        brief = _emvr_content_text(emvr_design.get("brief"))
+        brief = _emvr_content_text(
+            emvr_design.get("current_brief") or emvr_design.get("brief")
+        )
         if brief:
             parts.append(brief)
     for stage in Stage:
@@ -1335,7 +1343,7 @@ class RuleBasedStageGenerator:
                         limit=3,
                     ),
                 },
-                assumptions=["暂以用户提供的想法为设计边界，后续阶段再补充参数和理论模型。"],
+                assumptions=["暂时以你提出的想法为设计边界，接下来再补充参数和理论模型。"],
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             selected_direction = latest_stage_input or (
@@ -1350,7 +1358,7 @@ class RuleBasedStageGenerator:
                     "student_revisions": stage_inputs,
                     "course_references": _course_references(design_text),
                     "vr_suitability": "参数可调、结果可计算、现象可空间化展示",
-                    "selection_reason": "优先保留用户原始意图，并选择能够形成明确输入—输出反馈的方向。",
+                    "selection_reason": "优先保留你原本的研究意图，并选择能够形成明确输入—输出反馈的方向。",
                 },
             )
         if stage is Stage.LEARNING_OBJECTIVES:
@@ -1427,7 +1435,7 @@ class RuleBasedStageGenerator:
         if stage is Stage.HYPOTHESIS:
             hypothesis = latest_stage_input or "学生尚未给出具体方向性假设"
             return StepOutput(
-                assistant_message="已将理论假设映射为用户调整参数后可立即观察的VR反馈。",
+                assistant_message="这个假设已经对应到你调整参数后能够立即观察的VR反馈。",
                 stage_payload={
                     "research_hypothesis": hypothesis,
                     "null_hypothesis": "在设计范围内，主要自变量变化不会造成可分辨响应。",
@@ -1439,10 +1447,10 @@ class RuleBasedStageGenerator:
         if stage is Stage.CONCEPTUAL_OR_VR_SETUP:
             research_focus = _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
             return StepOutput(
-                assistant_message="已在保留用户现有场景条件的前提下，完善Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
+                assistant_message="你原有的场景条件已经保留；我在此基础上补全了Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
                 stage_payload={
                     "user_original_design": idea,
-                    "existing_context": "保留用户已有场景设定；工作流不新增或改写VR场景设计。",
+                    "existing_context": "保留你已有的场景设定；这一部分不额外改写VR场景。",
                     "student_constraints": stage_inputs,
                     "user_role": latest_stage_input or "通过有物理意义的交互调整参数、观察结果并进行比较",
                     "core_learning_task": research_focus or f"探索学生定义的条件变化与{topics[0]}响应之间的关系",
@@ -1570,7 +1578,7 @@ class RuleBasedStageGenerator:
                         "保留参数基准和重置闭环",
                     ],
                 },
-                warnings=["本阶段不定义VR场景，也不包含可访问性与舒适性设计。"],
+                warnings=["这一部分只整理实验结构，不另外定义VR场景，也不扩展可访问性与舒适性设计。"],
             )
         if stage is Stage.VARIABLES_AND_CONDITIONS:
             variable_definition = latest_stage_input or _emvr_latest_stage_input(

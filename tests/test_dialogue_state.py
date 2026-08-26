@@ -10,6 +10,7 @@ from ece329_workflow.dialogue_state import (
     deterministic_intent,
     fallback_intent,
     hydrate_pending_action_from_history,
+    record_pending_clarification,
     resolved_intent,
     save_pending_action,
     validate_resolved_intent,
@@ -1323,6 +1324,147 @@ class DialogueStateTests(unittest.TestCase):
         )
         self.assertEqual(resolved["source"], "CONFIRMED_PENDING_ANSWER")
 
+    def test_confirmed_candidate_answer_also_closes_emvr_open_question(self) -> None:
+        """EMVR uses the same contextual open-answer protocol as guided mode."""
+
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "candidate_answer": (
+                "在VR中拖动两个带电物体改变距离，观察导体与介质附近的电场线变化"
+            ),
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["pending_answer_status"], "CLEAR"
+        )
+        self.assertEqual(
+            resolved["resolved_value"], pending["candidate_answer"]
+        )
+        self.assertEqual(resolved["source"], "CONFIRMED_PENDING_ANSWER")
+
+    def test_confirmation_question_recovers_a_substantive_revision_by_context(self) -> None:
+        supplement = (
+            "保持电荷配置不变，增加导体与介质材料切换，并比较界面附近的场线"
+        )
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "proposal": {"stage": Stage.IDEA_BRAINSTORMING.value},
+            "question": "请补充或修改；如果草稿准确也可以继续。",
+            "allowed_intents": [
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session = DesignSession(
+            design_id="emvr_confirmation_candidate",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            model_context={"dialogue_state": {"pending_action": pending}},
+        )
+        stored = record_pending_clarification(session, supplement)
+        assert stored is not None
+        self.assertEqual(stored["candidate_answer"], supplement)
+        self.assertEqual(
+            stored["candidate_resolution"],
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        )
+
+        # The semantic layer may call a substantive draft response an ANSWER;
+        # the state machine normalizes it to a modification from pending type.
+        normalized = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                resolved_value=supplement,
+                confidence=0.97,
+                source="SEMANTIC_TEST",
+            ),
+            stored,
+        )
+        self.assertEqual(
+            normalized["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        )
+        self.assertEqual(normalized["resolved_value"], supplement)
+
+        accepted_candidate = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                resolved_value=None,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+            ),
+            stored,
+        )
+        self.assertEqual(
+            accepted_candidate["intent"],
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        )
+        self.assertEqual(accepted_candidate["resolved_value"], supplement)
+
+        # If the next semantic result confirms that the saved turn was a
+        # modification but omits its value, recover the saved content.
+        recovered = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                resolved_value=None,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+            ),
+            stored,
+        )
+        self.assertEqual(recovered["resolved_value"], supplement)
+        self.assertEqual(recovered["source"], "CONFIRMED_PENDING_MODIFICATION")
+
+    def test_guided_confirmation_recovers_the_same_saved_revision(self) -> None:
+        candidate = "补充一个分层介质条件，原有材料对照保持不变"
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.GUIDED_DESIGN.value,
+            "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+            "proposal": {"controlled_conditions": ["几何尺寸"]},
+            "candidate_answer": candidate,
+            "candidate_resolution": UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            "allowed_intents": [
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        )
+        self.assertEqual(resolved["resolved_value"], candidate)
+        self.assertEqual(resolved["source"], "CONFIRMED_PENDING_MODIFICATION")
+
     def test_missing_facet_decision_recovers_without_questioning_student_intent(self) -> None:
         generator = ScriptedSemanticGenerator(
             UserIntent.ANSWER_CURRENT_QUESTION,
@@ -1466,6 +1608,146 @@ class DialogueStateTests(unittest.TestCase):
         comparison = session.design_context["idea"]["standard_comparisons"][0]
         self.assertEqual(comparison["cases"], ["同种"])
         self.assertEqual(comparison["adoption_status"], "MODIFIED")
+
+    def test_student_can_append_a_new_comparison_case_without_model_invention(self) -> None:
+        original_cases = [
+            "较小闭合曲面完整包住场源",
+            "较大闭合曲面完整包住场源",
+            "不规则闭合曲面完整包住场源",
+        ]
+        new_case = "曲面没有完全包住场源"
+        session = DesignSession(
+            design_id="design_student_comparison_addition",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "standard_comparisons": [
+                        {
+                            "comparison_id": "surface_enclosure_cases",
+                            "recommended_cases": original_cases,
+                            "cases": list(original_cases),
+                            "adoption_status": "ACCEPTED",
+                        }
+                    ]
+                }
+            },
+        )
+        decision = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            confidence=0.98,
+            source="SEMANTIC_TEST",
+            semantic_updates={
+                "comparison_updates": [
+                    {
+                        "comparison_id": "surface_enclosure_cases",
+                        "action": "MODIFY",
+                        "cases": [new_case, "模型自行虚构的第五种情形"],
+                        "merge_with_existing": True,
+                    }
+                ]
+            },
+        )
+
+        apply_resolved_intent(
+            session,
+            decision,
+            None,
+            f"请补充第四种参照情形：{new_case}，其他内容不变。",
+        )
+
+        comparison = session.design_context["idea"]["standard_comparisons"][0]
+        self.assertEqual(comparison["cases"], [*original_cases, new_case])
+        self.assertNotIn("模型自行虚构的第五种情形", comparison["cases"])
+        self.assertEqual(comparison["adoption_status"], "MODIFIED")
+
+        initialize_idea_development(
+            session,
+            {"core_phenomenon": "比较闭合曲面的局部场强和总通量"},
+        )
+        session.turn_context = {"resolved_intent": decision}
+        visible = build_gap_output(session, new_case)
+        self.assertIn("对照调整已经并入", visible.assistant_message)
+        self.assertIn(new_case, visible.assistant_message)
+        self.assertNotIn("还需要把它与当前实验想法", visible.assistant_message)
+
+    def test_confirmed_clarification_keeps_original_student_evidence(self) -> None:
+        original_cases = ["导体", "均匀介质"]
+        new_case = "分层介质"
+        session = DesignSession(
+            design_id="design_confirmed_comparison_evidence",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "standard_comparisons": [
+                        {
+                            "comparison_id": "material_cases",
+                            "recommended_cases": original_cases,
+                            "cases": list(original_cases),
+                            "adoption_status": "ACCEPTED",
+                        }
+                    ]
+                }
+            },
+        )
+        decision = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            resolved_value=f"再加入{new_case}，其他情况保留",
+            confidence=0.98,
+            source="CONFIRMED_PENDING_MODIFICATION",
+            semantic_updates={
+                "comparison_updates": [
+                    {
+                        "comparison_id": "material_cases",
+                        "action": "MODIFY",
+                        "cases": [new_case, "模型虚构的材料"],
+                        "merge_with_existing": True,
+                    }
+                ]
+            },
+        )
+
+        # The current message only confirms the previous clarification.  The
+        # saved resolved_value is the authoritative student-authored evidence.
+        apply_resolved_intent(session, decision, None, "对，就是这个补充")
+
+        comparison = session.design_context["idea"]["standard_comparisons"][0]
+        self.assertEqual(comparison["cases"], [*original_cases, new_case])
+        self.assertNotIn("模型虚构的材料", comparison["cases"])
+
+    def test_facet_merge_preserves_previous_answer_and_adds_supplement(self) -> None:
+        session = DesignSession(
+            design_id="design_facet_merge",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {"original": "比较闭合曲面上的电通量"}},
+        )
+        development = initialize_idea_development(
+            session,
+            {"core_phenomenon": "比较闭合曲面的局部场强和总通量"},
+            semantic_updates={
+                "facet_updates": [
+                    {"facet_id": "conceptual_structure", "status": "CLEAR"}
+                ]
+            },
+        )
+        original = development["facets"]["conceptual_structure"]["evidence"]
+
+        update_idea_development(
+            session,
+            "补充一个没有完全包住场源的闭合曲面对照",
+            semantic_updates={
+                "facet_updates": [
+                    {
+                        "facet_id": "conceptual_structure",
+                        "status": "CLEAR",
+                        "operation": "MERGE",
+                    }
+                ]
+            },
+        )
+
+        evidence = development["facets"]["conceptual_structure"]["evidence"]
+        self.assertIn(original, evidence)
+        self.assertIn("没有完全包住场源", evidence)
 
     def test_semantic_facet_updates_replace_keyword_facet_detection(self) -> None:
         session = DesignSession(

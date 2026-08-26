@@ -108,6 +108,19 @@ def retrieved_brainstorm_options(
 
 
 class OpenAIStageGeneratorTests(unittest.TestCase):
+    def test_student_facing_reply_rejects_internal_numbered_stage_reference(self) -> None:
+        transport = FakeTransport(
+            valid_output(
+                assistant_message="根据阶段1已经确定的内容，我们继续整理当前部分。"
+            )
+        )
+
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(transport=transport).generate(
+                guided_session(),
+                "继续完善这个实验想法",
+            )
+
     def test_context_intent_resolver_uses_a_separate_structured_request(self) -> None:
         transport = FakeTransport(
             {
@@ -251,6 +264,159 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("research_question不要求使用问号或疑问句", instructions)
         self.assertIn("candidate_answer", instructions)
 
+    def test_confirmed_candidate_modification_is_semantically_reparsed(self) -> None:
+        candidate = "增加分层介质作为第三种材料条件，原来的导体和均匀介质都保留"
+        base = {
+            "target": "material_cases",
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    **base,
+                    "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+                    "resolved_value_json": None,
+                    "semantic_updates_json": None,
+                },
+                {
+                    **base,
+                    "intent": "MODIFY_PREVIOUS_PROPOSAL",
+                    "resolved_value_json": json.dumps(candidate, ensure_ascii=False),
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "comparison_updates": [
+                                {
+                                    "comparison_id": "material_cases",
+                                    "action": "MODIFY",
+                                    "cases": ["分层介质"],
+                                    "merge_with_existing": True,
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        pending = {
+            "type": "CONFIRM_OR_MODIFY",
+            "subject": "material_cases",
+            "proposal": ["导体", "均匀介质"],
+            "question": "是否保留当前材料对照？",
+            "candidate_answer": candidate,
+            "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "对，就是我刚才补充的内容",
+            pending,
+            {"baseline_comparisons": [{"comparison_id": "material_cases"}]},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
+        self.assertEqual(result["resolved_value"], candidate)
+        self.assertEqual(result["source"], "CONFIRMED_PENDING_MODIFICATION")
+        self.assertEqual(
+            result["semantic_updates"]["comparison_updates"][0]["cases"],
+            ["分层介质"],
+        )
+
+    def test_explicit_structured_no_direction_is_not_forced_into_an_answer(self) -> None:
+        response = {
+            "intent": "UNCLEAR",
+            "target": "direction_outline",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps(
+                {
+                    "no_direction": True,
+                    "course_scope_status": "COURSE_CONTENT",
+                    "facet_updates": [
+                        {"facet_id": "direction_outline", "status": "MISSING"}
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.92,
+        }
+        transport = FakeTransport(outputs=[response, response])
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "direction_outline",
+            "proposal": {"facet_id": "direction_outline"},
+            "question": "你目前最想探索什么现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "",
+            pending,
+            {"idea_development": {"active_facet_id": "direction_outline"}},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertTrue(result["semantic_updates"].get("no_direction"))
+
+    def test_candidate_confirmation_does_not_loop_when_repair_stays_unclear(self) -> None:
+        candidate = "补充观察中间平面的场强，并保留原来的场线比较"
+        transport = FakeTransport(
+            outputs=[
+                {
+                    "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+                    "target": "observation_plan",
+                    "resolved_value_json": None,
+                    "semantic_updates_json": None,
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.98,
+                },
+                {
+                    "intent": "UNCLEAR",
+                    "target": "observation_plan",
+                    "resolved_value_json": None,
+                    "semantic_updates_json": None,
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.70,
+                },
+            ]
+        )
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "subject": "observation_plan",
+            "proposal": {"observations": ["电场线"]},
+            "candidate_answer": candidate,
+            "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "就是刚才的补充",
+            pending,
+            {},
+        )
+
+        self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
+        self.assertEqual(result["resolved_value"], candidate)
+        self.assertEqual(result["source"], "CONFIRMED_PENDING_MODIFICATION")
+
     def test_intent_resolver_repairs_omitted_later_stage_answer_status(self) -> None:
         base = {
             "intent": "ANSWER_CURRENT_QUESTION",
@@ -296,6 +462,209 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(len(transport.requests), 2)
         repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
         self.assertIn("pending_answer_status=CLEAR", repair_text)
+
+    def test_intent_resolver_repairs_omitted_emvr_open_answer_status(self) -> None:
+        base = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "IDEA_BRAINSTORMING",
+            "resolved_value_json": None,
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {**base, "semantic_updates_json": None},
+                {
+                    **base,
+                    "semantic_updates_json": json.dumps(
+                        {"pending_answer_status": "CLEAR"},
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": "IDEA_BRAINSTORMING",
+            "proposal": {"stage_title": "实验目标与初始构想"},
+            "question": "实验中有哪些对象、操作和希望观察的现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        generator = OpenAIStageGenerator(transport=transport)
+
+        result = generator.resolve_intent(
+            session,
+            (
+                "学生拖动两个带电物体改变距离，观察导体和介质附近的电场线，"
+                "理解材料边界对场分布的影响"
+            ),
+            pending,
+            {"emvr_design": {"brief": "设计静电场VR实验"}},
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
+        self.assertEqual(len(transport.requests), 2)
+        repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
+        self.assertIn("pending_answer_status=CLEAR", repair_text)
+
+    def test_intent_resolver_repairs_unclear_emvr_draft_supplement(self) -> None:
+        supplement = (
+            "保持电荷配置不变，增加导体与介质材料切换，并比较界面附近的场线"
+        )
+        base = {
+            "target": "IDEA_BRAINSTORMING",
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    **base,
+                    "intent": "UNCLEAR",
+                    "resolved_value_json": None,
+                },
+                {
+                    **base,
+                    "intent": "MODIFY_PREVIOUS_PROPOSAL",
+                    "resolved_value_json": json.dumps(
+                        supplement,
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+        )
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "IDEA_BRAINSTORMING",
+            "proposal": {"stage_title": "实验目标与初始构想"},
+            "question": "请补充或修改；如果草稿准确也可以继续。",
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        generator = OpenAIStageGenerator(transport=transport)
+
+        result = generator.resolve_intent(
+            session,
+            supplement,
+            pending,
+            {"emvr_design": {"brief": "拖动两个电荷观察场线"}},
+        )
+
+        self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
+        self.assertEqual(result["resolved_value"], supplement)
+        self.assertEqual(len(transport.requests), 2)
+        repair_text = transport.requests[1]["input"][0]["content"][-1]["text"]
+        self.assertIn("MODIFY_PREVIOUS_PROPOSAL", repair_text)
+        self.assertIn("candidate_answer", repair_text)
+
+    def test_open_question_context_binding_prevents_repeat_in_both_modes(self) -> None:
+        student_answers = {
+            "guided": (
+                guided_session(),
+                {
+                    "type": "ANSWER_IDEA_FACET",
+                    "subject": "research_question",
+                    "proposal": {"facet_id": "research_question"},
+                    "question": "你想比较什么条件，并观察什么现象？",
+                    "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+                },
+                "比较不同闭合曲面的局部场强分布，并观察总通量是否保持不变",
+            ),
+            "emvr": (
+                guided_session(),
+                {
+                    "type": "ANSWER_EMVR_STAGE_QUESTION",
+                    "subject": "VARIABLES_AND_CONDITIONS",
+                    "proposal": {"stage_title": "变量与条件"},
+                    "question": "学生主动改变和观察哪些量？",
+                    "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+                },
+                "改变闭合曲面的大小和形状，观察局部场强箭头和总通量",
+            ),
+        }
+        student_answers["emvr"][0].interaction_state = InteractionState.EMVR_DIRECT
+
+        for label, (session, pending, answer) in student_answers.items():
+            with self.subTest(mode=label):
+                unclear = {
+                    "intent": "UNCLEAR",
+                    "target": pending["subject"],
+                    "resolved_value_json": None,
+                    "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.82,
+                }
+                generator = OpenAIStageGenerator(
+                    transport=FakeTransport(outputs=[unclear, unclear])
+                )
+
+                result = generator.resolve_intent(
+                    session,
+                    answer,
+                    pending,
+                    {"research_direction": "比较闭合曲面上的电场与通量"},
+                )
+
+                self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+                self.assertEqual(result["resolved_value"], answer)
+                if label == "guided":
+                    self.assertEqual(
+                        result["semantic_updates"]["facet_updates"],
+                        [{"facet_id": "research_question", "status": "CLEAR"}],
+                    )
+                else:
+                    self.assertEqual(
+                        result["semantic_updates"]["pending_answer_status"],
+                        "CLEAR",
+                    )
+
+    def test_reference_request_is_not_forced_into_contextual_answer(self) -> None:
+        output = {
+            "intent": "REQUEST_MORE_EXAMPLES",
+            "target": "research_question",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+        }
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question"},
+            "question": "你想比较什么条件，并观察什么现象？",
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "REQUEST_MORE_EXAMPLES",
+                "UNCLEAR",
+            ],
+        }
+        generator = OpenAIStageGenerator(transport=FakeTransport(output=output))
+
+        result = generator.resolve_intent(
+            guided_session(),
+            "请先给我一个课程内参考",
+            pending,
+            {"research_direction": "比较闭合曲面的电通量"},
+        )
+
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
 
     def test_intent_resolver_reviews_a_substantive_facet_answer_marked_missing(self) -> None:
         base = {

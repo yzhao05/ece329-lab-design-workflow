@@ -190,12 +190,24 @@ def _apply_structured_facet_updates(
             continue
         status = str(update.get("status") or "").upper()
         if status == CLEAR:
-            if facet.get("status") != CLEAR:
+            previous_status = facet.get("status")
+            previous_evidence = str(facet.get("evidence") or "").strip()
+            new_evidence = evidence.strip()[:500]
+            if (
+                str(update.get("operation") or "").upper() == "MERGE"
+                and str(facet.get("evidence") or "").strip()
+                and new_evidence
+                and new_evidence not in str(facet.get("evidence") or "")
+            ):
+                new_evidence = (
+                    f"{previous_evidence}；补充：{new_evidence}"
+                )[:500]
+            if previous_status != CLEAR or new_evidence != previous_evidence:
                 clarified.append(facet_id)
             facet.update(
                 {
                     "status": CLEAR,
-                    "evidence": evidence.strip()[:500],
+                    "evidence": new_evidence,
                     "source": "STUDENT_SEMANTIC",
                 }
             )
@@ -237,12 +249,18 @@ def build_gap_output(
         if facet_id in status["facets_by_id"]
     ]
     repeated_facet_count = _pending_facet_repeat_count(session, status)
-    acknowledgement = (
-        _student_facing_acknowledgement(acknowledged_message, clarified_titles)
-        if clarified_titles
-        else _student_facing_retry(status, acknowledged_message)
-    )
     comparison_update = _comparison_update_summary(session, acknowledged_message)
+    if clarified_titles:
+        acknowledgement = _student_facing_acknowledgement(
+            acknowledged_message,
+            clarified_titles,
+        )
+        if comparison_update:
+            acknowledgement += " 你提出的对照调整也已经并入当前实验想法。"
+    elif comparison_update:
+        acknowledgement = "你提出的对照调整已经并入当前实验想法。"
+    else:
+        acknowledgement = _student_facing_retry(status, acknowledged_message)
     assistant_message = (
         f"{acknowledgement}{comparison_update}\n\n"
         f"{_student_facing_next_turn(status, repeat_count=repeated_facet_count)}"

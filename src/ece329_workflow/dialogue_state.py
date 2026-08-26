@@ -34,6 +34,19 @@ _IDEA_FACET_IDS = {
     "hypothesis",
     "conceptual_structure",
 }
+OPEN_QUESTION_PENDING_TYPES = frozenset(
+    {
+        "ANSWER_IDEA_FACET",
+        "ANSWER_STAGE_QUESTION",
+        "ANSWER_EMVR_STAGE_QUESTION",
+    }
+)
+CONFIRMATION_PENDING_TYPES = frozenset(
+    {
+        "CONFIRM_OR_MODIFY",
+        "CONFIRM_STAGE_OR_MODIFY",
+    }
+)
 
 
 class ContextIntentResolver(Protocol):
@@ -78,13 +91,22 @@ def record_pending_clarification(
         repeat_count = 1
     pending["repeat_count"] = max(1, repeat_count + 1)
     normalized_candidate = candidate_answer.strip()
+    recoverable_confirmation = bool(
+        pending.get("type") in CONFIRMATION_PENDING_TYPES
+    )
     if (
         normalized_candidate
-        and pending.get("type")
-        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        and (
+            pending.get("type") in OPEN_QUESTION_PENDING_TYPES
+            or recoverable_confirmation
+        )
         and not str(pending.get("candidate_answer") or "").strip()
     ):
         pending["candidate_answer"] = normalized_candidate[:2000]
+        if recoverable_confirmation:
+            pending["candidate_resolution"] = (
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+            )
     return deepcopy(pending)
 
 
@@ -287,6 +309,12 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         and isinstance(emvr_design.get("structured_requirements"), dict)
         else {}
     )
+    guided_stage_inputs = session.design_context.get("guided_stage_inputs", {})
+    guided_stage_inputs = (
+        deepcopy(guided_stage_inputs)
+        if isinstance(guided_stage_inputs, dict)
+        else {}
+    )
     return {
         "research_direction": direction,
         "direction_locked": idea.get("direction_locked") is True,
@@ -343,6 +371,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "interactions": interactions,
         "emvr_stage_inputs": emvr_stage_inputs,
         "emvr_structured_requirements": emvr_structured_requirements,
+        "guided_stage_inputs": guided_stage_inputs,
         "visualization_plan": _find_payload_values(
             session,
             {
@@ -596,19 +625,54 @@ def validate_resolved_intent(
     intent = str(raw.get("intent") or UserIntent.UNCLEAR.value)
     if intent not in ALL_INTENTS:
         intent = UserIntent.UNCLEAR.value
+    pending_type = (
+        str(pending_action.get("type") or "")
+        if isinstance(pending_action, dict)
+        else ""
+    )
+    is_stage_confirmation = bool(
+        pending_type in CONFIRMATION_PENDING_TYPES
+    )
+    is_emvr_confirmation = bool(
+        is_stage_confirmation
+        and isinstance(pending_action, dict)
+        and pending_action.get("interaction_state")
+        == InteractionState.EMVR_DIRECT.value
+    )
+    confirms_saved_modification = bool(
+        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        and pending_type in CONFIRMATION_PENDING_TYPES
+        and isinstance(pending_action, dict)
+        and pending_action.get("candidate_resolution")
+        == UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        and str(pending_action.get("candidate_answer") or "").strip()
+    )
+    # A substantive response to "review this draft and add anything missing"
+    # is a modification even if the semantic service used the more general
+    # ANSWER_CURRENT_QUESTION label.  Normalize the structured intent from the
+    # pending action instead of inspecting the student's wording.
+    if (
+        intent == UserIntent.ANSWER_CURRENT_QUESTION.value
+        and is_emvr_confirmation
+    ):
+        intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        raw = {**raw, "source": "SEMANTIC_CONFIRMATION_CONTENT"}
+    if confirms_saved_modification:
+        intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        raw = {**raw, "resolved_value": None}
     allowed = set(pending_action.get("allowed_intents", [])) if pending_action else set(ALL_INTENTS)
     confirms_saved_candidate = bool(
         intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
         and isinstance(pending_action, dict)
         and pending_action.get("type")
-        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        in OPEN_QUESTION_PENDING_TYPES
         and str(pending_action.get("candidate_answer") or "").strip()
     )
     requests_reference_for_open_question = bool(
         intent == UserIntent.REQUEST_MORE_EXAMPLES.value
         and isinstance(pending_action, dict)
         and pending_action.get("type")
-        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        in OPEN_QUESTION_PENDING_TYPES
     )
     if (
         intent not in allowed
@@ -635,10 +699,19 @@ def validate_resolved_intent(
     source = str(raw.get("source") or "SEMANTIC")
     resolved_value = raw.get("resolved_value")
     if (
+        intent == UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        and is_stage_confirmation
+        and resolved_value in (None, "", [], {})
+        and isinstance(pending_action, dict)
+        and str(pending_action.get("candidate_answer") or "").strip()
+    ):
+        resolved_value = str(pending_action["candidate_answer"]).strip()
+        source = "CONFIRMED_PENDING_MODIFICATION"
+    if (
         intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
         and isinstance(pending_action, dict)
         and pending_action.get("type")
-        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        in OPEN_QUESTION_PENDING_TYPES
         and str(pending_action.get("candidate_answer") or "").strip()
     ):
         candidate_answer = str(pending_action["candidate_answer"]).strip()
@@ -680,7 +753,8 @@ def validate_resolved_intent(
                 ]
             elif (
                 isinstance(pending_action, dict)
-                and pending_action.get("type") == "ANSWER_STAGE_QUESTION"
+                and pending_action.get("type")
+                in {"ANSWER_STAGE_QUESTION", "ANSWER_EMVR_STAGE_QUESTION"}
             ):
                 semantic_updates["pending_answer_status"] = "CLEAR"
             source = "SEMANTIC_RECOVERED_ANSWER_STATUS"
@@ -742,7 +816,11 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         facet_id = str(item.get("facet_id") or "")
         status = str(item.get("status") or "").upper()
         if facet_id in _IDEA_FACET_IDS and status in {"CLEAR", "MISSING"}:
-            facet_updates.append({"facet_id": facet_id, "status": status})
+            normalized_facet = {"facet_id": facet_id, "status": status}
+            operation = str(item.get("operation") or "").upper()
+            if status == "CLEAR" and operation in {"MERGE", "REPLACE"}:
+                normalized_facet["operation"] = operation
+            facet_updates.append(normalized_facet)
     comparison_updates: list[dict[str, Any]] = []
     for item in raw.get("comparison_updates", []) if isinstance(raw.get("comparison_updates"), list) else []:
         if not isinstance(item, dict):
@@ -751,15 +829,16 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         action = str(item.get("action") or "").upper()
         cases = item.get("cases", [])
         if comparison_id and action in {"ACCEPT", "MODIFY", "REJECT"}:
-            comparison_updates.append(
-                {
-                    "comparison_id": comparison_id,
-                    "action": action,
-                    "cases": [str(case)[:80] for case in cases if isinstance(case, str)][:8]
-                    if isinstance(cases, list)
-                    else [],
-                }
-            )
+            normalized_comparison = {
+                "comparison_id": comparison_id,
+                "action": action,
+                "cases": [str(case)[:160] for case in cases if isinstance(case, str)][:12]
+                if isinstance(cases, list)
+                else [],
+            }
+            if item.get("merge_with_existing") is True:
+                normalized_comparison["merge_with_existing"] = True
+            comparison_updates.append(normalized_comparison)
     requested_state = str(raw.get("interaction_state_request") or "").upper()
     course_scope_status = str(raw.get("course_scope_status") or "").upper()
     stage_one_direction_detail = str(
@@ -893,7 +972,7 @@ def pending_question_answer_needs_review(
             and item.get("status") == "MISSING"
             for item in updates
         )
-    if pending_type == "ANSWER_STAGE_QUESTION":
+    if pending_type in {"ANSWER_STAGE_QUESTION", "ANSWER_EMVR_STAGE_QUESTION"}:
         return bool(
             isinstance(semantic_updates, dict)
             and semantic_updates.get("pending_answer_status") == "MISSING"
@@ -914,7 +993,8 @@ def pending_question_decision_missing(
     if (
         intent_value != UserIntent.ANSWER_CURRENT_QUESTION.value
         or not isinstance(pending_action, dict)
-        or pending_action.get("type") != "ANSWER_STAGE_QUESTION"
+        or pending_action.get("type")
+        not in {"ANSWER_STAGE_QUESTION", "ANSWER_EMVR_STAGE_QUESTION"}
     ):
         return False
     status = (
@@ -925,9 +1005,14 @@ def pending_question_decision_missing(
     return status not in {"CLEAR", "MISSING"}
 
 
+def _normalized_evidence_text(value: str) -> str:
+    return "".join(value.split()).casefold()
+
+
 def _apply_comparison_updates(
     session: DesignSession,
     updates: Any,
+    user_message: str = "",
 ) -> None:
     if not isinstance(updates, list):
         return
@@ -953,10 +1038,25 @@ def _apply_comparison_updates(
         ]
         action = str(update.get("action") or "").upper()
         raw_cases = update.get("cases", [])
-        cases = [
-            str(case) for case in raw_cases
-            if str(case) in recommended
-        ] if isinstance(raw_cases, list) else []
+        current_cases = [
+            str(case)
+            for case in item.get("cases", [])
+            if str(case).strip()
+        ]
+        message_evidence = _normalized_evidence_text(user_message)
+        cases = []
+        if isinstance(raw_cases, list):
+            for raw_case in raw_cases:
+                case = str(raw_case).strip()
+                if not case:
+                    continue
+                supported_by_state = case in recommended or case in current_cases
+                supported_by_student = bool(
+                    message_evidence
+                    and _normalized_evidence_text(case) in message_evidence
+                )
+                if supported_by_state or supported_by_student:
+                    cases.append(case)
         if action == "ACCEPT":
             item["cases"] = list(recommended)
             item["adoption_status"] = "ACCEPTED"
@@ -964,9 +1064,16 @@ def _apply_comparison_updates(
             item["cases"] = []
             item["adoption_status"] = "REJECTED"
         elif action == "MODIFY" and cases:
-            item["cases"] = list(dict.fromkeys(cases))
+            merged_cases = (
+                [*current_cases, *cases]
+                if update.get("merge_with_existing") is True
+                else cases
+            )
+            item["cases"] = list(dict.fromkeys(merged_cases))
             item["adoption_status"] = (
-                "ACCEPTED" if set(cases) == set(recommended) else "MODIFIED"
+                "ACCEPTED"
+                if set(item["cases"]) == set(recommended)
+                else "MODIFIED"
             )
 
 
@@ -999,7 +1106,26 @@ def apply_semantic_design_updates(
         or not isinstance(updates, dict)
     ):
         return
-    _apply_comparison_updates(session, updates.get("comparison_updates"))
+    # A clarification turn may preserve the student's substantive revision in
+    # pending_action and then receive only a short confirmation (for example,
+    # "对，就是我刚才补充的内容").  Once the state machine has explicitly
+    # marked that value as a confirmed pending modification, its provenance is
+    # the original student turn—not the short confirmation message.  Use that
+    # recovered value as evidence so structured comparison additions are not
+    # silently discarded after clarification.
+    comparison_evidence = user_message
+    resolved_value = resolved.get("resolved_value")
+    if (
+        resolved.get("source") == "CONFIRMED_PENDING_MODIFICATION"
+        and isinstance(resolved_value, str)
+        and resolved_value.strip()
+    ):
+        comparison_evidence = resolved_value
+    _apply_comparison_updates(
+        session,
+        updates.get("comparison_updates"),
+        comparison_evidence,
+    )
 
 
 def apply_resolved_intent(
@@ -1076,12 +1202,27 @@ def clarification_output(
                 student_task=None,
             )
         question = str(pending_action.get("question") or "").strip()
-        if pending_action.get("type") == "ANSWER_STAGE_QUESTION":
+        if pending_action.get("type") in {
+            "ANSWER_STAGE_QUESTION",
+            "ANSWER_EMVR_STAGE_QUESTION",
+        }:
             try:
                 repeat_count = int(pending_action.get("repeat_count", 1))
             except (TypeError, ValueError):
                 repeat_count = 1
-            if repeat_count > 2:
+            candidate_saved = bool(
+                str(pending_action.get("candidate_answer") or "").strip()
+            )
+            if (
+                pending_action.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+                and candidate_saved
+            ):
+                message = (
+                    "我已经保存你刚才的描述，不需要重写。"
+                    "如果那段正是在回答这个问题，直接告诉我沿用即可；"
+                    "如果还缺一个要点，只补充缺少的内容就好。"
+                )
+            elif repeat_count > 2:
                 message = (
                     "这一点先不要求你重复。你可以请我给一个可修改的参考，"
                     "也可以直接补充一个新的关键细节。"
@@ -1091,6 +1232,18 @@ def clarification_output(
                 message += " 如果暂时没有想法，我可以先给一个可修改的参考。"
             return StepOutput(
                 assistant_message=message,
+                stage_payload={"clarification_required": True},
+                student_task=None,
+            )
+        if (
+            pending_action.get("type") in CONFIRMATION_PENDING_TYPES
+            and str(pending_action.get("candidate_answer") or "").strip()
+        ):
+            return StepOutput(
+                assistant_message=(
+                    "我已经保留当前草稿，也保存了你刚才的补充，不需要重写。"
+                    "请确认是否把那条内容合并进当前设计；如果还有遗漏，直接补充即可。"
+                ),
                 stage_payload={"clarification_required": True},
                 student_task=None,
             )

@@ -76,6 +76,7 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
     def __init__(self) -> None:
         self.next_intent: UserIntent | None = None
         self.next_emvr_update: dict | None = None
+        self.next_advance_requested: bool | None = None
 
     def resolve_intent(self, session, user_message, pending_action, carried_context):
         pending_type = (
@@ -93,6 +94,8 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
         if self.next_emvr_update is not None:
             semantic_updates["emvr_design_update"] = self.next_emvr_update
             self.next_emvr_update = None
+        advance_requested = self.next_advance_requested
+        self.next_advance_requested = None
         return resolved_intent(
             intent,
             target=(
@@ -101,6 +104,7 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
                 else None
             ),
             resolved_value=user_message,
+            advance_requested=advance_requested,
             preserve_current_design=True,
             confidence=0.99,
             source="SEMANTIC_TEST",
@@ -653,6 +657,24 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn("alternative_ideas", result["stage_payload"])
         self.assertIn("VR实验", result["student_task"])
 
+    def test_guided_answers_are_carried_forward_without_emvr_state(self) -> None:
+        result = self.engine.create_design("我想比较闭合曲面的电场箭头与总通量")
+        answer = "比较不同大小和形状的闭合曲面，并观察总通量是否保持不变"
+
+        result = self.engine.process_turn(result["design_id"], {"message": answer})
+        stored = self.engine.store.get(result["design_id"])
+
+        guided_inputs = stored.design_context.get("guided_stage_inputs", {})
+        entries = guided_inputs.get(Stage.IDEA_BRAINSTORMING.value, [])
+        self.assertTrue(entries)
+        self.assertEqual(entries[-1]["content"], answer)
+        self.assertNotIn("emvr_design", stored.design_context)
+        carried = self.engine.get_design(result["design_id"])["design_context"].get(
+            "guided_stage_inputs",
+            {},
+        )
+        self.assertIn(Stage.IDEA_BRAINSTORMING.value, carried)
+
     def test_emvr_keeps_student_brief_and_shows_all_learning_goals(self) -> None:
         first = self.engine.create_design(
             "进入EMVR模式",
@@ -681,6 +703,171 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue({"概念目标", "计算目标", "分析目标", "交互目标"} <= labels)
         self.assertIn("• 概念目标", result["assistant_message"])
         self.assertTrue(result["student_task"])
+
+    def test_emvr4_recovers_obvious_answer_and_merges_later_supplement(self) -> None:
+        """A clarification and a supplement must not replace or restart the EMVR idea."""
+
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        result = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        brief = (
+            "让学生在VR中拖动两个带电物体，使它们从远到近，观察场线分布；"
+            "同时比较导体与介质附近的电场线，并理解材料边界对静电场的影响。"
+        )
+
+        # Reproduce a semantic service that first fails to bind an obvious
+        # answer to the open EMVR question.  The next contextual confirmation
+        # must recover the saved answer instead of asking it again.
+        generator.next_intent = UserIntent.UNCLEAR
+        unclear = engine.process_turn(result["design_id"], {"message": brief})
+        self.assertTrue(unclear["stage_payload"]["clarification_required"])
+
+        generator.next_intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+        recovered = engine.process_turn(
+            result["design_id"],
+            {"message": "我刚刚就是在回答这个问题"},
+        )
+        self.assertFalse(
+            recovered["stage_payload"].get("clarification_required", False)
+        )
+        self.assertEqual(recovered["stage_payload"]["original_idea"], brief)
+
+        # Simulate a pending confirmation saved by an older deployment before
+        # it carried an explicit EMVR marker. A general ANSWER classification
+        # must still become a modification of the current draft.
+        supplement = (
+            "补充一个材料切换操作：电荷配置保持不变，只在导体与介质之间切换并比较界面附近的场线。"
+        )
+        legacy_session = engine.store.get(result["design_id"])
+        legacy_pending = legacy_session.model_context["dialogue_state"]["pending_action"]
+        legacy_pending.pop("interaction_state", None)
+        engine.store.save(legacy_session)
+        generator.next_intent = UserIntent.ANSWER_CURRENT_QUESTION
+        refined = engine.process_turn(
+            result["design_id"],
+            {"message": supplement},
+        )
+
+        # Reproduce a bad NEW_TOPIC label for another substantive refinement.
+        # The state machine must keep the established direction instead of
+        # reopening earlier work.
+        second_supplement = "再补充移动探测器读取局部场强，但不改变原来的研究问题。"
+        generator.next_intent = UserIntent.NEW_TOPIC
+        refined = engine.process_turn(
+            result["design_id"],
+            {"message": second_supplement},
+        )
+
+        stored = engine.store.get(result["design_id"])
+        emvr_design = stored.design_context["emvr_design"]
+        self.assertEqual(stored.current_stage, Stage.IDEA_BRAINSTORMING)
+        self.assertEqual(stored.model_context.get("previous_designs", []), [])
+        self.assertEqual(emvr_design["brief"], brief)
+        self.assertEqual(
+            emvr_design["brief_revisions"],
+            [supplement, second_supplement],
+        )
+        self.assertIn(brief, emvr_design["current_brief"])
+        self.assertIn(supplement, emvr_design["current_brief"])
+        self.assertIn(second_supplement, emvr_design["current_brief"])
+        self.assertIn(brief, refined["stage_payload"]["original_idea"])
+        self.assertIn(supplement, refined["stage_payload"]["original_idea"])
+        self.assertIn(second_supplement, refined["stage_payload"]["original_idea"])
+
+    def test_modify_and_advance_keeps_emvr_revision_in_the_stage_it_modified(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        result = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        brief = (
+            "在VR中让两个带电物体从远到近移动，比较两种电荷配置下中间区域的电场线变化。"
+        )
+        result = engine.process_turn(result["design_id"], {"message": brief})
+        supplement = "增加可移动探测器读取中间平面的局部场强，并保留原有比较。"
+        generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        generator.next_advance_requested = True
+
+        advanced = engine.process_turn(
+            result["design_id"],
+            {"message": supplement},
+        )
+
+        self.assertEqual(
+            advanced["current_stage"],
+            Stage.COURSE_MAPPING_AND_DIRECTION.value,
+        )
+        stored = engine.store.get(result["design_id"])
+        stage_inputs = stored.design_context["emvr_design"]["stage_inputs"]
+        idea_entries = stage_inputs[Stage.IDEA_BRAINSTORMING.value]
+        self.assertEqual(idea_entries[-1]["content"], supplement)
+        self.assertNotIn(Stage.COURSE_MAPPING_AND_DIRECTION.value, stage_inputs)
+        self.assertIn(
+            supplement,
+            stored.design_context["emvr_design"]["brief_revisions"],
+        )
+
+    def test_modify_and_advance_keeps_guided_revision_in_the_stage_it_modified(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        stage = Stage.VARIABLES_AND_CONDITIONS
+        session = DesignSession(
+            design_id="guided_modify_and_advance",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(stage),
+            design_context={
+                "idea": {"original": "比较两电荷距离变化时的电场线"},
+                "guided_stage_drafts": {
+                    stage.value: {
+                        "variable_type": "两个电荷之间的距离",
+                    }
+                },
+            },
+            stage_outputs={
+                stage.value: {
+                    "assistant_message": "变量草稿",
+                    "stage_payload": {
+                        "variable_type": "两个电荷之间的距离",
+                    },
+                }
+            },
+            model_context={
+                "dialogue_state": {
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.GUIDED_DESIGN.value,
+                        "subject": stage.value,
+                        "proposal": {"stage": stage.value, "ready": True},
+                        "question": "这部分是否保留并继续？",
+                        "advance_on_accept": True,
+                        "allowed_intents": [
+                            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                            UserIntent.ADVANCE_STAGE.value,
+                            UserIntent.UNCLEAR.value,
+                        ],
+                    }
+                }
+            },
+        )
+        engine.store.save(session)
+        supplement = "补充固定电荷量和观察平面，然后继续下一部分。"
+        generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        generator.next_advance_requested = True
+
+        advanced = engine.process_turn(
+            session.design_id,
+            {"message": supplement},
+        )
+
+        self.assertEqual(advanced["current_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+        stored = engine.store.get(session.design_id)
+        stage_inputs = stored.design_context["guided_stage_inputs"]
+        self.assertEqual(stage_inputs[stage.value][-1]["content"], supplement)
+        self.assertNotIn(Stage.CONCEPTUAL_PROCEDURE.value, stage_inputs)
 
     def test_emvr2_conversation_is_interactive_contextual_and_produces_pdf(self) -> None:
         engine = WorkflowEngine(generator=ContextAwareEMVRGenerator())
@@ -1108,7 +1295,7 @@ class WorkflowEngineTests(unittest.TestCase):
             all(required_fields <= set(item) for item in payload["object_inventory"])
         )
         self.assertIn("physics_layer", payload)
-        self.assertIn("本阶段不定义VR场景", result["warnings"][0])
+        self.assertIn("不另外定义VR场景", result["warnings"][0])
 
     def test_visualization_is_theoretical_not_measured(self) -> None:
         first = self.engine.create_design(

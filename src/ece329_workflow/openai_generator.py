@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 
 from .dialogue_state import (
     ALL_INTENTS,
+    CONFIRMATION_PENDING_TYPES,
+    OPEN_QUESTION_PENDING_TYPES,
     pending_question_answer_needs_review,
     pending_question_decision_missing,
     required_pending_facet_id,
@@ -425,6 +427,13 @@ def _contains_forbidden_key(value: Any, forbidden: set[str]) -> bool:
 
 def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> None:
     stage = session.current_stage
+    student_visible_prose = " ".join(
+        [output.assistant_message, output.student_task or "", *output.warnings]
+    )
+    if re.search(r"阶段\s*\d+", student_visible_prose, flags=re.IGNORECASE):
+        raise ModelOutputError(
+            "Student-facing text exposed an internal numbered stage reference"
+        )
     if session.interaction_state is InteractionState.EMVR_DIRECT:
         visible_text = json.dumps(
             {
@@ -510,9 +519,7 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
             raise ModelOutputError(
                 "EMVR output did not preserve the student's latest stage input"
             )
-    visible_text = " ".join(
-        [output.assistant_message, output.student_task or "", *output.warnings]
-    ).casefold()
+    visible_text = student_visible_prose.casefold()
     forbidden_student_facing_terms = (
         "knowledge_retrieval",
         "知识检索",
@@ -1536,9 +1543,12 @@ class OpenAIStageGenerator:
                 "具体物理现象或关系时填写其实质描述；只选A/B/C时为null）、"
                 "topic_change_explicit（只有学生明确放弃、替换当前研究方向时为true）、"
                 "facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
-                "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING）、"
-                "comparison_updates（comparison_id和cases必须来自pending_action或carried_context，"
-                "action只能为ACCEPT、MODIFY、REJECT），以及interaction_state_request"
+                "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING；学生是在原内容上补充且"
+                "要求其他内容不变时operation=MERGE，明确替换时operation=REPLACE）、"
+                "comparison_updates（comparison_id必须来自pending_action或carried_context，"
+                "action只能为ACCEPT、MODIFY、REJECT；学生可以新增自己明确提出的比较情形，"
+                "但新增case必须逐字取自user_message，不能由模型补写；若是在现有对照上追加且"
+                "保留原项，merge_with_existing=true，否则false），以及interaction_state_request"
                 "（只能为GUIDED_DESIGN、EMVR_DIRECT或null），以及仅供EMVR_DIRECT使用的"
                 "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
                 "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
@@ -1587,6 +1597,9 @@ class OpenAIStageGenerator:
                 "问题时才可标MISSING。"
                 "不能因为措辞不同于示例而标MISSING，也不能遗漏该facet。学生同一轮既明确基础对照"
                 "又回答当前facet时，comparison_updates和facet_updates必须同时保留。"
+                "当学生说要补充一个对照且其他内容不变时，comparison_updates必须返回该对照组"
+                "真实comparison_id、action=MODIFY、新增case以及merge_with_existing=true；"
+                "不得只在resolved_value中复述修改而漏掉可执行更新。"
                 "research_question不要求使用问号或疑问句：只要学生说明了要比较或改变的条件以及"
                 "准备观察的现象，就必须标CLEAR；即使同一句还包含对现象形态的预测，也仍然可以同时"
                 "构成有效研究问题。pending_action若包含candidate_answer，学生用任何语义确认上一句"
@@ -1597,6 +1610,15 @@ class OpenAIStageGenerator:
                 "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
                 "当前问题时才填MISSING；请求参考、例子或可能判断时必须返回"
                 "REQUEST_MORE_EXAMPLES。不能因为措辞与问题示例不同而遗漏或填MISSING。"
+                "上述规则同样适用于pending_action.type=ANSWER_EMVR_STAGE_QUESTION；这是EMVR"
+                "开放问题，不是要求学生确认既有方案。学生给出对象、操作、观察现象和目标等"
+                "完整陈述时必须识别为ANSWER_CURRENT_QUESTION与CLEAR。若candidate_answer已保存，"
+                "学生说明上一轮就是回答当前问题时，应接受该candidate_answer，不要求再次复述。"
+                "当pending_action.type为CONFIRM_STAGE_OR_MODIFY或CONFIRM_OR_MODIFY时，"
+                "学生补充对象、交互、约束、对照、"
+                "观察量或物理说明属于MODIFY_PREVIOUS_PROPOSAL；resolved_value只保留实质补充，"
+                "不要把‘我是在回答’等会话说明写成实验观点。除非学生明确放弃原实验并提出"
+                "替代主题，否则EMVR补充不得返回NEW_TOPIC。"
                 "若subject=STUDENT_SYNTHESIS_OR_EMVR_OUTPUT，一段学生自己写的总结只要已经串联"
                 "研究问题或对象、主要比较或观察现象，以及ECE329课程关系，就应返回CLEAR；"
                 "不得要求拆成多轮，也不得因为没有逐字重复‘为什么值得研究’而返回UNCLEAR。"
@@ -1633,11 +1655,26 @@ class OpenAIStageGenerator:
                 self._intent_api_failures += 1
             raise
         raw_intent = str(raw.get("intent") or "UNCLEAR")
-        unresolved_open_question = bool(
+        pending_type = (
+            str(pending_action.get("type") or "")
+            if isinstance(pending_action, dict)
+            else ""
+        )
+        unresolved_pending_response = bool(
             raw_intent == "UNCLEAR"
             and isinstance(pending_action, dict)
-            and pending_action.get("type")
-            in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+            and (
+                pending_action.get("type") in OPEN_QUESTION_PENDING_TYPES
+                or pending_action.get("type") in CONFIRMATION_PENDING_TYPES
+            )
+        )
+        confirmed_candidate_modification = bool(
+            raw_intent == "ACCEPT_PREVIOUS_PROPOSAL"
+            and isinstance(pending_action, dict)
+            and pending_action.get("type") in CONFIRMATION_PENDING_TYPES
+            and pending_action.get("candidate_resolution")
+            == "MODIFY_PREVIOUS_PROPOSAL"
+            and str(pending_action.get("candidate_answer") or "").strip()
         )
         answer_status_conflict = pending_question_answer_needs_review(
             raw_intent,
@@ -1645,7 +1682,8 @@ class OpenAIStageGenerator:
             pending_action,
         )
         if (
-            unresolved_open_question
+            unresolved_pending_response
+            or confirmed_candidate_modification
             or answer_status_conflict
             or pending_question_decision_missing(
                 raw_intent,
@@ -1654,8 +1692,6 @@ class OpenAIStageGenerator:
             )
         ):
             required_facet = required_pending_facet_id(pending_action)
-            pending_type = str(pending_action.get("type") or "") \
-                if isinstance(pending_action, dict) else ""
             repair_payload = deepcopy(payload)
             repair_payload["input"][0]["content"].append(
                 {
@@ -1672,6 +1708,17 @@ class OpenAIStageGenerator:
                         )
                         if pending_type == "ANSWER_IDEA_FACET"
                         else (
+                            "上一份结构化判断没有解决学生对当前草稿的处理。请结合"
+                            "previous_question、proposal、candidate_answer与整条学生消息重新判断："
+                            "若学生认可原草稿，返回ACCEPT_PREVIOUS_PROPOSAL；若学生增加、替换或"
+                            "纠正了对象、操作、条件、观察量、目标或解释，返回"
+                            "MODIFY_PREVIOUS_PROPOSAL，resolved_value_json只写实质修改内容；"
+                            "若candidate_answer保存了上一轮实质补充，而学生说明上一轮就是在"
+                            "回应草稿，应返回MODIFY_PREVIOUS_PROPOSAL，并把candidate_answer作为"
+                            "resolved_value。只有语义仍确实无法确定时才返回UNCLEAR。"
+                        )
+                        if pending_type in CONFIRMATION_PENDING_TYPES
+                        else (
                             "上一份结构化判断没有解决当前阶段的开放问题。请重新判断同一条"
                             "学生消息：若它在语义上回答了previous_question，intent返回"
                             "ANSWER_CURRENT_QUESTION，并在semantic_updates_json中返回"
@@ -1682,7 +1729,7 @@ class OpenAIStageGenerator:
                         )
                     ) + (
                         "如果pending_action中已有candidate_answer，而学生是在确认、沿用或指认"
-                        "上一句为当前回答，应返回ACCEPT_PREVIOUS_PROPOSAL。"
+                        "上一句为开放问题的当前回答，应返回ACCEPT_PREVIOUS_PROPOSAL。"
                     ) + "不要回答学生，只返回完整的结构化意图结果。",
                 }
             )
@@ -1699,6 +1746,102 @@ class OpenAIStageGenerator:
                 with self._metrics_lock:
                     self._intent_api_failures += 1
                 raise
+        repaired_intent = str(raw.get("intent") or "UNCLEAR")
+        required_facet_after_repair = required_pending_facet_id(pending_action)
+        facet_explicitly_missing = any(
+            isinstance(item, dict)
+            and item.get("facet_id") == required_facet_after_repair
+            and item.get("status") == "MISSING"
+            for item in semantic_updates.get("facet_updates", [])
+        ) if required_facet_after_repair is not None else False
+        explicitly_unanswered = bool(
+            semantic_updates.get("no_direction") is True
+            or semantic_updates.get("pending_answer_status") == "MISSING"
+            or facet_explicitly_missing
+            or semantic_updates.get("course_scope_status") == "OUT_OF_SCOPE"
+        )
+        if (
+            repaired_intent == "UNCLEAR"
+            and pending_type in OPEN_QUESTION_PENDING_TYPES
+            and explicitly_unanswered
+        ):
+            # Structured MISSING/no_direction is itself meaningful context:
+            # the student has responded but wants help forming this part. Route
+            # to a contextual reference instead of declaring their statement
+            # to be a completed design answer or asking them to repeat it.
+            raw["intent"] = "REQUEST_MORE_EXAMPLES"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = None
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = None
+        elif (
+            repaired_intent == "UNCLEAR"
+            and pending_type in OPEN_QUESTION_PENDING_TYPES
+            and not explicitly_unanswered
+        ):
+            # After two semantic passes, the conversational default for an
+            # open question is to bind the student's turn to that exact
+            # pending question. Safety and explicit reference/new-topic
+            # intents have already been handled before this point. This avoids
+            # asking a student to repeat a substantive answer and does not use
+            # phrase or keyword matching.
+            raw["intent"] = "ANSWER_CURRENT_QUESTION"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = json.dumps(
+                user_message,
+                ensure_ascii=False,
+            )
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = user_message
+            required_facet = required_pending_facet_id(pending_action)
+            if required_facet is not None:
+                semantic_updates = {
+                    **semantic_updates,
+                    "facet_updates": [
+                        {"facet_id": required_facet, "status": "CLEAR"}
+                    ],
+                }
+            else:
+                semantic_updates = {
+                    **semantic_updates,
+                    "pending_answer_status": "CLEAR",
+                }
+        elif repaired_intent == "UNCLEAR" and confirmed_candidate_modification:
+            # The first pass already understood the student's short turn as
+            # acceptance of a saved, student-authored revision. If the repair
+            # pass cannot derive finer structured updates, preserve that
+            # revision instead of reopening the same confirmation loop.
+            raw["intent"] = "MODIFY_PREVIOUS_PROPOSAL"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = json.dumps(
+                str(pending_action.get("candidate_answer") or "").strip(),
+                ensure_ascii=False,
+            )
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = str(
+                pending_action.get("candidate_answer") or ""
+            ).strip()
+        elif pending_question_answer_needs_review(
+            repaired_intent,
+            semantic_updates,
+            pending_action,
+        ):
+            required_facet = required_pending_facet_id(pending_action)
+            if required_facet is not None:
+                semantic_updates = {
+                    **semantic_updates,
+                    "facet_updates": [
+                        {"facet_id": required_facet, "status": "CLEAR"}
+                    ],
+                }
+            elif pending_type in {
+                "ANSWER_STAGE_QUESTION",
+                "ANSWER_EMVR_STAGE_QUESTION",
+            }:
+                semantic_updates = {
+                    **semantic_updates,
+                    "pending_answer_status": "CLEAR",
+                }
         candidate = resolved_intent(
             str(raw.get("intent") or "UNCLEAR"),
             target=str(raw.get("target") or "") or None,
@@ -1710,6 +1853,19 @@ class OpenAIStageGenerator:
             semantic_updates=semantic_updates,
         )
         validated = validate_resolved_intent(candidate, pending_action)
+        if (
+            confirmed_candidate_modification
+            and validated.get("intent") == "MODIFY_PREVIOUS_PROPOSAL"
+            and isinstance(pending_action, dict)
+        ):
+            # The repair pass classifies the saved student-authored candidate,
+            # while the current message may only be a short confirmation. Keep
+            # the candidate's provenance explicit so downstream validation can
+            # accept its structured additions without trusting model invention.
+            validated["resolved_value"] = str(
+                pending_action.get("candidate_answer") or ""
+            ).strip()
+            validated["source"] = "CONFIRMED_PENDING_MODIFICATION"
         with self._metrics_lock:
             self._intent_api_successes += 1
         return validated
