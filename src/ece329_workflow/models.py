@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from copy import deepcopy
 from typing import Any
 
 
@@ -74,6 +75,19 @@ class DesignSession:
         return STAGE_SEQUENCE[next_index]
 
     def to_dict(self, include_history: bool = False) -> dict[str, Any]:
+        public_design_context = deepcopy(self.design_context)
+        public_design_state = public_design_context.get("design_state")
+        if isinstance(public_design_state, dict):
+            for internal_key in (
+                "pending_action",
+                "applied_update_ids",
+                "seen_scene_template_ids",
+                "seen_scene_signatures",
+                "legacy_migrated",
+                "explicitly_cleared_fields",
+                "scene_history_migrated",
+            ):
+                public_design_state.pop(internal_key, None)
         data = {
             "design_id": self.design_id,
             "interaction_state": self.interaction_state.value,
@@ -82,7 +96,7 @@ class DesignSession:
             "status": self.status.value,
             "revision": self.revision,
             "completed_stages": list(self.completed_stages),
-            "design_context": self.design_context,
+            "design_context": public_design_context,
             "stage_outputs": self.stage_outputs,
         }
         if include_history:

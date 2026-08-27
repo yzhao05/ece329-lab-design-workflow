@@ -4,6 +4,7 @@ import re
 from typing import Any, Protocol
 
 from .dialogue_state import UserIntent, build_carried_context
+from .design_state import seen_scene_signatures
 from .emvr_design import (
     EMVR_THEORY_RELATIONS,
     emvr_formula_support_map,
@@ -560,13 +561,18 @@ def _format_experiment_outline_seed(outline: dict[str, Any]) -> str:
         for item in comparisons
         if item.get("cases")
     ) or "暂未提出基础对照"
-    return (
-        "实验大纲雏形\n"
-        f"核心现象：{outline.get('core_phenomenon') or '待补充'}\n"
-        f"课程关系：{'；'.join(relations) if relations else '将结合当前现象继续说明'}\n"
-        f"基础比较：{comparison_text}\n"
-        f"观察重点：{'；'.join(observations) if observations else '围绕核心现象继续细化'}"
-    )
+    lines = [
+        "实验大纲雏形",
+        f"研究对象：{outline.get('research_object') or outline.get('core_phenomenon') or '待补充'}",
+        f"课程关系：{outline.get('course_relationship') or ('；'.join(relations) if relations else '将结合当前现象继续说明')}",
+        f"学习目标：{outline.get('learning_objective') or '待补充'}",
+        f"研究问题：{outline.get('research_question') or '待补充'}",
+        f"基础比较：{comparison_text}",
+        f"假设与预期现象：{outline.get('expected_phenomenon') or outline.get('hypothesis') or '待补充'}",
+        f"概念实验结构：{outline.get('conceptual_structure') or '待补充'}",
+        f"观察重点：{'；'.join(observations) if observations else '围绕核心现象继续细化'}",
+    ]
+    return "\n".join(lines)
 
 
 def _scene_components(
@@ -584,26 +590,28 @@ def _scene_components(
 
 def build_exploration_scenes(
     options: list[dict[str, Any]],
+    *,
+    excluded_scene_signatures: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Turn catalog-grounded relationships into vivid but clearly scoped scenes."""
 
     labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     scenes: list[dict[str, Any]] = []
-    used_signatures: set[str] = set()
+    used_signatures: set[str] = set(excluded_scene_signatures or set())
     for index, option in enumerate(options):
         direction = str(option.get("direction") or "ECE329课程关系").strip()
         focus = _clean_focus_text(option.get("focus"))
-        title, physical_frame, thinking_prompt, extension = _scene_components(
+        template = KNOWLEDGE.scene_template(
             f"{direction} {focus}",
             index,
             excluded_signatures=used_signatures,
         )
-        used_signatures.add(
-            "|".join(
-                " ".join(item.split()).casefold()
-                for item in (title, physical_frame, thinking_prompt)
-            )
-        )
+        title = str(template["title"])
+        physical_frame = str(template["physical_picture"])
+        thinking_prompt = str(template["thinking_prompt"])
+        extension = str(template["illustrative_extension"])
+        template_signature = str(template["template_signature"])
+        used_signatures.add(template_signature)
         focus_sentence = (
             f"这个画面围绕“{direction}”展开，课程内可以追问：{focus}？"
             if focus
@@ -615,6 +623,8 @@ def build_exploration_scenes(
                 "scene_id": f"scene_{labels[index].lower()}",
                 "catalog_scene_id": option.get("catalog_scene_id"),
                 "catalog_scene_number": option.get("catalog_scene_number"),
+                "scene_template_id": template["template_id"],
+                "scene_template_signature": template_signature,
                 "label": f"图景 {labels[index]}",
                 "title": title,
                 "course_anchor": option,
@@ -877,7 +887,10 @@ class RuleBasedStageGenerator:
             exclude_option_ids=shown,
             seed_key=f"{session.design_id}:{len(shown)}:redirect",
         )
-        scenes = build_exploration_scenes(options)
+        scenes = build_exploration_scenes(
+            options,
+            excluded_scene_signatures=seen_scene_signatures(session),
+        )
         scene_text = _format_exploration_scenes(scenes)
         return StepOutput(
             assistant_message=(
@@ -1015,7 +1028,10 @@ class RuleBasedStageGenerator:
                 else []
             )
             exploration_scenes = (
-                build_exploration_scenes(alternatives)
+                build_exploration_scenes(
+                    alternatives,
+                    excluded_scene_signatures=seen_scene_signatures(session),
+                )
                 if alternatives
                 else []
             )

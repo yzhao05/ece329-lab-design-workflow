@@ -16,6 +16,7 @@ from .dialogue_state import (
     build_carried_context,
     clarification_output,
     current_pending_action,
+    dialogue_state,
     deterministic_intent,
     fallback_intent,
     hydrate_pending_action_from_history,
@@ -29,6 +30,14 @@ from .generator import (
     guided_stage_entry_output,
 )
 from .emvr_design import apply_emvr_field_updates
+from .design_state import (
+    apply_design_updates,
+    design_state_snapshot,
+    ensure_design_state,
+    format_design_summary,
+    record_seen_scenes,
+    sync_design_state_to_legacy,
+)
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -46,6 +55,7 @@ from .idea_development import (
     has_idea_development,
     initialize_idea_development,
     public_idea_development_status,
+    refresh_idea_development,
     update_idea_development,
 )
 from .knowledge_base import KNOWLEDGE
@@ -883,6 +893,7 @@ class WorkflowEngine:
         message = request.message.strip()
         if not message:
             raise ValueError("message must not be empty")
+        ensure_design_state(session)
         # This deterministic pass is only the hard safety gate. Course scope
         # is resolved later from structured semantic output plus retrieval.
         input_kind = preclassify_stage_one_input(message)
@@ -1145,6 +1156,9 @@ class WorkflowEngine:
             else None
         )
         content_intent_name = intent_name
+        design_summary_request = bool(
+            intent_name == UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value
+        )
         summary_completed_this_turn = False
         if intent_name in {
             UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -1236,6 +1250,7 @@ class WorkflowEngine:
                 UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
                 UserIntent.ADVANCE_STAGE.value,
                 UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
                 UserIntent.RETURN_TO_PREVIOUS_POINT.value,
                 UserIntent.SET_INTERACTION_STATE.value,
             }
@@ -1265,6 +1280,8 @@ class WorkflowEngine:
                 idea_answer_message,
                 semantic_updates=semantic_updates,
             )
+            sync_design_state_to_legacy(session)
+            refresh_idea_development(session)
         turn_context: dict[str, Any] = {
             "selected_option_id": request.selected_option_id,
             "resolved_intent": deepcopy(turn_intent),
@@ -1391,7 +1408,44 @@ class WorkflowEngine:
             )
             and has_idea_development(session)
         )
-        if final_summary_confirmation_turn:
+        if design_summary_request:
+            summary_snapshot = design_state_snapshot(session)
+            requested_summary_fields = (
+                resolved_value
+                if isinstance(resolved_value, list)
+                and all(isinstance(item, str) for item in resolved_value)
+                else None
+            )
+            dialogue_state(session)["last_presented_design_summary"] = {
+                "display_order": [
+                    "research_object",
+                    "course_relationship",
+                    "learning_objective",
+                    "research_question",
+                    "theoretical_framework",
+                    "hypothesis",
+                    "expected_phenomenon",
+                    "conceptual_structure",
+                ],
+                "values": deepcopy(summary_snapshot),
+            }
+            output = StepOutput(
+                assistant_message=(
+                    "可以。下面是目前已经保存的设计内容，我只把它们整理出来，"
+                    "不会改变你的实验方向或进度：\n\n"
+                    f"{format_design_summary(session, requested_summary_fields)}\n\n"
+                    "如果其中某一项需要补充或改写，直接指出那一项和你的新表述就可以。"
+                ),
+                stage_payload={
+                    "read_only_design_summary": True,
+                    "design_state": summary_snapshot,
+                    "preserve_pending_action": True,
+                },
+                student_task=None,
+            )
+            session.turn_context = {}
+            completion_error = None
+        elif final_summary_confirmation_turn:
             output = _guided_summary_completion_output()
             session.turn_context = {}
             completion_error = None
@@ -1514,6 +1568,23 @@ class WorkflowEngine:
                     outline_seed,
                     semantic_updates=semantic_updates,
                 )
+                apply_design_updates(
+                    session,
+                    [
+                        {
+                            "field": "research_object",
+                            "operation": "REPLACE",
+                            "value": outline_seed.get("core_phenomenon", ""),
+                        },
+                        {
+                            "field": "course_relationship",
+                            "operation": "REPLACE",
+                            "value": outline_seed.get("course_relationships", []),
+                        },
+                    ],
+                )
+                sync_design_state_to_legacy(session)
+                refresh_idea_development(session)
                 decorate_outline_output(output, development)
             elif has_idea_development(session):
                 output.stage_payload.setdefault(
@@ -1522,8 +1593,16 @@ class WorkflowEngine:
                         session.design_context["idea_development"]
                     ),
                 )
-        if output.stage_payload.get("clarification_required") is not True:
+        record_seen_scenes(
+            session,
+            output.stage_payload.get("exploration_scenes"),
+        )
+        if (
+            output.stage_payload.get("clarification_required") is not True
+            and output.stage_payload.get("preserve_pending_action") is not True
+        ):
             save_pending_action(session, handled_stage, output)
+        output.stage_payload["design_state"] = design_state_snapshot(session)
         _persist_guided_stage_draft(session, handled_stage, output.stage_payload)
         session.revision += 1
         output_dict = output.to_dict()

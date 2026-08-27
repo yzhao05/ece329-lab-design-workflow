@@ -304,6 +304,34 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("src/ece329_workflow/knowledge", ignored_lines)
         self.assertIn("COPY src ./src", self.dockerfile)
 
+    def test_environment_example_covers_every_backend_setting(self) -> None:
+        import ast
+
+        backend_keys: set[str] = set()
+        for path in (PROJECT_ROOT / "src" / "ece329_workflow").glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                ):
+                    continue
+                key = node.args[0].value
+                if isinstance(key, str) and key.startswith(("ECE329_", "OPENAI_")):
+                    backend_keys.add(key)
+
+        example_keys = {
+            line.split("=", 1)[0]
+            for line in (PROJECT_ROOT / ".env.example")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*=.*", line)
+        }
+        self.assertEqual(example_keys, backend_keys)
+
 
 if __name__ == "__main__":
     unittest.main()

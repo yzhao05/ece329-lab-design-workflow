@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -24,6 +25,7 @@ from .dialogue_state import (
     validate_resolved_intent,
 )
 from .emvr_design import EMVR_THEORY_RELATIONS
+from .design_state import seen_scene_signatures
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
     NO_DIRECTION_ACKNOWLEDGEMENT,
@@ -1288,7 +1290,10 @@ def _step_output_from_response(
             # Scene wording is rendered from the catalog in one place.  This
             # prevents two distinct option IDs from being shown through the
             # same physical frame and keeps the visible A/B/C labels stable.
-            scenes = build_exploration_scenes(alternatives)
+            scenes = build_exploration_scenes(
+                alternatives,
+                excluded_scene_signatures=seen_scene_signatures(session),
+            )
             output.stage_payload["exploration_scenes"] = scenes
             category = output.stage_payload.get("input_category")
             if category == UNREASONABLE_REQUEST:
@@ -1527,6 +1532,8 @@ def _step_output_from_response(
 class OpenAIStageGenerator:
     transport: ResponsesTransport
     model: str = DEFAULT_MODEL
+    reasoning_effort: str = "medium"
+    intent_max_output_tokens: int = 1400
     max_output_tokens: int = 2400
     stage_one_max_output_tokens: int = 3200
     final_max_output_tokens: int = 5000
@@ -1540,6 +1547,35 @@ class OpenAIStageGenerator:
     _intent_api_successes: int = field(default=0, init=False, repr=False)
     _intent_api_failures: int = field(default=0, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Validate direct construction as strictly as environment loading.
+
+        Production normally creates this class through
+        ``generator_from_environment``.  Tests, scripts, and integrations may
+        instantiate it directly, however; without this check an invalid
+        reasoning value or zero token budget would only fail after an API call.
+        Keeping the validation here makes every construction path obey the
+        same request contract.
+        """
+
+        self.reasoning_effort = _reasoning_effort(self.reasoning_effort)
+        self.intent_max_output_tokens = _positive_int(
+            self.intent_max_output_tokens,
+            "OPENAI_INTENT_MAX_OUTPUT_TOKENS",
+        )
+        self.max_output_tokens = _positive_int(
+            self.max_output_tokens,
+            "OPENAI_MAX_OUTPUT_TOKENS",
+        )
+        self.stage_one_max_output_tokens = _positive_int(
+            self.stage_one_max_output_tokens,
+            "OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS",
+        )
+        self.final_max_output_tokens = _positive_int(
+            self.final_max_output_tokens,
+            "OPENAI_FINAL_MAX_OUTPUT_TOKENS",
+        )
 
     def resolve_intent(
         self,
@@ -1567,7 +1603,8 @@ class OpenAIStageGenerator:
                 "必须结合previous_question、pending_action、carried_context和user_message。"
                 "可选意图只有ANSWER_CURRENT_QUESTION、ACCEPT_PREVIOUS_PROPOSAL、"
                 "MODIFY_PREVIOUS_PROPOSAL、REJECT_PREVIOUS_PROPOSAL、ADVANCE_STAGE、"
-                "REQUEST_MORE_EXAMPLES、RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、"
+                "REQUEST_MORE_EXAMPLES、REQUEST_CURRENT_DESIGN_SUMMARY、"
+                "RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、"
                 "SET_INTERACTION_STATE、UNCLEAR。"
                 "凡是必须依赖上一轮才能理解的表达都要走这一套语义判断，包括指代某个或多个选项、"
                 "组合前述图景、表示暂无方向、回答或撤回想法完整性要点、接受或局部修改建议、"
@@ -1588,6 +1625,10 @@ class OpenAIStageGenerator:
                 "resolved_value_json必须是JSON序列化后的值；没有值时为null。若一条消息同时包含"
                 "‘保留/沿用/删改’等会话操作和实质设计内容，在ANSWER_CURRENT_QUESTION或"
                 "MODIFY_PREVIOUS_PROPOSAL下只返回实质设计内容，不要把会话操作写入该字段。"
+                "学生要求列出、检查、确认当前已经保存的研究对象、课程关系、学习目标、研究问题、"
+                "假设、预期现象或概念结构时，返回REQUEST_CURRENT_DESIGN_SUMMARY。这是只读请求，"
+                "semantic_updates_json为null，resolved_value_json返回学生要求查看的field ID数组；"
+                "若要求全部则返回null。不得把它当成回答、修改或阶段推进。"
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自pending_action中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
@@ -1596,7 +1637,14 @@ class OpenAIStageGenerator:
                 "topic_change_explicit（只有学生明确放弃、替换当前研究方向时为true）、"
                 "facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
                 "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING；学生是在原内容上补充且"
-                "要求其他内容不变时operation=MERGE，明确替换时operation=REPLACE）、"
+                "要求其他内容不变时operation=MERGE，明确替换时operation=REPLACE；CLEAR更新"
+                "必须用value保存该字段最终应写入的实质内容，不能把会话操作写入value）、"
+                "design_updates（所有普通引导模式下的实质设计修改都必须逐项返回，元素包含field、"
+                "operation和value。field只能为research_object、course_relationship、"
+                "learning_objective、research_question、theoretical_framework、hypothesis、"
+                "expected_phenomenon、conceptual_structure；operation只能为MERGE、REPLACE、CLEAR。"
+                "一个请求修改几项就返回几项，不得合并字段。学生补充且保留原内容时必须MERGE；"
+                "明确改写时REPLACE。模型只提出修改，程序负责验证和提交）、"
                 "comparison_updates（comparison_id必须来自pending_action或carried_context，"
                 "action只能为ACCEPT、MODIFY、REJECT；学生可以新增自己明确提出的比较情形，"
                 "但新增case必须逐字取自user_message，不能由模型补写；若是在现有对照上追加且"
@@ -1705,7 +1753,8 @@ class OpenAIStageGenerator:
                     "strict": True,
                 }
             },
-            "max_output_tokens": 600,
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": self.intent_max_output_tokens,
             "store": False,
         }
         try:
@@ -1766,7 +1815,8 @@ class OpenAIStageGenerator:
                         (
                             "上一份结构化判断遗漏了当前想法完整性要点。请重新判断同一条学生消息；"
                             f"当前必须判断的facet是{required_facet}。若学生已经在语义上回答了"
-                            "previous_question，在facet_updates中返回CLEAR；若明确不知道、撤回或"
+                            "previous_question，在facet_updates中返回CLEAR与最终value，并在"
+                            "design_updates中返回对应字段的MERGE或REPLACE更新；若明确不知道、撤回或"
                             "没有回答，不能一边返回ANSWER_CURRENT_QUESTION一边标MISSING："
                             "请改用UNCLEAR；若学生正在请你给一个课程内参考、例子或可能判断，"
                             "返回REQUEST_MORE_EXAMPLES。如同一轮还处理了基础对照，必须同时"
@@ -1971,25 +2021,26 @@ class OpenAIStageGenerator:
         else:
             output_budget = self.max_output_tokens
         request_payload: dict[str, Any] = {
-                "model": self.model,
-                "instructions": packet["system"],
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": input_text}],
-                    }
-                ],
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "ece329_stage_output",
-                        "schema": _response_schema(),
-                        "strict": True,
-                    }
-                },
-                "max_output_tokens": output_budget,
-                "store": self.stateful,
-            }
+            "model": self.model,
+            "instructions": packet["system"],
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": input_text}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_stage_output",
+                    "schema": _response_schema(),
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": output_budget,
+            "store": self.stateful,
+        }
         if self.stateful:
             previous_response_id = session.model_context.get(
                 "openai_previous_response_id"
@@ -2080,6 +2131,8 @@ class OpenAIStageGenerator:
         return {
             "provider": "openai",
             "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "intent_max_output_tokens": self.intent_max_output_tokens,
             "fallback_enabled": False,
             "stateful": self.stateful,
             "api_successes": successes,
@@ -2154,6 +2207,8 @@ class FallbackStageGenerator:
         return {
             "provider": "openai",
             "model": self.primary.model,
+            "reasoning_effort": self.primary.reasoning_effort,
+            "intent_max_output_tokens": self.primary.intent_max_output_tokens,
             "fallback_enabled": True,
             "fallback_provider": "rule_based",
             "stateful": self.primary.stateful,
@@ -2169,31 +2224,53 @@ class FallbackStageGenerator:
         }
 
 
-def _positive_float(value: str, name: str) -> float:
+def _positive_float(value: Any, name: str) -> float:
+    if isinstance(value, bool):
+        raise ModelConfigurationError(f"{name} must be a number")
     try:
         parsed = float(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ModelConfigurationError(f"{name} must be a number") from exc
-    if parsed <= 0:
+    if not math.isfinite(parsed) or not parsed > 0:
         raise ModelConfigurationError(f"{name} must be greater than zero")
     return parsed
 
 
-def _positive_int(value: str, name: str) -> int:
+def _positive_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or (
+        isinstance(value, float) and not value.is_integer()
+    ):
+        raise ModelConfigurationError(f"{name} must be an integer")
     try:
         parsed = int(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ModelConfigurationError(f"{name} must be an integer") from exc
     if parsed <= 0:
         raise ModelConfigurationError(f"{name} must be greater than zero")
     return parsed
 
 
-def _boolean(value: str, name: str) -> bool:
+def _boolean(value: Any, name: str) -> bool:
+    if not isinstance(value, str):
+        raise ModelConfigurationError(f"{name} must be true or false")
     normalized = value.strip().casefold()
     if normalized not in {"true", "false"}:
         raise ModelConfigurationError(f"{name} must be true or false")
     return normalized == "true"
+
+
+def _reasoning_effort(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ModelConfigurationError(
+            "OPENAI_REASONING_EFFORT must be none, low, medium, high, or xhigh"
+        )
+    normalized = value.strip().casefold()
+    allowed = {"none", "low", "medium", "high", "xhigh"}
+    if normalized not in allowed:
+        raise ModelConfigurationError(
+            "OPENAI_REASONING_EFFORT must be none, low, medium, high, or xhigh"
+        )
+    return normalized
 
 
 def generator_from_environment(
@@ -2216,7 +2293,14 @@ def generator_from_environment(
         return RuleBasedStageGenerator()
 
     model = env.get("OPENAI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    timeout = _positive_float(env.get("OPENAI_TIMEOUT_SECONDS", "45"), "OPENAI_TIMEOUT_SECONDS")
+    reasoning_effort = _reasoning_effort(
+        env.get("OPENAI_REASONING_EFFORT", "medium")
+    )
+    intent_max_tokens = _positive_int(
+        env.get("OPENAI_INTENT_MAX_OUTPUT_TOKENS", "1400"),
+        "OPENAI_INTENT_MAX_OUTPUT_TOKENS",
+    )
+    timeout = _positive_float(env.get("OPENAI_TIMEOUT_SECONDS", "60"), "OPENAI_TIMEOUT_SECONDS")
     max_tokens = _positive_int(
         env.get("OPENAI_MAX_OUTPUT_TOKENS", "2400"),
         "OPENAI_MAX_OUTPUT_TOKENS",
@@ -2232,6 +2316,8 @@ def generator_from_environment(
     primary = OpenAIStageGenerator(
         transport=transport or OpenAIResponsesHTTPTransport(api_key, timeout),
         model=model,
+        reasoning_effort=reasoning_effort,
+        intent_max_output_tokens=intent_max_tokens,
         max_output_tokens=max_tokens,
         stage_one_max_output_tokens=stage_one_max_tokens,
         final_max_output_tokens=final_max_tokens,

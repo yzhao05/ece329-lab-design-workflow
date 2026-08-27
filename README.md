@@ -58,11 +58,11 @@ python -m http.server 4173 --directory docs
 - 两种模式都会按阶段保存学生的实质回答与修改；“补充且其他不变”采用合并操作。学生可以增加资料目录未预设的对照情形，但新增内容必须能逐字追溯到学生本轮输入，模型不能自行扩充；
 - 基础对照的每个物理情形在语义判断中使用稳定身份；缩写、完整说法和重新命名会更新同一情形，不会被当成三个新情形重复追加；
 - EMVR修改使用逐字段操作保存研究方向、研究问题、变化量、观察量、假设、流程等内容。一轮修改多项时分别落到各自字段，抽象改写只替换被点名的字段，未点名内容保持不变；
-- 意图统一为回答当前问题、接受／修改／拒绝上一建议、推进阶段、索取更多例子、返回、换题、切换交互状态和不明确；模型只返回结构化语义，不直接修改阶段编号或交互状态；
+- 意图统一为回答当前问题、接受／修改／拒绝上一建议、推进阶段、索取更多例子、只读查看当前设计、返回、换题、切换交互状态和不明确；模型只返回结构化语义，不直接修改阶段编号或交互状态；
 - 状态机验证意图与置信度后才更新决定或推进。低置信度只提出一个简短澄清问题，不重复整段阶段入口；
 - 新阶段会继承已经确认的研究方向、比较情形、变量、观察量和控制条件，并据此生成可修改的参考结构。
 
-安全底线、API格式校验和明确的网页按钮事件仍由确定性程序处理。课程范围由语义解析器结合整句话、当前待办和讲义／补充资料检索证据返回 `course_scope_status`，知识检索只提供课程依据，不单独裁决边界。意图判断请求始终使用 `store=false`，不接入 `previous_response_id`；`ECE329_OPENAI_STATEFUL` 只控制正式课程回答的响应链。会话数据库仍是阶段、交互状态与学生决定的唯一事实来源。
+安全底线、API格式校验和明确的网页按钮事件仍由确定性程序处理。课程范围由语义解析器结合整句话、当前待办和讲义／补充资料检索证据返回 `course_scope_status`，知识检索只提供课程依据，不单独裁决边界。意图判断请求始终使用 `store=false`，不接入 `previous_response_id`；`ECE329_OPENAI_STATEFUL` 只控制正式课程回答的响应链。每个设计会话独立保存自己的 response ID，系统指令每轮重发。会话数据库中的统一 `design_state` 是研究对象、课程关系、学习目标、研究问题、假设、预期现象、概念结构、已展示图景和当前待办的唯一事实来源；模型只能提出逐字段更新，确定性状态机负责验证、幂等提交和阶段推进。
 
 ## ECE329知识来源与约束
 
@@ -150,6 +150,9 @@ API密钥必须只放在运行后端的服务器环境变量中，不能写入 `
 set OPENAI_API_KEY=在这里粘贴你的密钥
 set ECE329_GENERATOR=auto
 set OPENAI_MODEL=gpt-5.4-mini
+set OPENAI_REASONING_EFFORT=medium
+set OPENAI_INTENT_MAX_OUTPUT_TOKENS=1400
+set ECE329_OPENAI_STATEFUL=true
 set PYTHONPATH=src
 python -m ece329_workflow --host 127.0.0.1 --port 8080
 ```
@@ -159,12 +162,14 @@ python -m ece329_workflow --host 127.0.0.1 --port 8080
 可选服务器环境变量：
 
 - `OPENAI_MODEL`：模型ID，默认 `gpt-5.4-mini`；
-- `OPENAI_TIMEOUT_SECONDS`：请求超时，默认45秒；
+- `OPENAI_REASONING_EFFORT`：所有OpenAI语义判断与正式回复的推理强度，默认 `medium`；
+- `OPENAI_INTENT_MAX_OUTPUT_TOKENS`：语义意图JSON调用的总输出预算（包含推理token），默认1400；
+- `OPENAI_TIMEOUT_SECONDS`：请求超时，默认60秒，为 `medium` 推理预留更多时间；
 - `OPENAI_MAX_OUTPUT_TOKENS`：单轮最大输出，默认2400；
 - `OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS`：引导模式阶段1的最大输出，默认3200，用于生成多幅有细节、可组合的课程内物理图景；
 - `OPENAI_FINAL_MAX_OUTPUT_TOKENS`：EMVR最终设计包的最大输出，默认5000；
 - `ECE329_OPENAI_FALLBACK`：默认 `true`。设为 `false` 后，模型失败会返回HTTP 502；
-- `ECE329_OPENAI_STATEFUL`：默认 `false`，由本后端发送最近对话且 OpenAI 请求使用 `store=false`。设为 `true` 后会保存并续接 `previous_response_id`，OpenAI 请求使用 `store=true`；系统指令仍会在每轮重新发送。本地数据库仍是阶段与学生选择的最终状态来源；
+- `ECE329_OPENAI_STATEFUL`：代码在未配置时仍采用隐私优先的 `false`；学生网站的 Render 部署建议明确设置为 `true`。正式课程回答会保存并续接该设计会话自己的 `previous_response_id`，请求使用 `store=true`；意图分类始终无状态，系统指令仍会在每轮重新发送，本地 `design_state` 仍是最终事实来源；
 - `ECE329_GENERATOR=rule`：强制使用本地规则生成器；
 - `ECE329_GENERATOR=openai`：强制要求密钥，缺少密钥时后端拒绝启动。
 - `ECE329_ACCESS_CODE`：公开部署时强烈建议设置的课程访问码；它保护创建设计这一会产生模型费用的入口。

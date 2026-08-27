@@ -33,11 +33,17 @@ Use any container host that provides a public HTTPS URL and a persistent disk. C
 OPENAI_API_KEY=<backend secret>
 ECE329_GENERATOR=auto
 OPENAI_MODEL=gpt-5.4-mini
+OPENAI_REASONING_EFFORT=medium
+OPENAI_INTENT_MAX_OUTPUT_TOKENS=1400
+OPENAI_TIMEOUT_SECONDS=60
+OPENAI_MAX_OUTPUT_TOKENS=2400
 OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS=3200
 OPENAI_FINAL_MAX_OUTPUT_TOKENS=5000
-ECE329_OPENAI_STATEFUL=false
+ECE329_OPENAI_FALLBACK=true
+ECE329_OPENAI_STATEFUL=true
 ECE329_ACCESS_CODE=<generate-a-long-random-course-code>
 ECE329_ALLOWED_ORIGINS=https://YOUR_GITHUB_USERNAME.github.io
+ECE329_TRUST_PROXY=false
 ECE329_DATABASE_PATH=/data/ece329.sqlite3
 ECE329_RATE_LIMIT_REQUESTS=30
 ECE329_RATE_LIMIT_WINDOW_SECONDS=60
@@ -47,9 +53,15 @@ ECE329_SESSION_TTL_DAYS=30
 ECE329_ENABLE_PROMPT_DEBUG=false
 ```
 
+This block contains every environment variable used by the normal production
+path. `ECE329_PROMPT_DEBUG_TOKEN` is intentionally absent: add it only when
+temporarily setting `ECE329_ENABLE_PROMPT_DEBUG=true`, and remove it again when
+debugging ends. Render supplies `PORT` automatically, so do not add a manual
+`PORT` value unless you deliberately want to override Render's default.
+
 Mount a persistent volume at `/data`. Do not put a repository path in `ECE329_ALLOWED_ORIGINS`: for `https://name.github.io/repository/`, the browser origin is only `https://name.github.io`.
 
-`ECE329_OPENAI_STATEFUL=false` is the privacy-preserving default: recent dialogue is assembled from the local session and model calls use `store=false`. Set it to `true` only if you want Responses API continuity through `previous_response_id`; that mode uses `store=true` and persists the latest response ID in the local session database. Local stage state remains authoritative in both modes.
+For this student-facing workflow, set `ECE329_OPENAI_STATEFUL=true` so formal replies continue through `previous_response_id`. The returned response ID is stored inside that one design session and is never shared across students; intent classification still uses `store=false` without a response chain. The backend resends the current system instructions on every formal reply, and the local `design_state` remains authoritative. Use `false` only when your privacy policy requires fully local replay with `store=false`.
 
 Set `ECE329_TRUST_PROXY=true` only when the hosting platform overwrites and validates `X-Forwarded-For`. Otherwise leave it `false` so clients cannot forge the address used by the limiter.
 

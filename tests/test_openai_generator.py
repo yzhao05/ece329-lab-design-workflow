@@ -12,6 +12,7 @@ from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.openai_generator import (
     FallbackStageGenerator,
+    ModelConfigurationError,
     ModelOutputError,
     ModelHTTPError,
     ModelServiceError,
@@ -162,6 +163,8 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertFalse(result["semantic_updates"]["no_direction"])
         request = transport.requests[0]
         self.assertEqual(request["text"]["format"]["name"], "ece329_context_intent")
+        self.assertEqual(request["reasoning"], {"effort": "medium"})
+        self.assertEqual(request["max_output_tokens"], 1400)
         self.assertFalse(request["store"])
         self.assertNotIn("previous_response_id", request)
         serialized = request["input"][0]["content"][0]["text"]
@@ -904,6 +907,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         request = transport.requests[0]
         self.assertTrue(request["store"])
+        self.assertEqual(request["reasoning"], {"effort": "medium"})
         self.assertEqual(request["previous_response_id"], "resp_previous")
         self.assertIn("你是ZJUI ECE329实验设计工作流助手", request["instructions"])
         self.assertIn('"recent_history": []', request["input"][0]["content"][0]["text"])
@@ -1618,6 +1622,10 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(output.stage_payload["input_category"], "COURSE_CONTENT")
         self.assertEqual(len(transport.requests), 2)
         self.assertNotIn("previous_response_id", transport.requests[1])
+        self.assertEqual(
+            [request["reasoning"] for request in transport.requests],
+            [{"effort": "medium"}, {"effort": "medium"}],
+        )
         info = generator.runtime_info()
         self.assertEqual(info["output_rejections"], 1)
         self.assertEqual(info["repair_successes"], 1)
@@ -1661,12 +1669,35 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             {
                 "ECE329_OPENAI_STATEFUL": "true",
                 "ECE329_OPENAI_FALLBACK": "false",
+                "OPENAI_REASONING_EFFORT": "medium",
+                "OPENAI_INTENT_MAX_OUTPUT_TOKENS": "1400",
             },
             transport=FakeTransport(valid_output()),
         )
 
         self.assertIsInstance(generator, OpenAIStageGenerator)
         self.assertTrue(generator.runtime_info()["stateful"])
+        self.assertEqual(generator.runtime_info()["reasoning_effort"], "medium")
+        self.assertEqual(generator.runtime_info()["intent_max_output_tokens"], 1400)
+
+    def test_environment_rejects_unsupported_reasoning_effort(self) -> None:
+        with self.assertRaises(ModelConfigurationError):
+            generator_from_environment(
+                {
+                    "ECE329_OPENAI_FALLBACK": "false",
+                    "OPENAI_REASONING_EFFORT": "max",
+                },
+                transport=FakeTransport(valid_output()),
+            )
+
+    def test_direct_generator_construction_validates_request_configuration(self) -> None:
+        transport = FakeTransport(valid_output())
+        with self.assertRaises(ModelConfigurationError):
+            OpenAIStageGenerator(transport=transport, reasoning_effort="max")
+        with self.assertRaises(ModelConfigurationError):
+            OpenAIStageGenerator(transport=transport, intent_max_output_tokens=0)
+        with self.assertRaises(ModelConfigurationError):
+            OpenAIStageGenerator(transport=transport, max_output_tokens=float("nan"))
 
     def test_engine_reports_generator_without_exposing_credentials(self) -> None:
         engine = WorkflowEngine(generator=RuleBasedStageGenerator())

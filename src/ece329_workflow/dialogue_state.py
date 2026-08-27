@@ -11,6 +11,15 @@ from .emvr_design import (
     merge_emvr_structured_requirements,
     normalize_emvr_design_update,
 )
+from .design_state import (
+    DESIGN_FIELD_TO_FACET,
+    FACET_TO_DESIGN_FIELD,
+    apply_design_updates,
+    design_state_snapshot,
+    design_updates_from_facets,
+    ensure_design_state,
+    set_pending_action_snapshot,
+)
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
 
@@ -21,6 +30,7 @@ class UserIntent(str, Enum):
     REJECT_PREVIOUS_PROPOSAL = "REJECT_PREVIOUS_PROPOSAL"
     ADVANCE_STAGE = "ADVANCE_STAGE"
     REQUEST_MORE_EXAMPLES = "REQUEST_MORE_EXAMPLES"
+    REQUEST_CURRENT_DESIGN_SUMMARY = "REQUEST_CURRENT_DESIGN_SUMMARY"
     RETURN_TO_PREVIOUS_POINT = "RETURN_TO_PREVIOUS_POINT"
     NEW_TOPIC = "NEW_TOPIC"
     SET_INTERACTION_STATE = "SET_INTERACTION_STATE"
@@ -250,6 +260,7 @@ def _find_payload_values(session: DesignSession, keys: set[str]) -> list[str]:
 def build_carried_context(session: DesignSession) -> dict[str, Any]:
     """Build a compact, stage-independent view of confirmed design decisions."""
 
+    canonical = ensure_design_state(session)
     idea = session.design_context.get("idea", {})
     outline = session.design_context.get("experiment_outline_seed", {})
     idea = idea if isinstance(idea, dict) else {}
@@ -319,29 +330,37 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         if isinstance(guided_stage_inputs, dict)
         else {}
     )
+    last_summary = dialogue_state(session).get("last_presented_design_summary")
     return {
-        "research_direction": direction,
+        "research_direction": str(canonical.get("research_object") or direction),
         "direction_locked": idea.get("direction_locked") is True,
-        "course_relationships": deepcopy(
-            outline.get("course_relationships")
-            or idea.get("selected_course_relations")
-            or []
+        "course_relationships": (
+            str(canonical.get("course_relationship") or "")
+            or deepcopy(
+                outline.get("course_relationships")
+                or idea.get("selected_course_relations")
+                or []
+            )
         ),
         "learning_objective": (
-            facet_evidence("learning_objective")
+            str(canonical.get("learning_objective") or "")
+            or facet_evidence("learning_objective")
             or ("；".join(learning_objectives) if learning_objectives else "")
         ),
         "learning_objectives": learning_objectives,
         "research_question": (
-            facet_evidence("research_question")
+            str(canonical.get("research_question") or "")
+            or facet_evidence("research_question")
             or (research_questions[0] if research_questions else "")
         ),
         "hypothesis": (
-            facet_evidence("hypothesis")
+            str(canonical.get("hypothesis") or "")
+            or facet_evidence("hypothesis")
             or ("；".join(hypotheses) if hypotheses else "")
         ),
         "conceptual_structure": (
-            facet_evidence("conceptual_structure")
+            str(canonical.get("conceptual_structure") or "")
+            or facet_evidence("conceptual_structure")
             or ("；".join(unity_objects) if unity_objects else "")
         ),
         "baseline_comparisons": deepcopy(
@@ -397,6 +416,10 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "idea_development": deepcopy(
             development
         ),
+        "design_state": design_state_snapshot(session),
+        "last_presented_design_summary": (
+            deepcopy(last_summary) if isinstance(last_summary, dict) else None
+        ),
     }
 
 
@@ -443,6 +466,8 @@ def _normalize_pending_action(
             UserIntent.RETURN_TO_PREVIOUS_POINT.value,
             UserIntent.NEW_TOPIC.value,
         ]
+    if UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value not in allowed:
+        allowed.append(UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value)
     return {
         "action_id": str(raw.get("action_id") or f"action_{revision}_{uuid.uuid4().hex[:8]}"),
         "type": str(raw.get("type") or ("CONFIRM_OR_MODIFY" if fallback_proposal else "ANSWER_OR_ADVANCE")),
@@ -499,6 +524,7 @@ def save_pending_action(
         )
     if not question and proposal is None:
         dialogue_state(session).pop("pending_action", None)
+        set_pending_action_snapshot(session, None)
         return None
     pending = _normalize_pending_action(
         raw,
@@ -520,6 +546,7 @@ def save_pending_action(
             previous_count = 1
         pending["repeat_count"] = max(1, previous_count + 1)
     state["pending_action"] = pending
+    set_pending_action_snapshot(session, pending)
     state["carried_context"] = build_carried_context(session)
     return deepcopy(pending)
 
@@ -687,6 +714,7 @@ def validate_resolved_intent(
         UserIntent.NEW_TOPIC.value,
         UserIntent.RETURN_TO_PREVIOUS_POINT.value,
         UserIntent.SET_INTERACTION_STATE.value,
+        UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
         }
     ):
         intent = UserIntent.UNCLEAR.value
@@ -814,7 +842,7 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             if isinstance(item, str) and item.strip()
         )
     )[:5] if isinstance(option_ids, list) else []
-    facet_updates: list[dict[str, str]] = []
+    facet_updates: list[dict[str, Any]] = []
     for item in raw.get("facet_updates", []) if isinstance(raw.get("facet_updates"), list) else []:
         if not isinstance(item, dict):
             continue
@@ -825,7 +853,35 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             operation = str(item.get("operation") or "").upper()
             if status == "CLEAR" and operation in {"MERGE", "REPLACE"}:
                 normalized_facet["operation"] = operation
+            if status == "CLEAR" and item.get("value") not in (None, "", [], {}):
+                normalized_facet["value"] = deepcopy(item.get("value"))
             facet_updates.append(normalized_facet)
+    design_updates: list[dict[str, Any]] = []
+    raw_design_updates = raw.get("design_updates", [])
+    for item in raw_design_updates if isinstance(raw_design_updates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or item.get("field_id") or "")
+        operation = str(item.get("operation") or "").upper()
+        if field not in {
+            "research_object",
+            "course_relationship",
+            "learning_objective",
+            "research_question",
+            "theoretical_framework",
+            "hypothesis",
+            "expected_phenomenon",
+            "conceptual_structure",
+        } or operation not in {"MERGE", "REPLACE", "CLEAR"}:
+            continue
+        normalized_update: dict[str, Any] = {
+            "field": field,
+            "operation": operation,
+            "value": deepcopy(item.get("value")),
+        }
+        if str(item.get("update_id") or "").strip():
+            normalized_update["update_id"] = str(item["update_id"])[:100]
+        design_updates.append(normalized_update)
     comparison_updates: list[dict[str, Any]] = []
     for item in raw.get("comparison_updates", []) if isinstance(raw.get("comparison_updates"), list) else []:
         if not isinstance(item, dict):
@@ -883,6 +939,7 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         "selected_option_ids": selected_option_ids,
         "no_direction": raw.get("no_direction") is True,
         "facet_updates": facet_updates,
+        "design_updates": design_updates,
         "comparison_updates": comparison_updates,
         "pending_answer_status": (
             str(raw.get("pending_answer_status") or "").upper()
@@ -1219,6 +1276,7 @@ def apply_semantic_design_updates(
     session: DesignSession,
     resolved: dict[str, Any],
     user_message: str,
+    pending_action: dict[str, Any] | None = None,
 ) -> None:
     """Apply only validated IDs/cases from semantic analysis to design state."""
 
@@ -1243,6 +1301,70 @@ def apply_semantic_design_updates(
         and resolved_value.strip()
     ):
         comparison_evidence = resolved_value
+    design_evidence = (
+        resolved_value
+        if isinstance(resolved_value, str) and resolved_value.strip()
+        else user_message
+    )
+    design_updates = updates.get("design_updates")
+    if not isinstance(design_updates, list) or not design_updates:
+        design_updates = design_updates_from_facets(
+            updates.get("facet_updates"),
+            evidence=design_evidence,
+        )
+    if (
+        isinstance(pending_action, dict)
+        and pending_action.get("type") == "ANSWER_IDEA_FACET"
+    ):
+        allowed_fields = {
+            FACET_TO_DESIGN_FIELD.get(str(pending_action.get("subject") or ""), "")
+        }
+        for facet_update in updates.get("facet_updates", []):
+            if isinstance(facet_update, dict) and facet_update.get("status") == "CLEAR":
+                allowed_fields.add(
+                    FACET_TO_DESIGN_FIELD.get(
+                        str(facet_update.get("facet_id") or ""),
+                        "",
+                    )
+                )
+        if "hypothesis" in allowed_fields:
+            allowed_fields.add("expected_phenomenon")
+        design_updates = [
+            item
+            for item in design_updates
+            if isinstance(item, dict)
+            and str(item.get("field") or item.get("field_id") or "")
+            in allowed_fields
+        ]
+    changed_fields = apply_design_updates(
+        session,
+        design_updates,
+        pending_action=pending_action,
+    )
+    if changed_fields:
+        set_pending_action_snapshot(session, None)
+        facet_updates = updates.get("facet_updates")
+        if not isinstance(facet_updates, list):
+            facet_updates = []
+            updates["facet_updates"] = facet_updates
+        existing_facet_ids = {
+            str(item.get("facet_id") or "")
+            for item in facet_updates
+            if isinstance(item, dict)
+        }
+        canonical = ensure_design_state(session)
+        for field in changed_fields:
+            facet_id = DESIGN_FIELD_TO_FACET.get(field)
+            if not facet_id or facet_id in existing_facet_ids:
+                continue
+            facet_updates.append(
+                {
+                    "facet_id": facet_id,
+                    "status": "CLEAR",
+                    "operation": "REPLACE",
+                    "value": canonical.get(field, ""),
+                }
+            )
     _apply_comparison_updates(
         session,
         updates.get("comparison_updates"),
@@ -1288,7 +1410,12 @@ def apply_resolved_intent(
     if isinstance(log, list):
         log.append(deepcopy(resolved))
         del log[:-40]
-    apply_semantic_design_updates(session, resolved, user_message)
+    apply_semantic_design_updates(
+        session,
+        resolved,
+        user_message,
+        pending_action=pending_action,
+    )
     state["carried_context"] = build_carried_context(session)
 
 

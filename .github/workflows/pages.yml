@@ -5,6 +5,11 @@ on:
     branches: ["main"]
     paths:
       - "docs/**"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "Dockerfile"
+      - ".dockerignore"
       - "tools/configure_pages_api.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:

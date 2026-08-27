@@ -49,6 +49,14 @@ def has_idea_development(session: DesignSession) -> bool:
     return isinstance(value, dict) and isinstance(value.get("facets"), dict)
 
 
+def refresh_idea_development(session: DesignSession) -> None:
+    """Recalculate completeness after the canonical design state is projected."""
+
+    development = session.design_context.get("idea_development")
+    if isinstance(development, dict):
+        _refresh(development)
+
+
 def initialize_idea_development(
     session: DesignSession,
     outline: dict[str, Any],
@@ -192,7 +200,14 @@ def _apply_structured_facet_updates(
         if status == CLEAR:
             previous_status = facet.get("status")
             previous_evidence = str(facet.get("evidence") or "").strip()
-            new_evidence = evidence.strip()[:500]
+            update_value = update.get("value")
+            if isinstance(update_value, list):
+                update_value = "；".join(
+                    str(item).strip() for item in update_value if str(item).strip()
+                )
+            elif update_value is not None and not isinstance(update_value, str):
+                update_value = str(update_value)
+            new_evidence = str(update_value or evidence).strip()[:4000]
             if (
                 str(update.get("operation") or "").upper() == "MERGE"
                 and str(facet.get("evidence") or "").strip()
@@ -201,7 +216,7 @@ def _apply_structured_facet_updates(
             ):
                 new_evidence = (
                     f"{previous_evidence}；补充：{new_evidence}"
-                )[:500]
+                )[:4000]
             if previous_status != CLEAR or new_evidence != previous_evidence:
                 clarified.append(facet_id)
             facet.update(

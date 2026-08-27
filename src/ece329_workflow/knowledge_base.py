@@ -361,6 +361,27 @@ class LectureKnowledgeBase:
         new Python branch.  The score favors more and longer matching catalog terms.
         """
 
+        template = self.scene_template(
+            direction,
+            index,
+            excluded_signatures=excluded_signatures,
+        )
+        return (
+            str(template["title"]),
+            str(template["physical_picture"]),
+            str(template["thinking_prompt"]),
+            str(template["illustrative_extension"]),
+        )
+
+    def scene_template(
+        self,
+        direction: str,
+        index: int,
+        *,
+        excluded_signatures: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return a scene together with its stable cross-turn identity."""
+
         normalized = direction.casefold()
         candidates: list[tuple[int, int, dict[str, Any]]] = []
         for order, template in enumerate(self.scene_templates):
@@ -381,8 +402,20 @@ class LectureKnowledgeBase:
             self.generic_scene_frames[(index + offset) % len(self.generic_scene_frames)]
             for offset in range(len(self.generic_scene_frames))
         ]
-        choices = [*ranked_templates, *generic_templates]
-        template = next(
+        ranked_ids = {id(item) for item in ranked_templates}
+        remaining_course_templates = [
+            item for item in self.scene_templates if id(item) not in ranked_ids
+        ]
+        # A second request for examples must not fall back to a frame the
+        # student has already seen merely because one concept has only one
+        # direct template. Generic frames come next; if those are exhausted,
+        # another verified ECE329 scene is preferable to a visible duplicate.
+        choices = [
+            *ranked_templates,
+            *generic_templates,
+            *remaining_course_templates,
+        ]
+        selected = next(
             (
                 item
                 for item in choices
@@ -390,12 +423,17 @@ class LectureKnowledgeBase:
             ),
             choices[0],
         )
-        return (
-            str(template["title"]),
-            str(template["physical_picture"]),
-            str(template["thinking_prompt"]),
-            str(template["illustrative_extension"]),
-        )
+        signature = self._scene_signature(selected)
+        template_id = str(selected.get("template_id") or "").strip()
+        if not template_id:
+            template_id = "generic_" + hashlib.sha256(
+                signature.encode("utf-8")
+            ).hexdigest()[:16]
+        return {
+            **selected,
+            "template_id": template_id,
+            "template_signature": signature,
+        }
 
     @staticmethod
     def _scene_signature(template: dict[str, Any]) -> str:
@@ -405,6 +443,11 @@ class LectureKnowledgeBase:
             " ".join(str(template.get(field) or "").split()).casefold()
             for field in ("title", "physical_picture", "thinking_prompt")
         )
+
+    def scene_signature(self, template: dict[str, Any]) -> str:
+        """Public stable identity for a visible physical scene template."""
+
+        return self._scene_signature(template)
 
     def concept_references(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
         matches = self.match_concepts(text, limit=limit)
