@@ -36,6 +36,7 @@ from .design_state import (
     ensure_design_state,
     format_design_summary,
     record_seen_scenes,
+    set_baseline_comparisons,
     sync_design_state_to_legacy,
 )
 from .guardrails import (
@@ -1422,6 +1423,7 @@ class WorkflowEngine:
                     "course_relationship",
                     "learning_objective",
                     "research_question",
+                    "baseline_comparisons",
                     "theoretical_framework",
                     "hypothesis",
                     "expected_phenomenon",
@@ -2020,8 +2022,10 @@ class WorkflowEngine:
         context_comparisons = turn_context.get("standard_comparisons")
         if isinstance(output_comparisons, list):
             idea["standard_comparisons"] = deepcopy(output_comparisons)
+            set_baseline_comparisons(session, output_comparisons)
         elif isinstance(context_comparisons, list):
             idea["standard_comparisons"] = deepcopy(context_comparisons)
+            set_baseline_comparisons(session, context_comparisons)
         idea["combination_intent"] = bool(turn_context.get("combination_intent"))
         outline_seed = output.stage_payload.get("experiment_outline_seed")
         if isinstance(outline_seed, dict) and outline_seed:

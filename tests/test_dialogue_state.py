@@ -133,6 +133,56 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_completed_idea_review_displays_the_actual_summary(self) -> None:
+        session = idea_facet_session("design_visible_idea_review")
+        development = session.design_context["idea_development"]
+        evidence = {
+            "direction_outline": "比较两个点电荷靠近时的场线重排",
+            "course_mapping": "静电场、库仑定律与电场叠加",
+            "learning_objective": "解释极性和距离为什么改变电场线分布",
+            "research_question": "比较同种与异种电荷靠近时场线怎样变化",
+            "theoretical_framework": "库仑电场与叠加原理",
+            "hypothesis": "距离越近，场线弯曲越明显",
+            "conceptual_structure": "两个点电荷、距离调节和场线显示",
+        }
+        for facet_id, value in evidence.items():
+            development["facets"][facet_id].update(
+                {"status": "CLEAR", "evidence": value, "source": "STUDENT"}
+            )
+        development["complete"] = True
+
+        output = build_gap_output(session, "这些内容已经说明清楚")
+
+        self.assertIn("这是目前整理出的实验想法", output.assistant_message)
+        self.assertIn("学习目标：解释极性和距离", output.assistant_message)
+        self.assertIn("基础比较：", output.assistant_message)
+        self.assertIn("同种电荷、异种电荷", output.assistant_message)
+
+    def test_rejected_model_comparison_creation_is_not_acknowledged_as_saved(self) -> None:
+        session = idea_facet_session("design_rejected_comparison_ack")
+        session.turn_context = {
+            "resolved_intent": resolved_intent(
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                resolved_value="补充一个新的基础比较",
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "comparison_updates": [
+                        {
+                            "comparison_id": "",
+                            "action": "CREATE",
+                            "new_cases": ["模型虚构且未被学生提出的情形"],
+                        }
+                    ]
+                },
+            )
+        }
+
+        output = build_gap_output(session, "补充一个新的基础比较")
+
+        self.assertNotIn("新增基础比较", output.assistant_message)
+        self.assertNotIn("模型虚构", output.assistant_message)
+
     def test_stage_level_confirmation_advances_without_micro_confirmation_loop(self) -> None:
         class CompletionGenerator(ScriptedSemanticGenerator):
             def __init__(self) -> None:

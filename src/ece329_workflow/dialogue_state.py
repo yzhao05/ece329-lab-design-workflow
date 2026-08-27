@@ -15,9 +15,11 @@ from .design_state import (
     DESIGN_FIELD_TO_FACET,
     FACET_TO_DESIGN_FIELD,
     apply_design_updates,
+    baseline_comparisons_snapshot,
     design_state_snapshot,
     design_updates_from_facets,
     ensure_design_state,
+    set_baseline_comparisons,
     set_pending_action_snapshot,
 )
 from .models import DesignSession, InteractionState, Stage, StepOutput
@@ -363,11 +365,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             or facet_evidence("conceptual_structure")
             or ("；".join(unity_objects) if unity_objects else "")
         ),
-        "baseline_comparisons": deepcopy(
-            outline.get("baseline_comparisons")
-            or idea.get("standard_comparisons")
-            or []
-        ),
+        "baseline_comparisons": baseline_comparisons_snapshot(session),
         "independent_variable": _find_payload_values(
             session,
             {"independent_variable", "adjustable_quantity_in_vr"},
@@ -889,7 +887,9 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         comparison_id = str(item.get("comparison_id") or "")[:80]
         action = str(item.get("action") or "").upper()
         cases = item.get("cases", [])
-        if comparison_id and action in {"ACCEPT", "MODIFY", "REJECT"}:
+        if (
+            comparison_id and action in {"ACCEPT", "MODIFY", "REJECT"}
+        ) or action == "CREATE":
             normalized_comparison = {
                 "comparison_id": comparison_id,
                 "action": action,
@@ -897,6 +897,9 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
                 if isinstance(cases, list)
                 else [],
             }
+            title = str(item.get("title") or "").strip()[:240]
+            if title:
+                normalized_comparison["title"] = title
             if item.get("merge_with_existing") is True:
                 normalized_comparison["merge_with_existing"] = True
             case_refs = item.get("case_refs", [])
@@ -1149,13 +1152,11 @@ def _apply_comparison_updates(
     session: DesignSession,
     updates: Any,
     user_message: str = "",
-) -> None:
+) -> list[dict[str, Any]]:
     if not isinstance(updates, list):
-        return
-    idea = session.design_context.get("idea", {})
-    comparisons = idea.get("standard_comparisons", []) if isinstance(idea, dict) else []
-    if not isinstance(comparisons, list):
-        return
+        return []
+    comparisons = baseline_comparisons_snapshot(session)
+    applied: list[dict[str, Any]] = []
     by_id = {
         str(item.get("comparison_id")): item
         for item in comparisons
@@ -1164,15 +1165,93 @@ def _apply_comparison_updates(
     for update in updates:
         if not isinstance(update, dict):
             continue
+        action = str(update.get("action") or "").upper()
+        if action == "CREATE":
+            message_evidence = _normalized_evidence_text(user_message)
+            candidate_cases = [
+                str(case).strip()
+                for key in ("new_cases", "cases")
+                for case in (
+                    update.get(key, [])
+                    if isinstance(update.get(key), list)
+                    else []
+                )
+                if str(case).strip()
+            ]
+            supported_cases = list(
+                dict.fromkeys(
+                    case
+                    for case in candidate_cases
+                    if message_evidence
+                    and _normalized_evidence_text(case) in message_evidence
+                )
+            )
+            if not supported_cases:
+                continue
+            identity_material = "|".join(
+                sorted(_normalized_evidence_text(case) for case in supported_cases)
+            )
+            comparison_id = "student_" + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                identity_material,
+            ).hex[:16]
+            title = str(update.get("title") or "").strip()
+            if not (
+                title
+                and _normalized_evidence_text(title) in message_evidence
+            ):
+                title = "学生补充的基础比较"
+            existing = by_id.get(comparison_id)
+            if existing is None:
+                existing = {
+                    "comparison_id": comparison_id,
+                    "title": title,
+                    "recommended_cases": list(supported_cases),
+                    "cases": list(supported_cases),
+                    "adoption_status": "MODIFIED",
+                }
+                comparisons.append(existing)
+                by_id[comparison_id] = existing
+                applied.append(
+                    {
+                        "comparison_id": comparison_id,
+                        "action": "CREATE",
+                        "cases": list(supported_cases),
+                    }
+                )
+            else:
+                before = deepcopy(existing)
+                existing["cases"] = list(
+                    dict.fromkeys(
+                        [
+                            *[
+                                str(case)
+                                for case in existing.get("cases", [])
+                                if str(case).strip()
+                            ],
+                            *supported_cases,
+                        ]
+                    )
+                )
+                existing["adoption_status"] = "MODIFIED"
+                if existing != before:
+                    applied.append(
+                        {
+                            "comparison_id": comparison_id,
+                            "action": "MODIFY",
+                            "cases": list(existing["cases"]),
+                        }
+                    )
+            continue
         item = by_id.get(str(update.get("comparison_id") or ""))
         if item is None:
             continue
+        before = deepcopy(item)
         recommended = [
             str(case)
             for case in item.get("recommended_cases", item.get("cases", []))
             if str(case).strip()
         ]
-        action = str(update.get("action") or "").upper()
         raw_cases = update.get("cases", [])
         current_cases = [
             str(case)
@@ -1254,15 +1333,26 @@ def _apply_comparison_updates(
             item["adoption_status"] = (
                 "ACCEPTED" if item["cases"] == recommended else "MODIFIED"
             )
+        if item != before:
+            applied.append(
+                {
+                    "comparison_id": str(item.get("comparison_id") or ""),
+                    "action": action,
+                    "cases": [
+                        str(case)
+                        for case in item.get("cases", [])
+                        if str(case).strip()
+                    ],
+                }
+            )
+    set_baseline_comparisons(session, comparisons)
+    return applied
 
 
 def accept_pending_comparisons_on_advance(session: DesignSession) -> None:
     """Treat advancing as acceptance of still-pending baseline proposals."""
 
-    idea = session.design_context.get("idea", {})
-    comparisons = idea.get("standard_comparisons", []) if isinstance(idea, dict) else []
-    if not isinstance(comparisons, list):
-        return
+    comparisons = baseline_comparisons_snapshot(session)
     for item in comparisons:
         if not isinstance(item, dict) or item.get("adoption_status") != "PENDING":
             continue
@@ -1270,6 +1360,7 @@ def accept_pending_comparisons_on_advance(session: DesignSession) -> None:
         if isinstance(recommended, list):
             item["cases"] = [str(case) for case in recommended if str(case).strip()]
         item["adoption_status"] = "ACCEPTED"
+    set_baseline_comparisons(session, comparisons)
 
 
 def apply_semantic_design_updates(
@@ -1365,11 +1456,15 @@ def apply_semantic_design_updates(
                     "value": canonical.get(field, ""),
                 }
             )
-    _apply_comparison_updates(
+    applied_comparison_updates = _apply_comparison_updates(
         session,
         updates.get("comparison_updates"),
         comparison_evidence,
     )
+    # This is state-machine output, not model-authored input.  Response
+    # generation uses it to acknowledge only changes that were actually
+    # committed during this turn.
+    updates["applied_comparison_updates"] = applied_comparison_updates
 
 
 def apply_resolved_intent(

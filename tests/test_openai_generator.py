@@ -328,10 +328,66 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
         self.assertEqual(result["resolved_value"], candidate)
         self.assertEqual(result["source"], "CONFIRMED_PENDING_MODIFICATION")
+        reparsed_context = json.loads(
+            transport.requests[1]["input"][0]["content"][0]["text"]
+        )
+        self.assertEqual(reparsed_context["user_message"], candidate)
+        self.assertTrue(
+            reparsed_context["pending_action"]["candidate_confirmation_received"]
+        )
+        self.assertIn(
+            "comparison_updates",
+            result["semantic_updates"],
+        )
         self.assertEqual(
             result["semantic_updates"]["comparison_updates"][0]["cases"],
             ["分层介质"],
         )
+
+    def test_initial_course_idea_gets_a_semantic_second_pass_before_clarification(self) -> None:
+        idea = "我想探究静电场中两个物体靠近时电场线如何重新分布"
+        transport = FakeTransport(
+            outputs=[
+                {
+                    "intent": "UNCLEAR",
+                    "target": None,
+                    "resolved_value_json": None,
+                    "semantic_updates_json": json.dumps(
+                        {"course_scope_status": "COURSE_CONTENT"},
+                        ensure_ascii=False,
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.72,
+                },
+                {
+                    "intent": "ANSWER_CURRENT_QUESTION",
+                    "target": "initial_idea",
+                    "resolved_value_json": json.dumps(idea, ensure_ascii=False),
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "course_scope_status": "COURSE_CONTENT",
+                            "stage_one_direction_detail": idea,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.96,
+                },
+            ]
+        )
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            idea,
+            None,
+            {},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(result["resolved_value"], idea)
 
     def test_explicit_structured_no_direction_is_not_forced_into_an_answer(self) -> None:
         response = {

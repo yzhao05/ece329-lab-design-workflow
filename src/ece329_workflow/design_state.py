@@ -18,6 +18,7 @@ DESIGN_TEXT_FIELDS = (
     "expected_phenomenon",
     "conceptual_structure",
 )
+SUMMARY_FIELDS = (*DESIGN_TEXT_FIELDS, "baseline_comparisons")
 
 FACET_TO_DESIGN_FIELD = {
     "direction_outline": "research_object",
@@ -158,6 +159,72 @@ def _legacy_values(session: DesignSession) -> dict[str, str]:
     }
 
 
+def _normalized_comparison_groups(value: Any) -> list[dict[str, Any]]:
+    """Return a stable, deduplicated public comparison snapshot."""
+
+    if not isinstance(value, list):
+        return []
+    groups: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            continue
+        cases: list[str] = []
+        seen_cases: set[str] = set()
+        for item in raw.get("cases", []) if isinstance(raw.get("cases"), list) else []:
+            label = _text(item)[:240]
+            identity = _normalized(label)
+            if label and identity not in seen_cases:
+                cases.append(label)
+                seen_cases.add(identity)
+        recommended: list[str] = []
+        for item in raw.get("recommended_cases", []) \
+            if isinstance(raw.get("recommended_cases"), list) else []:
+            label = _text(item)[:240]
+            identity = _normalized(label)
+            if label and identity not in {_normalized(case) for case in recommended}:
+                recommended.append(label)
+        comparison_id = _text(raw.get("comparison_id"))[:100]
+        if not comparison_id:
+            material = json.dumps(
+                [raw.get("title"), cases or recommended, index],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            comparison_id = "comparison_" + hashlib.sha256(
+                material.encode("utf-8")
+            ).hexdigest()[:16]
+        if comparison_id in seen_ids:
+            continue
+        seen_ids.add(comparison_id)
+        group = deepcopy(raw)
+        group.update(
+            {
+                "comparison_id": comparison_id,
+                "title": _text(raw.get("title"))[:240],
+                "cases": cases,
+                "recommended_cases": recommended or list(cases),
+                "adoption_status": str(
+                    raw.get("adoption_status") or "PENDING"
+                ).upper(),
+            }
+        )
+        groups.append(group)
+    return groups
+
+
+def _legacy_comparisons(session: DesignSession) -> list[dict[str, Any]]:
+    idea = session.design_context.get("idea", {})
+    outline = session.design_context.get("experiment_outline_seed", {})
+    idea = idea if isinstance(idea, dict) else {}
+    outline = outline if isinstance(outline, dict) else {}
+    return _normalized_comparison_groups(
+        idea.get("standard_comparisons")
+        or outline.get("baseline_comparisons")
+        or []
+    )
+
+
 def ensure_design_state(session: DesignSession) -> dict[str, Any]:
     """Return the canonical design snapshot, migrating legacy fields once.
 
@@ -177,6 +244,7 @@ def ensure_design_state(session: DesignSession) -> dict[str, Any]:
     state.setdefault("pending_action", None)
     state.setdefault("applied_update_ids", [])
     state.setdefault("explicitly_cleared_fields", [])
+    state.setdefault("baseline_comparisons", [])
     for field in DESIGN_TEXT_FIELDS:
         state.setdefault(field, "")
     if state.get("legacy_migrated") is not True:
@@ -196,6 +264,10 @@ def ensure_design_state(session: DesignSession) -> dict[str, Any]:
             ):
                 state[field] = value
     _migrate_seen_scenes_from_history(session, state)
+    if not state.get("baseline_comparisons"):
+        legacy_comparisons = _legacy_comparisons(session)
+        if legacy_comparisons:
+            state["baseline_comparisons"] = legacy_comparisons
     return state
 
 
@@ -363,6 +435,14 @@ def sync_design_state_to_legacy(session: DesignSession) -> None:
                 ),
             }
         )
+        outline["baseline_comparisons"] = deepcopy(
+            state.get("baseline_comparisons", [])
+        )
+    idea = session.design_context.get("idea")
+    if isinstance(idea, dict):
+        idea["standard_comparisons"] = deepcopy(
+            state.get("baseline_comparisons", [])
+        )
     development = session.design_context.get("idea_development")
     facets = development.get("facets", {}) if isinstance(development, dict) else {}
     if isinstance(facets, dict):
@@ -429,8 +509,69 @@ def design_state_snapshot(session: DesignSession) -> dict[str, Any]:
     return {
         field: deepcopy(state.get(field, "")) for field in DESIGN_TEXT_FIELDS
     } | {
+        "baseline_comparisons": deepcopy(
+            state.get("baseline_comparisons", [])
+        ),
         "revision": int(state.get("revision") or 0),
     }
+
+
+def set_baseline_comparisons(
+    session: DesignSession,
+    comparisons: Any,
+) -> list[dict[str, Any]]:
+    """Commit comparison groups to the canonical state and legacy projections."""
+
+    state = ensure_design_state(session)
+    normalized = _normalized_comparison_groups(comparisons)
+    if normalized != state.get("baseline_comparisons"):
+        state["baseline_comparisons"] = normalized
+        state["revision"] = int(state.get("revision") or 0) + 1
+    idea = session.design_context.get("idea")
+    if isinstance(idea, dict):
+        idea["standard_comparisons"] = deepcopy(normalized)
+    outline = session.design_context.get("experiment_outline_seed")
+    if isinstance(outline, dict):
+        outline["baseline_comparisons"] = deepcopy(normalized)
+    return deepcopy(normalized)
+
+
+def baseline_comparisons_snapshot(session: DesignSession) -> list[dict[str, Any]]:
+    return deepcopy(ensure_design_state(session).get("baseline_comparisons", []))
+
+
+def _format_comparisons(comparisons: Any) -> str:
+    groups = _normalized_comparison_groups(comparisons)
+    rendered: list[str] = []
+    for group in groups:
+        cases = group.get("cases") or group.get("recommended_cases") or []
+        if not cases or group.get("adoption_status") == "REJECTED":
+            continue
+        title = str(group.get("title") or "").strip()
+        cases_text = "、".join(str(case) for case in cases)
+        title_identity = _normalized(title)
+        case_identities = {
+            _normalized(str(case)) for case in cases if str(case).strip()
+        }
+        # A student-created comparison may use the same phrase for its title
+        # and only case.  The title is metadata, not a second design item, so
+        # do not render the same content twice.
+        redundant_title = bool(
+            title_identity
+            and any(
+                title_identity == identity
+                or title_identity in identity
+                or identity in title_identity
+                for identity in case_identities
+                if identity
+            )
+        )
+        rendered.append(
+            f"{title}：{cases_text}"
+            if title and not redundant_title
+            else cases_text
+        )
+    return "；".join(rendered) or "暂未明确"
 
 
 def format_design_summary(
@@ -449,14 +590,39 @@ def format_design_summary(
         ("conceptual_structure", "概念实验结构"),
     )
     allowed = {
-        str(field) for field in requested_fields or [] if str(field) in DESIGN_TEXT_FIELDS
+        str(field) for field in requested_fields or [] if str(field) in SUMMARY_FIELDS
     }
     selected = (
         tuple(item for item in labels if item[0] in allowed)
         if allowed
         else labels
     )
-    return "\n".join(
-        f"• {label}：{_text(state.get(field)) or '暂未明确'}"
-        for field, label in selected
-    )
+    lines: list[str] = []
+    selected_fields = {field for field, _label in selected}
+    hypothesis = _text(state.get("hypothesis"))
+    expected = _text(state.get("expected_phenomenon"))
+    for field, label in selected:
+        if (
+            field == "expected_phenomenon"
+            and "hypothesis" in selected_fields
+            and hypothesis
+            and _normalized(hypothesis) == _normalized(expected)
+        ):
+            continue
+        if (
+            field == "hypothesis"
+            and "expected_phenomenon" in selected_fields
+            and hypothesis
+            and _normalized(hypothesis) == _normalized(expected)
+        ):
+            lines.append(f"• 假设与预期现象：{hypothesis}")
+            continue
+        lines.append(f"• {label}：{_text(state.get(field)) or '暂未明确'}")
+    if not allowed or "baseline_comparisons" in allowed:
+        comparison_line = f"• 基础比较：{_format_comparisons(state.get('baseline_comparisons'))}"
+        if not allowed:
+            insertion = 4 if len(lines) >= 4 else len(lines)
+            lines.insert(insertion, comparison_line)
+        else:
+            lines.append(comparison_line)
+    return "\n".join(lines)

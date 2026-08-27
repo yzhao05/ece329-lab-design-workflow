@@ -1626,9 +1626,10 @@ class OpenAIStageGenerator:
                 "‘保留/沿用/删改’等会话操作和实质设计内容，在ANSWER_CURRENT_QUESTION或"
                 "MODIFY_PREVIOUS_PROPOSAL下只返回实质设计内容，不要把会话操作写入该字段。"
                 "学生要求列出、检查、确认当前已经保存的研究对象、课程关系、学习目标、研究问题、"
-                "假设、预期现象或概念结构时，返回REQUEST_CURRENT_DESIGN_SUMMARY。这是只读请求，"
+                "假设、预期现象、概念结构或基础比较时，返回REQUEST_CURRENT_DESIGN_SUMMARY。这是只读请求，"
                 "semantic_updates_json为null，resolved_value_json返回学生要求查看的field ID数组；"
-                "若要求全部则返回null。不得把它当成回答、修改或阶段推进。"
+                "基础比较的field ID为baseline_comparisons；若要求全部则返回null。不得把它当成"
+                "回答、修改或阶段推进。"
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自pending_action中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
@@ -1645,8 +1646,10 @@ class OpenAIStageGenerator:
                 "expected_phenomenon、conceptual_structure；operation只能为MERGE、REPLACE、CLEAR。"
                 "一个请求修改几项就返回几项，不得合并字段。学生补充且保留原内容时必须MERGE；"
                 "明确改写时REPLACE。模型只提出修改，程序负责验证和提交）、"
-                "comparison_updates（comparison_id必须来自pending_action或carried_context，"
-                "action只能为ACCEPT、MODIFY、REJECT；学生可以新增自己明确提出的比较情形，"
+                "comparison_updates（修改现有组时comparison_id必须来自pending_action或"
+                "carried_context，action为ACCEPT、MODIFY或REJECT；学生提出与现有组不同的"
+                "新比较维度时action=CREATE、comparison_id留空，title和new_cases必须取自学生原话。"
+                "学生可以新增自己明确提出的比较情形，"
                 "但新增case必须逐字取自user_message，不能由模型补写；若是在现有对照上追加且"
                 "保留原项，merge_with_existing=true，否则false。修改已有情形时优先使用"
                 "semantic_case_catalog中的case_ref表达语义身份：case_refs列出保留的身份，"
@@ -1783,6 +1786,11 @@ class OpenAIStageGenerator:
                 or pending_action.get("type") in CONFIRMATION_PENDING_TYPES
             )
         )
+        unresolved_stage_entry_response = bool(
+            raw_intent == "UNCLEAR"
+            and pending_action is None
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+        )
         confirmed_candidate_modification = bool(
             raw_intent == "ACCEPT_PREVIOUS_PROPOSAL"
             and isinstance(pending_action, dict)
@@ -1798,6 +1806,7 @@ class OpenAIStageGenerator:
         )
         if (
             unresolved_pending_response
+            or unresolved_stage_entry_response
             or confirmed_candidate_modification
             or answer_status_conflict
             or pending_question_decision_missing(
@@ -1808,6 +1817,17 @@ class OpenAIStageGenerator:
         ):
             required_facet = required_pending_facet_id(pending_action)
             repair_payload = deepcopy(payload)
+            if confirmed_candidate_modification and isinstance(pending_action, dict):
+                candidate_pending = deepcopy(pending_action)
+                candidate_pending["candidate_confirmation_received"] = True
+                repair_payload["input"][0]["content"][0]["text"] = (
+                    serialize_intent_input(
+                        session,
+                        str(pending_action.get("candidate_answer") or ""),
+                        candidate_pending,
+                        carried_context,
+                    )
+                )
             repair_payload["input"][0]["content"].append(
                 {
                     "type": "input_text",
@@ -1829,9 +1849,12 @@ class OpenAIStageGenerator:
                             "若学生认可原草稿，返回ACCEPT_PREVIOUS_PROPOSAL；若学生增加、替换或"
                             "纠正了对象、操作、条件、观察量、目标或解释，返回"
                             "MODIFY_PREVIOUS_PROPOSAL，resolved_value_json只写实质修改内容；"
-                            "若candidate_answer保存了上一轮实质补充，而学生说明上一轮就是在"
-                            "回应草稿，应返回MODIFY_PREVIOUS_PROPOSAL，并把candidate_answer作为"
-                            "resolved_value。只有语义仍确实无法确定时才返回UNCLEAR。"
+                             "若candidate_answer保存了上一轮实质补充，而学生说明上一轮就是在"
+                            "回应草稿，应把candidate_answer当作本轮需要执行的原始学生修改，返回"
+                            "MODIFY_PREVIOUS_PROPOSAL，并把candidate_answer作为resolved_value；"
+                            "同时必须为其中每个修改生成design_updates、comparison_updates或"
+                            "emvr_design_update。新增且不属于已有基础比较组的维度使用"
+                            "comparison_updates.action=CREATE。只有语义仍确实无法确定时才返回UNCLEAR。"
                         )
                         if pending_type in CONFIRMATION_PENDING_TYPES
                         else (
@@ -1877,6 +1900,34 @@ class OpenAIStageGenerator:
             or semantic_updates.get("course_scope_status") == "OUT_OF_SCOPE"
         )
         if (
+            repaired_intent == "UNCLEAR"
+            and pending_action is None
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and semantic_updates.get("no_direction") is True
+        ):
+            raw["intent"] = "REQUEST_MORE_EXAMPLES"
+            raw["target"] = "exploration_scenes"
+            raw["resolved_value_json"] = None
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = None
+        elif (
+            repaired_intent == "UNCLEAR"
+            and pending_action is None
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and (
+                semantic_updates.get("course_scope_status") == "COURSE_CONTENT"
+                or str(semantic_updates.get("stage_one_direction_detail") or "").strip()
+            )
+        ):
+            raw["intent"] = "ANSWER_CURRENT_QUESTION"
+            raw["target"] = "initial_idea"
+            raw["resolved_value_json"] = json.dumps(
+                user_message,
+                ensure_ascii=False,
+            )
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = user_message
+        elif (
             repaired_intent == "UNCLEAR"
             and pending_type in OPEN_QUESTION_PENDING_TYPES
             and explicitly_unanswered

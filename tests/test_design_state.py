@@ -5,11 +5,14 @@ import unittest
 from ece329_workflow.design_state import (
     apply_design_updates,
     design_state_snapshot,
+    format_design_summary,
     record_seen_scenes,
+    set_baseline_comparisons,
     seen_scene_signatures,
 )
 from ece329_workflow.dialogue_state import (
     UserIntent,
+    apply_resolved_intent,
     current_pending_action,
     resolved_intent,
     save_pending_action,
@@ -24,6 +27,17 @@ class SummarySemanticGenerator(RuleBasedStageGenerator):
         return resolved_intent(
             UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY,
             target="current_design",
+            confidence=0.99,
+            source="SEMANTIC_TEST",
+        )
+
+
+class ComparisonSummarySemanticGenerator(RuleBasedStageGenerator):
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        return resolved_intent(
+            UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY,
+            target="baseline_comparisons",
+            resolved_value=["baseline_comparisons"],
             confidence=0.99,
             source="SEMANTIC_TEST",
         )
@@ -204,6 +218,181 @@ class CanonicalDesignStateTests(unittest.TestCase):
         after = current_pending_action(engine.store.get(session.design_id))
         assert after is not None
         self.assertEqual(after["action_id"], before["action_id"])
+
+    def test_new_comparison_dimension_is_committed_and_idempotent(self) -> None:
+        session = DesignSession(
+            design_id="design_new_comparison_dimension",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {}},
+        )
+        set_baseline_comparisons(
+            session,
+            [
+                {
+                    "comparison_id": "polarity_cases",
+                    "title": "电荷符号",
+                    "cases": ["同种电荷", "异种电荷"],
+                    "adoption_status": "ACCEPTED",
+                }
+            ],
+        )
+        message = "增加不同电荷量大小的对比情形，其余内容保持不变"
+        decision = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            resolved_value=message,
+            confidence=0.98,
+            source="SEMANTIC_TEST",
+            semantic_updates={
+                "comparison_updates": [
+                    {
+                        "comparison_id": "",
+                        "action": "CREATE",
+                        "title": "不同电荷量大小的对比情形",
+                        "new_cases": ["不同电荷量大小的对比情形"],
+                    }
+                ]
+            },
+        )
+
+        apply_resolved_intent(session, decision, None, message)
+        apply_resolved_intent(session, decision, None, message)
+
+        comparisons = design_state_snapshot(session)["baseline_comparisons"]
+        self.assertEqual(len(comparisons), 2)
+        self.assertEqual(
+            comparisons[1]["cases"],
+            ["不同电荷量大小的对比情形"],
+        )
+        comparison_only = format_design_summary(
+            session,
+            ["baseline_comparisons"],
+        )
+        self.assertIn("同种电荷、异种电荷", comparison_only)
+        self.assertIn("不同电荷量大小的对比情形", comparison_only)
+        self.assertNotIn("研究对象", comparison_only)
+        self.assertNotIn(
+            "不同电荷量大小的对比情形：不同电荷量大小的对比情形",
+            comparison_only,
+        )
+
+    def test_confirmed_new_comparison_uses_original_student_evidence(self) -> None:
+        session = DesignSession(
+            design_id="design_confirmed_new_comparison",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {}},
+        )
+        supplement = "增加等量电荷与不等量电荷这组基础比较"
+        decision = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            resolved_value=supplement,
+            confidence=0.98,
+            source="CONFIRMED_PENDING_MODIFICATION",
+            semantic_updates={
+                "comparison_updates": [
+                    {
+                        "comparison_id": "",
+                        "action": "CREATE",
+                        "title": "电荷量大小",
+                        "new_cases": ["等量电荷", "不等量电荷"],
+                    }
+                ]
+            },
+        )
+
+        apply_resolved_intent(session, decision, None, "确认合并")
+
+        comparisons = design_state_snapshot(session)["baseline_comparisons"]
+        self.assertEqual(len(comparisons), 1)
+        self.assertEqual(
+            comparisons[0]["cases"],
+            ["等量电荷", "不等量电荷"],
+        )
+        self.assertEqual(
+            decision["semantic_updates"]["applied_comparison_updates"],
+            [
+                {
+                    "comparison_id": comparisons[0]["comparison_id"],
+                    "action": "CREATE",
+                    "cases": ["等量电荷", "不等量电荷"],
+                }
+            ],
+        )
+
+        apply_resolved_intent(session, decision, None, "再次确认")
+
+        self.assertEqual(
+            decision["semantic_updates"]["applied_comparison_updates"],
+            [],
+        )
+
+    def test_summary_combines_identical_hypothesis_and_expected_phenomenon(self) -> None:
+        session = DesignSession(
+            design_id="design_deduplicated_prediction",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        prediction = "距离越近，场线弯曲越明显。"
+        apply_design_updates(
+            session,
+            [
+                {"field": "hypothesis", "operation": "REPLACE", "value": prediction},
+                {
+                    "field": "expected_phenomenon",
+                    "operation": "REPLACE",
+                    "value": prediction,
+                },
+            ],
+        )
+
+        summary = format_design_summary(session)
+
+        self.assertIn("假设与预期现象", summary)
+        self.assertEqual(summary.count(prediction), 1)
+
+    def test_read_only_comparison_request_returns_only_latest_comparisons(self) -> None:
+        engine = WorkflowEngine(generator=ComparisonSummarySemanticGenerator())
+        session = DesignSession(
+            design_id="design_comparison_only_summary",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {}},
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "research_object",
+                    "operation": "REPLACE",
+                    "value": "两个点电荷",
+                }
+            ],
+        )
+        set_baseline_comparisons(
+            session,
+            [
+                {
+                    "comparison_id": "polarity_cases",
+                    "title": "电荷符号",
+                    "cases": ["同种电荷", "异种电荷"],
+                    "adoption_status": "ACCEPTED",
+                },
+                {
+                    "comparison_id": "magnitude_cases",
+                    "title": "电荷量大小",
+                    "cases": ["等量", "不等量"],
+                    "adoption_status": "MODIFIED",
+                },
+            ],
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "单独把更新后的基础比较列表展示给我"},
+        )
+
+        self.assertIn("基础比较：", result["assistant_message"])
+        self.assertIn("同种电荷、异种电荷", result["assistant_message"])
+        self.assertIn("等量、不等量", result["assistant_message"])
+        self.assertNotIn("研究对象：", result["assistant_message"])
 
 
 if __name__ == "__main__":

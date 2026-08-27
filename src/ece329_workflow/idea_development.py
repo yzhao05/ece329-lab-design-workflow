@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .design_state import baseline_comparisons_snapshot, format_design_summary
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, StepOutput
 from .stages import IDEA_DEVELOPMENT_FACETS
@@ -276,8 +277,14 @@ def build_gap_output(
         acknowledgement = "你提出的对照调整已经并入当前实验想法。"
     else:
         acknowledgement = _student_facing_retry(status, acknowledged_message)
+    review = ""
+    if status["complete"]:
+        review = (
+            "\n\n这是目前整理出的实验想法：\n"
+            f"{format_design_summary(session)}"
+        )
     assistant_message = (
-        f"{acknowledgement}{comparison_update}\n\n"
+        f"{acknowledgement}{comparison_update}{review}\n\n"
         f"{_student_facing_next_turn(status, repeat_count=repeated_facet_count)}"
     )
     idea = session.design_context.get("idea", {})
@@ -686,21 +693,42 @@ def _student_facing_acknowledgement(
 
 
 def _comparison_update_summary(session: DesignSession, message: str) -> str:
-    idea = session.design_context.get("idea", {})
-    comparisons = idea.get("standard_comparisons", []) if isinstance(idea, dict) else []
-    if not isinstance(comparisons, list):
-        return ""
+    comparisons = baseline_comparisons_snapshot(session)
     resolved = session.turn_context.get("resolved_intent", {})
-    semantic_source = str(resolved.get("source") or "").startswith("SEMANTIC") \
-        if isinstance(resolved, dict) else False
+    semantic_source = (
+        str(resolved.get("source") or "").startswith("SEMANTIC")
+        or resolved.get("source") == "CONFIRMED_PENDING_MODIFICATION"
+    ) if isinstance(resolved, dict) else False
     semantic_updates = resolved.get("semantic_updates", {}) \
         if isinstance(resolved, dict) else {}
-    comparison_updates = semantic_updates.get("comparison_updates", []) \
+    comparison_updates = semantic_updates.get("applied_comparison_updates", []) \
         if isinstance(semantic_updates, dict) else []
     if not semantic_source or not comparison_updates:
         return ""
+    by_id = {
+        str(comparison.get("comparison_id") or ""): comparison
+        for comparison in comparisons
+        if isinstance(comparison, dict)
+    }
     summaries: list[str] = []
-    for comparison in comparisons:
+    for update in comparison_updates:
+        if not isinstance(update, dict):
+            continue
+        action = str(update.get("action") or "").upper()
+        if action == "CREATE":
+            cases = [
+                str(item).strip()
+                for item in (
+                    update.get("cases", [])
+                    if isinstance(update.get("cases"), list)
+                    else []
+                )
+                if str(item).strip()
+            ]
+            if cases:
+                summaries.append(f"新增基础比较：{'、'.join(cases)}")
+            continue
+        comparison = by_id.get(str(update.get("comparison_id") or ""))
         if not isinstance(comparison, dict):
             continue
         status = str(comparison.get("adoption_status") or "PENDING")
