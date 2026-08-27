@@ -389,6 +389,79 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
         self.assertEqual(result["resolved_value"], idea)
 
+    def test_safe_initial_idea_is_not_rejected_after_two_unclear_labels(self) -> None:
+        idea = "我想研究各种物体放在一起时电场线分布怎样相互影响"
+        unclear = {
+            "intent": "UNCLEAR",
+            "target": None,
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.74,
+        }
+        transport = FakeTransport(outputs=[unclear, unclear])
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            idea,
+            None,
+            {},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(result["target"], "initial_idea")
+        self.assertEqual(result["resolved_value"], idea)
+
+    def test_open_question_cannot_accept_a_missing_candidate(self) -> None:
+        answer = "比较同种与异种电荷由远到近时，中间电场线的弯曲和连接方式"
+        accepted_without_candidate = {
+            "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+            "target": "research_question",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.96,
+        }
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question", "title": "研究问题"},
+            "question": "你准备改变什么条件，并观察哪种现象？",
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+        transport = FakeTransport(
+            outputs=[accepted_without_candidate, accepted_without_candidate]
+        )
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            answer,
+            pending,
+            {"idea_development": {"active_facet_id": "research_question"}},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(result["resolved_value"], answer)
+        self.assertEqual(
+            result["semantic_updates"]["facet_updates"],
+            [
+                {
+                    "facet_id": "research_question",
+                    "status": "CLEAR",
+                    "operation": "REPLACE",
+                    "value": answer,
+                }
+            ],
+        )
+
     def test_explicit_structured_no_direction_is_not_forced_into_an_answer(self) -> None:
         response = {
             "intent": "UNCLEAR",

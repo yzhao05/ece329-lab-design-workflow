@@ -37,6 +37,13 @@ _FACET_HINT: dict[str, str] = {
     "conceptual_structure": "可以包含场源、研究对象、边界条件、参照情形以及用于观察结果的表示方式。",
 }
 
+_FACET_ACCEPTANCE_CRITERIA: dict[str, list[str]] = {
+    "learning_objective": ["说明完成实验后希望能够解释、判断或比较什么"],
+    "research_question": ["说明比较或改变的条件", "说明准备观察的现象或变化"],
+    "hypothesis": ["说明预期现象", "说明支持预测的物理理由"],
+    "conceptual_structure": ["说明参与比较的对象、边界或激励"],
+}
+
 _MISSING_PRIORITY = (
     "research_question",
     "learning_objective",
@@ -228,7 +235,12 @@ def _apply_structured_facet_updates(
                 }
             )
         elif status == MISSING:
-            facet.update({"status": MISSING, "evidence": "", "source": None})
+            # MISSING is an assessment of the current student turn, not an
+            # instruction to erase previously confirmed evidence. Explicit
+            # withdrawal is committed through a canonical design CLEAR update
+            # and projected back into the facets by the state machine.
+            if facet.get("status") != CLEAR:
+                facet.update({"status": MISSING, "evidence": "", "source": None})
     return clarified
 
 
@@ -619,6 +631,9 @@ def _pending_action_for_status(status: dict[str, Any]) -> dict[str, Any]:
         "proposal": {
             "facet_id": active,
             "title": str(facet.get("title") or "当前部分"),
+            "acceptance_criteria": deepcopy(
+                _FACET_ACCEPTANCE_CRITERIA.get(active, [])
+            ),
         },
         "question": _next_task(status),
         "allowed_intents": [
@@ -632,6 +647,19 @@ def _pending_action_for_status(status: dict[str, Any]) -> dict[str, Any]:
             "UNCLEAR",
         ],
     }
+
+
+def canonical_idea_pending_action(
+    session: DesignSession,
+) -> dict[str, Any] | None:
+    """Build the only valid Stage 1 pending action from canonical facet state."""
+
+    development = session.design_context.get("idea_development")
+    if not isinstance(development, dict) or not isinstance(
+        development.get("facets"), dict
+    ):
+        return None
+    return _pending_action_for_status(public_idea_development_status(development))
 
 
 def _pending_facet_repeat_count(

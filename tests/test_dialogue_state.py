@@ -6,6 +6,7 @@ from ece329_workflow.dialogue_state import (
     UserIntent,
     apply_resolved_intent,
     build_carried_context,
+    clarification_output,
     current_pending_action,
     deterministic_intent,
     fallback_intent,
@@ -19,6 +20,7 @@ from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.generator import guided_stage_entry_output
 from ece329_workflow.idea_development import (
+    build_facet_reference_output,
     build_gap_output,
     initialize_idea_development,
     update_idea_development,
@@ -1100,6 +1102,84 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(pending["subject"], "research_question")
         self.assertEqual(pending["proposal"]["title"], "研究问题")
 
+    def test_stage_one_pending_is_rebuilt_from_canonical_facet_state(self) -> None:
+        session = idea_facet_session("design_canonical_facet_pending")
+
+        pending = save_pending_action(
+            session,
+            Stage.IDEA_BRAINSTORMING,
+            StepOutput(
+                assistant_message="请继续说明。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "ANSWER_IDEA_FACET",
+                        "subject": None,
+                        "proposal": {"facet_id": None, "title": None},
+                        "question": "请继续说明。",
+                    }
+                },
+                student_task="请继续说明。",
+            ),
+        )
+
+        assert pending is not None
+        self.assertEqual(pending["subject"], "research_question")
+        self.assertEqual(pending["proposal"]["facet_id"], "research_question")
+        self.assertEqual(pending["proposal"]["title"], "研究问题")
+        self.assertNotIn("None", clarification_output(pending).assistant_message)
+
+    def test_course_reference_candidate_survives_pending_normalization(self) -> None:
+        session = idea_facet_session("design_reference_candidate")
+        output = build_facet_reference_output(session)
+
+        pending = save_pending_action(session, Stage.IDEA_BRAINSTORMING, output)
+
+        assert pending is not None
+        self.assertEqual(pending["subject"], "research_question")
+        self.assertTrue(str(pending.get("candidate_answer") or "").strip())
+        accepted = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                target="research_question",
+                confidence=0.98,
+            ),
+            pending,
+        )
+        self.assertEqual(accepted["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+        self.assertEqual(accepted["source"], "CONFIRMED_PENDING_ANSWER")
+        self.assertEqual(
+            accepted["semantic_updates"]["facet_updates"],
+            [{"facet_id": "research_question", "status": "CLEAR"}],
+        )
+
+    def test_accepting_course_reference_moves_past_research_question(self) -> None:
+        session = idea_facet_session("design_accept_reference")
+        save_pending_action(
+            session,
+            Stage.IDEA_BRAINSTORMING,
+            build_facet_reference_output(session),
+        )
+        engine = WorkflowEngine(
+            generator=ScriptedSemanticGenerator(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                target="research_question",
+            )
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "同意，继续"},
+        )
+
+        status = result["stage_payload"]["idea_development_status"]
+        self.assertEqual(
+            status["facets_by_id"]["research_question"]["status"],
+            "CLEAR",
+        )
+        self.assertEqual(status["active_facet_id"], "learning_objective")
+        self.assertNotIn("研究问题还需要", result["assistant_message"])
+
     def test_legacy_generic_stage_one_pending_is_migrated_before_next_turn(self) -> None:
         session = idea_facet_session("design_legacy_generic_pending")
         session.model_context["dialogue_state"]["pending_action"].update(
@@ -1868,7 +1948,7 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn(original, evidence)
         self.assertIn("没有完全包住场源", evidence)
 
-    def test_semantic_facet_updates_replace_keyword_facet_detection(self) -> None:
+    def test_semantic_facet_updates_do_not_erase_confirmed_facets(self) -> None:
         session = DesignSession(
             design_id="design_semantic_facets",
             interaction_state=InteractionState.GUIDED_DESIGN,
@@ -1897,7 +1977,7 @@ class DialogueStateTests(unittest.TestCase):
             },
         )
         self.assertEqual(development["facets"]["research_question"]["status"], "CLEAR")
-        self.assertEqual(development["facets"]["learning_objective"]["status"], "MISSING")
+        self.assertEqual(development["facets"]["learning_objective"]["status"], "CLEAR")
 
     def test_semantic_advance_paraphrases_use_one_state_transition(self) -> None:
         paraphrases = (

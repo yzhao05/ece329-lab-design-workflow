@@ -165,43 +165,37 @@ def _migrate_legacy_idea_facet_pending(
 
     if session.current_stage != Stage.IDEA_BRAINSTORMING:
         return pending
-    development = session.design_context.get("idea_development")
-    if not isinstance(development, dict) or development.get("complete") is True:
+    from .idea_development import canonical_idea_pending_action
+
+    canonical = canonical_idea_pending_action(session)
+    if not isinstance(canonical, dict):
         return pending
-    active = str(development.get("active_facet_id") or "")
-    if active not in _IDEA_FACET_IDS:
-        return pending
-    if (
-        pending.get("type") == "ANSWER_IDEA_FACET"
-        and pending.get("subject") == active
-    ):
-        return pending
-    facets = development.get("facets", {})
-    facet = facets.get(active, {}) if isinstance(facets, dict) else {}
-    migrated = deepcopy(pending)
-    migrated.update(
-        {
-            "type": "ANSWER_IDEA_FACET",
-            "subject": active,
-            "proposal": {
-                "facet_id": active,
-                "title": str(facet.get("title") or "当前部分")
-                if isinstance(facet, dict)
-                else "当前部分",
-            },
-            "allowed_intents": [
-                UserIntent.ANSWER_CURRENT_QUESTION.value,
-                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
-                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-                UserIntent.ADVANCE_STAGE.value,
-                UserIntent.REQUEST_MORE_EXAMPLES.value,
-                UserIntent.RETURN_TO_PREVIOUS_POINT.value,
-                UserIntent.NEW_TOPIC.value,
-                UserIntent.UNCLEAR.value,
-            ],
-            "status": "PENDING",
-        }
+    same_subject = bool(
+        pending.get("type") == canonical.get("type")
+        and pending.get("subject") == canonical.get("subject")
     )
+    migrated = deepcopy(pending)
+    preserved_proposal = (
+        deepcopy(pending.get("proposal"))
+        if same_subject and isinstance(pending.get("proposal"), dict)
+        else {}
+    )
+    canonical_proposal = canonical.get("proposal", {})
+    if isinstance(canonical_proposal, dict):
+        preserved_proposal.update(deepcopy(canonical_proposal))
+    migrated.update(deepcopy(canonical))
+    migrated["proposal"] = preserved_proposal
+    migrated["status"] = "PENDING"
+    if same_subject:
+        if str(pending.get("question") or "").strip():
+            migrated["question"] = str(pending["question"]).strip()
+    else:
+        migrated["action_id"] = (
+            f"action_{session.revision}_{uuid.uuid4().hex[:8]}"
+        )
+        migrated["repeat_count"] = 1
+        migrated.pop("candidate_answer", None)
+        migrated.pop("candidate_resolution", None)
     return migrated
 
 
@@ -466,7 +460,7 @@ def _normalize_pending_action(
         ]
     if UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value not in allowed:
         allowed.append(UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value)
-    return {
+    normalized = {
         "action_id": str(raw.get("action_id") or f"action_{revision}_{uuid.uuid4().hex[:8]}"),
         "type": str(raw.get("type") or ("CONFIRM_OR_MODIFY" if fallback_proposal else "ANSWER_OR_ADVANCE")),
         "stage": stage.value,
@@ -479,6 +473,19 @@ def _normalize_pending_action(
         "repeat_count": 1,
         "advance_on_accept": bool(raw.get("advance_on_accept", False)),
     }
+    candidate_answer = raw.get("candidate_answer")
+    if isinstance(candidate_answer, str) and candidate_answer.strip():
+        normalized["candidate_answer"] = candidate_answer.strip()[:2000]
+    candidate_resolution = str(raw.get("candidate_resolution") or "").strip()
+    if candidate_resolution in {
+        UserIntent.ANSWER_CURRENT_QUESTION.value,
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+    }:
+        normalized["candidate_resolution"] = candidate_resolution
+    interaction_state = str(raw.get("interaction_state") or "").strip()
+    if interaction_state in {item.value for item in InteractionState}:
+        normalized["interaction_state"] = interaction_state
+    return normalized
 
 
 def save_pending_action(
@@ -531,6 +538,8 @@ def save_pending_action(
         fallback_question=question,
         fallback_proposal=proposal,
     )
+    if stage is Stage.IDEA_BRAINSTORMING:
+        pending = _migrate_legacy_idea_facet_pending(session, pending)
     state = dialogue_state(session)
     previous = state.get("pending_action")
     if (
@@ -1521,7 +1530,7 @@ def clarification_output(
         if pending_action.get("type") == "ANSWER_IDEA_FACET":
             proposal = pending_action.get("proposal", {})
             title = str(
-                proposal.get("title")
+                proposal.get("title") or ""
                 if isinstance(proposal, dict)
                 else ""
             ).strip() or "当前部分"

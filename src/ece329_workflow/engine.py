@@ -21,6 +21,7 @@ from .dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     record_pending_clarification,
+    required_pending_facet_id,
     resolved_intent,
     save_pending_action,
     validate_resolved_intent,
@@ -1467,9 +1468,29 @@ class WorkflowEngine:
             ):
                 output = build_gap_output(session, "")
             else:
+                clarification_candidate = message
+                clarification_updates = turn_intent.get("semantic_updates", {})
+                required_facet = required_pending_facet_id(pending_action)
+                facet_explicitly_missing = bool(
+                    required_facet
+                    and isinstance(clarification_updates, dict)
+                    and any(
+                        isinstance(item, dict)
+                        and item.get("facet_id") == required_facet
+                        and item.get("status") == "MISSING"
+                        for item in clarification_updates.get("facet_updates", [])
+                    )
+                )
+                if isinstance(clarification_updates, dict) and (
+                    clarification_updates.get("no_direction") is True
+                    or clarification_updates.get("pending_answer_status") == "MISSING"
+                    or facet_explicitly_missing
+                    or clarification_updates.get("course_scope_status") == "OUT_OF_SCOPE"
+                ):
+                    clarification_candidate = ""
                 pending_action = record_pending_clarification(
                     session,
-                    message,
+                    clarification_candidate,
                 ) or pending_action
                 output = clarification_output(pending_action)
             session.turn_context = {}

@@ -1799,6 +1799,12 @@ class OpenAIStageGenerator:
             == "MODIFY_PREVIOUS_PROPOSAL"
             and str(pending_action.get("candidate_answer") or "").strip()
         )
+        unbacked_open_question_acceptance = bool(
+            raw_intent == "ACCEPT_PREVIOUS_PROPOSAL"
+            and pending_type in OPEN_QUESTION_PENDING_TYPES
+            and isinstance(pending_action, dict)
+            and not str(pending_action.get("candidate_answer") or "").strip()
+        )
         answer_status_conflict = pending_question_answer_needs_review(
             raw_intent,
             semantic_updates,
@@ -1808,6 +1814,7 @@ class OpenAIStageGenerator:
             unresolved_pending_response
             or unresolved_stage_entry_response
             or confirmed_candidate_modification
+            or unbacked_open_question_acceptance
             or answer_status_conflict
             or pending_question_decision_missing(
                 raw_intent,
@@ -1914,11 +1921,12 @@ class OpenAIStageGenerator:
             repaired_intent == "UNCLEAR"
             and pending_action is None
             and session.current_stage is Stage.IDEA_BRAINSTORMING
-            and (
-                semantic_updates.get("course_scope_status") == "COURSE_CONTENT"
-                or str(semantic_updates.get("stage_one_direction_detail") or "").strip()
-            )
         ):
+            # After two semantic passes, a safe free-form first turn is still
+            # useful experiment input even when its course-scope label remains
+            # uncertain. The Stage 1 generator performs the actual boundary
+            # response; do not ask the student to classify their own turn as a
+            # conversation command.
             raw["intent"] = "ANSWER_CURRENT_QUESTION"
             raw["target"] = "initial_idea"
             raw["resolved_value_json"] = json.dumps(
@@ -1927,6 +1935,42 @@ class OpenAIStageGenerator:
             )
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
             resolved_value = user_message
+        elif (
+            repaired_intent == "ACCEPT_PREVIOUS_PROPOSAL"
+            and pending_type in OPEN_QUESTION_PENDING_TYPES
+            and isinstance(pending_action, dict)
+            and not str(pending_action.get("candidate_answer") or "").strip()
+        ):
+            # An open question has nothing to accept until a reference or a
+            # saved candidate exists. Bind the student's substantive turn to
+            # the exact pending subject instead of silently accepting a null
+            # proposal and reopening the same question.
+            raw["intent"] = "ANSWER_CURRENT_QUESTION"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = json.dumps(
+                user_message,
+                ensure_ascii=False,
+            )
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = user_message
+            required_facet = required_pending_facet_id(pending_action)
+            if required_facet is not None:
+                semantic_updates = {
+                    **semantic_updates,
+                    "facet_updates": [
+                        {
+                            "facet_id": required_facet,
+                            "status": "CLEAR",
+                            "operation": "REPLACE",
+                            "value": user_message,
+                        }
+                    ],
+                }
+            else:
+                semantic_updates = {
+                    **semantic_updates,
+                    "pending_answer_status": "CLEAR",
+                }
         elif (
             repaired_intent == "UNCLEAR"
             and pending_type in OPEN_QUESTION_PENDING_TYPES
