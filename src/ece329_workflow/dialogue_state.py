@@ -22,6 +22,15 @@ from .design_state import (
     set_baseline_comparisons,
     set_pending_action_snapshot,
 )
+from .dialogue_acts import (
+    CONTROL_TARGETS,
+    DESIGN_ACT_FIELDS,
+    STAGE_ACT_FIELDS,
+    apply_stage_field_updates,
+    compile_dialogue_acts,
+    normalize_dialogue_acts,
+    stage_design_state_snapshot,
+)
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
 
@@ -33,6 +42,8 @@ class UserIntent(str, Enum):
     ADVANCE_STAGE = "ADVANCE_STAGE"
     REQUEST_MORE_EXAMPLES = "REQUEST_MORE_EXAMPLES"
     REQUEST_CURRENT_DESIGN_SUMMARY = "REQUEST_CURRENT_DESIGN_SUMMARY"
+    ASK_COURSE_QUESTION = "ASK_COURSE_QUESTION"
+    PROVIDE_FEEDBACK = "PROVIDE_FEEDBACK"
     RETURN_TO_PREVIOUS_POINT = "RETURN_TO_PREVIOUS_POINT"
     NEW_TOPIC = "NEW_TOPIC"
     SET_INTERACTION_STATE = "SET_INTERACTION_STATE"
@@ -327,6 +338,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         else {}
     )
     last_summary = dialogue_state(session).get("last_presented_design_summary")
+    stage_fields = stage_design_state_snapshot(session)
     return {
         "research_direction": str(canonical.get("research_object") or direction),
         "direction_locked": idea.get("direction_locked") is True,
@@ -363,7 +375,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "independent_variable": _find_payload_values(
             session,
             {"independent_variable", "adjustable_quantity_in_vr"},
-        ),
+        ) if not stage_fields["independent_variable"] else stage_fields["independent_variable"],
         "observations": _find_payload_values(
             session,
             {
@@ -373,17 +385,17 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
                 "observations",
                 "calculated_outputs",
             },
-        ),
+        ) if not stage_fields["observations"] else stage_fields["observations"],
         "controlled_conditions": _find_payload_values(
             session,
             {"controlled_variables", "controlled_conditions", "reference_condition"},
-        ),
+        ) if not stage_fields["controlled_conditions"] else stage_fields["controlled_conditions"],
         "procedure_steps": _find_payload_values(
             session,
             {"procedure_steps", "reference_draft"},
-        ),
-        "unity_objects": unity_objects,
-        "interactions": interactions,
+        ) if not stage_fields["procedure_steps"] else stage_fields["procedure_steps"],
+        "unity_objects": stage_fields["unity_objects"] or unity_objects,
+        "interactions": stage_fields["interactions"] or interactions,
         "emvr_stage_inputs": emvr_stage_inputs,
         "emvr_structured_requirements": emvr_structured_requirements,
         "emvr_merged_requirements": emvr_merged_requirements,
@@ -395,11 +407,13 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
                 "measurement_interface",
                 "trend_annotation",
             },
-        ),
+        ) if not stage_fields["visualization_plan"] else stage_fields["visualization_plan"],
+        "result_interpretation": stage_fields["result_interpretation"],
         "limitations": _find_payload_values(
             session,
             {"limitations", "invalid_conditions", "parameter_limits"},
-        ),
+        ) if not stage_fields["limitations"] else stage_fields["limitations"],
+        "stage_design_state": stage_fields,
         "resolved_decisions": deepcopy(
             session.design_context.get("resolved_decisions", {})
             if isinstance(session.design_context.get("resolved_decisions"), dict)
@@ -637,6 +651,8 @@ def resolved_intent(
     confidence: float = 1.0,
     source: str = "DETERMINISTIC",
     semantic_updates: dict[str, Any] | None = None,
+    dialogue_acts: list[dict[str, Any]] | None = None,
+    unresolved_content: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     intent_value = intent.value if isinstance(intent, UserIntent) else str(intent)
     return {
@@ -652,6 +668,8 @@ def resolved_intent(
         "confidence": max(0.0, min(float(confidence), 1.0)),
         "source": source,
         "semantic_updates": deepcopy(semantic_updates or {}),
+        "dialogue_acts": deepcopy(dialogue_acts or []),
+        "unresolved_content": deepcopy(unresolved_content or []),
     }
 
 
@@ -669,6 +687,187 @@ def validate_resolved_intent(
         if isinstance(pending_action, dict)
         else ""
     )
+    dialogue_acts, unresolved_acts = normalize_dialogue_acts(
+        raw.get("dialogue_acts"),
+        pending_action=pending_action,
+    )
+    raw_acts_supplied = bool(
+        isinstance(raw.get("dialogue_acts"), list)
+        and raw.get("dialogue_acts")
+    )
+    compiled_acts = compile_dialogue_acts(
+        dialogue_acts,
+        pending_action=pending_action,
+    )
+    if dialogue_acts:
+        merged_updates = (
+            deepcopy(raw.get("semantic_updates"))
+            if isinstance(raw.get("semantic_updates"), dict)
+            else {}
+        )
+        for update_key in (
+            "design_updates",
+            "facet_updates",
+            "stage_field_updates",
+            "comparison_updates",
+        ):
+            existing = merged_updates.get(update_key, [])
+            existing = existing if isinstance(existing, list) else []
+            merged_updates[update_key] = [
+                *existing,
+                *deepcopy(compiled_acts.get(update_key, [])),
+            ]
+        for value_key in (
+            "student_questions",
+            "feedback_items",
+            "unresolved_content",
+            "control_actions",
+        ):
+            existing = merged_updates.get(value_key, [])
+            existing = existing if isinstance(existing, list) else []
+            merged_updates[value_key] = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in [
+                        *existing,
+                        *compiled_acts.get(value_key, []),
+                        *(
+                            [
+                                str(item.get("content") or "").strip()
+                                for item in unresolved_acts
+                                if isinstance(item, dict)
+                                and str(item.get("content") or "").strip()
+                            ]
+                            if value_key == "unresolved_content"
+                            else []
+                        ),
+                    ]
+                    if str(item).strip()
+                )
+            )
+        if compiled_acts.get("answered_pending"):
+            merged_updates["pending_answer_status"] = "CLEAR"
+        controls = set(compiled_acts.get("control_actions", []))
+        if pending_action and {"ACCEPT", "REJECT"} & controls:
+            # Acceptance/rejection is an independent resolution of the open
+            # proposal even when the same message also edits another field.
+            merged_updates["pending_answer_status"] = "CLEAR"
+        if "SET_EMVR_MODE" in controls:
+            merged_updates["interaction_state_request"] = (
+                InteractionState.EMVR_DIRECT.value
+            )
+        elif "SET_GUIDED_MODE" in controls:
+            merged_updates["interaction_state_request"] = (
+                InteractionState.GUIDED_DESIGN.value
+            )
+        state_acts = any(
+            compiled_acts.get(key)
+            for key in (
+                "design_updates",
+                "facet_updates",
+                "stage_field_updates",
+                "comparison_updates",
+            )
+        )
+        if {"SET_EMVR_MODE", "SET_GUIDED_MODE"} & controls:
+            intent = UserIntent.SET_INTERACTION_STATE.value
+        elif "NEW_TOPIC" in controls:
+            intent = UserIntent.NEW_TOPIC.value
+        elif "RETURN" in controls and not state_acts:
+            intent = UserIntent.RETURN_TO_PREVIOUS_POINT.value
+        elif "REQUEST_SUMMARY" in controls and not state_acts:
+            intent = UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value
+        elif "REQUEST_REFERENCE" in controls and not state_acts:
+            intent = UserIntent.REQUEST_MORE_EXAMPLES.value
+        elif "ADVANCE" in controls and not state_acts:
+            intent = UserIntent.ADVANCE_STAGE.value
+        elif "REJECT" in controls and not state_acts:
+            intent = UserIntent.REJECT_PREVIOUS_PROPOSAL.value
+        elif "ACCEPT" in controls and not state_acts:
+            intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        elif state_acts:
+            intent = (
+                UserIntent.ANSWER_CURRENT_QUESTION.value
+                if compiled_acts.get("answered_pending")
+                else UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+            )
+            if "ADVANCE" in controls:
+                raw = {**raw, "advance_requested": True}
+            elif (
+                "ACCEPT" in controls
+                and isinstance(pending_action, dict)
+                and pending_action.get("advance_on_accept") is True
+            ):
+                raw = {**raw, "advance_requested": True}
+        elif compiled_acts.get("student_questions"):
+            intent = UserIntent.ASK_COURSE_QUESTION.value
+        elif compiled_acts.get("feedback_items"):
+            intent = UserIntent.PROVIDE_FEEDBACK.value
+        # Prefer experiment content over questions and feedback regardless of
+        # the order in which the model listed the acts.  This keeps a mixed
+        # turn such as "you misunderstood me; replace the research question"
+        # from carrying the correction sentence into later design prompts.
+        primary_content = raw.get("resolved_value")
+        for preferred_type in (
+            "ANSWER_PENDING_QUESTION",
+            "MODIFY_DESIGN_FIELD",
+            "MODIFY_STAGE_FIELD",
+            "MODIFY_COMPARISON",
+            "NEW_TOPIC",
+            "ASK_COURSE_QUESTION",
+            "CORRECT_ASSISTANT",
+        ):
+            selected_content = next(
+                (
+                    deepcopy(act.get("content"))
+                    for act in dialogue_acts
+                    if act.get("type") == preferred_type
+                    and act.get("content") not in (None, "", [], {})
+                ),
+                None,
+            )
+            if selected_content is not None:
+                primary_content = selected_content
+                break
+        raw = {
+            **raw,
+            "intent": intent,
+            "target": str(
+                next(
+                    (
+                        act.get("target")
+                        for act in dialogue_acts
+                        if act.get("type")
+                        in {
+                            "ANSWER_PENDING_QUESTION",
+                            "MODIFY_DESIGN_FIELD",
+                            "MODIFY_STAGE_FIELD",
+                            "MODIFY_COMPARISON",
+                            "ASK_COURSE_QUESTION",
+                            "CORRECT_ASSISTANT",
+                            "NEW_TOPIC",
+                        }
+                        if str(act.get("target") or "").strip()
+                    ),
+                    raw.get("target") or "",
+                )
+            ),
+            "resolved_value": primary_content,
+            "semantic_updates": merged_updates,
+            "source": "SEMANTIC_MULTI_ACT",
+        }
+    elif raw_acts_supplied and unresolved_acts:
+        # The action array is the authoritative semantic result.  If every
+        # proposed action is invalid, do not execute a contradictory legacy
+        # outer intent such as NEW_TOPIC or ADVANCE_STAGE.
+        intent = UserIntent.UNCLEAR.value
+        raw = {
+            **raw,
+            "intent": intent,
+            "resolved_value": None,
+            "semantic_updates": {},
+            "source": "SEMANTIC_INVALID_ACTIONS",
+        }
     is_stage_confirmation = bool(
         pending_type in CONFIRMATION_PENDING_TYPES
     )
@@ -722,6 +921,8 @@ def validate_resolved_intent(
         UserIntent.RETURN_TO_PREVIOUS_POINT.value,
         UserIntent.SET_INTERACTION_STATE.value,
         UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
+        UserIntent.ASK_COURSE_QUESTION.value,
+        UserIntent.PROVIDE_FEEDBACK.value,
         }
     ):
         intent = UserIntent.UNCLEAR.value
@@ -729,6 +930,11 @@ def validate_resolved_intent(
         confidence = float(raw.get("confidence", 0.0))
     except (TypeError, ValueError):
         confidence = 0.0
+    if dialogue_acts and confidence < 0.55:
+        confidence = max(
+            (float(item.get("confidence") or 0.0) for item in dialogue_acts),
+            default=confidence,
+        )
     if confidence < 0.55:
         intent = UserIntent.UNCLEAR.value
     semantic_updates = (
@@ -835,6 +1041,8 @@ def validate_resolved_intent(
         confidence=confidence,
         source=source,
         semantic_updates=semantic_updates,
+        dialogue_acts=dialogue_acts,
+        unresolved_content=unresolved_acts,
     )
 
 
@@ -870,16 +1078,7 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             continue
         field = str(item.get("field") or item.get("field_id") or "")
         operation = str(item.get("operation") or "").upper()
-        if field not in {
-            "research_object",
-            "course_relationship",
-            "learning_objective",
-            "research_question",
-            "theoretical_framework",
-            "hypothesis",
-            "expected_phenomenon",
-            "conceptual_structure",
-        } or operation not in {"MERGE", "REPLACE", "CLEAR"}:
+        if field not in DESIGN_ACT_FIELDS or operation not in {"MERGE", "REPLACE", "CLEAR"}:
             continue
         normalized_update: dict[str, Any] = {
             "field": field,
@@ -889,6 +1088,27 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         if str(item.get("update_id") or "").strip():
             normalized_update["update_id"] = str(item["update_id"])[:100]
         design_updates.append(normalized_update)
+    stage_field_updates: list[dict[str, Any]] = []
+    raw_stage_updates = raw.get("stage_field_updates", [])
+    for item in raw_stage_updates if isinstance(raw_stage_updates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field") or item.get("field_id") or "")
+        operation = str(item.get("operation") or "").upper()
+        if field not in STAGE_ACT_FIELDS or operation not in {
+            "MERGE",
+            "REPLACE",
+            "CLEAR",
+        }:
+            continue
+        normalized_update = {
+            "field": field,
+            "operation": operation,
+            "value": deepcopy(item.get("value")),
+        }
+        if str(item.get("update_id") or "").strip():
+            normalized_update["update_id"] = str(item["update_id"])[:100]
+        stage_field_updates.append(normalized_update)
     comparison_updates: list[dict[str, Any]] = []
     for item in raw.get("comparison_updates", []) if isinstance(raw.get("comparison_updates"), list) else []:
         if not isinstance(item, dict):
@@ -947,12 +1167,44 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         raw.get("stage_one_direction_detail") or ""
     ).strip()[:1200]
     emvr_design_update = normalize_emvr_design_update(raw.get("emvr_design_update"))
+    def normalized_text_list(key: str) -> list[str]:
+        value = raw.get(key, [])
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(
+                str(item).strip()[:1200]
+                for item in value
+                if isinstance(item, str) and item.strip()
+            )
+        )[:12]
+
     return {
         "selected_option_ids": selected_option_ids,
         "no_direction": raw.get("no_direction") is True,
         "facet_updates": facet_updates,
         "design_updates": design_updates,
+        "stage_field_updates": stage_field_updates,
         "comparison_updates": comparison_updates,
+        "student_questions": normalized_text_list("student_questions"),
+        "feedback_items": normalized_text_list("feedback_items"),
+        "unresolved_content": normalized_text_list("unresolved_content"),
+        "control_actions": list(
+            dict.fromkeys(
+                str(item).upper()
+                for item in raw.get("control_actions", [])
+                if isinstance(item, str)
+                and str(item).upper()
+                in {
+                    *CONTROL_TARGETS,
+                    "REQUEST_REFERENCE",
+                    "REQUEST_SUMMARY",
+                    "NEW_TOPIC",
+                }
+            )
+        )
+        if isinstance(raw.get("control_actions"), list)
+        else [],
         "pending_answer_status": (
             str(raw.get("pending_answer_status") or "").upper()
             if str(raw.get("pending_answer_status") or "").upper()
@@ -1017,6 +1269,10 @@ def pending_facet_decision_missing(
         and (
             semantic_updates.get("comparison_updates")
             or semantic_updates.get("selected_option_ids")
+            or semantic_updates.get("design_updates")
+            or semantic_updates.get("stage_field_updates")
+            or semantic_updates.get("student_questions")
+            or semantic_updates.get("feedback_items")
         )
     ):
         # A student can edit a concrete proposal that is still visible in the
@@ -1415,6 +1671,7 @@ def apply_semantic_design_updates(
     if (
         isinstance(pending_action, dict)
         and pending_action.get("type") == "ANSWER_IDEA_FACET"
+        and not resolved.get("dialogue_acts")
     ):
         allowed_fields = {
             FACET_TO_DESIGN_FIELD.get(str(pending_action.get("subject") or ""), "")
@@ -1465,6 +1722,13 @@ def apply_semantic_design_updates(
                     "value": canonical.get(field, ""),
                 }
             )
+    changed_stage_fields = apply_stage_field_updates(
+        session,
+        updates.get("stage_field_updates"),
+        stage=session.current_stage,
+    )
+    updates["applied_design_fields"] = changed_fields
+    updates["applied_stage_fields"] = changed_stage_fields
     applied_comparison_updates = _apply_comparison_updates(
         session,
         updates.get("comparison_updates"),
@@ -1485,14 +1749,26 @@ def apply_resolved_intent(
     state = dialogue_state(session)
     state["resolved_intent"] = deepcopy(resolved)
     intent = str(resolved.get("intent") or UserIntent.UNCLEAR.value)
+    semantic_updates = resolved.get("semantic_updates", {})
+    control_actions = set(
+        semantic_updates.get("control_actions", [])
+        if isinstance(semantic_updates, dict)
+        and isinstance(semantic_updates.get("control_actions"), list)
+        else []
+    )
     if pending_action and intent == UserIntent.ADVANCE_STAGE.value:
         pending_action["status"] = "PRESERVED_ON_ADVANCE"
         state["pending_action"] = deepcopy(pending_action)
-    if pending_action and intent in {
-        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
-        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-        UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
-    }:
+    if (
+        pending_action
+        and not resolved.get("dialogue_acts")
+        and intent
+        in {
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+        }
+    ):
         decision_value = resolved.get("resolved_value")
         if intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value and decision_value is None:
             decision_value = deepcopy(pending_action.get("proposal"))
@@ -1510,6 +1786,21 @@ def apply_resolved_intent(
             UserIntent.REJECT_PREVIOUS_PROPOSAL.value: "REJECTED",
         }[intent]
         state["pending_action"] = deepcopy(pending_action)
+    elif pending_action and {"ACCEPT", "REJECT"} & control_actions:
+        # A mixed turn can accept/reject the visible proposal and edit another
+        # field at the same time.  Resolve the proposal independently instead
+        # of losing this control action behind the primary MODIFY intent.
+        accepted = "ACCEPT" in control_actions
+        subject = str(pending_action.get("subject") or "current_proposal")
+        decisions = session.design_context.setdefault("resolved_decisions", {})
+        if not isinstance(decisions, dict):
+            decisions = {}
+            session.design_context["resolved_decisions"] = decisions
+        decisions[subject] = (
+            deepcopy(pending_action.get("proposal")) if accepted else None
+        )
+        pending_action["status"] = "ACCEPTED" if accepted else "REJECTED"
+        state["pending_action"] = deepcopy(pending_action)
     log = state.setdefault("decision_log", [])
     if isinstance(log, list):
         log.append(deepcopy(resolved))
@@ -1525,7 +1816,9 @@ def apply_resolved_intent(
 
 def clarification_output(
     pending_action: dict[str, Any] | None,
+    interaction_state: InteractionState = InteractionState.GUIDED_DESIGN,
 ) -> StepOutput:
+    emvr_mode = interaction_state is InteractionState.EMVR_DIRECT
     if pending_action:
         if pending_action.get("type") == "ANSWER_IDEA_FACET":
             proposal = pending_action.get("proposal", {})
@@ -1571,18 +1864,34 @@ def clarification_output(
                 and candidate_saved
             ):
                 message = (
-                    "我已经保存你刚才的描述，不需要重写。"
-                    "如果那段正是在回答这个问题，直接告诉我沿用即可；"
-                    "如果还缺一个要点，只补充缺少的内容就好。"
+                    "上一轮提供的设计描述已经保留，无需重新录入。"
+                    "如果它就是当前设计项的最终表述，请确认沿用；"
+                    "如需修订，只补充缺失的物理关系或Unity映射即可。"
                 )
             elif repeat_count > 2:
-                message = (
-                    "这一点先不要求你重复。你可以请我给一个可修改的参考，"
-                    "也可以直接补充一个新的关键细节。"
-                )
+                if emvr_mode:
+                    message = (
+                        "当前设计项先沿用现有草稿，不要求重复输入。"
+                        "你可以要求一份可修订的专业参考，也可以直接补充新的物理约束或Unity交互要求。"
+                    )
+                else:
+                    message = (
+                        "这一点先不用重复。你可以让我给一个可修改的参考，"
+                        "也可以直接补充一个新的关键细节。"
+                    )
             else:
-                message = f"当前还需要明确：{question or '请补充这一阶段最关键的设计内容。'}"
-                message += " 如果暂时没有想法，我可以先给一个可修改的参考。"
+                if emvr_mode:
+                    message = (
+                        "当前设计评审还缺少一项信息："
+                        f"{question or '请补充与研究问题直接相关的物理或Unity设计要求。'}"
+                        " 如需参考，我可以先给出一份可修订的专业草稿。"
+                    )
+                else:
+                    message = (
+                        "我们还差一个关键点："
+                        f"{question or '请补充这一部分最重要的设计内容。'}"
+                        " 如果暂时没有想法，我可以先给一个可修改的参考。"
+                    )
             return StepOutput(
                 assistant_message=message,
                 stage_payload={"clarification_required": True},
@@ -1592,22 +1901,44 @@ def clarification_output(
             pending_action.get("type") in CONFIRMATION_PENDING_TYPES
             and str(pending_action.get("candidate_answer") or "").strip()
         ):
+            if emvr_mode:
+                message = (
+                    "现有设计草稿和你刚补充的内容都已保留，无需重新表述。"
+                    "请确认是否将这项修订并入当前EMVR设计；如有遗漏，直接指出对应的物理模型或Unity设计层即可。"
+                )
+            else:
+                message = (
+                    "前面的想法和你刚补充的内容都保留着，不用重写。"
+                    "请告诉我是否把这项补充接进当前设计；如果还有遗漏，直接补充就可以。"
+                )
             return StepOutput(
-                assistant_message=(
-                    "我已经保留当前草稿，也保存了你刚才的补充，不需要重写。"
-                    "请确认是否把那条内容合并进当前设计；如果还有遗漏，直接补充即可。"
-                ),
+                assistant_message=message,
                 stage_payload={"clarification_required": True},
                 student_task=None,
             )
-        prompt = (
-            "我还不能确定你想怎样处理刚才的安排。"
-            "请简短说明是保留、修改、取消，还是完成当前部分后继续。"
-        )
+        if emvr_mode:
+            prompt = (
+                "我还不能确定你希望如何处理当前设计草稿。"
+                "请说明是沿用、修订、撤回，还是确认后进入下一项设计评审。"
+            )
+        else:
+            prompt = (
+                "我还没完全明白你想怎样处理刚才的想法。"
+                "请简单告诉我是保留、修改、取消，还是整理好这一部分后继续。"
+            )
         if question:
-            prompt += f" 我理解你是在回应这个问题：{question}"
+            prompt += f" 刚才我们讨论的是：{question}"
     else:
-        prompt = "我还不能确定你希望继续当前内容、返回前面，还是开始一个新方向。请简短说明你的意图。"
+        if emvr_mode:
+            prompt = (
+                "我还不能确定你希望继续当前EMVR设计、返回已有设计项，还是建立新的实验方向。"
+                "请简短说明要执行哪一种调整。"
+            )
+        else:
+            prompt = (
+                "我还没完全明白你想继续现在的想法、回到前面，还是换一个新方向。"
+                "请简单说明一下，我们再接着完善。"
+            )
     return StepOutput(
         assistant_message=prompt,
         stage_payload={"clarification_required": True},
@@ -1636,6 +1967,11 @@ def serialize_intent_input(
             "interaction_state": session.interaction_state.value,
             "previous_question": previous_question,
             "pending_action": pending_action,
+            "pending_action_role": (
+                "当前仍待明确的内容；它不是限制学生本轮只能回答这一项的指令"
+                if pending_action
+                else None
+            ),
             "carried_context": intent_context,
             "user_message": user_message,
         },

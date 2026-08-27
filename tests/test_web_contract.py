@@ -27,6 +27,10 @@ class WebFrontendContractTests(unittest.TestCase):
     def test_public_config_keeps_api_base_url_blank(self) -> None:
         self.assertIn('API_BASE_URL: ""', self.config_js)
 
+    def test_student_facing_chart_copy_does_not_expose_internal_stage_number(self) -> None:
+        self.assertIn("依据当前实验采用的理论关系生成", self.index_html)
+        self.assertNotIn("依据阶段5所选公式生成", self.index_html)
+
     def test_pages_build_injects_api_url_from_repository_variable(self) -> None:
         self.assertIn("vars.ECE329_API_BASE_URL", self.pages_workflow)
         self.assertIn("tools/configure_pages_api.py", self.pages_workflow)
@@ -66,7 +70,7 @@ class WebFrontendContractTests(unittest.TestCase):
             2,
         )
         self.assertIn(
-            "assets/app.js?v=20260825-emvr-report",
+            "assets/app.js?v=20260828-language-audit",
             self.index_html,
         )
 

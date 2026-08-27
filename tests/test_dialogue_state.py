@@ -68,6 +68,27 @@ class ScriptedSemanticGenerator(RuleBasedStageGenerator):
         )
 
 
+class MultiActSemanticGenerator(RuleBasedStageGenerator):
+    def __init__(self, acts: list[dict]) -> None:
+        self.acts = acts
+        self.calls: list[dict] = []
+
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        self.calls.append(
+            {
+                "message": user_message,
+                "pending_action": pending_action,
+                "carried_context": carried_context,
+            }
+        )
+        return resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.98,
+            source="SEMANTIC_MODEL",
+            dialogue_acts=self.acts,
+        )
+
+
 def variable_stage_session(design_id: str) -> DesignSession:
     session = DesignSession(
         design_id=design_id,
@@ -1243,6 +1264,678 @@ class DialogueStateTests(unittest.TestCase):
         ][0]
         self.assertEqual(comparison["adoption_status"], "ACCEPTED")
 
+    def test_multi_act_turn_commits_answer_observation_and_course_question(self) -> None:
+        research = "比较同种与异种电荷靠近时，中间区域的场线如何变化"
+        observation = "观察空白区和弯曲连接随距离的变化"
+        question = "为什么异种电荷的场线会弯曲相连？"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": research,
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "observations",
+                    "operation": "MERGE",
+                    "content": [observation],
+                    "confidence": 0.98,
+                },
+                {
+                    "type": "ASK_COURSE_QUESTION",
+                    "target": "course_explanation",
+                    "operation": "MERGE",
+                    "content": question,
+                    "confidence": 0.98,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_multi_act_answer_question")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"{research}，另外{observation}。{question}"},
+        )
+
+        self.assertEqual(
+            result["stage_payload"]["design_state"]["research_question"],
+            research,
+        )
+        self.assertEqual(
+            result["stage_payload"]["stage_design_state"]["observations"],
+            observation,
+        )
+        self.assertEqual(
+            result["stage_payload"]["idea_development_status"]["active_facet_id"],
+            "learning_objective",
+        )
+        self.assertIn("研究问题", result["assistant_message"])
+        self.assertIn("观察内容", result["assistant_message"])
+        stored = engine.get_design(session.design_id, include_history=True)
+        resolved = stored["history"][-1]["resolved_intent"]
+        self.assertEqual(resolved["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+
+    def test_multi_act_edit_other_field_keeps_pending_research_question(self) -> None:
+        objective = "能够解释电荷极性与距离如何共同影响场线分布"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "learning_objective",
+                    "operation": "REPLACE",
+                    "content": objective,
+                    "confidence": 0.99,
+                }
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_multi_act_nonpending_edit")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"先把学习目标改成：{objective}，研究问题我稍后再补。"},
+        )
+
+        status = result["stage_payload"]["idea_development_status"]
+        self.assertEqual(status["facets_by_id"]["learning_objective"]["status"], "CLEAR")
+        self.assertEqual(status["active_facet_id"], "research_question")
+        self.assertEqual(result["stage_payload"]["design_state"]["learning_objective"], objective)
+        self.assertIn("学习目标", result["assistant_message"])
+
+    def test_partial_multi_act_commits_valid_part_and_clarifies_only_remainder(self) -> None:
+        hypothesis = "距离越近，场线弯曲和重排越明显"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "hypothesis",
+                    "operation": "REPLACE",
+                    "content": hypothesis,
+                    "confidence": 0.98,
+                },
+                {
+                    "type": "UNRESOLVED",
+                    "target": "",
+                    "operation": "MERGE",
+                    "content": "后半句关于另一个比较我还没说清",
+                    "confidence": 0.91,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_partial_multi_act")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"我的预测是{hypothesis}，后半句关于另一个比较我还没说清。"},
+        )
+
+        self.assertEqual(result["stage_payload"]["design_state"]["hypothesis"], hypothesis)
+        self.assertIn("假设", result["assistant_message"])
+        self.assertIn("还有一句我没完全理解", result["assistant_message"])
+        self.assertNotIn("我还不能确定你希望继续", result["assistant_message"])
+
+    def test_multi_act_later_stage_updates_fields_independently(self) -> None:
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "independent_variable",
+                    "operation": "REPLACE",
+                    "content": "两个电荷之间的距离",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "observations",
+                    "operation": "MERGE",
+                    "content": ["中间区域场线形状", "零场区域位置"],
+                    "confidence": 0.98,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "controlled_conditions",
+                    "operation": "REPLACE",
+                    "content": ["电荷量大小", "观察平面"],
+                    "confidence": 0.98,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = variable_stage_session("design_multi_act_variables")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "距离作为自变量，观察场线和零场位置，并保持电荷量与观察平面不变。"},
+        )
+
+        stage_state = result["stage_payload"]["stage_design_state"]
+        self.assertEqual(stage_state["independent_variable"], "两个电荷之间的距离")
+        self.assertIn("中间区域场线形状", stage_state["observations"])
+        self.assertIn("零场区域位置", stage_state["observations"])
+        self.assertIn("电荷量大小", stage_state["controlled_conditions"])
+        self.assertNotEqual(
+            stage_state["independent_variable"],
+            stage_state["observations"],
+        )
+
+    def test_stage_answer_can_target_a_field_inside_the_pending_stage(self) -> None:
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "independent_variable",
+                    "operation": "REPLACE",
+                    "content": "两个电荷之间的距离",
+                    "confidence": 0.99,
+                }
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = variable_stage_session("design_stage_field_answer")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "我会主动改变两个电荷之间的距离。"},
+        )
+
+        self.assertEqual(
+            result["stage_payload"]["stage_design_state"]["independent_variable"],
+            "两个电荷之间的距离",
+        )
+        resolved = engine.store.get(session.design_id).model_context[
+            "dialogue_state"
+        ]["resolved_intent"]
+        self.assertEqual(resolved["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+        self.assertEqual(
+            resolved["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
+
+    def test_multi_act_updates_are_shared_by_emvr_mode(self) -> None:
+        research = "距离减小时，导体与介质附近的电场线分布如何变化"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": research,
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "unity_objects",
+                    "operation": "MERGE",
+                    "content": ["点电荷源", "可切换材料的测试物体"],
+                    "confidence": 0.98,
+                },
+                {
+                    "type": "ASK_COURSE_QUESTION",
+                    "target": "course_explanation",
+                    "operation": "MERGE",
+                    "content": "介质为什么会改变附近的场线？",
+                    "confidence": 0.97,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = variable_stage_session("design_emvr_multi_act")
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "请改研究问题并加入两个Unity对象，另外解释介质为何改变场线。"},
+        )
+
+        self.assertEqual(result["stage_payload"]["design_state"]["research_question"], research)
+        self.assertIn(
+            "点电荷源",
+            result["stage_payload"]["stage_design_state"]["unity_objects"],
+        )
+        self.assertIn("研究问题", result["assistant_message"])
+        self.assertIn("VR实验对象", result["assistant_message"])
+
+    def test_field_update_and_summary_request_both_execute(self) -> None:
+        objective = "能够解释距离与电荷极性如何共同改变场线分布"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_DESIGN_FIELD",
+                        "target": "learning_objective",
+                        "operation": "REPLACE",
+                        "content": objective,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "REQUEST_SUMMARY",
+                        "target": "current_design",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.98,
+                    },
+                ]
+            )
+        )
+        session = idea_facet_session("design_update_and_summary")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "把学习目标改成这句话，然后把当前设计整体列出来。"},
+        )
+
+        self.assertTrue(result["stage_payload"]["read_only_design_summary"])
+        self.assertEqual(
+            result["stage_payload"]["design_state"]["learning_objective"],
+            objective,
+        )
+        self.assertIn(objective, result["assistant_message"])
+
+    def test_stage_field_update_and_advance_both_execute(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "observations",
+                        "operation": "MERGE",
+                        "content": "同时记录零场位置",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                ]
+            )
+        )
+        session = variable_stage_session("design_update_and_advance")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "再记录零场位置，然后继续整理后面的流程。"},
+        )
+
+        self.assertEqual(result["handled_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+        self.assertIn(
+            "零场位置",
+            result["stage_payload"]["stage_design_state"]["observations"],
+        )
+
+    def test_structured_stage_answer_can_advance_without_old_draft_payload(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "ANSWER_PENDING_QUESTION",
+                        "target": "independent_variable",
+                        "operation": "REPLACE",
+                        "content": "两个源之间的距离",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                ]
+            )
+        )
+        session = variable_stage_session("design_structured_answer_advance")
+        session.stage_outputs = {}
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "我会改变两个源的距离，然后继续整理流程。"},
+        )
+
+        self.assertEqual(result["handled_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+        self.assertEqual(
+            result["stage_payload"]["stage_design_state"]["independent_variable"],
+            "两个源之间的距离",
+        )
+
+    def test_emvr_structured_answer_and_advance_are_processed_together(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "ANSWER_PENDING_QUESTION",
+                        "target": "independent_variable",
+                        "operation": "REPLACE",
+                        "content": "两个带电物体之间的距离",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                ]
+            )
+        )
+        session = variable_stage_session("design_emvr_answer_advance")
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value][
+            "stage_payload"
+        ]["awaiting_user_design_input"] = True
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "让距离连续减小，并继续整理VR实验流程。"},
+        )
+
+        self.assertEqual(result["handled_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+        self.assertEqual(
+            result["stage_payload"]["stage_design_state"]["independent_variable"],
+            "两个带电物体之间的距离",
+        )
+
+    def test_stage_field_update_and_reference_request_both_execute(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "observations",
+                        "operation": "MERGE",
+                        "content": "记录中间区域场线",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "REQUEST_REFERENCE",
+                        "target": "current_stage",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.98,
+                    },
+                ]
+            )
+        )
+        session = variable_stage_session("design_update_and_reference")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "增加中间区域场线，并给我一套课程内变量参考。"},
+        )
+
+        self.assertTrue(result["stage_payload"]["reference_only"])
+        self.assertIn(
+            "中间区域场线",
+            result["stage_payload"]["stage_design_state"]["observations"],
+        )
+
+    def test_accept_control_is_not_lost_beside_a_field_update(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "CONTROL",
+                        "target": "ACCEPT",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "observations",
+                        "operation": "MERGE",
+                        "content": "增加零场位置",
+                        "confidence": 0.98,
+                    },
+                ]
+            )
+        )
+        session = variable_stage_session("design_accept_and_update")
+        pending = current_pending_action(session)
+        assert pending is not None
+        subject = pending["subject"]
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "保留这套变量安排，再增加零场位置。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        self.assertIn(subject, stored.design_context["resolved_decisions"])
+        self.assertIn(
+            "零场位置",
+            result["stage_payload"]["stage_design_state"]["observations"],
+        )
+
+    def test_invalid_subaction_does_not_hide_valid_commit(self) -> None:
+        hypothesis = "距离越近，场线重排越明显"
+        bad_fragment = "把这句放到一个不存在的设计位置"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_DESIGN_FIELD",
+                        "target": "hypothesis",
+                        "operation": "REPLACE",
+                        "content": hypothesis,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_DESIGN_FIELD",
+                        "target": "unknown_field",
+                        "operation": "MERGE",
+                        "content": bad_fragment,
+                        "confidence": 0.96,
+                    },
+                ]
+            )
+        )
+        session = idea_facet_session("design_partial_invalid_action")
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": "同时修改两项。"})
+
+        self.assertEqual(result["stage_payload"]["design_state"]["hypothesis"], hypothesis)
+        self.assertIn(bad_fragment, result["assistant_message"])
+        self.assertIn("还有一句我没完全理解", result["assistant_message"])
+
+    def test_course_question_is_not_saved_as_pending_design_answer(self) -> None:
+        question = "为什么异种电荷的场线会从正电荷连向负电荷？"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "ASK_COURSE_QUESTION",
+                        "target": "electrostatics_explanation",
+                        "operation": "MERGE",
+                        "content": question,
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = idea_facet_session("design_question_not_fact")
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": question})
+
+        self.assertEqual(result["stage_payload"]["design_state"]["research_question"], "")
+        pending = current_pending_action(engine.store.get(session.design_id))
+        assert pending is not None
+        self.assertEqual(pending["subject"], "research_question")
+
+    def test_correction_and_rewrite_are_separate_actions(self) -> None:
+        corrected = "比较两种极性配置下，距离变化如何影响中间区域场线"
+        feedback = "你刚才把观察现象写成了新的实验方向"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "CORRECT_ASSISTANT",
+                        "target": "previous_interpretation",
+                        "operation": "MERGE",
+                        "content": feedback,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_DESIGN_FIELD",
+                        "target": "research_question",
+                        "operation": "REPLACE",
+                        "content": corrected,
+                        "confidence": 0.99,
+                    },
+                ]
+            )
+        )
+        session = idea_facet_session("design_feedback_and_rewrite")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"{feedback}，请改成：{corrected}"},
+        )
+
+        research = result["stage_payload"]["design_state"]["research_question"]
+        self.assertEqual(research, corrected)
+        self.assertNotIn(feedback, research)
+        stored = engine.store.get(session.design_id)
+        guided_inputs = stored.design_context["guided_stage_inputs"][
+            Stage.IDEA_BRAINSTORMING.value
+        ]
+        self.assertEqual(guided_inputs[-1]["content"], corrected)
+        self.assertNotIn(feedback, str(guided_inputs[-1]["content"]))
+
+    def test_emvr_stage_context_excludes_feedback_from_a_mixed_revision(self) -> None:
+        feedback = "你刚才把新增交互误解成了新的实验方向"
+        interaction = "增加可移动探测器读取中间区域的理论场强"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "CORRECT_ASSISTANT",
+                        "target": "previous_interpretation",
+                        "operation": "MERGE",
+                        "content": feedback,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "interactions",
+                        "operation": "MERGE",
+                        "content": interaction,
+                        "confidence": 0.99,
+                    },
+                ]
+            )
+        )
+        session = idea_facet_session("design_emvr_clean_mixed_context")
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        session.design_context["emvr_design"] = {
+            "brief": "比较两个带电物体靠近时的场线变化",
+            "current_brief": "比较两个带电物体靠近时的场线变化",
+            "brief_revisions": [],
+        }
+        engine.store.save(session)
+
+        engine.process_turn(
+            session.design_id,
+            {"message": f"{feedback}；{interaction}。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        emvr_design = stored.design_context["emvr_design"]
+        self.assertIn(interaction, emvr_design["current_brief"])
+        self.assertNotIn(feedback, emvr_design["current_brief"])
+        stage_entry = emvr_design["stage_inputs"][Stage.IDEA_BRAINSTORMING.value][-1]
+        self.assertEqual(stage_entry["content"], interaction)
+
+    def test_new_topic_act_uses_only_its_structured_content(self) -> None:
+        new_topic = "研究传输线负载匹配与反射系数的关系"
+        new_question = "改变负载阻抗时，反射系数的幅值和相位怎样变化？"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "NEW_TOPIC",
+                        "target": "experiment_direction",
+                        "operation": "EXECUTE",
+                        "content": new_topic,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_DESIGN_FIELD",
+                        "target": "research_question",
+                        "operation": "REPLACE",
+                        "content": new_question,
+                        "confidence": 0.99,
+                    },
+                ]
+            )
+        )
+        session = variable_stage_session("design_structured_new_topic")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"换成{new_topic}，并把研究问题写成：{new_question}"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        self.assertEqual(stored.design_context["idea"]["original"], new_topic)
+        self.assertEqual(
+            result["stage_payload"]["design_state"]["research_question"],
+            new_question,
+        )
+        self.assertNotIn("并把研究问题", stored.design_context["idea"]["original"])
+
+    def test_invalid_empty_new_topic_act_cannot_reset_the_design(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "NEW_TOPIC",
+                        "target": "experiment_direction",
+                        "operation": "EXECUTE",
+                        "content": "",
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = variable_stage_session("design_reject_empty_new_topic")
+        original_idea = session.design_context["idea"]["main_direction"]
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "我想换一个方向，但还没有说具体内容。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        self.assertEqual(stored.current_stage, Stage.VARIABLES_AND_CONDITIONS)
+        self.assertEqual(stored.design_context["idea"]["main_direction"], original_idea)
+        self.assertTrue(result["stage_payload"]["clarification_required"])
+
     def test_trail9_confirmation_reuses_candidate_research_answer(self) -> None:
         class CandidateConfirmationGenerator(RuleBasedStageGenerator):
             def __init__(self) -> None:
@@ -2119,6 +2812,119 @@ class DialogueStateTests(unittest.TestCase):
         comparison = session.design_context["idea"]["standard_comparisons"][0]
         self.assertEqual(comparison["adoption_status"], "PENDING")
         self.assertEqual(comparison["cases"], ["甲", "乙"])
+
+    def test_multi_act_notice_uses_interactive_guided_language(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_DESIGN_FIELD",
+                        "target": "learning_objective",
+                        "operation": "REPLACE",
+                        "content": "解释距离变化如何改变电场线分布",
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = idea_facet_session("design_guided_tone")
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "我希望最后能解释距离变化如何改变电场线分布。"},
+        )
+
+        self.assertIn("接到现有想法里", result["assistant_message"])
+        self.assertNotIn("已同步修订设计中的", result["assistant_message"])
+        self.assertNotIn("设计字段", result["assistant_message"])
+
+    def test_multi_act_notice_uses_professional_emvr_language(self) -> None:
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "unity_objects",
+                        "operation": "MERGE",
+                        "content": ["点电荷源", "场线可视化对象"],
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = variable_stage_session("design_emvr_tone")
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "加入点电荷源和场线可视化对象。"},
+        )
+
+        self.assertIn("已同步修订设计中的", result["assistant_message"])
+        self.assertIn("VR实验对象", result["assistant_message"])
+        self.assertIn("Unity", result["assistant_message"])
+
+    def test_feedback_only_reply_uses_mode_specific_language(self) -> None:
+        feedback_act = [
+            {
+                "type": "CORRECT_ASSISTANT",
+                "target": "previous_interpretation",
+                "operation": "MERGE",
+                "content": "你把我的补充误解成了新方向",
+                "confidence": 0.99,
+            }
+        ]
+
+        guided_engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(feedback_act)
+        )
+        guided = idea_facet_session("design_guided_feedback_tone")
+        guided_engine.store.save(guided)
+        guided_result = guided_engine.process_turn(
+            guided.design_id,
+            {"message": "你把我的补充误解成了新方向。"},
+        )
+
+        emvr_engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(feedback_act)
+        )
+        emvr = variable_stage_session("design_emvr_feedback_tone")
+        emvr.interaction_state = InteractionState.EMVR_DIRECT
+        emvr_engine.store.save(emvr)
+        emvr_result = emvr_engine.process_turn(
+            emvr.design_id,
+            {"message": "你把我的补充误解成了新方向。"},
+        )
+
+        self.assertIn("你提醒得对", guided_result["assistant_message"])
+        self.assertIn("我们就从那里接着完善", guided_result["assistant_message"])
+        self.assertIn("收到这项校正", emvr_result["assistant_message"])
+        self.assertIn("物理模型、Unity交互还是展示方式", emvr_result["assistant_message"])
+        self.assertNotIn("字段", emvr_result["assistant_message"])
+
+    def test_clarification_language_matches_interaction_mode(self) -> None:
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": "variable_plan",
+            "question": "哪些参数需要保持不变？",
+            "allowed_intents": [UserIntent.ANSWER_CURRENT_QUESTION.value],
+        }
+
+        guided = clarification_output(
+            pending,
+            InteractionState.GUIDED_DESIGN,
+        )
+        emvr = clarification_output(
+            pending,
+            InteractionState.EMVR_DIRECT,
+        )
+
+        self.assertIn("我们还差一个关键点", guided.assistant_message)
+        self.assertIn("可修改的参考", guided.assistant_message)
+        self.assertIn("当前设计评审", emvr.assistant_message)
+        self.assertIn("专业草稿", emvr.assistant_message)
 
 
 if __name__ == "__main__":

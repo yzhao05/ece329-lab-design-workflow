@@ -24,6 +24,7 @@ from .dialogue_state import (
     serialize_intent_input,
     validate_resolved_intent,
 )
+from .dialogue_acts import DIALOGUE_ACT_TYPES
 from .emvr_design import EMVR_THEORY_RELATIONS
 from .design_state import seen_scene_signatures
 from .generator import (
@@ -329,6 +330,7 @@ def _intent_response_schema() -> dict[str, Any]:
             "target": {"type": ["string", "null"]},
             "resolved_value_json": {"type": ["string", "null"]},
             "semantic_updates_json": {"type": ["string", "null"]},
+            "dialogue_acts_json": {"type": ["string", "null"]},
             "advance_requested": {"type": "boolean"},
             "preserve_current_design": {"type": "boolean"},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -338,6 +340,7 @@ def _intent_response_schema() -> dict[str, Any]:
             "target",
             "resolved_value_json",
             "semantic_updates_json",
+            "dialogue_acts_json",
             "advance_requested",
             "preserve_current_design",
             "confidence",
@@ -372,6 +375,15 @@ def _parse_intent_response(
         if not isinstance(parsed_updates, dict):
             raise ModelOutputError("Intent semantic_updates_json must encode an object")
         semantic_updates = parsed_updates
+    encoded_acts = raw.get("dialogue_acts_json")
+    if isinstance(encoded_acts, str):
+        try:
+            parsed_acts = json.loads(encoded_acts)
+        except json.JSONDecodeError as exc:
+            raise ModelOutputError("Intent dialogue_acts_json was invalid") from exc
+        if not isinstance(parsed_acts, list):
+            raise ModelOutputError("Intent dialogue_acts_json must encode an array")
+        raw["dialogue_acts"] = parsed_acts
     return raw, resolved_value, semantic_updates
 
 
@@ -580,6 +592,13 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         "知识目录",
         "stage_payload",
         "结构化字段",
+        "状态机",
+        "待办状态",
+        "提交状态",
+        "pending_action",
+        "resolved_intent",
+        "dialogue_acts",
+        "design_state",
         "concept_id",
         "supplemental_concept_id",
         "pdf",
@@ -1599,12 +1618,33 @@ class OpenAIStageGenerator:
         payload = {
             "model": self.model,
             "instructions": (
-                "你只负责识别学生本轮对话意图，不回答课程问题，也不决定阶段编号。"
+                "你只负责把学生本轮消息拆成一个或多个可执行对话动作，不回答课程问题，也不决定阶段编号。"
                 "必须结合previous_question、pending_action、carried_context和user_message。"
+                "dialogue_acts_json必须是JSON序列化数组；它是主要输出。不要假设学生只会按"
+                "previous_question预设的格式回答。同一句可以同时包含：回答当前问题、补充或修改"
+                "其他设计字段、修改基础比较、提出课程问题、索取参考或总结、纠正助手理解，以及"
+                "继续或返回等控制动作。必须逐项拆开，不能把整句复制进一个动作，也不能因为一项"
+                "不清楚就丢弃其他清楚项。每个动作包含type、target、operation、content、confidence；"
+                "type只能为ANSWER_PENDING_QUESTION、MODIFY_DESIGN_FIELD、MODIFY_STAGE_FIELD、"
+                "MODIFY_COMPARISON、ASK_COURSE_QUESTION、REQUEST_REFERENCE、REQUEST_SUMMARY、"
+                "CORRECT_ASSISTANT、CONTROL、NEW_TOPIC或UNRESOLVED。"
+                "ANSWER_PENDING_QUESTION只保存真正回答pending_action.subject的内容；"
+                "MODIFY_DESIGN_FIELD的target只能是research_object、course_relationship、"
+                "learning_objective、research_question、theoretical_framework、hypothesis、"
+                "expected_phenomenon、conceptual_structure；MODIFY_STAGE_FIELD的target只能是"
+                "independent_variable、observations、controlled_conditions、procedure_steps、"
+                "visualization_plan、result_interpretation、limitations、unity_objects、interactions。"
+                "operation只能为MERGE、REPLACE或CLEAR。课程疑问必须单独作为ASK_COURSE_QUESTION，"
+                "不能保存成实验观点；对遗漏、曲解或重复的反馈必须作为CORRECT_ASSISTANT，除非同句"
+                "还明确给出字段新值，否则不能据此覆盖设计。无法理解的片段单独放UNRESOLVED，"
+                "其他动作仍正常返回。CONTROL的target只能为ACCEPT、REJECT、ADVANCE、RETURN、"
+                "SET_GUIDED_MODE或SET_EMVR_MODE。每个动作的content只含该动作的实质内容。"
+                "外层intent、target、resolved_value_json和semantic_updates_json继续返回，作为旧接口"
+                "兼容摘要；外层intent应概括最主要动作，但不得用它压掉dialogue_acts_json中的并行动作。"
                 "可选意图只有ANSWER_CURRENT_QUESTION、ACCEPT_PREVIOUS_PROPOSAL、"
                 "MODIFY_PREVIOUS_PROPOSAL、REJECT_PREVIOUS_PROPOSAL、ADVANCE_STAGE、"
                 "REQUEST_MORE_EXAMPLES、REQUEST_CURRENT_DESIGN_SUMMARY、"
-                "RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、"
+                "ASK_COURSE_QUESTION、PROVIDE_FEEDBACK、RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、"
                 "SET_INTERACTION_STATE、UNCLEAR。"
                 "凡是必须依赖上一轮才能理解的表达都要走这一套语义判断，包括指代某个或多个选项、"
                 "组合前述图景、表示暂无方向、回答或撤回想法完整性要点、接受或局部修改建议、"
@@ -1629,7 +1669,10 @@ class OpenAIStageGenerator:
                 "假设、预期现象、概念结构或基础比较时，返回REQUEST_CURRENT_DESIGN_SUMMARY。这是只读请求，"
                 "semantic_updates_json为null，resolved_value_json返回学生要求查看的field ID数组；"
                 "基础比较的field ID为baseline_comparisons；若要求全部则返回null。不得把它当成"
-                "回答、修改或阶段推进。"
+                "回答、修改或阶段推进。若同一句还明确修改了字段，则必须同时返回"
+                "REQUEST_SUMMARY动作和对应的字段修改动作；此时不能因为有总结请求就把"
+                "semantic_updates_json清空。索取参考与保留、继续、返回等控制动作同理，"
+                "都必须与同句中的实质更新并列保留。"
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自pending_action中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
@@ -1646,6 +1689,12 @@ class OpenAIStageGenerator:
                 "expected_phenomenon、conceptual_structure；operation只能为MERGE、REPLACE、CLEAR。"
                 "一个请求修改几项就返回几项，不得合并字段。学生补充且保留原内容时必须MERGE；"
                 "明确改写时REPLACE。模型只提出修改，程序负责验证和提交）、"
+                "stage_field_updates（后续阶段和EMVR中的字段级更新；field只能为"
+                "independent_variable、observations、controlled_conditions、procedure_steps、"
+                "visualization_plan、result_interpretation、limitations、unity_objects、interactions；"
+                "operation同样只能为MERGE、REPLACE、CLEAR。用户一轮修改几项就逐项返回几项）、"
+                "student_questions、feedback_items与unresolved_content（分别保存用户课程问题、"
+                "对助手理解的纠错反馈和仍无法解析的局部内容；这些文字不能写入设计字段）、"
                 "comparison_updates（修改现有组时comparison_id必须来自pending_action或"
                 "carried_context，action为ACCEPT、MODIFY或REJECT；学生提出与现有组不同的"
                 "新比较维度时action=CREATE、comparison_id留空，title和new_cases必须取自学生原话。"
@@ -1773,6 +1822,16 @@ class OpenAIStageGenerator:
                 self._intent_api_failures += 1
             raise
         raw_intent = str(raw.get("intent") or "UNCLEAR")
+        raw_dialogue_acts = raw.get("dialogue_acts", [])
+        has_executable_dialogue_acts = bool(
+            isinstance(raw_dialogue_acts, list)
+            and any(
+                isinstance(item, dict)
+                and str(item.get("type") or "").upper() in DIALOGUE_ACT_TYPES
+                and str(item.get("type") or "").upper() != "UNRESOLVED"
+                for item in raw_dialogue_acts
+            )
+        )
         pending_type = (
             str(pending_action.get("type") or "")
             if isinstance(pending_action, dict)
@@ -1780,6 +1839,7 @@ class OpenAIStageGenerator:
         )
         unresolved_pending_response = bool(
             raw_intent == "UNCLEAR"
+            and not has_executable_dialogue_acts
             and isinstance(pending_action, dict)
             and (
                 pending_action.get("type") in OPEN_QUESTION_PENDING_TYPES
@@ -1788,6 +1848,7 @@ class OpenAIStageGenerator:
         )
         unresolved_stage_entry_response = bool(
             raw_intent == "UNCLEAR"
+            and not has_executable_dialogue_acts
             and pending_action is None
             and session.current_stage is Stage.IDEA_BRAINSTORMING
         )
@@ -1815,12 +1876,12 @@ class OpenAIStageGenerator:
             or unresolved_stage_entry_response
             or confirmed_candidate_modification
             or unbacked_open_question_acceptance
-            or answer_status_conflict
-            or pending_question_decision_missing(
+            or (answer_status_conflict and not has_executable_dialogue_acts)
+            or (not has_executable_dialogue_acts and pending_question_decision_missing(
                 raw_intent,
                 semantic_updates,
                 pending_action,
-            )
+            ))
         ):
             required_facet = required_pending_facet_id(pending_action)
             repair_payload = deepcopy(payload)
@@ -1892,6 +1953,16 @@ class OpenAIStageGenerator:
                 with self._metrics_lock:
                     self._intent_api_failures += 1
                 raise
+        raw_dialogue_acts = raw.get("dialogue_acts", [])
+        has_executable_dialogue_acts = bool(
+            isinstance(raw_dialogue_acts, list)
+            and any(
+                isinstance(item, dict)
+                and str(item.get("type") or "").upper() in DIALOGUE_ACT_TYPES
+                and str(item.get("type") or "").upper() != "UNRESOLVED"
+                for item in raw_dialogue_acts
+            )
+        )
         repaired_intent = str(raw.get("intent") or "UNCLEAR")
         required_facet_after_repair = required_pending_facet_id(pending_action)
         facet_explicitly_missing = any(
@@ -1906,7 +1977,12 @@ class OpenAIStageGenerator:
             or facet_explicitly_missing
             or semantic_updates.get("course_scope_status") == "OUT_OF_SCOPE"
         )
-        if (
+        if has_executable_dialogue_acts:
+            # Field-level acts are validated independently downstream.  The
+            # compatibility intent may be UNCLEAR without invalidating clear
+            # acts from the same turn.
+            pass
+        elif (
             repaired_intent == "UNCLEAR"
             and pending_action is None
             and session.current_stage is Stage.IDEA_BRAINSTORMING
@@ -2062,6 +2138,11 @@ class OpenAIStageGenerator:
             confidence=raw.get("confidence", 0.0),
             source="SEMANTIC_MODEL",
             semantic_updates=semantic_updates,
+            dialogue_acts=(
+                raw.get("dialogue_acts")
+                if isinstance(raw.get("dialogue_acts"), list)
+                else []
+            ),
         )
         validated = validate_resolved_intent(candidate, pending_action)
         if (

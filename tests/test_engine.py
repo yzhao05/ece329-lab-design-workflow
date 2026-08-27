@@ -665,6 +665,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["stage_status"], "active")
         self.assertTrue(result["student_task"])
         self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
+        self.assertNotIn("preserved_context", result["stage_payload"])
+        self.assertNotIn("pending_action", result["stage_payload"])
         self.assertEqual(result["task_report"]["sections"], [])
         self.assertFalse(result["report_ready"])
         self.assertNotIn("图景", result["assistant_message"])

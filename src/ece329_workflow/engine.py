@@ -28,9 +28,11 @@ from .dialogue_state import (
 )
 from .generator import (
     StageGenerator,
+    _guided_reference_output,
     guided_stage_entry_output,
 )
 from .emvr_design import apply_emvr_field_updates
+from .dialogue_acts import stage_design_state_snapshot
 from .design_state import (
     apply_design_updates,
     design_state_snapshot,
@@ -135,6 +137,42 @@ _GUIDED_COMPLETION_HINTS: dict[Stage, str] = {
     ),
 }
 
+_STRUCTURED_STAGE_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.CONCEPTUAL_OR_VR_SETUP: ("unity_objects", "interactions"),
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "independent_variable",
+        "observations",
+        "controlled_conditions",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+    Stage.RESULT_INTERPRETATION: ("result_interpretation",),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
+}
+
+_EMVR_DESIGN_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.IDEA_BRAINSTORMING: ("research_object", "course_relationship"),
+    Stage.LEARNING_OBJECTIVES: ("learning_objective",),
+    Stage.RESEARCH_QUESTION: ("research_question",),
+    Stage.HYPOTHESIS: ("hypothesis", "expected_phenomenon"),
+}
+
+
+def _has_structured_stage_content(session: DesignSession, stage: Stage) -> bool:
+    design = design_state_snapshot(session)
+    if any(
+        design.get(field)
+        for field in _EMVR_DESIGN_COMPLETION_FIELDS.get(stage, ())
+    ):
+        return True
+    structured = stage_design_state_snapshot(session)
+    return any(
+        structured.get(field)
+        for field in _STRUCTURED_STAGE_COMPLETION_FIELDS.get(stage, ())
+    ) or bool(
+        stage is Stage.EXPECTED_DATA_VISUALIZATION
+        and structured.get("visualization_plan")
+    )
+
 
 def _contains_emvr_marker(text: str) -> bool:
     """Return whether the user explicitly included the EMVR mode marker.
@@ -157,6 +195,73 @@ _TRANSIENT_GUIDED_PAYLOAD_KEYS = {
     "stage_readiness",
     "contextual_continuation",
 }
+
+_STUDENT_FIELD_LABELS = {
+    "research_object": "研究对象",
+    "course_relationship": "课程关系",
+    "learning_objective": "学习目标",
+    "research_question": "研究问题",
+    "theoretical_framework": "理论依据",
+    "hypothesis": "假设",
+    "expected_phenomenon": "预期现象",
+    "conceptual_structure": "实验结构",
+    "independent_variable": "主动改变量",
+    "observations": "观察内容",
+    "controlled_conditions": "控制条件",
+    "procedure_steps": "实验流程",
+    "visualization_plan": "显示方式",
+    "result_interpretation": "结果解释",
+    "limitations": "设计局限",
+    "unity_objects": "VR实验对象",
+    "interactions": "VR交互",
+}
+
+
+def _multi_act_student_notice(
+    semantic_updates: dict[str, Any],
+    interaction_state: InteractionState,
+) -> str:
+    """Describe committed and unresolved parts without exposing internals."""
+
+    changed = [
+        *semantic_updates.get("applied_design_fields", []),
+        *semantic_updates.get("applied_stage_fields", []),
+    ]
+    labels = list(
+        dict.fromkeys(
+            _STUDENT_FIELD_LABELS.get(str(field), str(field))
+            for field in changed
+            if str(field).strip()
+        )
+    )
+    notices: list[str] = []
+    if labels:
+        if interaction_state is InteractionState.EMVR_DIRECT:
+            notices.append(f"已同步修订设计中的{'、'.join(labels)}。")
+        else:
+            notices.append(f"我把你补充的{'、'.join(labels)}接到现有想法里了。")
+    applied_comparisons = semantic_updates.get("applied_comparison_updates", [])
+    if isinstance(applied_comparisons, list) and applied_comparisons:
+        notices.append(
+            "比较条件的修订也已同步到设计草稿。"
+            if interaction_state is InteractionState.EMVR_DIRECT
+            else "你对比较情形的调整也一起保留下来了。"
+        )
+    unresolved = semantic_updates.get("unresolved_content", [])
+    if isinstance(unresolved, list) and unresolved:
+        excerpt = str(unresolved[0]).strip()[:180]
+        notices.append(
+            (
+                "其余可确定的设计项已正常提交。"
+                f"以下片段的目标还不够明确：“{excerpt}”。请只说明它要修改哪一项。"
+            )
+            if interaction_state is InteractionState.EMVR_DIRECT
+            else (
+                "前面已经说清的内容先保留。"
+                f"还有一句我没完全理解：“{excerpt}”。你只要补充说明这一句就可以。"
+            )
+        )
+    return "".join(notices)
 
 
 def _normalized_question(text: str) -> str:
@@ -209,6 +314,10 @@ def _guided_stage_has_minimum_content(
     required_fields = _GUIDED_COMPLETION_FIELDS.get(stage)
     if not required_fields:
         return False
+    structured = stage_design_state_snapshot(session)
+    structured_fields = _STRUCTURED_STAGE_COMPLETION_FIELDS.get(stage, ())
+    if any(structured.get(field) for field in structured_fields):
+        return True
     drafts = session.design_context.get("guided_stage_drafts", {})
     draft = drafts.get(stage.value, {}) if isinstance(drafts, dict) else {}
     combined = deepcopy(draft) if isinstance(draft, dict) else {}
@@ -352,19 +461,19 @@ def _guided_summary_completion_output() -> StepOutput:
 
 
 _EMVR_STAGE_LEADS: dict[Stage, str] = {
-    Stage.IDEA_BRAINSTORMING: "我先把你提出的现象、对象和VR操作整理成一个设计起点。",
-    Stage.COURSE_MAPPING_AND_DIRECTION: "沿用已经确定的想法，我把它和ECE329课程内容的联系整理出来了。",
-    Stage.LEARNING_OBJECTIVES: "这一步先把实验真正要支持的学习目标摆在一起，后面的交互和反馈都要能对应它们。",
-    Stage.RESEARCH_QUESTION: "结合前面的方向和学习目标，我把模拟实验要回答的问题收得更清楚了一些。",
-    Stage.THEORETICAL_FRAMEWORK: "下面把Unity中真正参与计算的量和只用于帮助理解的画面分开。",
-    Stage.HYPOTHESIS: "根据前面的课程关系，我整理了一版可以被后续显示结果检验的预期。",
-    Stage.CONCEPTUAL_OR_VR_SETUP: "现在把已有想法转成Unity VR中的对象、操作、计算和反馈关系。",
-    Stage.VARIABLES_AND_CONDITIONS: "我把参数控制、观察结果和需要固定的条件对应到了Unity交互中。",
-    Stage.CONCEPTUAL_PROCEDURE: "根据前面已经确定的对象和变量，我整理了一套可重复比较的VR学习流程。",
-    Stage.EXPECTED_DATA_VISUALIZATION: "这一步把理论预测如何显示、又如何随Unity参数更新说明清楚。",
-    Stage.RESULT_INTERPRETATION: "为了避免只看见动画却不会解释，我把几类可能结果和检查顺序整理出来了。",
-    Stage.DESIGN_VALUE_AND_LIMITATIONS: "最后检查这套设计能帮助学生理解什么，以及哪些地方不能过度解释。",
-    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "你的EMVR模拟实验设计已经汇总完成，下面是最终报告中保留的主要内容。",
+    Stage.IDEA_BRAINSTORMING: "我先把你提出的电磁现象、实验对象和VR操作整理为设计边界。",
+    Stage.COURSE_MAPPING_AND_DIRECTION: "沿用已经确认的方向，下面核对它与ECE329课程关系的对应。",
+    Stage.LEARNING_OBJECTIVES: "下面把学习目标转换为可由VR交互、理论计算和反馈验证的能力要求。",
+    Stage.RESEARCH_QUESTION: "结合已有目标，下面将变化条件与指定观察响应组织为可检验的研究问题。",
+    Stage.THEORETICAL_FRAMEWORK: "下面区分参与理论计算的物理量、模型假设与仅承担教学表达的视觉元素。",
+    Stage.HYPOTHESIS: "依据已筛选的课程关系，下面给出可由参数变化和理论输出检验的方向性假设。",
+    Stage.CONCEPTUAL_OR_VR_SETUP: "下面把实验要求映射为Unity VR对象、交互职责、计算状态和反馈通道。",
+    Stage.VARIABLES_AND_CONDITIONS: "下面明确可调参数、观察量、控制条件及其Unity交互映射。",
+    Stage.CONCEPTUAL_PROCEDURE: "依据已确认的对象与变量，下面形成可复现、可比较的VR实验流程。",
+    Stage.EXPECTED_DATA_VISUALIZATION: "下面定义理论输出的显示编码，以及它与Unity参数更新事件的对应。",
+    Stage.RESULT_INTERPRETATION: "下面为不同理论结果建立解释路径，并区分物理偏差、模型边界与显示映射问题。",
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: "下面评估现有交互对学习目标的支持程度，并明确模型与VR展示的适用边界。",
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR模拟实验设计已汇总，以下内容构成最终设计报告。",
 }
 
 _EMVR_INTERACTIVE_ENTRY_STAGES = {
@@ -436,7 +545,6 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         stage_payload={
             "emvr_guided_entry": True,
             "awaiting_user_design_input": True,
-            "preserved_context": deepcopy(context),
             "pending_action": {
                 "type": "ANSWER_EMVR_STAGE_QUESTION",
                 "interaction_state": InteractionState.EMVR_DIRECT.value,
@@ -497,13 +605,13 @@ def _prepare_emvr_stage_output(
 
     if stage is Stage.IDEA_BRAINSTORMING:
         task = (
-            "请看看我有没有漏掉你原本想保留的现象、对象或操作；"
-            "你可以直接补充或修改，觉得这份起点准确也可以告诉我继续。"
+            "请核对这里是否完整保留了你要研究的电磁现象、VR对象和核心操作；"
+            "需要修订时直接指出对应内容，设计边界准确时也可以确认继续。"
         )
     else:
         task = (
-            "这份阶段草稿会写进右侧任务报告。你可以直接指出要修改或补充的地方；"
-            "如果符合你的想法，告诉我继续就会保留它并进入下一部分。"
+            "这份设计草稿将写入任务报告。请核对物理关系、Unity映射和模型边界；"
+            "需要调整时指出对应设计层，内容准确时确认继续即可。"
         )
     output.student_task = task
     output.stage_payload["pending_action"] = {
@@ -531,6 +639,7 @@ def _persist_emvr_brief(
     message: str,
     intent_name: str,
     stage: Stage | None = None,
+    turn_intent: dict[str, Any] | None = None,
 ) -> None:
     content_stage = stage or session.current_stage
     if (
@@ -549,7 +658,17 @@ def _persist_emvr_brief(
     if not isinstance(emvr_design, dict):
         emvr_design = {}
         session.design_context["emvr_design"] = emvr_design
-    normalized_message = message.strip()
+    dialogue_acts = (
+        turn_intent.get("dialogue_acts", [])
+        if isinstance(turn_intent, dict)
+        else []
+    )
+    structured_message = _turn_content_text(
+        _substantive_turn_content(turn_intent)
+    )
+    if isinstance(dialogue_acts, list) and dialogue_acts and not structured_message:
+        return
+    normalized_message = structured_message or message.strip()
     original_brief = str(emvr_design.get("brief") or "").strip()
     revisions = emvr_design.get("brief_revisions", [])
     if not isinstance(revisions, list):
@@ -574,6 +693,71 @@ def _persist_emvr_brief(
         idea["current_focus"] = current_brief
 
 
+def _substantive_turn_content(
+    turn_intent: dict[str, Any] | None,
+) -> Any:
+    """Return design content only, excluding questions, feedback and controls."""
+
+    if not isinstance(turn_intent, dict):
+        return ""
+    dialogue_acts = turn_intent.get("dialogue_acts", [])
+    if not isinstance(dialogue_acts, list) or not dialogue_acts:
+        return ""
+    substantive_types = {
+        "ANSWER_PENDING_QUESTION",
+        "MODIFY_DESIGN_FIELD",
+        "MODIFY_STAGE_FIELD",
+        "MODIFY_COMPARISON",
+        "NEW_TOPIC",
+    }
+    values: list[Any] = []
+    for act in dialogue_acts:
+        if not isinstance(act, dict) or act.get("type") not in substantive_types:
+            continue
+        content = deepcopy(act.get("content"))
+        if content in (None, "", [], {}):
+            continue
+        if content not in values:
+            values.append(content)
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
+def _turn_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "；".join(
+            part for part in (_turn_content_text(item) for item in value) if part
+        )
+    if isinstance(value, dict):
+        return "；".join(
+            part for part in (_turn_content_text(item) for item in value.values()) if part
+        )
+    return str(value).strip() if value is not None else ""
+
+
+def _new_topic_content(
+    turn_intent: dict[str, Any],
+    fallback_message: str,
+) -> str:
+    """Use the structured new-topic act instead of copying a mixed command."""
+
+    dialogue_acts = turn_intent.get("dialogue_acts", [])
+    if isinstance(dialogue_acts, list):
+        for act in dialogue_acts:
+            if not isinstance(act, dict) or act.get("type") != "NEW_TOPIC":
+                continue
+            content = str(act.get("content") or "").strip()
+            if content:
+                return content
+    resolved_value = turn_intent.get("resolved_value")
+    if isinstance(resolved_value, str) and resolved_value.strip():
+        return resolved_value.strip()
+    return fallback_message.strip()
+
+
 def _persist_emvr_stage_input(
     session: DesignSession,
     stage: Stage,
@@ -592,7 +776,18 @@ def _persist_emvr_stage_input(
     }:
         return
     resolved_value = turn_intent.get("resolved_value")
-    content: Any = resolved_value if resolved_value not in (None, "", [], {}) else message
+    dialogue_acts = turn_intent.get("dialogue_acts", [])
+    structured_content = _substantive_turn_content(turn_intent)
+    if isinstance(dialogue_acts, list) and dialogue_acts:
+        if structured_content in (None, "", [], {}):
+            return
+        content: Any = structured_content
+    else:
+        content = (
+            resolved_value
+            if resolved_value not in (None, "", [], {})
+            else message
+        )
     if isinstance(content, str):
         content = content.strip()
         if not content:
@@ -615,6 +810,9 @@ def _persist_emvr_stage_input(
         "revision": session.revision + 1,
     }
     semantic_updates = turn_intent.get("semantic_updates", {})
+    dialogue_acts = turn_intent.get("dialogue_acts", [])
+    if isinstance(dialogue_acts, list) and dialogue_acts:
+        entry["dialogue_acts"] = deepcopy(dialogue_acts)
     structured_update = (
         semantic_updates.get("emvr_design_update")
         if isinstance(semantic_updates, dict)
@@ -649,13 +847,37 @@ def _persist_guided_stage_input(
     if session.interaction_state is not InteractionState.GUIDED_DESIGN:
         return
     intent_name = str(turn_intent.get("intent") or "")
+    dialogue_acts = turn_intent.get("dialogue_acts", [])
+    substantive_acts = [
+        deepcopy(act)
+        for act in dialogue_acts
+        if isinstance(act, dict)
+        and act.get("type")
+        in {
+            "ANSWER_PENDING_QUESTION",
+            "MODIFY_DESIGN_FIELD",
+            "MODIFY_STAGE_FIELD",
+            "MODIFY_COMPARISON",
+        }
+    ] if isinstance(dialogue_acts, list) else []
     if intent_name not in {
         UserIntent.ANSWER_CURRENT_QUESTION.value,
         UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-    }:
+    } and not substantive_acts:
         return
     resolved_value = turn_intent.get("resolved_value")
-    content: Any = resolved_value if resolved_value not in (None, "", [], {}) else message
+    dialogue_acts = turn_intent.get("dialogue_acts", [])
+    structured_content = _substantive_turn_content(turn_intent)
+    if isinstance(dialogue_acts, list) and dialogue_acts:
+        if structured_content in (None, "", [], {}):
+            return
+        content: Any = structured_content
+    else:
+        content = (
+            resolved_value
+            if resolved_value not in (None, "", [], {})
+            else message
+        )
     if isinstance(content, str):
         content = content.strip()
         if not content:
@@ -673,6 +895,8 @@ def _persist_guided_stage_input(
         "intent": intent_name,
         "revision": session.revision + 1,
     }
+    if substantive_acts:
+        entry["dialogue_acts"] = substantive_acts
     semantic_updates = turn_intent.get("semantic_updates", {})
     if isinstance(semantic_updates, dict) and semantic_updates:
         entry["semantic_updates"] = deepcopy(semantic_updates)
@@ -1157,9 +1381,35 @@ class WorkflowEngine:
             )
             else None
         )
+        has_semantic_update_packet = isinstance(semantic_updates, dict)
+        semantic_updates = semantic_updates if has_semantic_update_packet else {}
+        student_questions = semantic_updates.get("student_questions", [])
+        student_questions = (
+            [str(item) for item in student_questions if str(item).strip()]
+            if isinstance(student_questions, list)
+            else []
+        )
+        feedback_items = semantic_updates.get("feedback_items", [])
+        feedback_items = (
+            [str(item) for item in feedback_items if str(item).strip()]
+            if isinstance(feedback_items, list)
+            else []
+        )
+        has_structured_turn_updates = bool(
+            semantic_updates.get("design_updates")
+            or semantic_updates.get("stage_field_updates")
+            or semantic_updates.get("comparison_updates")
+            or semantic_updates.get("facet_updates")
+        )
+        control_actions = set(
+            semantic_updates.get("control_actions", [])
+            if isinstance(semantic_updates.get("control_actions"), list)
+            else []
+        )
         content_intent_name = intent_name
         design_summary_request = bool(
             intent_name == UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value
+            or "REQUEST_SUMMARY" in control_actions
         )
         summary_completed_this_turn = False
         if intent_name in {
@@ -1173,14 +1423,21 @@ class WorkflowEngine:
             )
 
         if intent_name == UserIntent.NEW_TOPIC.value:
-            self._start_new_topic(session, message)
+            self._start_new_topic(
+                session,
+                _new_topic_content(turn_intent, message),
+            )
             pending_action = None
             apply_resolved_intent(session, turn_intent, pending_action, message)
-        elif intent_name == UserIntent.RETURN_TO_PREVIOUS_POINT.value:
+        elif (
+            intent_name == UserIntent.RETURN_TO_PREVIOUS_POINT.value
+            or "RETURN" in control_actions
+        ):
             self._return_to_previous_stage(session)
 
         explicit_transition_intent = bool(
             intent_name == UserIntent.ADVANCE_STAGE.value
+            or "ADVANCE" in control_actions
             or (
                 turn_intent.get("advance_requested") is True
                 and intent_name
@@ -1253,6 +1510,8 @@ class WorkflowEngine:
                 UserIntent.ADVANCE_STAGE.value,
                 UserIntent.REQUEST_MORE_EXAMPLES.value,
                 UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
+                UserIntent.ASK_COURSE_QUESTION.value,
+                UserIntent.PROVIDE_FEEDBACK.value,
                 UserIntent.RETURN_TO_PREVIOUS_POINT.value,
                 UserIntent.SET_INTERACTION_STATE.value,
             }
@@ -1280,7 +1539,9 @@ class WorkflowEngine:
             update_idea_development(
                 session,
                 idea_answer_message,
-                semantic_updates=semantic_updates,
+                semantic_updates=(
+                    semantic_updates if has_semantic_update_packet else None
+                ),
             )
             sync_design_state_to_legacy(session)
             refresh_idea_development(session)
@@ -1295,6 +1556,7 @@ class WorkflowEngine:
             resolved_student_message,
             content_intent_name,
             content_stage,
+            turn_intent,
         )
         _persist_emvr_stage_input(
             session,
@@ -1389,6 +1651,12 @@ class WorkflowEngine:
             )
         )
         clarification_turn = intent_name == UserIntent.UNCLEAR.value
+        dialogue_question_turn = bool(student_questions)
+        feedback_only_turn = bool(
+            feedback_items
+            and not student_questions
+            and not has_structured_turn_updates
+        )
         substantive_guided_reply = bool(
             intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             and input_kind != UNREASONABLE_REQUEST
@@ -1396,7 +1664,10 @@ class WorkflowEngine:
         idea_facet_reference_turn = bool(
             handled_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
-            and intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+            and (
+                intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+                or "REQUEST_REFERENCE" in control_actions
+            )
             and isinstance(pending_action, dict)
             and pending_action.get("type") == "ANSWER_IDEA_FACET"
             and (
@@ -1409,6 +1680,11 @@ class WorkflowEngine:
                 )
             )
             and has_idea_development(session)
+        )
+        guided_stage_reference_turn = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and handled_stage is not Stage.IDEA_BRAINSTORMING
+            and "REQUEST_REFERENCE" in control_actions
         )
         if design_summary_request:
             summary_snapshot = design_state_snapshot(session)
@@ -1456,6 +1732,56 @@ class WorkflowEngine:
             output = _guided_summary_completion_output()
             session.turn_context = {}
             completion_error = None
+        elif dialogue_question_turn:
+            try:
+                generated_answer = self.generator.generate(
+                    session,
+                    message,
+                )
+            finally:
+                session.turn_context = {}
+            if (
+                handled_stage is Stage.IDEA_BRAINSTORMING
+                and session.interaction_state is InteractionState.GUIDED_DESIGN
+                and has_idea_development(session)
+            ):
+                output = build_gap_output(session, "")
+                output.assistant_message = generated_answer.assistant_message
+                output.assumptions = generated_answer.assumptions
+                output.warnings = generated_answer.warnings
+                output.stage_payload["answered_student_questions"] = deepcopy(
+                    student_questions
+                )
+            else:
+                output = generated_answer
+                output.stage_payload["answered_student_questions"] = deepcopy(
+                    student_questions
+                )
+            if not has_structured_turn_updates:
+                output.stage_payload["preserve_pending_action"] = True
+            completion_error = None
+        elif feedback_only_turn:
+            if session.interaction_state is InteractionState.EMVR_DIRECT:
+                feedback_message = (
+                    "收到这项校正。它不会被误记为新的实验要求，现有实验草稿也不会因此回退。"
+                    "请指出需要修订的是物理模型、Unity交互还是展示方式，并给出目标表述；"
+                    "我会只调整对应部分。"
+                )
+            else:
+                feedback_message = (
+                    "你提醒得对，我先不把这句话当成新的实验内容，前面已经确定的想法也继续保留。"
+                    "请告诉我具体要改哪一项，以及你希望怎样表达，我们就从那里接着完善。"
+                )
+            output = StepOutput(
+                assistant_message=feedback_message,
+                stage_payload={
+                    "feedback_received": True,
+                    "preserve_pending_action": True,
+                },
+                student_task=None,
+            )
+            session.turn_context = {}
+            completion_error = None
         elif emvr_stage_entry_turn:
             output = _emvr_stage_entry_output(session, handled_stage)
             session.turn_context = {}
@@ -1492,11 +1818,18 @@ class WorkflowEngine:
                     session,
                     clarification_candidate,
                 ) or pending_action
-                output = clarification_output(pending_action)
+                output = clarification_output(
+                    pending_action,
+                    session.interaction_state,
+                )
             session.turn_context = {}
             completion_error = None
         elif idea_facet_reference_turn:
             output = build_facet_reference_output(session)
+            session.turn_context = {}
+            completion_error = None
+        elif guided_stage_reference_turn:
+            output = _guided_reference_output(session)
             session.turn_context = {}
             completion_error = None
         elif dynamic_idea_turn:
@@ -1566,6 +1899,16 @@ class WorkflowEngine:
                 }
             ):
                 _prepare_guided_stage_completion(session, handled_stage, output)
+        multi_act_notice = _multi_act_student_notice(
+            semantic_updates,
+            session.interaction_state,
+        )
+        if multi_act_notice and turn_intent.get("dialogue_acts"):
+            output.assistant_message = (
+                f"{multi_act_notice}\n\n{output.assistant_message}"
+                if output.assistant_message
+                else multi_act_notice
+            )
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(
@@ -1626,6 +1969,7 @@ class WorkflowEngine:
         ):
             save_pending_action(session, handled_stage, output)
         output.stage_payload["design_state"] = design_state_snapshot(session)
+        output.stage_payload["stage_design_state"] = stage_design_state_snapshot(session)
         _persist_guided_stage_draft(session, handled_stage, output.stage_payload)
         session.revision += 1
         output_dict = output.to_dict()
@@ -2077,6 +2421,7 @@ class WorkflowEngine:
                 stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
                 and isinstance(stage_payload, dict)
                 and stage_payload.get("awaiting_user_design_input") is True
+                and not _has_structured_stage_content(session, stage)
             ):
                 raise StageCompletionError(
                     "请先结合当前VR实验回答这一问；如果暂时不确定，也可以让我先给一版专业参考。"
@@ -2120,7 +2465,12 @@ class WorkflowEngine:
             combined_payload = deepcopy(draft_payload) if isinstance(draft_payload, dict) else {}
             if isinstance(payload, dict):
                 _deep_merge(combined_payload, payload)
-            if not any(
+            structured = stage_design_state_snapshot(session)
+            structured_fields = _STRUCTURED_STAGE_COMPLETION_FIELDS.get(stage, ())
+            has_structured_content = any(
+                structured.get(field) for field in structured_fields
+            )
+            if not has_structured_content and not any(
                 combined_payload.get(field) for field in required_fields
             ):
                 raise StageCompletionError(

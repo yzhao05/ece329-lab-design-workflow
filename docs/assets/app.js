@@ -562,7 +562,7 @@ function renderEvidence() {
   if (!state.evidence) {
     const empty = document.createElement("p");
     empty.className = "empty-copy";
-    empty.textContent = "输入想法后，这里会显示匹配的讲次、概念和公式页码。";
+    empty.textContent = "输入想法后，这里会显示与当前实验相关的课程主题、概念和公式依据。";
     dom.evidenceContent.append(empty);
     return;
   }
@@ -585,7 +585,7 @@ function renderEvidence() {
     card.append(kicker, title);
 
     const detail = document.createElement("p");
-    detail.textContent = formatConcepts(item.concepts) || item.expression || "来源已由lecture note知识目录固定。";
+    detail.textContent = formatConcepts(item.concepts) || item.expression || "相关依据来自已核对的ECE329课程资料。";
     card.append(detail);
 
     if (item.formula || item.expression) {

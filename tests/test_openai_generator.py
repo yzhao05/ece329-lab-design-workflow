@@ -109,10 +109,40 @@ def retrieved_brainstorm_options(
 
 
 class OpenAIStageGeneratorTests(unittest.TestCase):
+    def test_prompt_defines_interactive_guided_and_professional_emvr_tones(self) -> None:
+        guided_packet = build_prompt_packet(
+            guided_session(),
+            "继续完善这个实验想法",
+        )
+        emvr = guided_session()
+        emvr.interaction_state = InteractionState.EMVR_DIRECT
+        emvr_packet = build_prompt_packet(
+            emvr,
+            "继续完善这个Unity VR实验设计",
+        )
+
+        self.assertIn("教师与学生共同推敲想法", guided_packet["system"])
+        self.assertIn("避免“字段已提交”", guided_packet["system"])
+        self.assertIn("专业实验设计评审", emvr_packet["system"])
+        self.assertIn("Unity对象、交互输入、计算状态", emvr_packet["system"])
+
     def test_student_facing_reply_rejects_internal_numbered_stage_reference(self) -> None:
         transport = FakeTransport(
             valid_output(
                 assistant_message="根据阶段1已经确定的内容，我们继续整理当前部分。"
+            )
+        )
+
+        with self.assertRaises(ModelOutputError):
+            OpenAIStageGenerator(transport=transport).generate(
+                guided_session(),
+                "继续完善这个实验想法",
+            )
+
+    def test_student_facing_reply_rejects_state_machine_terminology(self) -> None:
+        transport = FakeTransport(
+            valid_output(
+                assistant_message="状态机已经提交design_state，请继续回答。"
             )
         )
 
@@ -177,6 +207,81 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("CONFIRM_STAGE_OR_MODIFY", request["instructions"])
         self.assertIn("stage_one_direction_detail", request["instructions"])
         self.assertIn("topic_change_explicit", request["instructions"])
+
+    def test_context_resolver_accepts_multiple_executable_dialogue_acts(self) -> None:
+        research = "比较同种与异种电荷靠近时的场线变化"
+        observation = "观察中间区域空白区和弯曲连接"
+        question = "为什么异种电荷的场线会弯曲相连？"
+        transport = FakeTransport(
+            output={
+                "intent": "UNCLEAR",
+                "target": None,
+                "resolved_value_json": None,
+                "semantic_updates_json": None,
+                "dialogue_acts_json": json.dumps(
+                    [
+                        {
+                            "type": "ANSWER_PENDING_QUESTION",
+                            "target": "research_question",
+                            "operation": "REPLACE",
+                            "content": research,
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "MODIFY_STAGE_FIELD",
+                            "target": "observations",
+                            "operation": "MERGE",
+                            "content": [observation],
+                            "confidence": 0.98,
+                        },
+                        {
+                            "type": "ASK_COURSE_QUESTION",
+                            "target": "course_explanation",
+                            "operation": "MERGE",
+                            "content": question,
+                            "confidence": 0.98,
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+                "advance_requested": False,
+                "preserve_current_design": True,
+                "confidence": 0.97,
+            }
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question"},
+            "question": "你准备比较什么条件，并观察什么现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            f"{research}，另外{observation}。{question}",
+            pending,
+            {"idea_development": {"active_facet_id": "research_question"}},
+        )
+
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(len(result["dialogue_acts"]), 3)
+        self.assertEqual(
+            result["semantic_updates"]["design_updates"][0]["field"],
+            "research_question",
+        )
+        self.assertEqual(
+            result["semantic_updates"]["stage_field_updates"][0]["field"],
+            "observations",
+        )
+        self.assertEqual(
+            result["semantic_updates"]["student_questions"],
+            [question],
+        )
+        schema = transport.requests[0]["text"]["format"]["schema"]
+        self.assertIn("dialogue_acts_json", schema["required"])
+        self.assertIn("同一句可以同时包含", transport.requests[0]["instructions"])
 
     def test_intent_resolver_repairs_an_omitted_active_facet_decision(self) -> None:
         base = {
