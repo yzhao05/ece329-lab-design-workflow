@@ -201,6 +201,54 @@ def apply_emvr_field_updates(
                 prior_values = prior_values if isinstance(prior_values, list) else []
                 field_state[field_id] = list(dict.fromkeys([*prior_values, *value]))
 
+    raw_theory_links = structured_update.get("theory_links", [])
+    raw_theory_links = raw_theory_links if isinstance(raw_theory_links, list) else []
+    theory_edits = structured_update.get("theory_link_updates", [])
+    theory_edits = theory_edits if isinstance(theory_edits, list) else []
+    has_theory_change = bool(raw_theory_links or theory_edits)
+    theory_state = emvr_design.get("theory_link_state")
+    if has_theory_change and not isinstance(theory_state, dict):
+        # Migrate an older session lazily.  Seed the editable state with the
+        # last persisted per-stage theory links before applying an ADD/REMOVE,
+        # so an unrelated first edit cannot erase them and a targeted removal
+        # removes only the requested relation.
+        theory_state = {}
+        by_stage = emvr_design.get("structured_requirements", {})
+        if isinstance(by_stage, dict):
+            for stage in Stage:
+                prior = by_stage.get(stage.value)
+                if not isinstance(prior, dict):
+                    continue
+                for link in prior.get("theory_links", []):
+                    if not isinstance(link, dict):
+                        continue
+                    relation_id = str(link.get("relation_id") or "")
+                    if relation_id in EMVR_THEORY_RELATION_IDS:
+                        theory_state[relation_id] = deepcopy(link)
+        emvr_design["theory_link_state"] = theory_state
+    if not isinstance(theory_state, dict):
+        return
+    if not theory_edits:
+        for link in raw_theory_links:
+            if not isinstance(link, dict):
+                continue
+            relation_id = str(link.get("relation_id") or "")
+            if relation_id in EMVR_THEORY_RELATION_IDS:
+                theory_state[relation_id] = deepcopy(link)
+    for edit in theory_edits:
+        if not isinstance(edit, dict):
+            continue
+        relation_id = str(edit.get("relation_id") or "")
+        operation = str(edit.get("operation") or "").upper()
+        if relation_id not in EMVR_THEORY_RELATION_IDS:
+            continue
+        if operation == "REMOVE":
+            theory_state.pop(relation_id, None)
+        elif operation == "ADD":
+            link = edit.get("link")
+            if isinstance(link, dict):
+                theory_state[relation_id] = deepcopy(link)
+
 
 def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
     """Merge per-stage semantic readings, with later revisions authoritative."""
@@ -231,6 +279,28 @@ def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
         for key, value in field_state.items():
             if key in EMVR_EDITABLE_FIELDS and value not in (None, "", [], {}):
                 merged[key] = deepcopy(value)
+    theory_state = (
+        emvr_design.get("theory_link_state", {})
+        if isinstance(emvr_design, dict)
+        else {}
+    )
+    if (
+        isinstance(emvr_design, dict)
+        and "theory_link_state" in emvr_design
+        and isinstance(theory_state, dict)
+    ):
+        links = [
+            deepcopy(link)
+            for relation_id, link in theory_state.items()
+            if relation_id in EMVR_THEORY_RELATION_IDS
+            and isinstance(link, dict)
+        ]
+        merged["theory_links"] = links
+        merged["theory_relation_ids"] = [
+            str(link.get("relation_id") or "")
+            for link in links
+            if str(link.get("relation_id") or "")
+        ]
     return merged
 
 
@@ -252,7 +322,7 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
             )
         )[:limit]
 
-    theory_links: list[dict[str, str]] = []
+    theory_links: list[dict[str, Any]] = []
     seen_relations: set[str] = set()
     raw_links = raw.get("theory_links", [])
     for item in raw_links if isinstance(raw_links, list) else []:
@@ -260,6 +330,21 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
             continue
         relation_id = str(item.get("relation_id") or "").strip().upper()
         supports = str(item.get("supports_design_content") or "").strip()[:1200]
+        support_fields = list(
+            dict.fromkeys(
+                str(field)
+                for field in item.get("supports_design_fields", [])
+                if isinstance(field, str)
+                and field
+                in {
+                    "research_question",
+                    "changed_quantities",
+                    "observed_quantities",
+                    "comparison_cases",
+                    "object_constraints",
+                }
+            )
+        ) if isinstance(item.get("supports_design_fields"), list) else []
         if (
             relation_id not in EMVR_THEORY_RELATION_IDS
             or not supports
@@ -270,6 +355,11 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
             {
                 "relation_id": relation_id,
                 "supports_design_content": supports,
+                **(
+                    {"supports_design_fields": support_fields}
+                    if support_fields
+                    else {}
+                ),
             }
         )
         seen_relations.add(relation_id)
@@ -294,6 +384,39 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
             field_updates.append(
                 {"field_id": field_id, "operation": operation, "value": deepcopy(value)}
             )
+    theory_link_updates: list[dict[str, Any]] = []
+    raw_theory_updates = raw.get("theory_link_updates", [])
+    for item in raw_theory_updates if isinstance(raw_theory_updates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        relation_id = str(item.get("relation_id") or "").strip().upper()
+        operation = str(item.get("operation") or "").strip().upper()
+        if relation_id not in EMVR_THEORY_RELATION_IDS or operation not in {
+            "ADD",
+            "REMOVE",
+        }:
+            continue
+        if operation == "REMOVE":
+            theory_link_updates.append(
+                {"relation_id": relation_id, "operation": "REMOVE"}
+            )
+            continue
+        link = next(
+            (
+                deepcopy(link)
+                for link in theory_links
+                if link.get("relation_id") == relation_id
+            ),
+            None,
+        )
+        if isinstance(link, dict):
+            theory_link_updates.append(
+                {
+                    "relation_id": relation_id,
+                    "operation": "ADD",
+                    "link": link,
+                }
+            )
     normalized = {
         **scalar_values,
         "research_summary": summary or scalar_values.get("research_summary"),
@@ -307,6 +430,7 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
         "visualization_requirements": text_list("visualization_requirements"),
         "limitations": text_list("limitations"),
         "field_updates": field_updates,
+        "theory_link_updates": theory_link_updates,
         # Relation IDs are derived from explicit semantic links.  A bare ID
         # list is intentionally ignored so a model cannot attach a theory just
         # because it is topically nearby.

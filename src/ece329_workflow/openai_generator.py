@@ -1658,8 +1658,10 @@ class OpenAIStageGenerator:
                 "other_version_id与fields。学生要求分析设计是否合理时使用REQUEST_QUALITY_REVIEW；"
                 "提出两个以上方案并要求比较时使用COMPARE_OPTIONS，content保留各方案的实质内容。"
                 "每个动作的content只含该动作的实质内容。"
-                "外层intent、target、resolved_value_json和semantic_updates_json继续返回，作为旧接口"
-                "兼容摘要；外层intent应概括最主要动作，但不得用它压掉dialogue_acts_json中的并行动作。"
+                "外层intent、target、resolved_value_json和semantic_updates_json继续返回，只作为旧接口"
+                "兼容摘要和非写入型分析；程序不会用这些外层字段写入实验设计。所有设计字段、阶段字段、"
+                "基础比较和纠错修改都必须有对应dialogue_acts_json动作。外层intent应概括最主要动作，"
+                "但不得用它压掉dialogue_acts_json中的并行动作。"
                 "可选意图只有ANSWER_CURRENT_QUESTION、ACCEPT_PREVIOUS_PROPOSAL、"
                 "MODIFY_PREVIOUS_PROPOSAL、REJECT_PREVIOUS_PROPOSAL、ADVANCE_STAGE、"
                 "REQUEST_MORE_EXAMPLES、REQUEST_CURRENT_DESIGN_SUMMARY、"
@@ -1697,6 +1699,12 @@ class OpenAIStageGenerator:
                 "REQUEST_SUMMARY动作和对应的字段修改动作；此时不能因为有总结请求就把"
                 "semantic_updates_json清空。索取参考与保留、继续、返回等控制动作同理，"
                 "都必须与同句中的实质更新并列保留。"
+                "总结请求必须以carried_context中的规范化设计状态为依据，不能重新从历史消息自由"
+                "归纳。如果学生同时指出已保存字段混入了会话说明、遗漏某项或含有重复内容，先返回"
+                "可执行的CORRECT_ASSISTANT字段修复，再并列返回REQUEST_SUMMARY；不得只表达同意后"
+                "继续展示旧状态。修复动作中的value只能是清洗后的实验设计内容，不能含有‘请确认’、"
+                "‘另外我想问’等对话操作本身。若学生只指出受影响字段而没有提供足以确定的新值，"
+                "CORRECT_ASSISTANT只返回affected_fields，不得猜写字段值。"
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自pending_action中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
@@ -1760,7 +1768,10 @@ class OpenAIStageGenerator:
                 "改成清晰的因果句’必须读取旧研究问题，生成改写后的research_question并以"
                 "REPLACE保存；value中不得包含操作说明。只改一个字段时，不得顺带重写其他字段；"
                 "明确替换时不能把旧值和新值并列。GUIDED_DESIGN下不得返回此对象。"
-                "theory_links的每项包含relation_id与supports_design_content；后者必须明确"
+                "theory_links的每项包含relation_id、supports_design_content与supports_design_fields；"
+                "supports_design_fields只能从research_question、changed_quantities、observed_quantities、"
+                "comparison_cases、object_constraints中选择至少一项，并表示这条理论实际支持的结构化"
+                "设计字段；supports_design_content必须明确"
                 "指出该关系支持当前哪一个变化量、观察量、比较情形或边界条件，不能只重复"
                 "关系名称。relation_id表示真正进入当前实验的物理机制，不是与主题沾边的"
                 "课程知识列表；只选择能计算、解释或约束changed_quantities、"
@@ -1769,6 +1780,9 @@ class OpenAIStageGenerator:
                 "只有研究自由电荷随时间消散时才需要CHARGE_RELAXATION。不能因为它们都属于"
                 "电磁学就自动加入。可用关系ID及含义为："
                 f"{json.dumps(emvr_relation_catalog, ensure_ascii=False)}。"
+                "学生增加或删除理论关系时，还必须在emvr_design_update.theory_link_updates中逐项返回"
+                "relation_id和operation（ADD或REMOVE）；ADD必须同时在theory_links中提供上述字段绑定，"
+                "REMOVE只删除指定关系，不能重新生成或覆盖其他理论关系。"
                 "程序会把包含EMVR标记的安全输入直接切换为EMVR_DIRECT；不要推翻这个明确状态。"
                 "对于不含该标记的其他模式表达，仍需依据整句话语义设置interaction_state_request，"
                 "不能靠扩充词表猜测。若这句话只有模式切换而没有实验内容，intent返回"
@@ -1907,11 +1921,21 @@ class OpenAIStageGenerator:
             semantic_updates,
             pending_action,
         )
+        missing_authoritative_actions = bool(
+            not has_executable_dialogue_acts
+            and raw_intent
+            in {
+                "ANSWER_CURRENT_QUESTION",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "NEW_TOPIC",
+            }
+        )
         if (
             unresolved_pending_response
             or unresolved_stage_entry_response
             or confirmed_candidate_modification
             or unbacked_open_question_acceptance
+            or missing_authoritative_actions
             or (answer_status_conflict and not has_executable_dialogue_acts)
             or (not has_executable_dialogue_acts and pending_question_decision_missing(
                 raw_intent,
@@ -1973,6 +1997,10 @@ class OpenAIStageGenerator:
                     ) + (
                         "如果pending_action中已有candidate_answer，而学生是在确认、沿用或指认"
                         "上一句为开放问题的当前回答，应返回ACCEPT_PREVIOUS_PROPOSAL。"
+                    ) + (
+                        "所有将写入设计的内容都必须出现在dialogue_acts_json的字段级动作中；"
+                        "不能只返回外层resolved_value_json、facet_updates、design_updates或"
+                        "emvr_design_update。"
                     ) + "不要回答学生，只返回完整的结构化意图结果。",
                 }
             )
@@ -2111,21 +2139,34 @@ class OpenAIStageGenerator:
                     **semantic_updates,
                     "pending_answer_status": "CLEAR",
                 }
-        elif repaired_intent == "UNCLEAR" and confirmed_candidate_modification:
-            # The first pass already understood the student's short turn as
-            # acceptance of a saved, student-authored revision. If the repair
-            # pass cannot derive finer structured updates, preserve that
-            # revision instead of reopening the same confirmation loop.
-            raw["intent"] = "MODIFY_PREVIOUS_PROPOSAL"
+        elif confirmed_candidate_modification:
+            # The first pass already understood the short turn as acceptance.
+            # If reparsing the saved candidate still cannot produce field-level
+            # actions, its outer compatibility intent (UNCLEAR, ACCEPT, etc.)
+            # must not reopen the same confirmation. Do not pretend the raw
+            # candidate is a safe design update; consume ACCEPT and let the
+            # state machine preserve the existing normalized design.
+            accept_act = {
+                "type": "CONTROL",
+                "target": "ACCEPT",
+                "operation": "EXECUTE",
+                "content": None,
+                "confidence": 0.98,
+            }
+            raw["intent"] = "ACCEPT_PREVIOUS_PROPOSAL"
             raw["target"] = str(pending_action.get("subject") or "")
-            raw["resolved_value_json"] = json.dumps(
-                str(pending_action.get("candidate_answer") or "").strip(),
-                ensure_ascii=False,
+            raw["resolved_value_json"] = None
+            raw["dialogue_acts"] = [accept_act]
+            raw["dialogue_acts_json"] = json.dumps(
+                [accept_act], ensure_ascii=False
+            )
+            raw["advance_requested"] = bool(
+                pending_action.get("advance_on_accept") is True
+                or pending_action.get("type") == "CONFIRM_STAGE_OR_MODIFY"
             )
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
-            resolved_value = str(
-                pending_action.get("candidate_answer") or ""
-            ).strip()
+            resolved_value = None
+            semantic_updates = {}
         elif pending_question_answer_needs_review(
             repaired_intent,
             semantic_updates,
@@ -2161,6 +2202,11 @@ class OpenAIStageGenerator:
                 if isinstance(raw.get("dialogue_acts"), list)
                 else []
             ),
+            # The current Responses schema always includes this field.  Older
+            # saved integrations that predate the action contract may omit it
+            # entirely; only those legacy payloads retain compatibility
+            # behavior while every current API response is action-only.
+            actions_authoritative="dialogue_acts_json" in raw,
         )
         validated = validate_resolved_intent(candidate, pending_action)
         if (
@@ -2181,19 +2227,6 @@ class OpenAIStageGenerator:
                 ),
                 pending_action,
             )
-        if (
-            confirmed_candidate_modification
-            and validated.get("intent") == "MODIFY_PREVIOUS_PROPOSAL"
-            and isinstance(pending_action, dict)
-        ):
-            # The repair pass classifies the saved student-authored candidate,
-            # while the current message may only be a short confirmation. Keep
-            # the candidate's provenance explicit so downstream validation can
-            # accept its structured additions without trusting model invention.
-            validated["resolved_value"] = str(
-                pending_action.get("candidate_answer") or ""
-            ).strip()
-            validated["source"] = "CONFIRMED_PENDING_MODIFICATION"
         with self._metrics_lock:
             self._intent_api_successes += 1
         return validated

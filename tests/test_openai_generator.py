@@ -407,6 +407,23 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                         },
                         ensure_ascii=False,
                     ),
+                    "dialogue_acts_json": json.dumps(
+                        [
+                            {
+                                "type": "MODIFY_COMPARISON",
+                                "target": "material_cases",
+                                "operation": "MERGE",
+                                "content": {
+                                    "comparison_id": "material_cases",
+                                    "action": "MODIFY",
+                                    "cases": ["分层介质"],
+                                    "merge_with_existing": True,
+                                },
+                                "confidence": 0.99,
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
                 },
             ]
         )
@@ -433,8 +450,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         self.assertEqual(len(transport.requests), 2)
         self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
-        self.assertEqual(result["resolved_value"], candidate)
-        self.assertEqual(result["source"], "CONFIRMED_PENDING_MODIFICATION")
+        self.assertEqual(
+            result["resolved_value"]["comparison_id"],
+            "material_cases",
+        )
+        self.assertEqual(result["source"], "SEMANTIC_MULTI_ACT")
         reparsed_context = json.loads(
             transport.requests[1]["input"][0]["content"][0]["text"]
         )
@@ -528,9 +548,13 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         )
 
         self.assertEqual(len(transport.requests), 2)
-        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
-        self.assertEqual(result["target"], "initial_idea")
-        self.assertEqual(result["resolved_value"], idea)
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertEqual(result["target"], "exploration_scenes")
+        self.assertIsNone(result["resolved_value"])
+        self.assertEqual(
+            result["unresolved_content"][0]["content"],
+            idea,
+        )
 
     def test_stage_one_unclear_without_course_evidence_opens_breadth_exploration(self) -> None:
         unclear = {
@@ -747,9 +771,54 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             {},
         )
 
-        self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
-        self.assertEqual(result["resolved_value"], candidate)
-        self.assertEqual(result["source"], "CONFIRMED_PENDING_MODIFICATION")
+        self.assertEqual(result["intent"], "ACCEPT_PREVIOUS_PROPOSAL")
+        self.assertIsNone(result["resolved_value"])
+        self.assertTrue(result["advance_requested"])
+        self.assertEqual(
+            result["semantic_updates"]["control_actions"],
+            ["ACCEPT"],
+        )
+
+    def test_candidate_confirmation_does_not_loop_when_repair_repeats_accept(self) -> None:
+        candidate = "补充观察中间区域的场强，并保留原来的场线比较"
+        accepted = {
+            "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+            "target": "observation_plan",
+            "resolved_value_json": None,
+            "semantic_updates_json": None,
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        transport = FakeTransport(outputs=[accepted, accepted])
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "subject": "observation_plan",
+            "proposal": {"observations": ["电场线"]},
+            "candidate_answer": candidate,
+            "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "是",
+            pending,
+            {},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "ACCEPT_PREVIOUS_PROPOSAL")
+        self.assertIsNone(result["resolved_value"])
+        self.assertTrue(result["advance_requested"])
+        self.assertEqual(
+            result["semantic_updates"]["control_actions"],
+            ["ACCEPT"],
+        )
 
     def test_intent_resolver_repairs_omitted_later_stage_answer_status(self) -> None:
         base = {
@@ -1983,8 +2052,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             third["stage_payload"]["input_category"],
             "COURSE_CONTENT",
         )
-        self.assertTrue(third["stage_payload"]["direction_locked"])
-        self.assertIn("静电场", third["stage_payload"]["direction_summary"])
+        self.assertFalse(third["stage_payload"].get("direction_locked", False))
+        self.assertEqual(
+            third["stage_payload"]["design_state"]["research_object"],
+            "",
+        )
 
         fourth = engine.process_turn(
             first["design_id"],
@@ -2006,9 +2078,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertTrue(
             any("还没有具体思路" in item.get("content", "") for item in preserved)
         )
-        self.assertEqual(
-            fallback.runtime_info()["last_fallback_reason"],
-            "intent_transport_error",
+        runtime = fallback.runtime_info()
+        self.assertGreater(runtime["intent_api_failures"], 0)
+        self.assertIn(
+            runtime["last_fallback_reason"],
+            {"intent_transport_error", "model_transport_error"},
         )
 
     def test_intent_output_rejection_is_distinct_from_transport_failure(self) -> None:

@@ -8,6 +8,7 @@ from ece329_workflow.dialogue_state import (
     build_carried_context,
     clarification_output,
     current_pending_action,
+    degraded_context_intent,
     deterministic_intent,
     fallback_intent,
     hydrate_pending_action_from_history,
@@ -19,6 +20,16 @@ from ece329_workflow.dialogue_state import (
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.generator import guided_stage_entry_output
+from ece329_workflow.emvr_design import (
+    apply_emvr_field_updates,
+    merge_emvr_structured_requirements,
+    normalize_emvr_design_update,
+)
+from ece329_workflow.design_state import (
+    design_state_snapshot,
+    ensure_design_state,
+    set_baseline_comparisons,
+)
 from ece329_workflow.idea_development import (
     build_facet_reference_output,
     build_gap_output,
@@ -69,8 +80,14 @@ class ScriptedSemanticGenerator(RuleBasedStageGenerator):
 
 
 class MultiActSemanticGenerator(RuleBasedStageGenerator):
-    def __init__(self, acts: list[dict]) -> None:
+    def __init__(
+        self,
+        acts: list[dict],
+        *,
+        semantic_updates: dict | None = None,
+    ) -> None:
         self.acts = acts
+        self.semantic_updates = semantic_updates or {}
         self.calls: list[dict] = []
 
     def resolve_intent(self, session, user_message, pending_action, carried_context):
@@ -85,7 +102,9 @@ class MultiActSemanticGenerator(RuleBasedStageGenerator):
             UserIntent.UNCLEAR,
             confidence=0.98,
             source="SEMANTIC_MODEL",
+            semantic_updates=self.semantic_updates,
             dialogue_acts=self.acts,
+            actions_authoritative=True,
         )
 
 
@@ -156,6 +175,523 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_action_contract_splits_pending_answer_and_comparison_replacement(self) -> None:
+        session = idea_facet_session("design_mixed_learning_and_comparison")
+        set_baseline_comparisons(
+            session,
+            [
+                {
+                    "comparison_id": "boundary_cases",
+                    "cases": ["完整包围场源", "不包围场源"],
+                    "recommended_cases": ["完整包围场源", "不包围场源"],
+                    "adoption_status": "ACCEPTED",
+                }
+            ],
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "learning_objective",
+            "question": "完成实验后希望能够解释什么？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        learning = "解释边界形状如何影响局部场分布，同时判断闭合面总通量是否改变"
+        message = (
+            f"学习目标是{learning}。另外把基础比较改成完整包围场源、部分包围场源和不包围场源。"
+        )
+        raw = resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target="learning_objective",
+            resolved_value=message,
+            confidence=0.99,
+            source="SEMANTIC_MODEL",
+            semantic_updates={
+                "design_updates": [
+                    {
+                        "field": "learning_objective",
+                        "operation": "REPLACE",
+                        "value": message,
+                    }
+                ]
+            },
+            dialogue_acts=[
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "learning_objective",
+                    "operation": "REPLACE",
+                    "content": learning,
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_COMPARISON",
+                    "target": "boundary_cases",
+                    "operation": "REPLACE",
+                    "content": {
+                        "comparison_id": "boundary_cases",
+                        "action": "MODIFY",
+                        "cases": ["完整包围场源", "部分包围场源", "不包围场源"],
+                        "replace_all": True,
+                    },
+                    "confidence": 0.99,
+                },
+            ],
+            actions_authoritative=True,
+        )
+
+        resolved = validate_resolved_intent(raw, pending)
+        apply_resolved_intent(session, resolved, pending, message)
+        state = design_state_snapshot(session)
+
+        self.assertEqual(state["learning_objective"], learning)
+        self.assertNotIn("另外", state["learning_objective"])
+        self.assertEqual(
+            state["baseline_comparisons"][0]["cases"],
+            ["完整包围场源", "部分包围场源", "不包围场源"],
+        )
+
+    def test_authoritative_empty_action_array_cannot_copy_whole_turn_to_facet(self) -> None:
+        session = idea_facet_session("design_no_whole_turn_fallback")
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "learning_objective",
+            "question": "学习目标是什么？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        message = "学习目标是什么？另外我需要确认你是否替换基础比较。"
+        raw = resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target="learning_objective",
+            resolved_value=message,
+            confidence=0.99,
+            source="SEMANTIC_MODEL",
+            semantic_updates={
+                "facet_updates": [
+                    {"facet_id": "learning_objective", "status": "CLEAR"}
+                ]
+            },
+            dialogue_acts=[],
+            actions_authoritative=True,
+            unresolved_content=[
+                {"type": "UNRESOLVED", "content": message, "reason": "no acts"}
+            ],
+        )
+
+        resolved = validate_resolved_intent(raw, pending)
+        apply_resolved_intent(session, resolved, pending, message)
+
+        self.assertEqual(resolved["intent"], UserIntent.UNCLEAR.value)
+        self.assertEqual(design_state_snapshot(session)["learning_objective"], "")
+
+    def test_cross_stage_field_edit_does_not_clear_current_pending_item(self) -> None:
+        session = variable_stage_session("design_cross_stage_edit")
+        pending = current_pending_action(session)
+        raw = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            target="research_question",
+            confidence=0.99,
+            source="SEMANTIC_MODEL",
+            dialogue_acts=[
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": "闭合面形状改变时，局部场强如何变化而总通量是否保持不变？",
+                    "confidence": 0.99,
+                }
+            ],
+            actions_authoritative=True,
+        )
+
+        resolved = validate_resolved_intent(raw, pending)
+        apply_resolved_intent(session, resolved, pending, "在变量阶段改写研究问题")
+
+        self.assertIn("总通量", design_state_snapshot(session)["research_question"])
+        self.assertEqual(
+            current_pending_action(session)["subject"],
+            pending["subject"],
+        )
+
+    def test_accepting_saved_confirmation_consumes_it_and_advances(self) -> None:
+        session = variable_stage_session("design_confirm_yes_advances")
+        pending = session.model_context["dialogue_state"]["pending_action"]
+        pending.update(
+            {
+                "type": "CONFIRM_STAGE_OR_MODIFY",
+                "candidate_answer": "补充观察中间区域的场线弯曲程度",
+                "candidate_resolution": UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                "advance_on_accept": True,
+                "allowed_intents": [
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.ADVANCE_STAGE.value,
+                    UserIntent.UNCLEAR.value,
+                ],
+            }
+        )
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "CONTROL",
+                        "target": "ACCEPT",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": "是"})
+
+        self.assertEqual(result["handled_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+        self.assertNotIn(
+            "请告诉我是否把这项补充接进当前设计",
+            result["assistant_message"],
+        )
+
+    def test_structured_correction_repairs_only_named_field(self) -> None:
+        session = idea_facet_session("design_structured_correction")
+        raw = resolved_intent(
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                confidence=0.99,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[
+                    {
+                        "type": "CORRECT_ASSISTANT",
+                        "target": "learning_objective",
+                        "operation": "REPLACE",
+                        "content": {
+                            "error_type": "META_TEXT_CONTAMINATION",
+                            "explanation": "删除误写入的会话说明",
+                            "affected_fields": ["learning_objective"],
+                            "design_updates": [
+                                {
+                                    "field": "learning_objective",
+                                    "operation": "REPLACE",
+                                    "value": "解释局部场分布与闭合面总通量之间的区别",
+                                }
+                            ],
+                        },
+                        "confidence": 0.99,
+                    }
+                ],
+                actions_authoritative=True,
+        )
+        pending = current_pending_action(session)
+        resolved = validate_resolved_intent(raw, pending)
+        apply_resolved_intent(
+            session,
+            resolved,
+            pending,
+            "删除学习目标中的确认说明",
+        )
+
+        self.assertEqual(
+            design_state_snapshot(session)["learning_objective"],
+            "解释局部场分布与闭合面总通量之间的区别",
+        )
+
+    def test_theory_links_require_field_binding_and_support_targeted_removal(self) -> None:
+        session = DesignSession(
+            design_id="design_theory_relevance",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.THEORETICAL_FRAMEWORK),
+        )
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": Stage.THEORETICAL_FRAMEWORK.value,
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        raw = resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            confidence=0.99,
+            source="SEMANTIC_MODEL",
+            semantic_updates={
+                "emvr_design_update": {
+                    "theory_links": [
+                        {
+                            "relation_id": "ELECTROSTATIC_BOUNDARY",
+                            "supports_design_content": "解释不同导体边界附近的场线方向",
+                            "supports_design_fields": ["object_constraints", "observed_quantities"],
+                        },
+                        {
+                            "relation_id": "OHMIC_CONDUCTION",
+                            "supports_design_content": "属于ECE329课程",
+                            "supports_design_fields": [],
+                        },
+                    ]
+                }
+            },
+            dialogue_acts=[
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": Stage.THEORETICAL_FRAMEWORK.value,
+                    "operation": "REPLACE",
+                    "content": "只保留能解释边界形状与场分布的理论关系",
+                    "confidence": 0.99,
+                }
+            ],
+            actions_authoritative=True,
+        )
+
+        resolved = validate_resolved_intent(raw, pending)
+        links = resolved["semantic_updates"]["emvr_design_update"]["theory_links"]
+
+        self.assertEqual(
+            [item["relation_id"] for item in links],
+            ["ELECTROSTATIC_BOUNDARY"],
+        )
+
+        emvr_design: dict = {}
+        initial = normalize_emvr_design_update(
+            {
+                "theory_links": [
+                    {
+                        "relation_id": "ELECTROSTATIC_BOUNDARY",
+                        "supports_design_content": "解释边界附近场线方向",
+                        "supports_design_fields": ["object_constraints"],
+                    },
+                    {
+                        "relation_id": "OHMIC_CONDUCTION",
+                        "supports_design_content": "解释导电电流响应",
+                        "supports_design_fields": ["observed_quantities"],
+                    },
+                ]
+            }
+        )
+        apply_emvr_field_updates(emvr_design, initial)
+        removal = normalize_emvr_design_update(
+            {
+                "theory_link_updates": [
+                    {"relation_id": "OHMIC_CONDUCTION", "operation": "REMOVE"}
+                ]
+            }
+        )
+        apply_emvr_field_updates(emvr_design, removal)
+
+        merged = merge_emvr_structured_requirements(emvr_design)
+        self.assertEqual(
+            [item["relation_id"] for item in merged["theory_links"]],
+            ["ELECTROSTATIC_BOUNDARY"],
+        )
+
+    def test_parser_outage_keeps_open_question_and_does_not_write_raw_turn(self) -> None:
+        session = idea_facet_session("design_parser_outage_local_clarification")
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "learning_objective",
+            "question": "完成实验后希望能够解释什么？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        message = (
+            "学习目标是解释边界形状和局部场分布；另外把基础比较换成三种边界。"
+        )
+
+        resolved = degraded_context_intent(
+            session,
+            message,
+            pending,
+            build_carried_context(session),
+            source="INTENT_API_FAILURE",
+        )
+        apply_resolved_intent(session, resolved, pending, message)
+
+        self.assertEqual(resolved["intent"], UserIntent.UNCLEAR.value)
+        self.assertEqual(design_state_snapshot(session)["learning_objective"], "")
+        self.assertEqual(
+            resolved["unresolved_content"][0]["content"],
+            message,
+        )
+        self.assertEqual(
+            resolved["semantic_updates"],
+            {"pending_answer_status": "MISSING"},
+        )
+
+    def test_old_emvr_theory_links_survive_unrelated_first_field_edit(self) -> None:
+        boundary_link = {
+            "relation_id": "ELECTROSTATIC_BOUNDARY",
+            "supports_design_content": "解释导体边界附近场线方向",
+            "supports_design_fields": ["object_constraints"],
+        }
+        emvr_design = {
+            "structured_requirements": {
+                Stage.THEORETICAL_FRAMEWORK.value: {
+                    "theory_links": [boundary_link]
+                }
+            }
+        }
+
+        apply_emvr_field_updates(
+            emvr_design,
+            normalize_emvr_design_update(
+                {
+                    "field_updates": [
+                        {
+                            "field_id": "observed_quantities",
+                            "operation": "MERGE",
+                            "value": ["场线方向"],
+                        }
+                    ]
+                }
+            ),
+        )
+
+        merged = merge_emvr_structured_requirements(emvr_design)
+        self.assertEqual(
+            [item["relation_id"] for item in merged["theory_links"]],
+            ["ELECTROSTATIC_BOUNDARY"],
+        )
+        self.assertNotIn("theory_link_state", emvr_design)
+
+    def test_three_field_mixed_emvr_revision_commits_independently(self) -> None:
+        research_question = "边界曲率改变时，局部场线和等势面如何重新分布？"
+        observation = "记录尖端附近场线密度与等势面间距"
+        theory_text = "只采用能解释导体静电边界的高斯定律与边界条件"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": research_question,
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "observations",
+                    "operation": "REPLACE",
+                    "content": observation,
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "theoretical_framework",
+                    "operation": "REPLACE",
+                    "content": theory_text,
+                    "confidence": 0.99,
+                },
+            ],
+            semantic_updates={
+                "emvr_design_update": {
+                    "field_updates": [
+                        {
+                            "field_id": "research_question",
+                            "operation": "REPLACE",
+                            "value": research_question,
+                        },
+                        {
+                            "field_id": "observed_quantities",
+                            "operation": "REPLACE",
+                            "value": [observation],
+                        },
+                        {
+                            "field_id": "limitations",
+                            "operation": "REPLACE",
+                            "value": ["本轮没有要求修改的内容"],
+                        },
+                    ],
+                    "theory_links": [
+                        {
+                            "relation_id": "ELECTROSTATIC_BOUNDARY",
+                            "supports_design_content": "解释导体曲率边界附近的场线方向",
+                            "supports_design_fields": [
+                                "research_question",
+                                "observed_quantities",
+                            ],
+                        },
+                        {
+                            "relation_id": "OHMIC_CONDUCTION",
+                            "supports_design_content": "只是课程相关",
+                            "supports_design_fields": [],
+                        },
+                    ],
+                }
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = variable_stage_session("design_emvr_three_field_revision")
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {
+                "message": (
+                    "改写研究问题，同时更新观察现象，并把理论依据精简为只保留直接相关的关系。"
+                )
+            },
+        )
+
+        self.assertEqual(
+            result["stage_payload"]["design_state"]["research_question"],
+            research_question,
+        )
+        self.assertIn(
+            observation,
+            result["stage_payload"]["stage_design_state"]["observations"],
+        )
+        saved = engine.store.get(session.design_id)
+        merged = merge_emvr_structured_requirements(
+            saved.design_context["emvr_design"]
+        )
+        self.assertNotIn("limitations", merged)
+        self.assertEqual(
+            [item["relation_id"] for item in merged["theory_links"]],
+            ["ELECTROSTATIC_BOUNDARY"],
+        )
+
+    def test_correction_then_summary_reads_clean_committed_state_only(self) -> None:
+        clean_objective = "解释边界形状如何影响局部场线与等势面分布"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "CORRECT_ASSISTANT",
+                    "target": "learning_objective",
+                    "operation": "REPLACE",
+                    "content": {
+                        "error_type": "META_TEXT_CONTAMINATION",
+                        "explanation": "删除误写入学习目标的会话说明",
+                        "affected_fields": ["learning_objective"],
+                        "design_updates": [
+                            {
+                                "field": "learning_objective",
+                                "operation": "REPLACE",
+                                "value": clean_objective,
+                            }
+                        ],
+                    },
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "REQUEST_SUMMARY",
+                    "target": "current_design",
+                    "operation": "EXECUTE",
+                    "content": None,
+                    "confidence": 0.99,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = idea_facet_session("design_clean_summary_after_correction")
+        ensure_design_state(session)["learning_objective"] = (
+            "解释边界条件。另外，我需要确认你是否替换基础比较。"
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "删除学习目标里的确认说明，然后整体看一遍。"},
+        )
+
+        self.assertTrue(result["stage_payload"]["read_only_design_summary"])
+        self.assertEqual(
+            result["stage_payload"]["design_state"]["learning_objective"],
+            clean_objective,
+        )
+        self.assertIn(clean_objective, result["assistant_message"])
+        self.assertNotIn("我需要确认", result["assistant_message"])
+
     def test_completed_idea_review_displays_the_actual_summary(self) -> None:
         session = idea_facet_session("design_visible_idea_review")
         development = session.design_context["idea_development"]
@@ -2239,9 +2775,9 @@ class DialogueStateTests(unittest.TestCase):
         )
         self.assertEqual(
             accepted_candidate["intent"],
-            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
         )
-        self.assertEqual(accepted_candidate["resolved_value"], supplement)
+        self.assertIsNone(accepted_candidate["resolved_value"])
 
         # If the next semantic result confirms that the saved turn was a
         # modification but omits its value, recover the saved content.
@@ -2283,10 +2819,10 @@ class DialogueStateTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            resolved["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+            resolved["intent"], UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
         )
-        self.assertEqual(resolved["resolved_value"], candidate)
-        self.assertEqual(resolved["source"], "CONFIRMED_PENDING_MODIFICATION")
+        self.assertIsNone(resolved["resolved_value"])
+        self.assertEqual(resolved["source"], "SEMANTIC_TEST")
 
     def test_missing_facet_decision_recovers_without_questioning_student_intent(self) -> None:
         generator = ScriptedSemanticGenerator(

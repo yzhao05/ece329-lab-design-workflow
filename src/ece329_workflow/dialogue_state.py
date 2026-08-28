@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from .emvr_design import (
+    EMVR_EDITABLE_FIELDS,
     merge_emvr_structured_requirements,
     normalize_emvr_design_update,
 )
@@ -35,6 +36,174 @@ from .dialogue_acts import (
 )
 from .turn_planning import build_stage_context_summary, build_turn_task_plan
 from .models import DesignSession, InteractionState, Stage, StepOutput
+
+
+_EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
+    Stage.IDEA_BRAINSTORMING.value: frozenset(
+        {"direction_summary", "research_summary"}
+    ),
+    Stage.COURSE_MAPPING_AND_DIRECTION.value: frozenset({"direction_summary"}),
+    Stage.LEARNING_OBJECTIVES.value: frozenset({"learning_objectives"}),
+    Stage.RESEARCH_QUESTION.value: frozenset(
+        {"research_question", "changed_quantities", "observed_quantities"}
+    ),
+    Stage.THEORETICAL_FRAMEWORK.value: frozenset(),
+    Stage.HYPOTHESIS.value: frozenset({"hypothesis"}),
+    Stage.CONCEPTUAL_OR_VR_SETUP.value: frozenset(
+        {"required_behaviors", "object_constraints", "visualization_requirements"}
+    ),
+    Stage.VARIABLES_AND_CONDITIONS.value: frozenset(
+        {"changed_quantities", "observed_quantities", "object_constraints"}
+    ),
+    Stage.CONCEPTUAL_PROCEDURE.value: frozenset({"procedure_steps"}),
+    Stage.EXPECTED_DATA_VISUALIZATION.value: frozenset(
+        {"visualization_requirements"}
+    ),
+    Stage.RESULT_INTERPRETATION.value: frozenset(),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS.value: frozenset({"limitations"}),
+}
+
+_EMVR_FIELDS_BY_CANONICAL_FIELD: dict[str, frozenset[str]] = {
+    "research_object": frozenset({"direction_summary", "research_summary"}),
+    "learning_objective": frozenset({"learning_objectives"}),
+    "research_question": frozenset({"research_question"}),
+    "hypothesis": frozenset({"hypothesis"}),
+    "conceptual_structure": frozenset({"required_behaviors", "object_constraints"}),
+    "independent_variable": frozenset({"changed_quantities"}),
+    "observations": frozenset({"observed_quantities"}),
+    "controlled_conditions": frozenset({"object_constraints"}),
+    "procedure_steps": frozenset({"procedure_steps"}),
+    "visualization_plan": frozenset({"visualization_requirements"}),
+    "limitations": frozenset({"limitations"}),
+    "unity_objects": frozenset({"object_constraints"}),
+    "interactions": frozenset({"required_behaviors"}),
+}
+
+_THEORY_SUPPORT_FIELDS = frozenset(
+    {
+        "research_question",
+        "changed_quantities",
+        "observed_quantities",
+        "comparison_cases",
+        "object_constraints",
+    }
+)
+
+
+def _authoritative_emvr_update(
+    raw_update: Any,
+    acts: list[dict[str, Any]],
+    compiled_acts: dict[str, Any],
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Restrict EMVR persistence to fields authorized by dialogue acts."""
+
+    if not isinstance(raw_update, dict):
+        return {}
+    allowed_fields: set[str] = set()
+    theory_allowed = False
+    pending_subject = (
+        str(pending_action.get("subject") or "")
+        if isinstance(pending_action, dict)
+        else ""
+    )
+
+    def authorize_target(target: str) -> None:
+        nonlocal theory_allowed
+        canonical = FACET_TO_DESIGN_FIELD.get(target, target)
+        allowed_fields.update(
+            _EMVR_FIELDS_BY_CANONICAL_FIELD.get(canonical, frozenset())
+        )
+        allowed_fields.update(
+            _EMVR_FIELDS_BY_PENDING_SUBJECT.get(target, frozenset())
+        )
+        if canonical == "theoretical_framework" or target == Stage.THEORETICAL_FRAMEWORK.value:
+            theory_allowed = True
+
+    for act in acts:
+        if not isinstance(act, dict):
+            continue
+        act_type = str(act.get("type") or "")
+        target = str(act.get("target") or "")
+        if act_type == "ANSWER_PENDING_QUESTION":
+            authorize_target(target or pending_subject)
+        elif act_type in {"MODIFY_DESIGN_FIELD", "MODIFY_STAGE_FIELD"}:
+            authorize_target(target)
+        elif act_type == "MODIFY_COMPARISON":
+            allowed_fields.add("comparison_cases")
+        elif act_type == "NEW_TOPIC":
+            allowed_fields.update({"direction_summary", "research_summary"})
+
+    # CORRECT_ASSISTANT compiles nested field repairs into the same validated
+    # update lists, so they receive exactly the same field authorization.
+    for item in [
+        *compiled_acts.get("design_updates", []),
+        *compiled_acts.get("stage_field_updates", []),
+    ]:
+        if isinstance(item, dict):
+            authorize_target(str(item.get("field") or ""))
+
+    filtered: dict[str, Any] = {
+        field: deepcopy(raw_update.get(field))
+        for field in allowed_fields
+        if field in EMVR_EDITABLE_FIELDS
+        and raw_update.get(field) not in (None, "", [], {})
+    }
+    field_updates = []
+    for item in raw_update.get("field_updates", []):
+        if not isinstance(item, dict):
+            continue
+        field_id = str(item.get("field_id") or "")
+        if field_id in allowed_fields:
+            field_updates.append(deepcopy(item))
+    if field_updates:
+        filtered["field_updates"] = field_updates
+
+    if theory_allowed:
+        theory_links = []
+        for item in raw_update.get("theory_links", []):
+            if not isinstance(item, dict):
+                continue
+            support_fields = item.get("supports_design_fields", [])
+            support_fields = (
+                [
+                    str(field)
+                    for field in support_fields
+                    if isinstance(field, str)
+                    and field in _THEORY_SUPPORT_FIELDS
+                ]
+                if isinstance(support_fields, list)
+                else []
+            )
+            if not support_fields:
+                continue
+            theory_links.append(
+                {**deepcopy(item), "supports_design_fields": support_fields}
+            )
+        if theory_links:
+            filtered["theory_links"] = theory_links
+        permitted_relation_ids = {
+            str(item.get("relation_id") or "")
+            for item in theory_links
+            if isinstance(item, dict)
+        }
+        theory_link_updates = []
+        for item in raw_update.get("theory_link_updates", []):
+            if not isinstance(item, dict):
+                continue
+            relation_id = str(item.get("relation_id") or "").strip().upper()
+            operation = str(item.get("operation") or "").strip().upper()
+            if operation == "REMOVE" and relation_id:
+                theory_link_updates.append(
+                    {"relation_id": relation_id, "operation": "REMOVE"}
+                )
+            elif operation == "ADD" and relation_id in permitted_relation_ids:
+                theory_link_updates.append(
+                    {"relation_id": relation_id, "operation": "ADD"}
+                )
+        if theory_link_updates:
+            filtered["theory_link_updates"] = theory_link_updates
+    return filtered
 
 
 class UserIntent(str, Enum):
@@ -725,6 +894,35 @@ def degraded_context_intent(
         isinstance(evidence.get(key), list) and bool(evidence.get(key))
         for key in ("lecture_concepts", "supplemental_concepts")
     )
+    course_anchor = ""
+    for evidence_key in ("lecture_concepts", "supplemental_concepts"):
+        entries = evidence.get(evidence_key, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            candidates: list[Any] = []
+            if isinstance(entry, str):
+                candidates.append(entry)
+            elif isinstance(entry, dict):
+                candidates.extend(
+                    entry.get(key)
+                    for key in ("title", "concept", "name")
+                )
+                concepts = entry.get("concepts", [])
+                if isinstance(concepts, list):
+                    candidates.extend(concepts)
+            course_anchor = next(
+                (
+                    str(candidate).strip()[:300]
+                    for candidate in candidates
+                    if isinstance(candidate, str) and candidate.strip()
+                ),
+                "",
+            )
+            if course_anchor:
+                break
+        if course_anchor:
+            break
     stage_one_entry = bool(
         session.interaction_state is InteractionState.GUIDED_DESIGN
         and session.current_stage is Stage.IDEA_BRAINSTORMING
@@ -732,18 +930,21 @@ def degraded_context_intent(
         and not idea_development
     )
 
-    if stage_one_entry and has_course_evidence:
+    if stage_one_entry and has_course_evidence and course_anchor:
+        # Retrieval proves that the turn touches course material, but a broad
+        # match is not precise enough to become the student's research object.
+        # Keep the original text for a later semantic pass and remain in
+        # non-writing exploration instead of inventing or copying a direction.
         return resolved_intent(
-            UserIntent.ANSWER_CURRENT_QUESTION,
-            target=subject or "initial_idea",
-            resolved_value=message,
+            UserIntent.REQUEST_MORE_EXAMPLES,
+            target="exploration_scenes",
             confidence=0.72,
             source=f"{source}_COURSE_EVIDENCE",
             semantic_updates={
                 "no_direction": False,
                 "course_scope_status": "COURSE_CONTENT",
-                "stage_one_direction_detail": message,
-                "pending_answer_status": "CLEAR",
+                "pending_answer_status": "MISSING",
+                "guidance_need": "CONCRETE_EXAMPLE",
             },
             unresolved_content=preserved_input,
         )
@@ -772,26 +973,18 @@ def degraded_context_intent(
         else ""
     )
     if pending_type in OPEN_QUESTION_PENDING_TYPES:
-        updates: dict[str, Any] = {"pending_answer_status": "CLEAR"}
-        required_facet = required_pending_facet_id(pending_action)
-        if required_facet is not None:
-            updates = {
-                "facet_updates": [
-                    {
-                        "facet_id": required_facet,
-                        "status": "CLEAR",
-                        "operation": "MERGE",
-                        "value": message,
-                    }
-                ]
-            }
+        # A parser outage proves only that the original message exists; it
+        # does not prove that the whole turn answers the visible question.
+        # Keep the pending item open and retain the raw turn for one local
+        # clarification.  In particular, never use the entire mixed message
+        # as a facet value merely because an open question is visible.
         return resolved_intent(
-            UserIntent.ANSWER_CURRENT_QUESTION,
+            UserIntent.UNCLEAR,
             target=subject or session.current_stage.value,
             resolved_value=message,
             confidence=0.62,
-            source=f"{source}_OPEN_QUESTION",
-            semantic_updates=updates,
+            source=f"{source}_OPEN_QUESTION_LOCAL_CLARIFICATION",
+            semantic_updates={"pending_answer_status": "MISSING"},
             unresolved_content=preserved_input,
         )
 
@@ -820,6 +1013,7 @@ def resolved_intent(
     dialogue_acts: list[dict[str, Any]] | None = None,
     unresolved_content: list[dict[str, str]] | None = None,
     task_plan: dict[str, Any] | None = None,
+    actions_authoritative: bool = False,
 ) -> dict[str, Any]:
     intent_value = intent.value if isinstance(intent, UserIntent) else str(intent)
     return {
@@ -838,6 +1032,7 @@ def resolved_intent(
         "dialogue_acts": deepcopy(dialogue_acts or []),
         "unresolved_content": deepcopy(unresolved_content or []),
         "task_plan": deepcopy(task_plan or {}),
+        "actions_authoritative": bool(actions_authoritative),
     }
 
 
@@ -869,40 +1064,50 @@ def validate_resolved_intent(
         for item in raw.get("unresolved_content", [])
         if isinstance(item, dict) and str(item.get("content") or "").strip()
     ] if isinstance(raw.get("unresolved_content"), list) else []
-    raw_acts_supplied = bool(
-        isinstance(raw.get("dialogue_acts"), list)
-        and raw.get("dialogue_acts")
-    )
+    actions_authoritative = raw.get("actions_authoritative") is True
+    raw_acts_supplied = isinstance(raw.get("dialogue_acts"), list)
     compiled_acts = compile_dialogue_acts(
         dialogue_acts,
         pending_action=pending_action,
     )
     task_plan = build_turn_task_plan(dialogue_acts, unresolved_acts)
+    authoritative_state_acts = False
     if dialogue_acts:
         merged_updates = (
             deepcopy(raw.get("semantic_updates"))
             if isinstance(raw.get("semantic_updates"), dict)
             else {}
         )
+        # The action array is the only model-authored state-write contract.
+        # Compatibility summary fields may still describe the turn, but they
+        # cannot add a second, potentially contradictory set of field writes.
         for update_key in (
             "design_updates",
             "facet_updates",
             "stage_field_updates",
             "comparison_updates",
         ):
-            existing = merged_updates.get(update_key, [])
-            existing = existing if isinstance(existing, list) else []
-            merged_updates[update_key] = [
-                *existing,
-                *deepcopy(compiled_acts.get(update_key, [])),
-            ]
+            merged_updates[update_key] = deepcopy(
+                compiled_acts.get(update_key, [])
+            )
+        if actions_authoritative:
+            merged_updates["emvr_design_update"] = _authoritative_emvr_update(
+                merged_updates.get("emvr_design_update"),
+                dialogue_acts,
+                compiled_acts,
+                pending_action,
+            ) or None
         for value_key in (
             "student_questions",
             "feedback_items",
             "unresolved_content",
             "control_actions",
         ):
-            existing = merged_updates.get(value_key, [])
+            existing = (
+                []
+                if actions_authoritative
+                else merged_updates.get(value_key, [])
+            )
             existing = existing if isinstance(existing, list) else []
             merged_updates[value_key] = list(
                 dict.fromkeys(
@@ -930,7 +1135,11 @@ def validate_resolved_intent(
             "option_comparison_requests",
             "version_requests",
         ):
-            existing = merged_updates.get(structured_key, [])
+            existing = (
+                []
+                if actions_authoritative
+                else merged_updates.get(structured_key, [])
+            )
             existing = existing if isinstance(existing, list) else []
             compiled = compiled_acts.get(structured_key, [])
             compiled = compiled if isinstance(compiled, list) else []
@@ -938,6 +1147,8 @@ def validate_resolved_intent(
         if compiled_acts.get("answered_pending"):
             merged_updates["pending_answer_status"] = "CLEAR"
         controls = set(compiled_acts.get("control_actions", []))
+        if actions_authoritative:
+            merged_updates["interaction_state_request"] = None
         if pending_action and {"ACCEPT", "REJECT"} & controls:
             # Acceptance/rejection is an independent resolution of the open
             # proposal even when the same message also edits another field.
@@ -959,6 +1170,7 @@ def validate_resolved_intent(
                 "comparison_updates",
             )
         )
+        authoritative_state_acts = bool(actions_authoritative and state_acts)
         if {"SET_EMVR_MODE", "SET_GUIDED_MODE"} & controls:
             intent = UserIntent.SET_INTERACTION_STATE.value
         elif "NEW_TOPIC" in controls:
@@ -1052,10 +1264,11 @@ def validate_resolved_intent(
             "semantic_updates": merged_updates,
             "source": "SEMANTIC_MULTI_ACT",
         }
-    elif raw_acts_supplied and unresolved_acts:
+    elif raw_acts_supplied and (unresolved_acts or actions_authoritative):
         # The action array is the authoritative semantic result.  If every
-        # proposed action is invalid, do not execute a contradictory legacy
-        # outer intent such as NEW_TOPIC or ADVANCE_STAGE.
+        # proposed action is invalid—or the model returned no executable
+        # action—do not execute a contradictory legacy outer intent or copy
+        # the complete student message into the current field.
         intent = UserIntent.UNCLEAR.value
         raw = {
             **raw,
@@ -1073,14 +1286,6 @@ def validate_resolved_intent(
         and pending_action.get("interaction_state")
         == InteractionState.EMVR_DIRECT.value
     )
-    confirms_saved_modification = bool(
-        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
-        and pending_type in CONFIRMATION_PENDING_TYPES
-        and isinstance(pending_action, dict)
-        and pending_action.get("candidate_resolution")
-        == UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
-        and str(pending_action.get("candidate_answer") or "").strip()
-    )
     # A substantive response to "review this draft and add anything missing"
     # is a modification even if the semantic service used the more general
     # ANSWER_CURRENT_QUESTION label.  Normalize the structured intent from the
@@ -1091,9 +1296,6 @@ def validate_resolved_intent(
     ):
         intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
         raw = {**raw, "source": "SEMANTIC_CONFIRMATION_CONTENT"}
-    if confirms_saved_modification:
-        intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
-        raw = {**raw, "resolved_value": None}
     allowed = set(pending_action.get("allowed_intents", [])) if pending_action else set(ALL_INTENTS)
     confirms_saved_candidate = bool(
         intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
@@ -1110,6 +1312,7 @@ def validate_resolved_intent(
     )
     if (
         intent not in allowed
+        and not authoritative_state_acts
         and not confirms_saved_candidate
         and not requests_reference_for_open_question
         and intent not in {
@@ -1146,6 +1349,8 @@ def validate_resolved_intent(
     if (
         intent == UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
         and is_stage_confirmation
+        and not actions_authoritative
+        and not dialogue_acts
         and resolved_value in (None, "", [], {})
         and isinstance(pending_action, dict)
         and str(pending_action.get("candidate_answer") or "").strip()
@@ -1243,6 +1448,7 @@ def validate_resolved_intent(
         dialogue_acts=dialogue_acts,
         unresolved_content=[*unresolved_acts, *preserved_unresolved],
         task_plan=task_plan,
+        actions_authoritative=actions_authoritative,
     )
 
 
@@ -1984,6 +2190,12 @@ def apply_semantic_design_updates(
         or not isinstance(updates, dict)
     ):
         return
+    authoritative_actions = resolved.get("actions_authoritative") is True
+    if authoritative_actions and not resolved.get("dialogue_acts"):
+        # A model summary without executable field-level acts is read-only.
+        # Never fall back to copying the whole student turn into a pending
+        # field; retain it for localized clarification instead.
+        return
     # A clarification turn may preserve the student's substantive revision in
     # pending_action and then receive only a short confirmation (for example,
     # "对，就是我刚才补充的内容").  Once the state machine has explicitly
@@ -2005,11 +2217,16 @@ def apply_semantic_design_updates(
         else user_message
     )
     design_updates = updates.get("design_updates")
-    if not isinstance(design_updates, list) or not design_updates:
+    if (
+        not authoritative_actions
+        and (not isinstance(design_updates, list) or not design_updates)
+    ):
         design_updates = design_updates_from_facets(
             updates.get("facet_updates"),
             evidence=design_evidence,
         )
+    elif not isinstance(design_updates, list):
+        design_updates = []
     if (
         isinstance(pending_action, dict)
         and pending_action.get("type") == "ANSWER_IDEA_FACET"
@@ -2042,7 +2259,11 @@ def apply_semantic_design_updates(
         provenance="STUDENT_CONFIRMED",
     )
     if changed_fields:
-        set_pending_action_snapshot(session, None)
+        if (
+            isinstance(pending_action, dict)
+            and updates.get("pending_answer_status") == "CLEAR"
+        ):
+            set_pending_action_snapshot(session, None)
         facet_updates = updates.get("facet_updates")
         if not isinstance(facet_updates, list):
             facet_updates = []

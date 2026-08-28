@@ -2237,16 +2237,40 @@ class WorkflowEngine:
                 output.stage_payload["preserve_pending_action"] = True
             completion_error = None
         elif feedback_only_turn:
+            correction_items = semantic_updates.get("correction_items", [])
+            correction_items = (
+                correction_items if isinstance(correction_items, list) else []
+            )
+            affected_fields = list(
+                dict.fromkeys(
+                    str(field)
+                    for item in correction_items
+                    if isinstance(item, dict)
+                    for field in item.get("affected_fields", [])
+                    if isinstance(field, str) and field in _STUDENT_FIELD_LABELS
+                )
+            )
+            affected_labels = [
+                _STUDENT_FIELD_LABELS[field] for field in affected_fields
+            ]
             if session.interaction_state is InteractionState.EMVR_DIRECT:
                 feedback_message = (
                     "收到这项校正。它不会被误记为新的实验要求，现有实验草稿也不会因此回退。"
-                    "请指出需要修订的是物理模型、Unity交互还是展示方式，并给出目标表述；"
-                    "我会只调整对应部分。"
+                    + (
+                        f"目前只需要你给出“{'、'.join(affected_labels)}”的目标表述；"
+                        if affected_labels
+                        else "请指出需要修订的是物理模型、Unity交互还是展示方式，并给出目标表述；"
+                    )
+                    + "我会只调整对应部分。"
                 )
             else:
                 feedback_message = (
                     "你提醒得对，我先不把这句话当成新的实验内容，前面已经确定的想法也继续保留。"
-                    "请告诉我具体要改哪一项，以及你希望怎样表达，我们就从那里接着完善。"
+                    + (
+                        f"现在只需要补充“{'、'.join(affected_labels)}”应该怎样表达。"
+                        if affected_labels
+                        else "请告诉我具体要改哪一项，以及你希望怎样表达，我们就从那里接着完善。"
+                    )
                 )
             output = StepOutput(
                 assistant_message=feedback_message,
@@ -2965,6 +2989,19 @@ class WorkflowEngine:
         if not isinstance(idea, dict):
             idea = {}
             session.design_context["idea"] = idea
+        if (
+            turn_context.get("more_brainstorm_requested") is True
+            or turn_context.get("stage_one_no_direction") is True
+        ):
+            # Breadth requests and an explicitly missing direction may still
+            # carry the student's full sentence into response planning. They
+            # are not research-direction updates and must not be committed as
+            # topic_anchor/current_focus by this compatibility persistence
+            # hook. Facet-reference control turns continue through the legacy
+            # path because it maintains their non-repeating reference cycle.
+            idea["course_scope_confirmed"] = True
+            idea.setdefault("brainstorm_phase", BREADTH_EXPLORATION)
+            return
         topic_anchor = str(turn_context.get("topic_anchor") or "").strip()
         current_focus = str(turn_context.get("current_focus") or "").strip()
         focus_history = turn_context.get("focus_history", [])
