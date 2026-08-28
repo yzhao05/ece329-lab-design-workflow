@@ -402,7 +402,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIsNone(mapped["substep_number"])
         self.assertNotRegex(mapped["assistant_message"], r"请选择|你希望把哪|选哪")
         self.assertTrue(mapped["stage_payload"]["awaiting_student_description"])
-        self.assertIn("哪些量应该主动改变", mapped["assistant_message"])
+        self.assertIn("我先把已有线索顺成", mapped["assistant_message"])
+        self.assertIn("变量分工是否符合", mapped["assistant_message"])
         self.assertNotIn("先把自变量定为", mapped["assistant_message"])
 
         reasked = self.engine.process_turn(
@@ -1501,7 +1502,8 @@ class WorkflowEngineTests(unittest.TestCase):
         while guided["current_stage"] != Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value:
             self.assertTrue(guided["stage_payload"]["awaiting_student_description"])
             if guided["current_stage"] == Stage.CONCEPTUAL_PROCEDURE.value:
-                self.assertIn("你认为在这个实验中", guided["assistant_message"])
+                self.assertIn("我先把已有线索顺成", guided["assistant_message"])
+                self.assertIn("这套顺序是否能完成", guided["assistant_message"])
                 self.assertNotIn("你认为学生", guided["assistant_message"])
             guided = self.engine.process_turn(
                 guided["design_id"],

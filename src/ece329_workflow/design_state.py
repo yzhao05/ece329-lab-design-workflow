@@ -121,6 +121,12 @@ def _legacy_values(session: DesignSession) -> dict[str, str]:
         return _text(facet.get("evidence"))
 
     hypothesis = facet_value("hypothesis") or _text(outline.get("hypothesis"))
+    original_as_confirmed_direction = (
+        _text(idea.get("original"))
+        if idea.get("course_scope_confirmed") is True
+        and idea.get("direction_locked") is True
+        else ""
+    )
     return {
         "research_object": (
             facet_value("direction_outline")
@@ -128,7 +134,7 @@ def _legacy_values(session: DesignSession) -> dict[str, str]:
             or _text(outline.get("core_phenomenon"))
             or _text(idea.get("direction_summary"))
             or _text(idea.get("current_focus"))
-            or _text(idea.get("original"))
+            or original_as_confirmed_direction
         ),
         "course_relationship": (
             facet_value("course_mapping")
@@ -243,8 +249,20 @@ def ensure_design_state(session: DesignSession) -> dict[str, Any]:
     state.setdefault("seen_scene_signatures", [])
     state.setdefault("pending_action", None)
     state.setdefault("applied_update_ids", [])
+    state.setdefault("semantic_signatures", {})
+    state.setdefault("field_provenance", {})
     state.setdefault("explicitly_cleared_fields", [])
     state.setdefault("baseline_comparisons", [])
+    state.setdefault(
+        "topic_lock",
+        {
+            "locked": False,
+            "research_topic": "",
+            "confirmed_research_question": "",
+            "confirmed_comparisons": [],
+            "preserved_fields": [],
+        },
+    )
     for field in DESIGN_TEXT_FIELDS:
         state.setdefault(field, "")
     if state.get("legacy_migrated") is not True:
@@ -263,6 +281,36 @@ def ensure_design_state(session: DesignSession) -> dict[str, Any]:
                 and value
             ):
                 state[field] = value
+    # Earlier sessions could seed the raw creation message into
+    # research_object before the student had established a course direction.
+    # Repair only that provenance-free, unconfirmed legacy shape; never
+    # inspect the wording and never clear a confirmed or explicitly updated
+    # research object.
+    idea = session.design_context.get("idea", {})
+    idea = idea if isinstance(idea, dict) else {}
+    original = _text(idea.get("original"))
+    provenance = state.get("field_provenance", {})
+    provenance = provenance if isinstance(provenance, dict) else {}
+    has_direction_evidence = any(
+        _text(idea.get(field))
+        for field in (
+            "topic_anchor",
+            "current_focus",
+            "main_direction",
+            "direction_summary",
+            "core_phenomenon",
+            "selected_focus",
+        )
+    )
+    if (
+        original
+        and _normalized(_text(state.get("research_object")))
+        == _normalized(original)
+        and not _text(provenance.get("research_object"))
+        and idea.get("direction_locked") is not True
+        and not has_direction_evidence
+    ):
+        state["research_object"] = ""
     _migrate_seen_scenes_from_history(session, state)
     if not state.get("baseline_comparisons"):
         legacy_comparisons = _legacy_comparisons(session)
@@ -312,6 +360,7 @@ def apply_design_updates(
     updates: Any,
     *,
     pending_action: dict[str, Any] | None = None,
+    provenance: str = "STUDENT_CONFIRMED",
 ) -> list[str]:
     """Validate and idempotently commit semantic field updates."""
 
@@ -322,9 +371,15 @@ def apply_design_updates(
     if not isinstance(applied_ids, list):
         applied_ids = []
     known_ids = {str(item) for item in applied_ids}
+    semantic_signatures = state.get("semantic_signatures", {})
+    if not isinstance(semantic_signatures, dict):
+        semantic_signatures = {}
     explicitly_cleared = {
         str(item) for item in state.get("explicitly_cleared_fields", [])
     }
+    field_provenance = state.get("field_provenance", {})
+    if not isinstance(field_provenance, dict):
+        field_provenance = {}
     action_id = (
         str(pending_action.get("action_id") or "")
         if isinstance(pending_action, dict)
@@ -354,8 +409,21 @@ def apply_design_updates(
         if update_id in known_ids:
             continue
         previous = _text(state.get(field))
+        signature = str(raw.get("semantic_key") or "").strip().casefold()
+        if not signature:
+            signature = _normalized(value)
+        known_signatures = semantic_signatures.get(field, [])
+        known_signatures = (
+            [str(item) for item in known_signatures]
+            if isinstance(known_signatures, list)
+            else []
+        )
         if operation == "MERGE":
-            next_value = _merge_text(previous, value)
+            next_value = (
+                previous
+                if signature and signature in known_signatures
+                else _merge_text(previous, value)
+            )
         elif operation == "CLEAR":
             next_value = ""
         else:
@@ -365,15 +433,105 @@ def apply_design_updates(
         if next_value != previous:
             state[field] = next_value
             changed.append(field)
+            records = field_provenance.get(field, [])
+            records = records if isinstance(records, list) else []
+            records.append(
+                {
+                    "revision": int(state.get("revision") or 0) + 1,
+                    "source": str(raw.get("provenance") or provenance)[:80],
+                    "operation": operation,
+                    "value": next_value[:1000],
+                }
+            )
+            field_provenance[field] = records[-30:]
         if operation == "CLEAR":
             explicitly_cleared.add(field)
+            semantic_signatures[field] = []
+        elif operation == "REPLACE":
+            explicitly_cleared.discard(field)
+            semantic_signatures[field] = [signature] if signature else []
         else:
             explicitly_cleared.discard(field)
+            if signature and signature not in known_signatures:
+                known_signatures.append(signature)
+                semantic_signatures[field] = known_signatures[-40:]
     if changed:
         state["revision"] = int(state.get("revision") or 0) + 1
     state["applied_update_ids"] = applied_ids[-200:]
+    state["semantic_signatures"] = semantic_signatures
+    state["field_provenance"] = field_provenance
     state["explicitly_cleared_fields"] = sorted(explicitly_cleared)
+    refresh_topic_lock(session)
     return list(dict.fromkeys(changed))
+
+
+def refresh_topic_lock(
+    session: DesignSession,
+    *,
+    force_locked: bool | None = None,
+    preserved_fields: list[str] | None = None,
+) -> dict[str, Any]:
+    """Keep one canonical topic anchor across every interaction mode.
+
+    The lock protects already confirmed content from accidental resets.  It
+    does not prevent an explicit field-level edit; replacing the whole topic
+    still requires the separately validated NEW_TOPIC action.
+    """
+
+    state = ensure_design_state(session)
+    lock = state.get("topic_lock")
+    if not isinstance(lock, dict):
+        lock = {}
+        state["topic_lock"] = lock
+    idea = session.design_context.get("idea", {})
+    idea_locked = bool(
+        isinstance(idea, dict) and idea.get("direction_locked") is True
+    )
+    research_topic = _text(state.get("research_object"))
+    research_question = _text(state.get("research_question"))
+    comparisons = _normalized_comparison_groups(
+        state.get("baseline_comparisons", [])
+    )
+    was_locked = lock.get("locked") is True
+    lock["locked"] = (
+        bool(force_locked)
+        if force_locked is not None
+        else bool(was_locked or idea_locked or research_question)
+    )
+    if research_topic:
+        lock["research_topic"] = research_topic
+    else:
+        lock.setdefault("research_topic", "")
+    if research_question:
+        lock["confirmed_research_question"] = research_question
+    else:
+        lock.setdefault("confirmed_research_question", "")
+    if comparisons:
+        lock["confirmed_comparisons"] = deepcopy(comparisons)
+    else:
+        lock.setdefault("confirmed_comparisons", [])
+    preserved = {
+        str(item)
+        for item in lock.get("preserved_fields", [])
+        if str(item).strip()
+    }
+    preserved.update(
+        str(item)
+        for item in preserved_fields or []
+        if str(item).strip()
+    )
+    lock["preserved_fields"] = sorted(preserved)
+    if lock["locked"] and not lock.get("locked_at_revision"):
+        lock["locked_at_revision"] = int(state.get("revision") or 0)
+    return deepcopy(lock)
+
+
+def topic_lock_snapshot(session: DesignSession) -> dict[str, Any]:
+    return refresh_topic_lock(session)
+
+
+def is_topic_locked(session: DesignSession) -> bool:
+    return topic_lock_snapshot(session).get("locked") is True
 
 
 def design_updates_from_facets(
@@ -506,12 +664,15 @@ def design_state_snapshot(session: DesignSession) -> dict[str, Any]:
     """Return public design fields without internal state-machine metadata."""
 
     state = ensure_design_state(session)
+    comparisons = deepcopy(state.get("baseline_comparisons", []))
+    for comparison in comparisons if isinstance(comparisons, list) else []:
+        if isinstance(comparison, dict):
+            comparison.pop("semantic_key", None)
+            comparison.pop("case_semantic_keys", None)
     return {
         field: deepcopy(state.get(field, "")) for field in DESIGN_TEXT_FIELDS
     } | {
-        "baseline_comparisons": deepcopy(
-            state.get("baseline_comparisons", [])
-        ),
+        "baseline_comparisons": comparisons,
         "revision": int(state.get("revision") or 0),
     }
 
@@ -533,6 +694,7 @@ def set_baseline_comparisons(
     outline = session.design_context.get("experiment_outline_seed")
     if isinstance(outline, dict):
         outline["baseline_comparisons"] = deepcopy(normalized)
+    refresh_topic_lock(session)
     return deepcopy(normalized)
 
 

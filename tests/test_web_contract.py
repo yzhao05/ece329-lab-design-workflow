@@ -23,6 +23,9 @@ class WebFrontendContractTests(unittest.TestCase):
         cls.ci_workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         cls.dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
         cls.dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+        cls.live_eval = (PROJECT_ROOT / "tools" / "run_live_dialogue_eval.py").read_text(
+            encoding="utf-8"
+        )
 
     def test_public_config_keeps_api_base_url_blank(self) -> None:
         self.assertIn('API_BASE_URL: ""', self.config_js)
@@ -36,7 +39,10 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("tools/configure_pages_api.py", self.pages_workflow)
 
     def test_guided_confirmation_builds_completion_context(self) -> None:
-        self.assertIn("function buildTurnRequest(message, uiAction = null)", self.app_js)
+        self.assertIn(
+            "function buildTurnRequest(message, uiAction = null, versionRequest = null)",
+            self.app_js,
+        )
         self.assertIn('uiAction !== "ADVANCE_STAGE"', self.app_js)
         self.assertIn('return { label, action: "ADVANCE_STAGE" }', self.app_js)
         self.assertIn("turn.complete_stage = true", self.app_js)
@@ -65,12 +71,13 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("active_facet_id", self.app_js)
         self.assertIn("确认想法完善并进入变量与条件", self.app_js)
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
-        self.assertEqual(
-            self.index_html.count("v=20260824-unified-semantics"),
-            2,
+        self.assertEqual(self.index_html.count("v=20260824-unified-semantics"), 1)
+        self.assertIn(
+            "assets/styles.css?v=20260828-quality-review",
+            self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260828-language-audit",
+            "assets/app.js?v=20260828-quality-idempotency",
             self.index_html,
         )
 
@@ -82,8 +89,39 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("function downloadTaskReport()", self.app_js)
         self.assertIn("response.task_report", self.app_js)
         self.assertIn("response.report_ready === true", self.app_js)
+
+    def test_quality_review_versions_and_guided_export_are_visible(self) -> None:
+        self.assertIn('id="qualityReviewCard"', self.index_html)
+        self.assertIn('id="qualityCausalChain"', self.index_html)
+        self.assertIn('id="qualityFeasibility"', self.index_html)
+        self.assertIn('id="viewVersionsButton"', self.index_html)
+        self.assertIn('id="undoVersionButton"', self.index_html)
+        self.assertIn('id="downloadGuidedSummaryButton"', self.index_html)
+        self.assertIn("response.stage_payload?.quality_review", self.app_js)
+        self.assertIn('querySelector("#qualityBoundaryCases")', self.app_js)
+        self.assertIn('querySelector("#qualityOptionComparison")', self.app_js)
+        self.assertIn("entry.design_field_label", self.app_js)
+        self.assertIn("response.stage_payload?.version_control", self.app_js)
+
+    def test_frontend_sends_stable_turn_id_and_can_resume_a_design(self) -> None:
+        self.assertIn('"Idempotency-Key": turn.turn_id', self.app_js)
+        self.assertIn("turn_id: turnId", self.app_js)
+        self.assertIn("/resume", self.app_js)
+        self.assertIn("design_resume_token", self.app_js)
+        self.assertIn("async function authorizedDesignApiRequest", self.app_js)
+        self.assertIn("async function authorizedDesignDownload", self.app_js)
+        self.assertIn("sessionStorage.removeItem(DESIGN_TOKEN_KEY)", self.app_js)
         self.assertIn("Authorization: `Bearer ${token}`", self.app_js)
         self.assertIn('advanceQuickAction("保留这部分并继续")', self.app_js)
+        self.assertRegex(
+            self.app_js,
+            r"error instanceof ApiError && error\.status === 409[\s\S]{0,180}state\.pendingRequest = null",
+        )
+
+    def test_live_dialogue_eval_forces_the_real_openai_generator(self) -> None:
+        self.assertIn('os.environ["ECE329_GENERATOR"] = "openai"', self.live_eval)
+        self.assertNotIn("ECE329_GENERATOR_MODE", self.live_eval)
+        self.assertIn('generator_info.get("provider") != "openai"', self.live_eval)
 
     def test_demo_rechecks_all_idea_facets_without_fixed_substep_order(self) -> None:
         self.assertIn("function updateDemoIdeaDevelopmentStatus", self.app_js)

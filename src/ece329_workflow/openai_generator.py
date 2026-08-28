@@ -17,6 +17,7 @@ from .dialogue_state import (
     ALL_INTENTS,
     CONFIRMATION_PENDING_TYPES,
     OPEN_QUESTION_PENDING_TYPES,
+    degraded_context_intent,
     pending_question_answer_needs_review,
     pending_question_decision_missing,
     required_pending_facet_id,
@@ -448,6 +449,12 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         raise ModelOutputError(
             "Student-facing text exposed an internal numbered stage reference"
         )
+    if stage is not Stage.IDEA_BRAINSTORMING:
+        question_count = student_visible_prose.count("？") + student_visible_prose.count("?")
+        if question_count > 1:
+            raise ModelOutputError(
+                "A student-facing turn may ask only one next question"
+            )
     if session.interaction_state is InteractionState.EMVR_DIRECT:
         visible_text = json.dumps(
             {
@@ -598,6 +605,7 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         "pending_action",
         "resolved_intent",
         "dialogue_acts",
+        "task_plan",
         "design_state",
         "concept_id",
         "supplemental_concept_id",
@@ -1624,10 +1632,14 @@ class OpenAIStageGenerator:
                 "previous_question预设的格式回答。同一句可以同时包含：回答当前问题、补充或修改"
                 "其他设计字段、修改基础比较、提出课程问题、索取参考或总结、纠正助手理解，以及"
                 "继续或返回等控制动作。必须逐项拆开，不能把整句复制进一个动作，也不能因为一项"
-                "不清楚就丢弃其他清楚项。每个动作包含type、target、operation、content、confidence；"
+                "不清楚就丢弃其他清楚项。每个动作包含type、target、operation、content、confidence，"
+                "设计内容动作还应包含semantic_key。semantic_key是简短、稳定、与措辞无关的物理含义"
+                "标识；同一字段中语义等价的说法必须返回相同semantic_key。每个设计动作只表达一个"
+                "原子含义，同一句涉及多个字段或同一字段中的多个独立要点时必须拆成多个动作；"
                 "type只能为ANSWER_PENDING_QUESTION、MODIFY_DESIGN_FIELD、MODIFY_STAGE_FIELD、"
                 "MODIFY_COMPARISON、ASK_COURSE_QUESTION、REQUEST_REFERENCE、REQUEST_SUMMARY、"
-                "CORRECT_ASSISTANT、CONTROL、NEW_TOPIC或UNRESOLVED。"
+                "REQUEST_QUALITY_REVIEW、COMPARE_OPTIONS、VERSION_CONTROL、CORRECT_ASSISTANT、"
+                "CONTROL、NEW_TOPIC或UNRESOLVED。"
                 "ANSWER_PENDING_QUESTION只保存真正回答pending_action.subject的内容；"
                 "MODIFY_DESIGN_FIELD的target只能是research_object、course_relationship、"
                 "learning_objective、research_question、theoretical_framework、hypothesis、"
@@ -1636,21 +1648,33 @@ class OpenAIStageGenerator:
                 "visualization_plan、result_interpretation、limitations、unity_objects、interactions。"
                 "operation只能为MERGE、REPLACE或CLEAR。课程疑问必须单独作为ASK_COURSE_QUESTION，"
                 "不能保存成实验观点；对遗漏、曲解或重复的反馈必须作为CORRECT_ASSISTANT，除非同句"
-                "还明确给出字段新值，否则不能据此覆盖设计。无法理解的片段单独放UNRESOLVED，"
+                "还明确给出字段新值，否则不能据此覆盖设计。若能从user_message、上一轮真实回复和"
+                "当前状态确定助手究竟错改或漏改了哪个字段，CORRECT_ASSISTANT.content应返回对象，"
+                "包含error_type、explanation、affected_fields，以及经过核对的design_updates或"
+                "stage_field_updates；只修复有证据的字段，不能用道歉代替修正。无法理解的片段单独放UNRESOLVED，"
                 "其他动作仍正常返回。CONTROL的target只能为ACCEPT、REJECT、ADVANCE、RETURN、"
-                "SET_GUIDED_MODE或SET_EMVR_MODE。每个动作的content只含该动作的实质内容。"
+                "SET_GUIDED_MODE、SET_EMVR_MODE或ACCEPT_QUALITY_REVIEW。VERSION_CONTROL.content"
+                "必须包含action，取值VIEW_RECENT、UNDO_LAST、RESTORE或COMPARE；可包含version_id、"
+                "other_version_id与fields。学生要求分析设计是否合理时使用REQUEST_QUALITY_REVIEW；"
+                "提出两个以上方案并要求比较时使用COMPARE_OPTIONS，content保留各方案的实质内容。"
+                "每个动作的content只含该动作的实质内容。"
                 "外层intent、target、resolved_value_json和semantic_updates_json继续返回，作为旧接口"
                 "兼容摘要；外层intent应概括最主要动作，但不得用它压掉dialogue_acts_json中的并行动作。"
                 "可选意图只有ANSWER_CURRENT_QUESTION、ACCEPT_PREVIOUS_PROPOSAL、"
                 "MODIFY_PREVIOUS_PROPOSAL、REJECT_PREVIOUS_PROPOSAL、ADVANCE_STAGE、"
                 "REQUEST_MORE_EXAMPLES、REQUEST_CURRENT_DESIGN_SUMMARY、"
                 "ASK_COURSE_QUESTION、PROVIDE_FEEDBACK、RETURN_TO_PREVIOUS_POINT、NEW_TOPIC、"
-                "SET_INTERACTION_STATE、UNCLEAR。"
+                "SET_INTERACTION_STATE、REQUEST_DESIGN_REVIEW、COMPARE_DESIGN_OPTIONS、"
+                "MANAGE_DESIGN_VERSION、UNCLEAR。"
                 "凡是必须依赖上一轮才能理解的表达都要走这一套语义判断，包括指代某个或多个选项、"
                 "组合前述图景、表示暂无方向、回答或撤回想法完整性要点、接受或局部修改建议、"
                 "继续推进、索取其他例子、返回前项和更换主题；不能用孤立词语代替上下文判断。"
                 "类似‘沿用刚才安排’‘两个都留下’‘不用改，接着做’应根据上一项待办解析，"
                 "不能按孤立关键词判断。只有语义确实不足时才返回UNCLEAR。"
+                "carried_context.topic_lock.locked=true时，学生后续补充默认属于当前研究主题；"
+                "除非学生明确表示放弃当前实验并重新开始，否则不得返回NEW_TOPIC，也不得清空已经"
+                "确认的研究问题、比较对象、观察现象或保留内容。current_edit_target表示当前正在"
+                "讨论的设计项，但不限制同一句对其他字段的明确修改。"
                 "学生明确表示暂时不知道并要求你给出一个可能、参考、示例或你的判断时，应返回"
                 "REQUEST_MORE_EXAMPLES；这不是学生对当前问题给出的设计答案，不得返回"
                 "ANSWER_CURRENT_QUESTION，也不得把请求文字作为resolved_value。"
@@ -1684,12 +1708,12 @@ class OpenAIStageGenerator:
                 "要求其他内容不变时operation=MERGE，明确替换时operation=REPLACE；CLEAR更新"
                 "必须用value保存该字段最终应写入的实质内容，不能把会话操作写入value）、"
                 "design_updates（所有普通引导模式下的实质设计修改都必须逐项返回，元素包含field、"
-                "operation和value。field只能为research_object、course_relationship、"
+                "operation、value和semantic_key。field只能为research_object、course_relationship、"
                 "learning_objective、research_question、theoretical_framework、hypothesis、"
                 "expected_phenomenon、conceptual_structure；operation只能为MERGE、REPLACE、CLEAR。"
                 "一个请求修改几项就返回几项，不得合并字段。学生补充且保留原内容时必须MERGE；"
                 "明确改写时REPLACE。模型只提出修改，程序负责验证和提交）、"
-                "stage_field_updates（后续阶段和EMVR中的字段级更新；field只能为"
+                "stage_field_updates（后续阶段和EMVR中的字段级更新；每项同样包含semantic_key；field只能为"
                 "independent_variable、observations、controlled_conditions、procedure_steps、"
                 "visualization_plan、result_interpretation、limitations、unity_objects、interactions；"
                 "operation同样只能为MERGE、REPLACE、CLEAR。用户一轮修改几项就逐项返回几项）、"
@@ -1707,6 +1731,18 @@ class OpenAIStageGenerator:
                 "canonical=false表示旧会话中的未核对自定义表述；若它与canonical=true项语义等价，"
                 "只保留canonical项并用renames记录学生希望显示的说法。同一物理情形的缩写、"
                 "完整说法或改名不是新增项，不能把新旧表述同时保留），"
+                "comparison_updates还应为比较组返回semantic_key，并在case_semantic_keys中用"
+                "{显示表述:稳定物理含义标识}标记各case；跨轮语义相同但措辞不同的比较组或case"
+                "必须复用同一semantic_key，不能作为新内容追加。"
+                "quality_assessment（根据提交后的完整设计含义检查一致性、因果链、概念可行性、"
+                "边界情形、课程依据和多方案差异；issues逐项包含category、status、severity、fields、"
+                "finding、suggestion、student_question；causal_chain包含cause、response、mechanism、"
+                "comparison、answerability、status；boundary_cases只提出与当前设计有关的边界；"
+                "traceability逐项说明design_field、course_item、purpose、source_type；若学生要求"
+                "比较方案，option_comparison按observability、course_alignment、controllability、"
+                "vr_suitability、discrimination、extra_assumptions和recommendation比较，不替学生"
+                "静默作决定），guidance_need（只能为BRIEF_HINT、CONCRETE_EXAMPLE、REFERENCE_DRAFT、"
+                "FORMULA_EXPLANATION、DESIGN_REVIEW或OPTION_COMPARISON，应依据学生当前困难选择帮助深度），"
                 "以及interaction_state_request"
                 "（只能为GUIDED_DESIGN、EMVR_DIRECT或null），以及仅供EMVR_DIRECT使用的"
                 "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
@@ -1994,24 +2030,6 @@ class OpenAIStageGenerator:
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
             resolved_value = None
         elif (
-            repaired_intent == "UNCLEAR"
-            and pending_action is None
-            and session.current_stage is Stage.IDEA_BRAINSTORMING
-        ):
-            # After two semantic passes, a safe free-form first turn is still
-            # useful experiment input even when its course-scope label remains
-            # uncertain. The Stage 1 generator performs the actual boundary
-            # response; do not ask the student to classify their own turn as a
-            # conversation command.
-            raw["intent"] = "ANSWER_CURRENT_QUESTION"
-            raw["target"] = "initial_idea"
-            raw["resolved_value_json"] = json.dumps(
-                user_message,
-                ensure_ascii=False,
-            )
-            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
-            resolved_value = user_message
-        elif (
             repaired_intent == "ACCEPT_PREVIOUS_PROPOSAL"
             and pending_type in OPEN_QUESTION_PENDING_TYPES
             and isinstance(pending_action, dict)
@@ -2145,6 +2163,24 @@ class OpenAIStageGenerator:
             ),
         )
         validated = validate_resolved_intent(candidate, pending_action)
+        if (
+            validated.get("intent") == "UNCLEAR"
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+        ):
+            # Stage 1 is exploratory and its pending item is non-blocking.
+            # Recover from course evidence and topic state instead of
+            # replaying a global clarification prompt.
+            validated = validate_resolved_intent(
+                degraded_context_intent(
+                    session,
+                    user_message,
+                    pending_action,
+                    carried_context,
+                    source="SEMANTIC_UNCLEAR_RECOVERY",
+                ),
+                pending_action,
+            )
         if (
             confirmed_candidate_modification
             and validated.get("intent") == "MODIFY_PREVIOUS_PROPOSAL"
@@ -2343,14 +2379,24 @@ class FallbackStageGenerator:
                 pending_action,
                 carried_context,
             )
-        except ModelServiceError:
+        except ModelServiceError as exc:
+            if isinstance(exc, ModelOutputError):
+                fallback_reason = "intent_output_rejected"
+            elif isinstance(exc, ModelHTTPError):
+                fallback_reason = f"intent_http_{exc.status_code}"
+            elif isinstance(exc, ModelConfigurationError):
+                fallback_reason = "intent_configuration_error"
+            else:
+                fallback_reason = "intent_transport_error"
             with self._metrics_lock:
                 self._fallback_calls += 1
-                self._last_fallback_reason = "intent_service_unavailable"
-            return resolved_intent(
-                "UNCLEAR",
-                confidence=0.0,
-                source="INTENT_SERVICE_UNAVAILABLE",
+                self._last_fallback_reason = fallback_reason
+            return degraded_context_intent(
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+                source="SEMANTIC_SERVICE_FALLBACK",
             )
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:

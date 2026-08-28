@@ -5,6 +5,7 @@ import unittest
 from ece329_workflow.design_state import (
     apply_design_updates,
     design_state_snapshot,
+    ensure_design_state,
     format_design_summary,
     record_seen_scenes,
     set_baseline_comparisons,
@@ -44,6 +45,71 @@ class ComparisonSummarySemanticGenerator(RuleBasedStageGenerator):
 
 
 class CanonicalDesignStateTests(unittest.TestCase):
+    def test_unconfirmed_legacy_creation_message_is_not_a_research_object(self) -> None:
+        raw_request = "请先帮助我浏览课程里的实验方向"
+        session = DesignSession(
+            design_id="design_unconfirmed_legacy_seed",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {"original": raw_request},
+                "design_state": {
+                    "legacy_migrated": True,
+                    "research_object": raw_request,
+                    "field_provenance": {},
+                },
+            },
+        )
+
+        state = ensure_design_state(session)
+
+        self.assertEqual(state["research_object"], "")
+
+    def test_confirmed_legacy_original_is_preserved_as_research_object(self) -> None:
+        original = "比较传输线终端条件与反射的关系"
+        session = DesignSession(
+            design_id="design_confirmed_legacy_seed",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "original": original,
+                    "course_scope_confirmed": True,
+                    "direction_locked": True,
+                },
+                "design_state": {
+                    "legacy_migrated": True,
+                    "research_object": original,
+                    "field_provenance": {},
+                },
+            },
+        )
+
+        state = ensure_design_state(session)
+
+        self.assertEqual(state["research_object"], original)
+
+    def test_course_scoped_but_unselected_legacy_request_is_not_a_research_object(self) -> None:
+        raw_request = "请先帮助我浏览课程里的实验方向"
+        session = DesignSession(
+            design_id="design_course_scoped_unselected_seed",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "original": raw_request,
+                    "course_scope_confirmed": True,
+                    "direction_locked": False,
+                },
+                "design_state": {
+                    "legacy_migrated": True,
+                    "research_object": raw_request,
+                    "field_provenance": {},
+                },
+            },
+        )
+
+        state = ensure_design_state(session)
+
+        self.assertEqual(state["research_object"], "")
+
     def test_scene_templates_are_excluded_across_rounds(self) -> None:
         session = DesignSession(
             design_id="design_scene_history",

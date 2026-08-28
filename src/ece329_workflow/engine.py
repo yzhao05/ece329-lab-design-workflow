@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import uuid
@@ -38,6 +39,7 @@ from .design_state import (
     design_state_snapshot,
     ensure_design_state,
     format_design_summary,
+    is_topic_locked,
     record_seen_scenes,
     set_baseline_comparisons,
     sync_design_state_to_legacy,
@@ -65,12 +67,14 @@ from .idea_development import (
 from .knowledge_base import KNOWLEDGE
 from .models import (
     STAGE_SEQUENCE,
+    DesignAccessDenied,
     DesignSession,
     InteractionState,
     Stage,
     StageCompletionError,
     StepOutput,
     TurnRequest,
+    SessionConflict,
     WorkflowStatus,
 )
 from .prompts import build_prompt_packet
@@ -89,6 +93,105 @@ from .stages import (
     stage_title,
 )
 from .store import SessionStore, store_from_environment
+from .turn_planning import (
+    compute_design_diff,
+    finalize_turn_task_plan,
+    student_change_notice,
+    workflow_design_snapshot,
+)
+from .design_quality import (
+    evaluate_design_quality,
+    format_option_comparison,
+    format_quality_review,
+    public_quality_review,
+)
+from .design_versions import (
+    ensure_initial_version,
+    execute_version_request,
+    format_version_result,
+    normalize_version_request,
+    record_design_version,
+)
+
+
+_TURN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}")
+_TURN_CACHE_LIMIT = 50
+
+
+def _validated_turn_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("turn_id must be a string or null")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if _TURN_ID_PATTERN.fullmatch(normalized) is None:
+        raise ValueError("turn_id must be 8-128 URL-safe characters")
+    return normalized
+
+
+def _turn_request_fingerprint(request: TurnRequest) -> str:
+    payload = {
+        "message": request.message,
+        "complete_stage": request.complete_stage,
+        "context_patch": request.context_patch,
+        "interaction_state": (
+            request.interaction_state.value if request.interaction_state else None
+        ),
+        "selected_option_id": request.selected_option_id,
+        "version_request": request.version_request,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cached_turn_response(
+    session: DesignSession,
+    request: TurnRequest,
+) -> dict[str, Any] | None:
+    if not request.turn_id:
+        return None
+    cache = session.model_context.get("turn_idempotency", [])
+    if not isinstance(cache, list):
+        return None
+    fingerprint = _turn_request_fingerprint(request)
+    for item in reversed(cache):
+        if not isinstance(item, dict) or item.get("turn_id") != request.turn_id:
+            continue
+        if item.get("fingerprint") != fingerprint:
+            raise SessionConflict(
+                "The same turn_id cannot be reused for different turn content."
+            )
+        response = item.get("response")
+        return deepcopy(response) if isinstance(response, dict) else None
+    return None
+
+
+def _cache_turn_response(
+    session: DesignSession,
+    request: TurnRequest,
+    response: dict[str, Any],
+) -> None:
+    if not request.turn_id:
+        return
+    cache = session.model_context.setdefault("turn_idempotency", [])
+    if not isinstance(cache, list):
+        cache = []
+        session.model_context["turn_idempotency"] = cache
+    cache.append(
+        {
+            "turn_id": request.turn_id,
+            "fingerprint": _turn_request_fingerprint(request),
+            "response": deepcopy(response),
+        }
+    )
+    del cache[:-_TURN_CACHE_LIMIT]
 
 
 _GUIDED_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
@@ -183,6 +286,108 @@ def _contains_emvr_marker(text: str) -> bool:
 
     return "EMVR" in text.upper()
 
+
+def _record_mode_handoff(
+    session: DesignSession,
+    previous_state: InteractionState,
+    next_state: InteractionState,
+) -> dict[str, Any]:
+    """Preserve design meaning while only changing the interaction strategy."""
+
+    design = design_state_snapshot(session)
+    stage_state = stage_design_state_snapshot(session)
+    comparisons = design.get("baseline_comparisons", [])
+    rejected = [
+        deepcopy(item)
+        for item in (comparisons if isinstance(comparisons, list) else [])
+        if isinstance(item, dict) and item.get("adoption_status") == "REJECTED"
+    ]
+    handoff = {
+        "from": previous_state.value,
+        "to": next_state.value,
+        "research_question": design.get("research_question", ""),
+        "learning_objective": design.get("learning_objective", ""),
+        "variables": {
+            "independent_variable": stage_state.get("independent_variable", ""),
+            "observations": stage_state.get("observations", ""),
+            "controlled_conditions": stage_state.get("controlled_conditions", ""),
+        },
+        "rejected_content": rejected,
+        "unresolved_quality_issues": deepcopy(
+            session.design_context.get("quality_review", {}).get("issues", [])
+            if isinstance(session.design_context.get("quality_review"), dict)
+            else []
+        ),
+    }
+    session.model_context["mode_handoff"] = deepcopy(handoff)
+    if next_state is InteractionState.EMVR_DIRECT:
+        emvr = session.design_context.setdefault("emvr_design", {})
+        if not isinstance(emvr, dict):
+            emvr = {}
+            session.design_context["emvr_design"] = emvr
+        transferred_brief = str(
+            design.get("research_question")
+            or design.get("research_object")
+            or session.design_context.get("idea", {}).get("original", "")
+        ).strip()
+        if transferred_brief:
+            emvr["current_brief"] = transferred_brief
+        emvr["mode_handoff"] = deepcopy(handoff)
+    return handoff
+
+
+def _keep_locked_topic_as_refinement(
+    turn_intent: dict[str, Any],
+    pending_action: dict[str, Any] | None,
+    target: str,
+    source: str,
+) -> None:
+    """Downgrade an unsupported topic reset to a current-design refinement."""
+
+    resolved_target = (
+        str(pending_action.get("subject") or "")
+        if isinstance(pending_action, dict)
+        else ""
+    ) or target
+    turn_intent.update(
+        {
+            "intent": (
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+                if isinstance(pending_action, dict)
+                and pending_action.get("type")
+                in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+                else UserIntent.ANSWER_CURRENT_QUESTION.value
+            ),
+            "target": resolved_target,
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "source": source,
+        }
+    )
+    updates = turn_intent.get("semantic_updates")
+    if isinstance(updates, dict):
+        controls = updates.get("control_actions", [])
+        if isinstance(controls, list):
+            updates["control_actions"] = [
+                item for item in controls if item != "NEW_TOPIC"
+            ]
+    acts = turn_intent.get("dialogue_acts", [])
+    if isinstance(acts, list):
+        for act in acts:
+            if not isinstance(act, dict) or act.get("type") != "NEW_TOPIC":
+                continue
+            act["type"] = "ANSWER_PENDING_QUESTION"
+            act["target"] = resolved_target
+            act["operation"] = "MERGE"
+    plan = turn_intent.get("task_plan")
+    if isinstance(plan, dict):
+        for task in plan.get("tasks", []):
+            if not isinstance(task, dict) or task.get("type") != "NEW_TOPIC":
+                continue
+            task["type"] = "CURRENT_TOPIC_REFINEMENT"
+            task["target"] = resolved_target
+            task["status"] = "READY"
+
 _TRANSIENT_GUIDED_PAYLOAD_KEYS = {
     "guided_entry",
     "awaiting_student_description",
@@ -220,9 +425,11 @@ _STUDENT_FIELD_LABELS = {
 def _multi_act_student_notice(
     semantic_updates: dict[str, Any],
     interaction_state: InteractionState,
+    design_diff: dict[str, Any] | None = None,
 ) -> str:
     """Describe committed and unresolved parts without exposing internals."""
 
+    delta_notice = student_change_notice(design_diff, interaction_state)
     changed = [
         *semantic_updates.get("applied_design_fields", []),
         *semantic_updates.get("applied_stage_fields", []),
@@ -234,14 +441,18 @@ def _multi_act_student_notice(
             if str(field).strip()
         )
     )
-    notices: list[str] = []
-    if labels:
+    notices: list[str] = [delta_notice] if delta_notice else []
+    if labels and not delta_notice:
         if interaction_state is InteractionState.EMVR_DIRECT:
             notices.append(f"已同步修订设计中的{'、'.join(labels)}。")
         else:
             notices.append(f"我把你补充的{'、'.join(labels)}接到现有想法里了。")
     applied_comparisons = semantic_updates.get("applied_comparison_updates", [])
-    if isinstance(applied_comparisons, list) and applied_comparisons:
+    if (
+        isinstance(applied_comparisons, list)
+        and applied_comparisons
+        and not delta_notice
+    ):
         notices.append(
             "比较条件的修订也已同步到设计草稿。"
             if interaction_state is InteractionState.EMVR_DIRECT
@@ -262,6 +473,49 @@ def _multi_act_student_notice(
             )
         )
     return "".join(notices)
+
+
+def _self_correction_notice(
+    semantic_updates: dict[str, Any],
+    design_diff: dict[str, Any],
+    interaction_state: InteractionState,
+) -> str:
+    corrections = semantic_updates.get("correction_items", [])
+    corrections = [item for item in corrections if isinstance(item, dict)] \
+        if isinstance(corrections, list) else []
+    if not corrections:
+        return ""
+    affected = list(
+        dict.fromkeys(
+            _STUDENT_FIELD_LABELS.get(str(field), str(field))
+            for item in corrections
+            for field in item.get("affected_fields", [])
+            if str(field).strip()
+        )
+    )
+    changed = design_diff.get("changed_fields", []) if isinstance(design_diff, dict) else []
+    if changed:
+        labels = "、".join(
+            _STUDENT_FIELD_LABELS.get(str(field), str(field)) for field in changed[:4]
+        )
+        return (
+            f"你指出的理解偏差已经具体修正：这次只调整了{labels}，其他设计内容保持不变。"
+            if interaction_state is InteractionState.EMVR_DIRECT
+            else f"你提醒得对，我刚才没有按你的修改处理好。现在只改了{labels}，其他想法都保留。"
+        )
+    if affected:
+        labels = "、".join(affected[:4])
+        return (
+            f"我核对了你指出的{labels}；目前保存值没有发生变化，因此不会假装已经改过。"
+            if interaction_state is InteractionState.EMVR_DIRECT
+            else f"我重新核对了{labels}，这次没有实际变化，所以不会只口头说“已经修改”。"
+        )
+    explanation = str(corrections[0].get("explanation") or "").strip()
+    return (
+        f"我确认上一轮的问题是：{explanation}。这条反馈不会被写进实验内容；接下来会沿用已经确认的设计。"
+        if explanation
+        else "我确认上一轮的处理有偏差。这条反馈不会被写进实验内容，已经确认的设计继续保留。"
+    )
 
 
 def _normalized_question(text: str) -> str:
@@ -528,6 +782,76 @@ _EMVR_ENTRY_QUESTIONS: dict[Stage, tuple[str, str]] = {
 }
 
 
+def _emvr_entry_reference(
+    stage: Stage,
+    context: dict[str, Any],
+) -> list[str]:
+    """Draft the current EMVR layer from confirmed facts before asking for edits."""
+
+    def compact(value: Any, fallback: str) -> str:
+        if isinstance(value, str):
+            text = value.strip()
+        elif isinstance(value, list):
+            text = "、".join(
+                dict.fromkeys(str(item).strip() for item in value if str(item).strip())
+            )
+        else:
+            text = str(value).strip() if value is not None else ""
+        text = text[:240]
+        return text or fallback
+
+    direction = compact(context.get("research_direction"), "当前电磁现象")
+    objective = compact(context.get("learning_objective"), "解释核心物理关系")
+    question = compact(context.get("research_question"), "当前研究问题")
+    variable = compact(context.get("independent_variable"), "主要可调参数")
+    observations = compact(context.get("observations"), "目标场量或响应")
+    controls = compact(context.get("controlled_conditions"), "其余物理条件")
+    hypothesis = compact(context.get("hypothesis"), "预期变化趋势")
+    references: dict[Stage, list[str]] = {
+        Stage.LEARNING_OBJECTIVES: [
+            f"概念目标：能够用ECE329关系解释{direction}",
+            f"比较目标：能够根据可视化结果判断不同条件下的差异",
+            "交互目标：能够通过VR操作建立参数变化与理论响应之间的对应",
+        ],
+        Stage.RESEARCH_QUESTION: [
+            f"问题主线：围绕“{question}”组织可调条件与观察响应",
+            f"条件端：{variable}",
+            f"响应端：{observations}",
+        ],
+        Stage.HYPOTHESIS: [
+            f"待检验趋势：{hypothesis}",
+            f"变化输入：{variable}",
+            f"判定依据：{observations}",
+        ],
+        Stage.CONCEPTUAL_OR_VR_SETUP: [
+            f"物理层：围绕{direction}枚举场源、受影响对象、边界与观察载体",
+            "Unity层：分别定义可交互对象、参数控制器、理论计算状态与反馈面板",
+            "对应原则：每个视觉反馈都必须能追溯到研究问题中的物理量",
+        ],
+        Stage.VARIABLES_AND_CONDITIONS: [
+            f"可调参数：{variable}",
+            f"观察量：{observations}",
+            f"控制条件：{controls}",
+        ],
+        Stage.CONCEPTUAL_PROCEDURE: [
+            f"建立基准：固定{controls}",
+            f"执行变化：按设计范围调整{variable}",
+            f"观察比较：记录{observations}并完成各基础情形的对照",
+        ],
+        Stage.EXPECTED_DATA_VISUALIZATION: [
+            f"交互输入：{variable}",
+            f"理论输出：{observations}",
+            "显示约束：数值、曲线与空间可视化采用同一计算状态并标注模型适用范围",
+        ],
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: [
+            f"目标核对：当前交互是否真正支持“{objective}”",
+            "空间价值：哪些三维关系通过VR比平面图更容易观察",
+            "模型边界：明确理想化条件、计算近似与视觉编码不能代表的内容",
+        ],
+    }
+    return references.get(stage, [])
+
+
 def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput:
     lead, question = _EMVR_ENTRY_QUESTIONS[stage]
     context = build_carried_context(session)
@@ -540,17 +864,37 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         acknowledgement = f"我会继续沿用“{direction}”这个实验方向。"
     else:
         acknowledgement = "我会承接前面已经确定的实验内容。"
+    reference_draft = _emvr_entry_reference(stage, context)
+    reference_text = (
+        "\n\n我先依据现有设计整理一份本阶段草稿：\n"
+        + "\n".join(
+            f"{index}. {item}"
+            for index, item in enumerate(reference_draft, start=1)
+        )
+        if reference_draft
+        else ""
+    )
+    review_question = (
+        "这份草稿是否准确承接了当前研究问题？如需修订，请直接指出对应的物理内容、"
+        "Unity映射或展示要求。"
+        if reference_draft
+        else question
+    )
     return StepOutput(
-        assistant_message=f"{acknowledgement}{lead}",
+        assistant_message=f"{acknowledgement}{lead}{reference_text}",
         stage_payload={
             "emvr_guided_entry": True,
             "awaiting_user_design_input": True,
+            "reference_draft": reference_draft,
             "pending_action": {
                 "type": "ANSWER_EMVR_STAGE_QUESTION",
                 "interaction_state": InteractionState.EMVR_DIRECT.value,
                 "subject": stage.value,
-                "proposal": {"carried_context": deepcopy(context)},
-                "question": question,
+                "proposal": {
+                    "carried_context": deepcopy(context),
+                    "reference_draft": reference_draft,
+                },
+                "question": review_question,
                 "advance_on_accept": False,
                 "allowed_intents": [
                     UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -562,7 +906,7 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
                 ],
             },
         },
-        student_task=question,
+        student_task=review_question,
     )
 
 
@@ -1064,18 +1408,23 @@ class WorkflowEngine:
         elif _contains_emvr_marker(idea):
             state = InteractionState.EMVR_DIRECT
         access_token = secrets.token_urlsafe(32)
+        resume_token = secrets.token_urlsafe(32)
         session = DesignSession(
             design_id=f"design_{uuid.uuid4().hex[:12]}",
             interaction_state=state,
             access_token_hash=hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
             design_context={"idea": {"original": idea.strip()}},
         )
+        session.model_context["resume_token_hash"] = hashlib.sha256(
+            resume_token.encode("utf-8")
+        ).hexdigest()
         self.store.save(session)
         result = self.process_turn(
             session.design_id,
             TurnRequest(message=idea.strip()),
         )
         result["design_access_token"] = access_token
+        result["design_resume_token"] = resume_token
         return result
 
     def process_turn(
@@ -1092,6 +1441,14 @@ class WorkflowEngine:
         request: TurnRequest | dict[str, Any],
     ) -> dict[str, Any]:
         session = self.store.get(design_id)
+        if isinstance(request, dict):
+            request = self._request_from_dict(request)
+        if not isinstance(request, TurnRequest):
+            raise ValueError("turn request must be an object")
+        request.turn_id = _validated_turn_id(request.turn_id)
+        cached_response = _cached_turn_response(session, request)
+        if cached_response is not None:
+            return cached_response
         if session.status is WorkflowStatus.COMPLETE:
             response = {
                 "design_id": session.design_id,
@@ -1111,15 +1468,16 @@ class WorkflowEngine:
                         "report_url": f"/v1/designs/{session.design_id}/report.pdf",
                     }
                 )
+            response["turn_id"] = request.turn_id
             return response
-        if isinstance(request, dict):
-            request = self._request_from_dict(request)
         if not isinstance(request.message, str):
             raise ValueError("message must be a string")
         message = request.message.strip()
         if not message:
             raise ValueError("message must not be empty")
         ensure_design_state(session)
+        ensure_initial_version(session)
+        topic_locked_before_turn = is_topic_locked(session)
         # This deterministic pass is only the hard safety gate. Course scope
         # is resolved later from structured semantic output plus retrieval.
         input_kind = preclassify_stage_one_input(message)
@@ -1143,7 +1501,17 @@ class WorkflowEngine:
         expected_revision = session.revision
         transitioned_from_stage: Stage | None = None
         completion_error: str | None = None
-        if input_kind == UNREASONABLE_REQUEST:
+        if request.version_request is not None:
+            turn_intent = resolved_intent(
+                UserIntent.MANAGE_DESIGN_VERSION,
+                confidence=1.0,
+                source="STRUCTURED_UI_ACTION",
+                semantic_updates={
+                    "version_requests": [deepcopy(request.version_request)],
+                },
+            )
+            pending_action = current_pending_action(session)
+        elif input_kind == UNREASONABLE_REQUEST:
             turn_intent = resolved_intent(
                 UserIntent.ANSWER_CURRENT_QUESTION,
                 confidence=1.0,
@@ -1186,8 +1554,13 @@ class WorkflowEngine:
             input_kind != UNREASONABLE_REQUEST
             and session.interaction_state is InteractionState.GUIDED_DESIGN
             and session.current_stage is Stage.IDEA_BRAINSTORMING
-            and isinstance(idea_for_direction_lock, dict)
-            and idea_for_direction_lock.get("direction_locked") is True
+            and (
+                topic_locked_before_turn
+                or (
+                    isinstance(idea_for_direction_lock, dict)
+                    and idea_for_direction_lock.get("direction_locked") is True
+                )
+            )
             and turn_intent.get("intent") == UserIntent.NEW_TOPIC.value
             and not (
                 isinstance(semantic_for_direction_lock, dict)
@@ -1198,24 +1571,15 @@ class WorkflowEngine:
             # new objects and examples refine that same design.  Replacing the
             # whole topic requires an explicit semantic decision, not a phrase
             # match or a model's unsupported NEW_TOPIC label.
-            turn_intent.update(
-                {
-                    "intent": (
-                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
-                        if isinstance(pending_action, dict)
-                        and pending_action.get("type")
-                        in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
-                        else UserIntent.ANSWER_CURRENT_QUESTION.value
-                    ),
-                    "target": str(
-                        idea_for_direction_lock.get("direction_summary")
-                        or idea_for_direction_lock.get("selected_focus")
-                        or "locked_stage_one_direction"
-                    ),
-                    "advance_requested": False,
-                    "preserve_current_design": True,
-                    "source": "SEMANTIC_DIRECTION_LOCK",
-                }
+            _keep_locked_topic_as_refinement(
+                turn_intent,
+                pending_action,
+                str(
+                    idea_for_direction_lock.get("direction_summary")
+                    or idea_for_direction_lock.get("selected_focus")
+                    or "locked_stage_one_direction"
+                ),
+                "SEMANTIC_DIRECTION_LOCK",
             )
         emvr_design_before_turn = session.design_context.get("emvr_design", {})
         emvr_direction_exists = bool(
@@ -1229,7 +1593,7 @@ class WorkflowEngine:
         if (
             input_kind != UNREASONABLE_REQUEST
             and session.interaction_state is InteractionState.EMVR_DIRECT
-            and emvr_direction_exists
+            and (emvr_direction_exists or topic_locked_before_turn)
             and turn_intent.get("intent") == UserIntent.NEW_TOPIC.value
             and not (
                 isinstance(semantic_for_direction_lock, dict)
@@ -1239,24 +1603,11 @@ class WorkflowEngine:
             # In EMVR, additional objects, interactions, observations and
             # questions refine the existing experiment.  Resetting the whole
             # workflow requires an explicit semantic topic-change decision.
-            turn_intent.update(
-                {
-                    "intent": (
-                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
-                        if isinstance(pending_action, dict)
-                        and pending_action.get("type")
-                        in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
-                        else UserIntent.ANSWER_CURRENT_QUESTION.value
-                    ),
-                    "target": (
-                        str(pending_action.get("subject") or "emvr_design")
-                        if isinstance(pending_action, dict)
-                        else "emvr_design"
-                    ),
-                    "advance_requested": False,
-                    "preserve_current_design": True,
-                    "source": "SEMANTIC_EMVR_DIRECTION_LOCK",
-                }
+            _keep_locked_topic_as_refinement(
+                turn_intent,
+                pending_action,
+                "emvr_design",
+                "SEMANTIC_EMVR_DIRECTION_LOCK",
             )
         interaction_state_changed = False
         if input_kind != UNREASONABLE_REQUEST:
@@ -1291,8 +1642,14 @@ class WorkflowEngine:
                 requested_interaction_state is not None
                 and requested_interaction_state is not session.interaction_state
             ):
+                previous_interaction_state = session.interaction_state
                 session.interaction_state = requested_interaction_state
                 interaction_state_changed = True
+                _record_mode_handoff(
+                    session,
+                    previous_interaction_state,
+                    requested_interaction_state,
+                )
                 pending_action = None
                 dialogue = session.model_context.get("dialogue_state")
                 if isinstance(dialogue, dict):
@@ -1345,6 +1702,25 @@ class WorkflowEngine:
             ):
                 turn_intent["advance_requested"] = True
                 pending_action["advance_on_accept"] = True
+        design_before_turn = workflow_design_snapshot(session)
+        semantic_before_apply = turn_intent.get("semantic_updates", {})
+        version_requests = (
+            semantic_before_apply.get("version_requests", [])
+            if isinstance(semantic_before_apply, dict)
+            and isinstance(semantic_before_apply.get("version_requests"), list)
+            else []
+        )
+        if (
+            request.version_request is not None
+            and request.version_request not in version_requests
+        ):
+            version_requests = [*version_requests, request.version_request]
+        version_results = [
+            result
+            for version_request in version_requests
+            for result in [execute_version_request(session, version_request)]
+            if result is not None
+        ]
         apply_resolved_intent(session, turn_intent, pending_action, message)
         intent_name = str(turn_intent.get("intent") or UserIntent.UNCLEAR.value)
         resolved_value = turn_intent.get("resolved_value")
@@ -1512,6 +1888,9 @@ class WorkflowEngine:
                 UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
                 UserIntent.ASK_COURSE_QUESTION.value,
                 UserIntent.PROVIDE_FEEDBACK.value,
+                UserIntent.REQUEST_DESIGN_REVIEW.value,
+                UserIntent.COMPARE_DESIGN_OPTIONS.value,
+                UserIntent.MANAGE_DESIGN_VERSION.value,
                 UserIntent.RETURN_TO_PREVIOUS_POINT.value,
                 UserIntent.SET_INTERACTION_STATE.value,
             }
@@ -1545,6 +1924,21 @@ class WorkflowEngine:
             )
             sync_design_state_to_legacy(session)
             refresh_idea_development(session)
+        turn_design_diff = compute_design_diff(
+            design_before_turn,
+            workflow_design_snapshot(session),
+            turn_intent.get("task_plan"),
+        )
+        recorded_version = record_design_version(
+            session,
+            changed_fields=turn_design_diff.get("changed_fields", []),
+            reason=(
+                "恢复或撤销设计版本"
+                if version_results and turn_design_diff.get("has_changes")
+                else "根据本轮讨论更新实验设计"
+            ),
+            source=("VERSION_CONTROL" if version_results else "STUDENT_TURN"),
+        )
         turn_context: dict[str, Any] = {
             "selected_option_id": request.selected_option_id,
             "resolved_intent": deepcopy(turn_intent),
@@ -1570,6 +1964,27 @@ class WorkflowEngine:
             resolved_student_message,
             turn_intent,
         )
+        quality_review_requested = bool(
+            semantic_updates.get("quality_review_requests")
+            or intent_name == UserIntent.REQUEST_DESIGN_REVIEW.value
+        )
+        option_comparison_requested = bool(
+            semantic_updates.get("option_comparison_requests")
+            or intent_name == UserIntent.COMPARE_DESIGN_OPTIONS.value
+        )
+        final_quality_review = handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+        quality_review = evaluate_design_quality(
+            session,
+            semantic_updates.get("quality_assessment"),
+            final_review=final_quality_review,
+        )
+        turn_context["quality_review"] = deepcopy(quality_review)
+        turn_context["guidance_need"] = semantic_updates.get("guidance_need")
+        turn_context["option_comparison_requests"] = deepcopy(
+            semantic_updates.get("option_comparison_requests", [])
+        )
+        turn_context["version_results"] = deepcopy(version_results)
+        turn_context["recorded_version"] = deepcopy(recorded_version)
         if dynamic_idea_turn:
             idea_context = session.design_context.get("idea", {})
             stage_one_context = build_stage_one_turn_context(
@@ -1657,6 +2072,15 @@ class WorkflowEngine:
             and not student_questions
             and not has_structured_turn_updates
         )
+        version_only_turn = bool(
+            version_results
+            and (
+                intent_name == UserIntent.MANAGE_DESIGN_VERSION.value
+                or request.version_request is not None
+            )
+            and not has_structured_turn_updates
+            and not student_questions
+        )
         substantive_guided_reply = bool(
             intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
             and input_kind != UNREASONABLE_REQUEST
@@ -1686,7 +2110,59 @@ class WorkflowEngine:
             and handled_stage is not Stage.IDEA_BRAINSTORMING
             and "REQUEST_REFERENCE" in control_actions
         )
-        if design_summary_request:
+        if version_only_turn:
+            output = StepOutput(
+                assistant_message="\n\n".join(
+                    item for item in (format_version_result(result) for result in version_results) if item
+                ),
+                stage_payload={
+                    "version_control": deepcopy(version_results),
+                    "preserve_pending_action": True,
+                },
+                student_task=None,
+            )
+            session.turn_context = {}
+            completion_error = None
+        elif quality_review_requested:
+            priority = quality_review.get("priority_issue")
+            output = StepOutput(
+                assistant_message=format_quality_review(
+                    quality_review,
+                    session.interaction_state,
+                    final_review=final_quality_review,
+                ),
+                stage_payload={
+                    "quality_review": public_quality_review(
+                        quality_review,
+                        max_issues=2 if final_quality_review else 1,
+                    ),
+                    "preserve_pending_action": True,
+                },
+                student_task=(
+                    str(priority.get("student_question") or "").strip() or None
+                    if isinstance(priority, dict)
+                    else None
+                ),
+            )
+            session.turn_context = {}
+            completion_error = None
+        elif option_comparison_requested:
+            output = StepOutput(
+                assistant_message=format_option_comparison(
+                    quality_review,
+                    session.interaction_state,
+                ),
+                stage_payload={
+                    "option_comparison": deepcopy(
+                        quality_review.get("option_comparison", [])
+                    ),
+                    "preserve_pending_action": True,
+                },
+                student_task="你更看重哪一项判断标准，或者已经想采用其中一个方案？",
+            )
+            session.turn_context = {}
+            completion_error = None
+        elif design_summary_request:
             summary_snapshot = design_state_snapshot(session)
             requested_summary_fields = (
                 resolved_value
@@ -1902,6 +2378,7 @@ class WorkflowEngine:
         multi_act_notice = _multi_act_student_notice(
             semantic_updates,
             session.interaction_state,
+            turn_design_diff,
         )
         if multi_act_notice and turn_intent.get("dialogue_acts"):
             output.assistant_message = (
@@ -1909,6 +2386,61 @@ class WorkflowEngine:
                 if output.assistant_message
                 else multi_act_notice
             )
+        correction_notice = _self_correction_notice(
+            semantic_updates,
+            turn_design_diff,
+            session.interaction_state,
+        )
+        if correction_notice:
+            output.assistant_message = (
+                f"{correction_notice}\n\n{output.assistant_message}"
+                if output.assistant_message
+                else correction_notice
+            )
+        if version_results and not version_only_turn:
+            version_notice = "\n\n".join(
+                item for item in (format_version_result(result) for result in version_results) if item
+            )
+            if version_notice:
+                output.assistant_message = f"{version_notice}\n\n{output.assistant_message}".strip()
+        if final_quality_review and not quality_review_requested:
+            quality_notice = format_quality_review(
+                quality_review,
+                session.interaction_state,
+                final_review=True,
+            )
+            if quality_notice and (
+                transitioned_from_stage is not None
+                or guided_stage_entry_turn
+                or emvr_stage_entry_turn
+            ):
+                output.assistant_message = f"{quality_notice}\n\n{output.assistant_message}".strip()
+        if (
+            not final_quality_review
+            and (guided_stage_entry_turn or emvr_stage_entry_turn)
+            and isinstance(quality_review.get("priority_issue"), dict)
+        ):
+            priority_issue = quality_review["priority_issue"]
+            finding = str(priority_issue.get("finding") or "").strip()
+            next_question = str(priority_issue.get("student_question") or "").strip()
+            if finding:
+                bridge = (
+                    f"从当前方案的衔接看，{finding}"
+                    if session.interaction_state is InteractionState.EMVR_DIRECT
+                    else f"结合前面已经确定的内容，{finding}"
+                )
+                output.assistant_message = f"{output.assistant_message.rstrip()}\n\n{bridge}"
+            if next_question:
+                output.student_task = next_question
+        output.stage_payload["quality_review"] = public_quality_review(
+            quality_review,
+            max_issues=2 if final_quality_review else 1,
+        )
+        if recorded_version is not None:
+            output.stage_payload["design_version"] = {
+                key: deepcopy(recorded_version.get(key))
+                for key in ("version_id", "reason", "source", "changed_fields")
+            }
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(
@@ -1948,6 +2480,7 @@ class WorkflowEngine:
                             "value": outline_seed.get("course_relationships", []),
                         },
                     ],
+                    provenance="AGENT_SUGGESTION",
                 )
                 sync_design_state_to_legacy(session)
                 refresh_idea_development(session)
@@ -2029,6 +2562,22 @@ class WorkflowEngine:
             except StageCompletionError as exc:
                 completion_error = str(exc)
 
+        dialogue_state(session)["last_task_plan"] = finalize_turn_task_plan(
+            turn_intent.get("task_plan"),
+            turn_design_diff,
+            response_generated=True,
+            transition_requested=explicit_transition_intent,
+            transition_completed=bool(
+                transitioned_from_stage is not None
+                or session.status is WorkflowStatus.COMPLETE
+                or (
+                    explicit_transition_intent
+                    and completion_error is None
+                    and handled_stage.value in session.completed_stages
+                )
+            ),
+        )
+
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             task_report = build_emvr_task_report(session)
         else:
@@ -2038,7 +2587,6 @@ class WorkflowEngine:
         if isinstance(state, dict):
             state["carried_context"] = build_carried_context(session)
 
-        self.store.save(session, expected_revision=expected_revision)
         next_stage = session.next_stage.value if session.next_stage else None
         response_message = output.assistant_message
         if (
@@ -2078,12 +2626,23 @@ class WorkflowEngine:
             "current_stage": session.current_stage.value,
             "next_stage": next_stage,
             "revision": session.revision,
+            "turn_id": request.turn_id,
         }
         if task_report is not None:
             response["task_report"] = task_report
             response["report_ready"] = session.status is WorkflowStatus.COMPLETE
             if response["report_ready"]:
                 response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+        if (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.status is WorkflowStatus.COMPLETE
+        ):
+            response["guided_export_ready"] = True
+            response["guided_export_url"] = (
+                f"/v1/designs/{session.design_id}/guided-summary.txt"
+            )
+        _cache_turn_response(session, request, response)
+        self.store.save(session, expected_revision=expected_revision)
         return response
 
     def _lock_for_design(self, design_id: str) -> RLock:
@@ -2094,12 +2653,73 @@ class WorkflowEngine:
     def get_design(self, design_id: str, include_history: bool = False) -> dict[str, Any]:
         session = self.store.get(design_id)
         result = session.to_dict(include_history=include_history)
+        result["quality_review"] = public_quality_review(
+            evaluate_design_quality(
+                session,
+                final_review=(session.status is WorkflowStatus.COMPLETE),
+            ),
+            max_issues=8 if session.status is WorkflowStatus.COMPLETE else 2,
+        )
+        result["recent_versions"] = execute_version_request(
+            session, {"action": "VIEW_RECENT"}
+        )
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             result["task_report"] = build_emvr_task_report(session)
             result["report_ready"] = session.status is WorkflowStatus.COMPLETE
             if result["report_ready"]:
                 result["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+        elif session.status is WorkflowStatus.COMPLETE:
+            result["guided_export_ready"] = True
+            result["guided_export_url"] = (
+                f"/v1/designs/{session.design_id}/guided-summary.txt"
+            )
         return result
+
+    def resume_design(self, design_id: str, resume_token: str) -> dict[str, Any]:
+        if not isinstance(resume_token, str) or not resume_token.strip():
+            raise DesignAccessDenied("A valid design resume token is required.")
+        with self._lock_for_design(design_id):
+            session = self.store.get(design_id)
+            expected_revision = session.revision
+            candidate = hashlib.sha256(resume_token.strip().encode("utf-8")).hexdigest()
+            stored = str(session.model_context.get("resume_token_hash") or "")
+            if not stored or not hmac.compare_digest(stored, candidate):
+                raise DesignAccessDenied("A valid design resume token is required.")
+            access_token = secrets.token_urlsafe(32)
+            next_resume_token = secrets.token_urlsafe(32)
+            session.access_token_hash = hashlib.sha256(
+                access_token.encode("utf-8")
+            ).hexdigest()
+            session.model_context["resume_token_hash"] = hashlib.sha256(
+                next_resume_token.encode("utf-8")
+            ).hexdigest()
+            session.revision += 1
+            self.store.save(session, expected_revision=expected_revision)
+        result = self.get_design(design_id)
+        result["design_access_token"] = access_token
+        result["design_resume_token"] = next_resume_token
+        return result
+
+    def render_guided_summary_text(self, design_id: str) -> bytes:
+        session = self.store.get(design_id)
+        if session.interaction_state is not InteractionState.GUIDED_DESIGN:
+            raise StageCompletionError("这项导出只适用于引导模式。")
+        if session.status is not WorkflowStatus.COMPLETE:
+            raise StageCompletionError("请先完成学生总结，再导出当前设计。")
+        synthesis = session.design_context.get("synthesis", {})
+        summary = (
+            str(synthesis.get("student_summary") or "").strip()
+            if isinstance(synthesis, dict)
+            else ""
+        )
+        if not summary:
+            raise StageCompletionError("尚未找到学生自己完成的总结。")
+        body = (
+            "ECE329 实验设计学生总结\n"
+            f"设计编号：{session.design_id}\n\n"
+            f"{summary}\n"
+        )
+        return body.encode("utf-8")
 
     def render_report_pdf(self, design_id: str) -> bytes:
         session = self.store.get(design_id)
@@ -2201,6 +2821,12 @@ class WorkflowEngine:
         if "interaction_state" in data and data["interaction_state"] is not None and not isinstance(data["interaction_state"], str):
             raise ValueError("interaction_state must be a string or null")
         raw_state = data.get("interaction_state")
+        turn_id = _validated_turn_id(data.get("turn_id"))
+        version_request = None
+        if data.get("version_request") is not None:
+            version_request = normalize_version_request(data.get("version_request"))
+            if version_request is None:
+                raise ValueError("version_request is invalid")
         selected_option_id = data.get("selected_option_id")
         if selected_option_id is not None:
             if not isinstance(selected_option_id, str):
@@ -2216,6 +2842,8 @@ class WorkflowEngine:
             context_patch=context_patch,
             interaction_state=self._coerce_state(raw_state),
             selected_option_id=selected_option_id,
+            turn_id=turn_id,
+            version_request=version_request,
         )
 
     @staticmethod

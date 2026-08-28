@@ -10,7 +10,7 @@
     <title>ECE329 Lab Studio</title>
     <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
     <link rel="manifest" href="site.webmanifest">
-    <link rel="stylesheet" href="assets/styles.css?v=20260824-unified-semantics">
+    <link rel="stylesheet" href="assets/styles.css?v=20260828-quality-review">
   </head>
   <body>
     <a class="skip-link" href="#chatInput">跳到消息输入框</a>
@@ -157,6 +157,39 @@
           </ul>
         </section>
 
+        <section id="qualityReviewCard" class="insight-card quality-review-card" hidden>
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">DESIGN REVIEW</p>
+              <h2>设计检查</h2>
+            </div>
+            <span id="qualityReviewStatus" class="data-label">持续更新</span>
+          </div>
+          <div id="qualityCausalChain" class="quality-review-block"></div>
+          <div id="qualityFeasibility" class="quality-review-block"></div>
+          <ul id="qualityIssueList" class="quality-issue-list"></ul>
+          <details id="qualityBoundaryCases" class="quality-traceability" hidden>
+            <summary>边界情形</summary>
+            <div id="qualityBoundaryCasesContent"></div>
+          </details>
+          <details id="qualityOptionComparison" class="quality-traceability" hidden>
+            <summary>方案比较</summary>
+            <div id="qualityOptionComparisonContent"></div>
+          </details>
+          <details id="qualityTraceability" class="quality-traceability" hidden>
+            <summary>课程关系与设计来源</summary>
+            <div id="qualityTraceabilityContent"></div>
+          </details>
+          <div class="version-toolbar">
+            <button id="viewVersionsButton" type="button">查看最近修改</button>
+            <button id="undoVersionButton" type="button">撤销上一项修改</button>
+          </div>
+          <div id="versionResults" class="version-results"></div>
+          <button id="downloadGuidedSummaryButton" class="report-download-button" type="button" hidden>
+            导出我的设计总结
+          </button>
+        </section>
+
         <section id="taskReportCard" class="insight-card task-report-card" hidden>
           <div class="card-heading">
             <div>
@@ -181,6 +214,6 @@
     </noscript>
 
     <script src="assets/config.js?v=20260824-unified-semantics"></script>
-    <script src="assets/app.js?v=20260828-language-audit"></script>
+    <script src="assets/app.js?v=20260828-quality-idempotency"></script>
   </body>
 </html>

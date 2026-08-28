@@ -3,6 +3,7 @@
 const CONFIG = window.ECE329_CONFIG || { API_BASE_URL: "", REQUEST_TIMEOUT_MS: 70000 };
 const STORAGE_KEY = "ece329-lab-studio-session-v1";
 const DESIGN_TOKEN_KEY = "ece329-design-access-token-v1";
+const DESIGN_RESUME_KEY = "ece329-design-resume-key-v1";
 const ACCESS_CODE_KEY = "ece329-course-access-code-v1";
 const LEGACY_INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们先从讲义中的概念出发探索想法，不急着写完整方案。\n\n请描述一个你感兴趣的电磁现象，或者告诉我你还没有具体方向。";
 const PREVIOUS_INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们会从ECE329课上所学的电磁场、电磁波和传输线概念出发，一起探索实验想法，不急着写完整方案。\n\n你可以描述一个感兴趣的现象，例如静电场与材料边界、磁场与电磁感应、电磁波的偏振与反射，或传输线中的反射与驻波。如果暂时没有方向，也可以直接告诉我。";
@@ -241,6 +242,21 @@ const dom = {
   taskReportIdea: document.querySelector("#taskReportIdea"),
   taskReportSections: document.querySelector("#taskReportSections"),
   downloadReportButton: document.querySelector("#downloadReportButton"),
+  qualityReviewCard: document.querySelector("#qualityReviewCard"),
+  qualityReviewStatus: document.querySelector("#qualityReviewStatus"),
+  qualityCausalChain: document.querySelector("#qualityCausalChain"),
+  qualityFeasibility: document.querySelector("#qualityFeasibility"),
+  qualityIssueList: document.querySelector("#qualityIssueList"),
+  qualityBoundaryCases: document.querySelector("#qualityBoundaryCases"),
+  qualityBoundaryCasesContent: document.querySelector("#qualityBoundaryCasesContent"),
+  qualityOptionComparison: document.querySelector("#qualityOptionComparison"),
+  qualityOptionComparisonContent: document.querySelector("#qualityOptionComparisonContent"),
+  qualityTraceability: document.querySelector("#qualityTraceability"),
+  qualityTraceabilityContent: document.querySelector("#qualityTraceabilityContent"),
+  viewVersionsButton: document.querySelector("#viewVersionsButton"),
+  undoVersionButton: document.querySelector("#undoVersionButton"),
+  versionResults: document.querySelector("#versionResults"),
+  downloadGuidedSummaryButton: document.querySelector("#downloadGuidedSummaryButton"),
   toast: document.querySelector("#toast"),
 };
 
@@ -283,6 +299,12 @@ function initialState() {
     taskReport: null,
     reportReady: false,
     reportUrl: null,
+    qualityReview: null,
+    versionControl: null,
+    recentVersions: null,
+    guidedExportReady: false,
+    guidedExportUrl: null,
+    pendingRequest: null,
   };
 }
 
@@ -373,6 +395,7 @@ function render() {
   renderEvidence();
   renderNotes();
   renderTaskReport();
+  renderQualityReview();
   renderMode();
   drawChart();
 }
@@ -653,19 +676,169 @@ function renderTaskReport() {
   dom.downloadReportButton.hidden = !state.reportReady || !state.reportUrl;
 }
 
-async function downloadTaskReport() {
-  if (!state.designId || !state.reportUrl || !apiBase()) return;
-  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
-  if (!token) {
-    showToast("当前设计的访问凭证已经失效，请新建设计后再试");
+function renderQualityReview() {
+  const review = state.qualityReview;
+  const hasReview = review && typeof review === "object";
+  const hasVersionData = state.versionControl || state.recentVersions;
+  dom.qualityReviewCard.hidden = !hasReview && !hasVersionData && !state.guidedExportReady;
+  if (dom.qualityReviewCard.hidden) return;
+
+  const issues = Array.isArray(review?.issues) ? review.issues : [];
+  dom.qualityReviewStatus.textContent = review?.status === "READY" ? "衔接完整" : "持续检查";
+  const causal = review?.causal_chain || {};
+  const causalParts = [
+    causal.cause ? `改变：${causal.cause}` : "",
+    causal.response ? `观察：${causal.response}` : "",
+    causal.mechanism ? `依据：${causal.mechanism}` : "",
+    causal.comparison ? `比较：${causal.comparison}` : "",
+  ].filter(Boolean);
+  dom.qualityCausalChain.replaceChildren();
+  if (causalParts.length) {
+    const title = document.createElement("strong");
+    title.textContent = "当前因果链";
+    const text = document.createElement("span");
+    text.textContent = causalParts.join(" → ");
+    dom.qualityCausalChain.append(title, text);
+  }
+
+  const feasibility = review?.feasibility || {};
+  const feasibilityChecks = [
+    ["自变量可调整", feasibility.independent_variable_can_change],
+    ["观察量可记录", feasibility.observation_can_be_recorded],
+    ["比较条件已定义", feasibility.comparison_is_defined],
+    ["控制条件已定义", feasibility.controls_are_defined],
+    ["流程能够检验预期", feasibility.procedure_can_test_hypothesis],
+  ];
+  dom.qualityFeasibility.replaceChildren();
+  if (hasReview) {
+    const title = document.createElement("strong");
+    title.textContent = "概念可行性";
+    const text = document.createElement("span");
+    text.textContent = feasibilityChecks
+      .map(([label, passed]) => `${passed ? "✓" : "○"} ${label}`)
+      .join(" · ");
+    dom.qualityFeasibility.append(title, text);
+  }
+
+  dom.qualityIssueList.replaceChildren();
+  issues.forEach((issue) => {
+    const item = document.createElement("li");
+    if (issue.severity === "MAJOR") item.classList.add("major");
+    item.textContent = [issue.finding, issue.suggestion].filter(Boolean).join(" 建议：");
+    dom.qualityIssueList.append(item);
+  });
+
+  const boundaryCases = Array.isArray(review?.boundary_cases) ? review.boundary_cases : [];
+  dom.qualityBoundaryCases.hidden = boundaryCases.length === 0;
+  dom.qualityBoundaryCasesContent.replaceChildren();
+  boundaryCases.slice(0, 6).forEach((entry) => {
+    const item = document.createElement("p");
+    item.textContent = `${entry.case || "边界情形"}${entry.relevance ? ` — ${entry.relevance}` : ""}`;
+    dom.qualityBoundaryCasesContent.append(item);
+  });
+
+  const optionComparison = Array.isArray(review?.option_comparison) ? review.option_comparison : [];
+  dom.qualityOptionComparison.hidden = optionComparison.length === 0;
+  dom.qualityOptionComparisonContent.replaceChildren();
+  optionComparison.slice(0, 6).forEach((option) => {
+    const item = document.createElement("div");
+    item.className = "quality-option-item";
+    const title = document.createElement("strong");
+    title.textContent = option.name || "候选方案";
+    const detail = document.createElement("p");
+    detail.textContent = [
+      option.observability ? `可观察性：${option.observability}` : "",
+      option.course_alignment ? `课程联系：${option.course_alignment}` : "",
+      option.controllability ? `可控性：${option.controllability}` : "",
+      option.vr_suitability ? `VR适配：${option.vr_suitability}` : "",
+      option.recommendation ? `建议：${option.recommendation}` : "",
+    ].filter(Boolean).join("；");
+    item.append(title, detail);
+    dom.qualityOptionComparisonContent.append(item);
+  });
+
+  const traceability = Array.isArray(review?.traceability) ? review.traceability : [];
+  dom.qualityTraceability.hidden = traceability.length === 0;
+  dom.qualityTraceabilityContent.replaceChildren();
+  traceability.slice(0, 8).forEach((entry) => {
+    const item = document.createElement("p");
+    item.textContent = `${entry.design_field_label || "设计内容"}：${entry.course_item || ""}${entry.purpose ? ` — ${entry.purpose}` : ""}`;
+    dom.qualityTraceabilityContent.append(item);
+  });
+
+  renderVersionResults();
+  const canUseVersions = Boolean(apiBase() && state.designId && state.sessionKind === "api");
+  dom.viewVersionsButton.disabled = !canUseVersions;
+  dom.undoVersionButton.disabled = !canUseVersions;
+  dom.downloadGuidedSummaryButton.hidden = !state.guidedExportReady || !state.guidedExportUrl;
+}
+
+function renderVersionResults() {
+  dom.versionResults.replaceChildren();
+  const result = Array.isArray(state.versionControl)
+    ? state.versionControl.at(-1)
+    : state.versionControl;
+  const recent = result?.action === "VIEW_RECENT" ? result : state.recentVersions;
+  if (recent?.action === "VIEW_RECENT" && Array.isArray(recent.versions)) {
+    recent.versions.slice().reverse().forEach((version) => {
+      const row = document.createElement("div");
+      row.className = "version-result-item";
+      const text = document.createElement("p");
+      const changed = Array.isArray(version.changed_field_labels) && version.changed_field_labels.length
+        ? version.changed_field_labels.join("、")
+        : "设计起点";
+      text.textContent = `${version.version_id} · ${version.reason || "设计修改"} · ${changed}`;
+      const actions = document.createElement("div");
+      actions.className = "version-result-actions";
+      const compare = document.createElement("button");
+      compare.type = "button";
+      compare.textContent = "与当前比较";
+      compare.addEventListener("click", () => sendVersionAction({
+        action: "COMPARE",
+        version_id: version.version_id,
+      }, "比较这个版本与当前设计"));
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.textContent = "恢复此版本";
+      restore.addEventListener("click", () => sendVersionAction({
+        action: "RESTORE",
+        version_id: version.version_id,
+      }, `恢复设计版本 ${version.version_id}`));
+      actions.append(compare, restore);
+      row.append(text, actions);
+      dom.versionResults.append(row);
+    });
     return;
   }
+  if (result?.action === "COMPARE" && Array.isArray(result.differences)) {
+    result.differences.forEach((difference) => {
+      const item = document.createElement("p");
+      item.textContent = `${difference.label || "设计内容"}：${formatVersionValue(difference.before)} → ${formatVersionValue(difference.after)}`;
+      dom.versionResults.append(item);
+    });
+    return;
+  }
+  if (result?.error) {
+    const item = document.createElement("p");
+    item.textContent = result.error;
+    dom.versionResults.append(item);
+  }
+}
+
+function formatVersionValue(value) {
+  if (value === null || value === undefined || value === "") return "未明确";
+  if (Array.isArray(value)) return value.map((item) => (
+    typeof item === "object" ? JSON.stringify(item) : String(item)
+  )).join("；");
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+async function downloadTaskReport() {
+  if (!state.designId || !state.reportUrl || !apiBase()) return;
   dom.downloadReportButton.disabled = true;
   dom.downloadReportButton.textContent = "正在生成 PDF…";
   try {
-    const response = await fetch(`${apiBase()}${state.reportUrl}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await authorizedDesignDownload(state.reportUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -683,6 +856,59 @@ async function downloadTaskReport() {
   } finally {
     dom.downloadReportButton.disabled = false;
     dom.downloadReportButton.textContent = "下载 PDF 总结";
+  }
+}
+
+async function downloadGuidedSummary() {
+  if (!state.designId || !state.guidedExportUrl || !apiBase()) return;
+  try {
+    const response = await authorizedDesignDownload(state.guidedExportUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `ece329-guided-summary-${state.designId}.txt`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast("你的设计总结已导出");
+  } catch (error) {
+    console.warn("Unable to download guided summary", error);
+    showToast("总结导出失败，请稍后重试");
+  }
+}
+
+async function sendVersionAction(versionRequest, message) {
+  if (!state.designId || state.sessionKind !== "api" || dom.sendButton.disabled) return;
+  state.pendingRequest = {
+    turnId: crypto.randomUUID(),
+    message,
+    uiAction: null,
+    versionRequest,
+  };
+  addMessage("user", message);
+  setBusy(true);
+  showTyping();
+  try {
+    const response = await sendToApi(message, null);
+    response._runtime_source = "api";
+    hideTyping();
+    applyResponse(response, message);
+  } catch (error) {
+    hideTyping();
+    console.warn("Unable to apply version action", error);
+    addMessage(
+      "assistant",
+      "这次版本操作没有完成，当前设计没有改变。你可以稍后重试。",
+      ["版本操作未完成"],
+      { meta: "ECE329 Agent" },
+    );
+  } finally {
+    setBusy(false);
+    render();
+    saveState();
   }
 }
 
@@ -724,6 +950,18 @@ async function handleSubmit(event) {
   const uiAction = state.pendingUiAction;
   const isUiAdvance = uiAction === "ADVANCE_STAGE";
   const retryAction = isUiAdvance ? advanceQuickAction(message) : message;
+  if (
+    !state.pendingRequest
+    || state.pendingRequest.message !== message
+    || state.pendingRequest.uiAction !== uiAction
+  ) {
+    state.pendingRequest = {
+      turnId: crypto.randomUUID(),
+      message,
+      uiAction,
+      versionRequest: null,
+    };
+  }
   state.pendingUiAction = null;
   if (state.stageIndex === 0 && !isUiAdvance && !state.pendingDirection) {
     state.pendingDirection = message;
@@ -789,6 +1027,8 @@ async function handleSubmit(event) {
     }
     if (error instanceof ApiError && error.status === 409) {
       await reloadApiDesignState();
+      // A conflicting idempotency key must never be reused for the next attempt.
+      state.pendingRequest = null;
       addMessage(
         "assistant",
         "设计可能已在另一个窗口更新。我已同步当前设计，请重新发送本轮内容。",
@@ -822,22 +1062,21 @@ async function sendToApi(message, uiAction = null) {
   if (!state.designId || state.sessionKind === "demo" || state.designId.startsWith("demo_")) {
     return createApiDesign(message);
   }
-  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
-  if (!token) {
-    throw new ApiError("Missing design access token", 401, "access_denied");
-  }
-  const turn = buildTurnRequest(message, uiAction);
-  return apiRequest(`/v1/designs/${encodeURIComponent(state.designId)}/turns`, {
+  const turn = buildTurnRequest(message, uiAction, state.pendingRequest?.versionRequest || null);
+  return authorizedDesignApiRequest(`/v1/designs/${encodeURIComponent(state.designId)}/turns`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      "Idempotency-Key": turn.turn_id,
+    },
     body: JSON.stringify(turn),
   });
 }
 
 async function createApiDesign(message) {
+  const idempotencyKey = state.pendingRequest?.turnId || crypto.randomUUID();
   const request = () => apiRequest("/v1/designs", {
       method: "POST",
-      headers: courseAccessHeaders(),
+      headers: { ...courseAccessHeaders(), "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({ idea: message }),
     });
   try {
@@ -860,32 +1099,111 @@ function clearApiSession() {
   const retainedMessages = state.messages;
   state = { ...initialState(), messages: retainedMessages };
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
+  localStorage.removeItem(DESIGN_RESUME_KEY);
   saveState();
+}
+
+async function ensureDesignAccessToken() {
+  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
+  if (token || !state.designId) return token;
+  const resumeToken = localStorage.getItem(DESIGN_RESUME_KEY) || "";
+  if (!resumeToken) return "";
+  const restored = await apiRequest(
+    `/v1/designs/${encodeURIComponent(state.designId)}/resume`,
+    {
+      method: "POST",
+      body: JSON.stringify({ resume_token: resumeToken }),
+    },
+  );
+  applyDesignSnapshot(restored);
+  return sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
+}
+
+async function authorizedDesignApiRequest(path, options = {}) {
+  let token = await ensureDesignAccessToken();
+  if (!token) {
+    throw new ApiError("Missing design access token", 401, "access_denied");
+  }
+  const request = () => apiRequest(path, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  try {
+    return await request();
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.code !== "access_denied") throw error;
+    // Another tab may have rotated this tab's short-lived access token. The
+    // shared resume credential remains the source for a one-time recovery.
+    sessionStorage.removeItem(DESIGN_TOKEN_KEY);
+    token = await ensureDesignAccessToken();
+    if (!token) throw error;
+    return request();
+  }
+}
+
+async function authorizedDesignDownload(path) {
+  let token = await ensureDesignAccessToken();
+  if (!token) {
+    throw new ApiError("Missing design access token", 401, "access_denied");
+  }
+  const request = () => fetch(`${apiBase()}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  let response = await request();
+  if (response.status !== 401) return response;
+  sessionStorage.removeItem(DESIGN_TOKEN_KEY);
+  token = await ensureDesignAccessToken();
+  if (!token) return response;
+  response = await request();
+  return response;
 }
 
 async function reloadApiDesignState() {
   if (!state.designId) return;
-  const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
-  if (!token) return;
   try {
-    const design = await apiRequest(`/v1/designs/${encodeURIComponent(state.designId)}`, {
+    const design = await authorizedDesignApiRequest(`/v1/designs/${encodeURIComponent(state.designId)}`, {
       method: "GET",
-      headers: { Authorization: `Bearer ${token}` },
     });
-    state.mode = design.interaction_state || state.mode;
-    const index = STAGES.findIndex(([id]) => id === design.current_stage);
-    if (index >= 0) state.stageIndex = index;
-    if (design.task_report) state.taskReport = design.task_report;
-    state.reportReady = design.report_ready === true;
-    state.reportUrl = typeof design.report_url === "string" ? design.report_url : null;
-    renderTaskReport();
+    applyDesignSnapshot(design);
   } catch (error) {
     console.warn("Unable to refresh design state", error);
   }
 }
 
-function buildTurnRequest(message, uiAction = null) {
-  const turn = { message };
+function applyDesignSnapshot(design) {
+  if (design.design_access_token) {
+    sessionStorage.setItem(DESIGN_TOKEN_KEY, design.design_access_token);
+  }
+  if (design.design_resume_token) {
+    localStorage.setItem(DESIGN_RESUME_KEY, design.design_resume_token);
+  }
+  if (design.design_id) {
+    state.designId = design.design_id;
+    state.sessionKind = "api";
+  }
+  state.mode = design.interaction_state || state.mode;
+  const index = STAGES.findIndex(([id]) => id === design.current_stage);
+  if (index >= 0) state.stageIndex = index;
+  if (design.task_report) state.taskReport = design.task_report;
+  if (design.quality_review) state.qualityReview = design.quality_review;
+  if (design.recent_versions) state.recentVersions = design.recent_versions;
+  state.reportReady = design.report_ready === true;
+  state.reportUrl = typeof design.report_url === "string" ? design.report_url : null;
+  state.guidedExportReady = design.guided_export_ready === true;
+  state.guidedExportUrl = typeof design.guided_export_url === "string"
+    ? design.guided_export_url
+    : null;
+  saveState();
+  render();
+}
+
+function buildTurnRequest(message, uiAction = null, versionRequest = null) {
+  const turnId = state.pendingRequest?.turnId || crypto.randomUUID();
+  const turn = { message, turn_id: turnId };
+  if (versionRequest) turn.version_request = versionRequest;
   if (state.pendingOptionId) {
     turn.selected_option_id = state.pendingOptionId;
     state.pendingOptionId = null;
@@ -1614,6 +1932,9 @@ function applyResponse(response, userMessage) {
   if (response.design_access_token) {
     sessionStorage.setItem(DESIGN_TOKEN_KEY, response.design_access_token);
   }
+  if (response.design_resume_token) {
+    localStorage.setItem(DESIGN_RESUME_KEY, response.design_resume_token);
+  }
   if (response.design_id) {
     state.designId = response.design_id;
     state.sessionKind = "api";
@@ -1633,8 +1954,23 @@ function applyResponse(response, userMessage) {
     state.ideaDevelopmentStatus = response.stage_payload.idea_development_status;
   }
   if (response.task_report) state.taskReport = response.task_report;
+  if (response.quality_review) state.qualityReview = response.quality_review;
+  if (response.stage_payload?.quality_review) {
+    state.qualityReview = response.stage_payload.quality_review;
+  }
+  if (response.stage_payload?.version_control) {
+    state.versionControl = response.stage_payload.version_control;
+    const last = Array.isArray(state.versionControl)
+      ? state.versionControl.at(-1)
+      : state.versionControl;
+    if (last?.action === "VIEW_RECENT") state.recentVersions = last;
+  }
   state.reportReady = response.report_ready === true;
   state.reportUrl = typeof response.report_url === "string" ? response.report_url : null;
+  state.guidedExportReady = response.guided_export_ready === true;
+  state.guidedExportUrl = typeof response.guided_export_url === "string"
+    ? response.guided_export_url
+    : null;
   if (state.stageIndex === 0) {
     const inputCategory = response.stage_payload?.input_category;
     if (response.stage_payload?.brainstorm_phase) {
@@ -1682,7 +2018,9 @@ function applyResponse(response, userMessage) {
     state.visualization = response.visualization;
     dom.chartDescription.textContent = response.visualization.disclaimer || "该图表示理论预测，不是实际测量数据。";
   }
+  state.pendingRequest = null;
   renderTaskReport();
+  renderQualityReview();
 }
 
 function composeAssistantText(response) {
@@ -1818,6 +2156,7 @@ function resetDesign() {
   }
   state = initialState();
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
+  localStorage.removeItem(DESIGN_RESUME_KEY);
   saveState();
   render();
   dom.chatInput.focus();
@@ -1945,7 +2284,23 @@ dom.chatInput.addEventListener("keydown", (event) => {
 dom.resetButton.addEventListener("click", resetDesign);
 dom.chartParameter.addEventListener("input", drawChart);
 dom.downloadReportButton.addEventListener("click", downloadTaskReport);
+dom.downloadGuidedSummaryButton.addEventListener("click", downloadGuidedSummary);
+dom.viewVersionsButton.addEventListener("click", () => sendVersionAction(
+  { action: "VIEW_RECENT" },
+  "查看最近的设计修改",
+));
+dom.undoVersionButton.addEventListener("click", () => sendVersionAction(
+  { action: "UNDO_LAST" },
+  "撤销上一项设计修改",
+));
 window.addEventListener("resize", drawChart);
 
-render();
-checkConnection();
+async function initializePage() {
+  render();
+  await checkConnection();
+  if (connectionState === "online" && state.designId && state.sessionKind === "api") {
+    await reloadApiDesignState();
+  }
+}
+
+void initializePage();

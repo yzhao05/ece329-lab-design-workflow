@@ -19,6 +19,8 @@ from .design_state import (
     design_state_snapshot,
     design_updates_from_facets,
     ensure_design_state,
+    refresh_topic_lock,
+    topic_lock_snapshot,
     set_baseline_comparisons,
     set_pending_action_snapshot,
 )
@@ -31,6 +33,7 @@ from .dialogue_acts import (
     normalize_dialogue_acts,
     stage_design_state_snapshot,
 )
+from .turn_planning import build_stage_context_summary, build_turn_task_plan
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
 
@@ -44,6 +47,9 @@ class UserIntent(str, Enum):
     REQUEST_CURRENT_DESIGN_SUMMARY = "REQUEST_CURRENT_DESIGN_SUMMARY"
     ASK_COURSE_QUESTION = "ASK_COURSE_QUESTION"
     PROVIDE_FEEDBACK = "PROVIDE_FEEDBACK"
+    REQUEST_DESIGN_REVIEW = "REQUEST_DESIGN_REVIEW"
+    COMPARE_DESIGN_OPTIONS = "COMPARE_DESIGN_OPTIONS"
+    MANAGE_DESIGN_VERSION = "MANAGE_DESIGN_VERSION"
     RETURN_TO_PREVIOUS_POINT = "RETURN_TO_PREVIOUS_POINT"
     NEW_TOPIC = "NEW_TOPIC"
     SET_INTERACTION_STATE = "SET_INTERACTION_STATE"
@@ -339,9 +345,15 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
     )
     last_summary = dialogue_state(session).get("last_presented_design_summary")
     stage_fields = stage_design_state_snapshot(session)
+    pending = current_pending_action(session)
+    topic_lock = topic_lock_snapshot(session)
     return {
         "research_direction": str(canonical.get("research_object") or direction),
         "direction_locked": idea.get("direction_locked") is True,
+        "topic_lock": topic_lock,
+        "current_edit_target": (
+            str(pending.get("subject") or "") if isinstance(pending, dict) else ""
+        ),
         "course_relationships": (
             str(canonical.get("course_relationship") or "")
             or deepcopy(
@@ -425,6 +437,30 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "design_state": design_state_snapshot(session),
         "last_presented_design_summary": (
             deepcopy(last_summary) if isinstance(last_summary, dict) else None
+        ),
+        "stage_context_summary": build_stage_context_summary(session),
+        "quality_review": deepcopy(
+            session.design_context.get("quality_review", {})
+            if isinstance(session.design_context.get("quality_review"), dict)
+            else {}
+        ),
+        "recent_design_versions": [
+            {
+                "version_id": item.get("version_id"),
+                "reason": item.get("reason"),
+                "changed_fields": deepcopy(item.get("changed_fields", [])),
+            }
+            for item in (
+                session.model_context.get("design_versions", [])[-5:]
+                if isinstance(session.model_context.get("design_versions"), list)
+                else []
+            )
+            if isinstance(item, dict)
+        ],
+        "mode_handoff": deepcopy(
+            session.model_context.get("mode_handoff", {})
+            if isinstance(session.model_context.get("mode_handoff"), dict)
+            else {}
         ),
     }
 
@@ -641,6 +677,136 @@ def fallback_intent(
     )
 
 
+def degraded_context_intent(
+    session: DesignSession,
+    user_message: str,
+    pending_action: dict[str, Any] | None,
+    carried_context: dict[str, Any],
+    *,
+    source: str = "SEMANTIC_DEGRADED",
+) -> dict[str, Any]:
+    """Preserve useful work when contextual semantic parsing is unavailable.
+
+    This recovery is intentionally structural: it uses the current stage,
+    topic lock, pending-action type and course-retrieval evidence. It does not
+    inspect a list of conversational phrases. The original turn is retained
+    so a later model call can revisit it instead of silently losing it.
+    """
+
+    message = user_message.strip()
+    subject = (
+        str(pending_action.get("subject") or "").strip()
+        if isinstance(pending_action, dict)
+        else ""
+    )
+    preserved_input = [
+        {
+            "type": "UNRESOLVED",
+            "target": subject or session.current_stage.value,
+            "content": message,
+            "reason": "contextual_semantic_parser_unavailable",
+        }
+    ]
+    entry_context = carried_context.get("intent_entry_context", {})
+    entry_context = entry_context if isinstance(entry_context, dict) else {}
+    topic_lock = carried_context.get("topic_lock", {})
+    topic_lock = topic_lock if isinstance(topic_lock, dict) else {}
+    direction_locked = bool(
+        entry_context.get("direction_status") == "LOCKED"
+        or topic_lock.get("locked") is True
+    )
+    evidence = carried_context.get("current_course_evidence", {})
+    evidence = evidence if isinstance(evidence, dict) else {}
+    idea_development = carried_context.get("idea_development", {})
+    idea_development = (
+        idea_development if isinstance(idea_development, dict) else {}
+    )
+    has_course_evidence = any(
+        isinstance(evidence.get(key), list) and bool(evidence.get(key))
+        for key in ("lecture_concepts", "supplemental_concepts")
+    )
+    stage_one_entry = bool(
+        session.interaction_state is InteractionState.GUIDED_DESIGN
+        and session.current_stage is Stage.IDEA_BRAINSTORMING
+        and not direction_locked
+        and not idea_development
+    )
+
+    if stage_one_entry and has_course_evidence:
+        return resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=subject or "initial_idea",
+            resolved_value=message,
+            confidence=0.72,
+            source=f"{source}_COURSE_EVIDENCE",
+            semantic_updates={
+                "no_direction": False,
+                "course_scope_status": "COURSE_CONTENT",
+                "stage_one_direction_detail": message,
+                "pending_answer_status": "CLEAR",
+            },
+            unresolved_content=preserved_input,
+        )
+
+    if stage_one_entry:
+        # Without a locked direction or positive course match, breadth
+        # exploration is safer than inventing an out-of-scope judgment or
+        # storing a help request as the research object.
+        return resolved_intent(
+            UserIntent.REQUEST_MORE_EXAMPLES,
+            target="exploration_scenes",
+            confidence=0.72,
+            source=f"{source}_STAGE_ONE_ENTRY",
+            semantic_updates={
+                "no_direction": True,
+                "course_scope_status": "COURSE_CONTENT",
+                "pending_answer_status": "MISSING",
+                "guidance_need": "CONCRETE_EXAMPLE",
+            },
+            unresolved_content=preserved_input,
+        )
+
+    pending_type = (
+        str(pending_action.get("type") or "")
+        if isinstance(pending_action, dict)
+        else ""
+    )
+    if pending_type in OPEN_QUESTION_PENDING_TYPES:
+        updates: dict[str, Any] = {"pending_answer_status": "CLEAR"}
+        required_facet = required_pending_facet_id(pending_action)
+        if required_facet is not None:
+            updates = {
+                "facet_updates": [
+                    {
+                        "facet_id": required_facet,
+                        "status": "CLEAR",
+                        "operation": "MERGE",
+                        "value": message,
+                    }
+                ]
+            }
+        return resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=subject or session.current_stage.value,
+            resolved_value=message,
+            confidence=0.62,
+            source=f"{source}_OPEN_QUESTION",
+            semantic_updates=updates,
+            unresolved_content=preserved_input,
+        )
+
+    # A confirmation or unbound control message cannot be executed safely
+    # without semantics. Keep the text and clarify only the active decision.
+    return resolved_intent(
+        UserIntent.UNCLEAR,
+        target=subject or None,
+        resolved_value=message,
+        confidence=0.62,
+        source=f"{source}_LOCAL_CLARIFICATION",
+        unresolved_content=preserved_input,
+    )
+
+
 def resolved_intent(
     intent: UserIntent | str,
     *,
@@ -653,6 +819,7 @@ def resolved_intent(
     semantic_updates: dict[str, Any] | None = None,
     dialogue_acts: list[dict[str, Any]] | None = None,
     unresolved_content: list[dict[str, str]] | None = None,
+    task_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intent_value = intent.value if isinstance(intent, UserIntent) else str(intent)
     return {
@@ -670,6 +837,7 @@ def resolved_intent(
         "semantic_updates": deepcopy(semantic_updates or {}),
         "dialogue_acts": deepcopy(dialogue_acts or []),
         "unresolved_content": deepcopy(unresolved_content or []),
+        "task_plan": deepcopy(task_plan or {}),
     }
 
 
@@ -691,6 +859,16 @@ def validate_resolved_intent(
         raw.get("dialogue_acts"),
         pending_action=pending_action,
     )
+    preserved_unresolved = [
+        {
+            "type": "UNRESOLVED",
+            "target": str(item.get("target") or "")[:120],
+            "content": str(item.get("content") or "")[:1200],
+            "reason": str(item.get("reason") or "")[:160],
+        }
+        for item in raw.get("unresolved_content", [])
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ] if isinstance(raw.get("unresolved_content"), list) else []
     raw_acts_supplied = bool(
         isinstance(raw.get("dialogue_acts"), list)
         and raw.get("dialogue_acts")
@@ -699,6 +877,7 @@ def validate_resolved_intent(
         dialogue_acts,
         pending_action=pending_action,
     )
+    task_plan = build_turn_task_plan(dialogue_acts, unresolved_acts)
     if dialogue_acts:
         merged_updates = (
             deepcopy(raw.get("semantic_updates"))
@@ -745,6 +924,17 @@ def validate_resolved_intent(
                     if str(item).strip()
                 )
             )
+        for structured_key in (
+            "correction_items",
+            "quality_review_requests",
+            "option_comparison_requests",
+            "version_requests",
+        ):
+            existing = merged_updates.get(structured_key, [])
+            existing = existing if isinstance(existing, list) else []
+            compiled = compiled_acts.get(structured_key, [])
+            compiled = compiled if isinstance(compiled, list) else []
+            merged_updates[structured_key] = [*existing, *deepcopy(compiled)][:16]
         if compiled_acts.get("answered_pending"):
             merged_updates["pending_answer_status"] = "CLEAR"
         controls = set(compiled_acts.get("control_actions", []))
@@ -799,6 +989,12 @@ def validate_resolved_intent(
                 and pending_action.get("advance_on_accept") is True
             ):
                 raw = {**raw, "advance_requested": True}
+        elif compiled_acts.get("version_requests"):
+            intent = UserIntent.MANAGE_DESIGN_VERSION.value
+        elif compiled_acts.get("option_comparison_requests"):
+            intent = UserIntent.COMPARE_DESIGN_OPTIONS.value
+        elif compiled_acts.get("quality_review_requests"):
+            intent = UserIntent.REQUEST_DESIGN_REVIEW.value
         elif compiled_acts.get("student_questions"):
             intent = UserIntent.ASK_COURSE_QUESTION.value
         elif compiled_acts.get("feedback_items"):
@@ -923,6 +1119,9 @@ def validate_resolved_intent(
         UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
         UserIntent.ASK_COURSE_QUESTION.value,
         UserIntent.PROVIDE_FEEDBACK.value,
+        UserIntent.REQUEST_DESIGN_REVIEW.value,
+        UserIntent.COMPARE_DESIGN_OPTIONS.value,
+        UserIntent.MANAGE_DESIGN_VERSION.value,
         }
     ):
         intent = UserIntent.UNCLEAR.value
@@ -1042,7 +1241,8 @@ def validate_resolved_intent(
         source=source,
         semantic_updates=semantic_updates,
         dialogue_acts=dialogue_acts,
-        unresolved_content=unresolved_acts,
+        unresolved_content=[*unresolved_acts, *preserved_unresolved],
+        task_plan=task_plan,
     )
 
 
@@ -1087,6 +1287,10 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         }
         if str(item.get("update_id") or "").strip():
             normalized_update["update_id"] = str(item["update_id"])[:100]
+        if str(item.get("semantic_key") or "").strip():
+            normalized_update["semantic_key"] = str(item["semantic_key"])[:180]
+        if str(item.get("provenance") or "").strip():
+            normalized_update["provenance"] = str(item["provenance"])[:80]
         design_updates.append(normalized_update)
     stage_field_updates: list[dict[str, Any]] = []
     raw_stage_updates = raw.get("stage_field_updates", [])
@@ -1108,6 +1312,10 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         }
         if str(item.get("update_id") or "").strip():
             normalized_update["update_id"] = str(item["update_id"])[:100]
+        if str(item.get("semantic_key") or "").strip():
+            normalized_update["semantic_key"] = str(item["semantic_key"])[:180]
+        if str(item.get("provenance") or "").strip():
+            normalized_update["provenance"] = str(item["provenance"])[:80]
         stage_field_updates.append(normalized_update)
     comparison_updates: list[dict[str, Any]] = []
     for item in raw.get("comparison_updates", []) if isinstance(raw.get("comparison_updates"), list) else []:
@@ -1160,6 +1368,16 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
                 ][:12]
             if item.get("replace_all") is True:
                 normalized_comparison["replace_all"] = True
+            semantic_key = str(item.get("semantic_key") or "").strip()[:180]
+            if semantic_key:
+                normalized_comparison["semantic_key"] = semantic_key
+            raw_case_keys = item.get("case_semantic_keys", {})
+            if isinstance(raw_case_keys, dict):
+                normalized_comparison["case_semantic_keys"] = {
+                    str(label).strip()[:160]: str(key).strip()[:180]
+                    for label, key in raw_case_keys.items()
+                    if str(label).strip() and str(key).strip()
+                }
             comparison_updates.append(normalized_comparison)
     requested_state = str(raw.get("interaction_state_request") or "").upper()
     course_scope_status = str(raw.get("course_scope_status") or "").upper()
@@ -1167,6 +1385,19 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         raw.get("stage_one_direction_detail") or ""
     ).strip()[:1200]
     emvr_design_update = normalize_emvr_design_update(raw.get("emvr_design_update"))
+    from .design_quality import normalize_quality_assessment
+
+    quality_assessment = normalize_quality_assessment(raw.get("quality_assessment"))
+    guidance_need = str(raw.get("guidance_need") or "").upper()
+    if guidance_need not in {
+        "BRIEF_HINT",
+        "CONCRETE_EXAMPLE",
+        "REFERENCE_DRAFT",
+        "FORMULA_EXPLANATION",
+        "DESIGN_REVIEW",
+        "OPTION_COMPARISON",
+    }:
+        guidance_need = None
     def normalized_text_list(key: str) -> list[str]:
         value = raw.get(key, [])
         if not isinstance(value, list):
@@ -1188,6 +1419,34 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         "comparison_updates": comparison_updates,
         "student_questions": normalized_text_list("student_questions"),
         "feedback_items": normalized_text_list("feedback_items"),
+        "correction_items": [
+            deepcopy(item)
+            for item in raw.get("correction_items", [])
+            if isinstance(item, dict)
+        ][:12]
+        if isinstance(raw.get("correction_items"), list)
+        else [],
+        "quality_review_requests": [
+            deepcopy(item)
+            for item in raw.get("quality_review_requests", [])
+            if isinstance(item, dict)
+        ][:8]
+        if isinstance(raw.get("quality_review_requests"), list)
+        else [],
+        "option_comparison_requests": [
+            deepcopy(item)
+            for item in raw.get("option_comparison_requests", [])
+            if isinstance(item, (dict, list))
+        ][:8]
+        if isinstance(raw.get("option_comparison_requests"), list)
+        else [],
+        "version_requests": [
+            deepcopy(item)
+            for item in raw.get("version_requests", [])
+            if isinstance(item, dict)
+        ][:8]
+        if isinstance(raw.get("version_requests"), list)
+        else [],
         "unresolved_content": normalized_text_list("unresolved_content"),
         "control_actions": list(
             dict.fromkeys(
@@ -1235,6 +1494,8 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         # confirms that the student explicitly abandoned or replaced it.
         "topic_change_explicit": raw.get("topic_change_explicit") is True,
         "emvr_design_update": emvr_design_update or None,
+        "quality_assessment": quality_assessment or None,
+        "guidance_need": guidance_need,
     }
 
 
@@ -1413,6 +1674,37 @@ def _comparison_case_catalog(item: dict[str, Any]) -> list[dict[str, Any]]:
     return catalog
 
 
+def _semantic_case_identity(
+    label: str,
+    semantic_keys: dict[str, Any] | None = None,
+) -> str:
+    keys = semantic_keys if isinstance(semantic_keys, dict) else {}
+    supplied = str(keys.get(label) or "").strip().casefold()
+    return supplied or _normalized_evidence_text(label)
+
+
+def _deduplicate_cases_by_semantics(
+    cases: list[str],
+    semantic_keys: dict[str, Any] | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Keep one display label for each model-canonicalized physical case."""
+
+    result: list[str] = []
+    result_keys: dict[str, str] = {}
+    seen: set[str] = set()
+    for case in cases:
+        label = str(case).strip()
+        if not label:
+            continue
+        identity = _semantic_case_identity(label, semantic_keys)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(label)
+        result_keys[label] = identity
+    return result, result_keys
+
+
 def _apply_comparison_updates(
     session: DesignSession,
     updates: Any,
@@ -1426,6 +1718,11 @@ def _apply_comparison_updates(
         str(item.get("comparison_id")): item
         for item in comparisons
         if isinstance(item, dict) and str(item.get("comparison_id") or "")
+    }
+    by_semantic_key = {
+        str(item.get("semantic_key") or "").strip().casefold(): item
+        for item in comparisons
+        if isinstance(item, dict) and str(item.get("semantic_key") or "").strip()
     }
     for update in updates:
         if not isinstance(update, dict):
@@ -1453,8 +1750,20 @@ def _apply_comparison_updates(
             )
             if not supported_cases:
                 continue
-            identity_material = "|".join(
-                sorted(_normalized_evidence_text(case) for case in supported_cases)
+            case_semantic_keys = (
+                update.get("case_semantic_keys")
+                if isinstance(update.get("case_semantic_keys"), dict)
+                else {}
+            )
+            supported_cases, normalized_case_keys = _deduplicate_cases_by_semantics(
+                supported_cases,
+                case_semantic_keys,
+            )
+            comparison_semantic_key = str(
+                update.get("semantic_key") or ""
+            ).strip().casefold()
+            identity_material = comparison_semantic_key or "|".join(
+                sorted(normalized_case_keys.values())
             )
             comparison_id = "student_" + uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -1466,7 +1775,9 @@ def _apply_comparison_updates(
                 and _normalized_evidence_text(title) in message_evidence
             ):
                 title = "学生补充的基础比较"
-            existing = by_id.get(comparison_id)
+            existing = by_semantic_key.get(comparison_semantic_key) \
+                if comparison_semantic_key else None
+            existing = existing or by_id.get(comparison_id)
             if existing is None:
                 existing = {
                     "comparison_id": comparison_id,
@@ -1474,9 +1785,13 @@ def _apply_comparison_updates(
                     "recommended_cases": list(supported_cases),
                     "cases": list(supported_cases),
                     "adoption_status": "MODIFIED",
+                    "semantic_key": comparison_semantic_key,
+                    "case_semantic_keys": normalized_case_keys,
                 }
                 comparisons.append(existing)
                 by_id[comparison_id] = existing
+                if comparison_semantic_key:
+                    by_semantic_key[comparison_semantic_key] = existing
                 applied.append(
                     {
                         "comparison_id": comparison_id,
@@ -1486,8 +1801,16 @@ def _apply_comparison_updates(
                 )
             else:
                 before = deepcopy(existing)
-                existing["cases"] = list(
-                    dict.fromkeys(
+                combined_keys = {
+                    **(
+                        existing.get("case_semantic_keys", {})
+                        if isinstance(existing.get("case_semantic_keys"), dict)
+                        else {}
+                    ),
+                    **normalized_case_keys,
+                }
+                existing["cases"], existing["case_semantic_keys"] = (
+                    _deduplicate_cases_by_semantics(
                         [
                             *[
                                 str(case)
@@ -1495,7 +1818,8 @@ def _apply_comparison_updates(
                                 if str(case).strip()
                             ],
                             *supported_cases,
-                        ]
+                        ],
+                        combined_keys,
                     )
                 )
                 existing["adoption_status"] = "MODIFIED"
@@ -1523,6 +1847,18 @@ def _apply_comparison_updates(
             for case in item.get("cases", [])
             if str(case).strip()
         ]
+        case_semantic_keys = {
+            **(
+                item.get("case_semantic_keys", {})
+                if isinstance(item.get("case_semantic_keys"), dict)
+                else {}
+            ),
+            **(
+                update.get("case_semantic_keys", {})
+                if isinstance(update.get("case_semantic_keys"), dict)
+                else {}
+            ),
+        }
         message_evidence = _normalized_evidence_text(user_message)
         catalog = _comparison_case_catalog(item)
         catalog_by_ref = {
@@ -1599,6 +1935,12 @@ def _apply_comparison_updates(
                 "ACCEPTED" if item["cases"] == recommended else "MODIFIED"
             )
         if item != before:
+            item["cases"], item["case_semantic_keys"] = (
+                _deduplicate_cases_by_semantics(
+                    [str(case) for case in item.get("cases", [])],
+                    case_semantic_keys,
+                )
+            )
             applied.append(
                 {
                     "comparison_id": str(item.get("comparison_id") or ""),
@@ -1697,6 +2039,7 @@ def apply_semantic_design_updates(
         session,
         design_updates,
         pending_action=pending_action,
+        provenance="STUDENT_CONFIRMED",
     )
     if changed_fields:
         set_pending_action_snapshot(session, None)
@@ -1726,6 +2069,7 @@ def apply_semantic_design_updates(
         session,
         updates.get("stage_field_updates"),
         stage=session.current_stage,
+        provenance="STUDENT_CONFIRMED",
     )
     updates["applied_design_fields"] = changed_fields
     updates["applied_stage_fields"] = changed_stage_fields
@@ -1786,6 +2130,12 @@ def apply_resolved_intent(
             UserIntent.REJECT_PREVIOUS_PROPOSAL.value: "REJECTED",
         }[intent]
         state["pending_action"] = deepcopy(pending_action)
+        if intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value:
+            subject = str(pending_action.get("subject") or "")
+            refresh_topic_lock(
+                session,
+                preserved_fields=[FACET_TO_DESIGN_FIELD.get(subject, subject)],
+            )
     elif pending_action and {"ACCEPT", "REJECT"} & control_actions:
         # A mixed turn can accept/reject the visible proposal and edit another
         # field at the same time.  Resolve the proposal independently instead
@@ -1801,6 +2151,12 @@ def apply_resolved_intent(
         )
         pending_action["status"] = "ACCEPTED" if accepted else "REJECTED"
         state["pending_action"] = deepcopy(pending_action)
+        if accepted:
+            subject = str(pending_action.get("subject") or "")
+            refresh_topic_lock(
+                session,
+                preserved_fields=[FACET_TO_DESIGN_FIELD.get(subject, subject)],
+            )
     log = state.setdefault("decision_log", [])
     if isinstance(log, list):
         log.append(deepcopy(resolved))
@@ -1961,6 +2317,38 @@ def serialize_intent_input(
                 comparison["semantic_case_catalog"] = _comparison_case_catalog(
                     comparison
                 )
+    topic_lock = intent_context.get("topic_lock", {})
+    topic_lock = topic_lock if isinstance(topic_lock, dict) else {}
+    idea_development = intent_context.get("idea_development", {})
+    idea_development = (
+        idea_development if isinstance(idea_development, dict) else {}
+    )
+    direction_locked = topic_lock.get("locked") is True
+    direction_status = (
+        "LOCKED"
+        if direction_locked
+        else "DEVELOPING"
+        if idea_development
+        else "NOT_ESTABLISHED"
+    )
+    intent_entry_context = {
+        "is_stage_one_entry": bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and direction_status == "NOT_ESTABLISHED"
+        ),
+        "direction_status": direction_status,
+        "pending_action_is_non_blocking": bool(
+            session.current_stage is Stage.IDEA_BRAINSTORMING
+        ),
+        "allowed_parallel_results": [
+            "NO_DIRECTION",
+            "REQUEST_COURSE_REFERENCE",
+            "COURSE_DIRECTION_CONTENT",
+            "NEW_TOPIC_CONTENT",
+        ],
+    }
+    intent_context["intent_entry_context"] = intent_entry_context
     return json.dumps(
         {
             "current_stage": session.current_stage.value,
@@ -1972,6 +2360,7 @@ def serialize_intent_input(
                 if pending_action
                 else None
             ),
+            "intent_entry_context": intent_entry_context,
             "carried_context": intent_context,
             "user_message": user_message,
         },

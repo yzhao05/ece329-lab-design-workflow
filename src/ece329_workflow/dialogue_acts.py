@@ -18,6 +18,9 @@ DIALOGUE_ACT_TYPES = frozenset(
         "ASK_COURSE_QUESTION",
         "REQUEST_REFERENCE",
         "REQUEST_SUMMARY",
+        "REQUEST_QUALITY_REVIEW",
+        "COMPARE_OPTIONS",
+        "VERSION_CONTROL",
         "CORRECT_ASSISTANT",
         "CONTROL",
         "NEW_TOPIC",
@@ -58,6 +61,7 @@ CONTROL_TARGETS = frozenset(
         "RETURN",
         "SET_GUIDED_MODE",
         "SET_EMVR_MODE",
+        "ACCEPT_QUALITY_REVIEW",
     }
 )
 
@@ -171,14 +175,31 @@ def normalize_dialogue_acts(
                     {"content": _text(content), "reason": "基础比较修改缺少结构"}
                 )
                 continue
-        elif act_type in {
-            "ASK_COURSE_QUESTION",
-            "CORRECT_ASSISTANT",
-            "UNRESOLVED",
-        }:
+        elif act_type in {"ASK_COURSE_QUESTION", "UNRESOLVED"}:
             if not _text(content):
                 unresolved.append({"content": "", "reason": "动作缺少内容"})
                 continue
+        elif act_type == "CORRECT_ASSISTANT":
+            if not _text(content):
+                unresolved.append({"content": "", "reason": "纠错动作缺少内容"})
+                continue
+        elif act_type == "VERSION_CONTROL":
+            if not isinstance(content, dict) or str(content.get("action") or "").upper() not in {
+                "VIEW_RECENT",
+                "UNDO_LAST",
+                "RESTORE",
+                "COMPARE",
+            }:
+                unresolved.append({"content": _text(content), "reason": "版本操作缺少结构"})
+                continue
+            operation = "EXECUTE"
+        elif act_type == "COMPARE_OPTIONS":
+            if not isinstance(content, (list, dict)) or not _text(content):
+                unresolved.append({"content": _text(content), "reason": "缺少待比较方案"})
+                continue
+            operation = "EXECUTE"
+        elif act_type == "REQUEST_QUALITY_REVIEW":
+            operation = "EXECUTE"
         elif act_type == "CONTROL":
             target = target.upper()
             if target not in CONTROL_TARGETS:
@@ -211,6 +232,9 @@ def normalize_dialogue_acts(
             "content": content,
             "confidence": max(0.0, min(confidence, 1.0)),
         }
+        semantic_key = str(item.get("semantic_key") or "").strip()[:180]
+        if semantic_key:
+            normalized["semantic_key"] = semantic_key
         accepted.append(normalized)
         if act_type == "UNRESOLVED":
             unresolved.append(
@@ -237,6 +261,10 @@ def compile_dialogue_acts(
     comparison_updates: list[dict[str, Any]] = []
     questions: list[str] = []
     feedback: list[str] = []
+    correction_items: list[dict[str, Any]] = []
+    quality_review_requests: list[dict[str, Any]] = []
+    option_comparison_requests: list[Any] = []
+    version_requests: list[dict[str, Any]] = []
     controls: list[str] = []
     unresolved: list[str] = []
     answered_pending = False
@@ -246,6 +274,7 @@ def compile_dialogue_acts(
         operation = str(act.get("operation") or "MERGE")
         content = deepcopy(act.get("content"))
         act_id = str(act.get("act_id") or "")
+        semantic_key = str(act.get("semantic_key") or "").strip()
         if act_type == "ANSWER_PENDING_QUESTION":
             # The pending subject can be a public stage id while the useful
             # answer targets one concrete field inside that stage.  The act
@@ -261,6 +290,7 @@ def compile_dialogue_acts(
                         "operation": operation,
                         "value": content,
                         "update_id": act_id,
+                        "semantic_key": semantic_key,
                     }
                 )
                 facet_updates.append(
@@ -278,6 +308,7 @@ def compile_dialogue_acts(
                         "operation": operation,
                         "value": content,
                         "update_id": act_id,
+                        "semantic_key": semantic_key,
                     }
                 )
             elif target in STAGE_ACT_FIELDS:
@@ -287,6 +318,7 @@ def compile_dialogue_acts(
                         "operation": operation,
                         "value": content,
                         "update_id": act_id,
+                        "semantic_key": semantic_key,
                     }
                 )
         elif act_type == "MODIFY_DESIGN_FIELD":
@@ -296,6 +328,7 @@ def compile_dialogue_acts(
                     "operation": operation,
                     "value": content,
                     "update_id": act_id,
+                    "semantic_key": semantic_key,
                 }
             )
             facet_id = next(
@@ -322,6 +355,7 @@ def compile_dialogue_acts(
                     "operation": operation,
                     "value": content,
                     "update_id": act_id,
+                    "semantic_key": semantic_key,
                 }
             )
         elif act_type == "MODIFY_COMPARISON" and isinstance(content, dict):
@@ -329,7 +363,87 @@ def compile_dialogue_acts(
         elif act_type == "ASK_COURSE_QUESTION":
             questions.append(_text(content))
         elif act_type == "CORRECT_ASSISTANT":
-            feedback.append(_text(content))
+            if isinstance(content, dict):
+                explanation = _text(
+                    content.get("explanation") or content.get("error") or content
+                )
+                if explanation:
+                    feedback.append(explanation)
+                correction = {
+                    "error_type": str(content.get("error_type") or "UNDERSTANDING_ERROR").upper()[:80],
+                    "explanation": explanation,
+                    "affected_fields": [
+                        str(field)
+                        for field in content.get("affected_fields", [])
+                        if isinstance(field, str)
+                        and field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS}
+                    ][:8]
+                    if isinstance(content.get("affected_fields"), list)
+                    else [],
+                }
+                correction_items.append(correction)
+                for index, update in enumerate(
+                    content.get("design_updates", [])
+                    if isinstance(content.get("design_updates"), list)
+                    else []
+                ):
+                    if not isinstance(update, dict):
+                        continue
+                    field = str(update.get("field") or "")
+                    op = str(update.get("operation") or "REPLACE").upper()
+                    value = deepcopy(update.get("value"))
+                    if field in DESIGN_ACT_FIELDS and op in {"MERGE", "REPLACE", "CLEAR"}:
+                        design_updates.append(
+                            {
+                                "field": field,
+                                "operation": op,
+                                "value": value,
+                                "update_id": f"{act_id}:correction:design:{index}",
+                                "semantic_key": str(update.get("semantic_key") or ""),
+                                "provenance": "AGENT_SELF_CORRECTION",
+                            }
+                        )
+                for index, update in enumerate(
+                    content.get("stage_field_updates", [])
+                    if isinstance(content.get("stage_field_updates"), list)
+                    else []
+                ):
+                    if not isinstance(update, dict):
+                        continue
+                    field = str(update.get("field") or "")
+                    op = str(update.get("operation") or "REPLACE").upper()
+                    value = deepcopy(update.get("value"))
+                    if field in STAGE_ACT_FIELDS and op in {"MERGE", "REPLACE", "CLEAR"}:
+                        stage_field_updates.append(
+                            {
+                                "field": field,
+                                "operation": op,
+                                "value": value,
+                                "update_id": f"{act_id}:correction:stage:{index}",
+                                "semantic_key": str(update.get("semantic_key") or ""),
+                                "provenance": "AGENT_SELF_CORRECTION",
+                            }
+                        )
+            else:
+                feedback.append(_text(content))
+                correction_items.append(
+                    {
+                        "error_type": "UNDERSTANDING_ERROR",
+                        "explanation": _text(content),
+                        "affected_fields": [],
+                    }
+                )
+        elif act_type == "REQUEST_QUALITY_REVIEW":
+            quality_review_requests.append(
+                {
+                    "scope": str(target or "CURRENT_DESIGN")[:120],
+                    "content": deepcopy(content),
+                }
+            )
+        elif act_type == "COMPARE_OPTIONS":
+            option_comparison_requests.append(deepcopy(content))
+        elif act_type == "VERSION_CONTROL" and isinstance(content, dict):
+            version_requests.append(deepcopy(content))
         elif act_type == "CONTROL":
             controls.append(target)
         elif act_type == "REQUEST_REFERENCE":
@@ -347,6 +461,10 @@ def compile_dialogue_acts(
         "comparison_updates": comparison_updates,
         "student_questions": list(dict.fromkeys(item for item in questions if item)),
         "feedback_items": list(dict.fromkeys(item for item in feedback if item)),
+        "correction_items": correction_items,
+        "quality_review_requests": quality_review_requests,
+        "option_comparison_requests": option_comparison_requests,
+        "version_requests": version_requests,
         "control_actions": list(dict.fromkeys(controls)),
         "unresolved_content": list(dict.fromkeys(item for item in unresolved if item)),
         "answered_pending": answered_pending,
@@ -358,6 +476,7 @@ def apply_stage_field_updates(
     updates: Any,
     *,
     stage: Stage,
+    provenance: str = "STUDENT_CONFIRMED",
 ) -> list[str]:
     """Idempotently commit later-stage fields without copying the whole turn."""
 
@@ -372,6 +491,14 @@ def apply_stage_field_updates(
         applied_ids = []
         state["applied_update_ids"] = applied_ids
     known_ids = {str(item) for item in applied_ids}
+    semantic_signatures = state.setdefault("semantic_signatures", {})
+    if not isinstance(semantic_signatures, dict):
+        semantic_signatures = {}
+        state["semantic_signatures"] = semantic_signatures
+    field_provenance = state.setdefault("field_provenance", {})
+    if not isinstance(field_provenance, dict):
+        field_provenance = {}
+        state["field_provenance"] = field_provenance
     changed: list[str] = []
     for item in updates:
         if not isinstance(item, dict):
@@ -396,10 +523,21 @@ def apply_stage_field_updates(
         if update_id in known_ids:
             continue
         previous = _text(state.get(field))
+        signature = str(item.get("semantic_key") or "").strip().casefold()
+        if not signature:
+            signature = "".join(value.split()).casefold()
+        known_signatures = semantic_signatures.get(field, [])
+        known_signatures = (
+            [str(item) for item in known_signatures]
+            if isinstance(known_signatures, list)
+            else []
+        )
         if operation == "CLEAR":
             next_value = ""
         elif operation == "REPLACE" or not previous:
             next_value = value
+        elif signature and signature in known_signatures:
+            next_value = previous
         elif not value or value.replace(" ", "") in previous.replace(" ", ""):
             next_value = previous
         else:
@@ -409,10 +547,30 @@ def apply_stage_field_updates(
         if next_value != previous:
             state[field] = next_value
             changed.append(field)
+            records = field_provenance.get(field, [])
+            records = records if isinstance(records, list) else []
+            records.append(
+                {
+                    "revision": int(state.get("revision") or 0) + 1,
+                    "source": str(item.get("provenance") or provenance)[:80],
+                    "operation": operation,
+                    "value": next_value[:1000],
+                    "stage": stage.value,
+                }
+            )
+            field_provenance[field] = records[-30:]
+        if operation == "CLEAR":
+            semantic_signatures[field] = []
+        elif operation == "REPLACE":
+            semantic_signatures[field] = [signature] if signature else []
+        elif signature and signature not in known_signatures:
+            known_signatures.append(signature)
+            semantic_signatures[field] = known_signatures[-40:]
     if changed:
         state["revision"] = int(state.get("revision") or 0) + 1
         state["last_updated_stage"] = stage.value
     state["applied_update_ids"] = applied_ids[-240:]
+    state["semantic_signatures"] = semantic_signatures
     return list(dict.fromkeys(changed))
 
 

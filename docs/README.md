@@ -9,7 +9,9 @@ This folder is a dependency-free static site intended for GitHub Pages. Its entr
 
 Never put an OpenAI key, database password, or other secret in this directory. Every file published by GitHub Pages can be read by site visitors. The model API must be called from the separately hosted backend.
 
-If the backend enables `ECE329_ACCESS_CODE`, the page asks the student for that course code on first use. It keeps the code and the server-issued per-design token in `sessionStorage`, not in source files or persistent browser storage.
+If the backend enables `ECE329_ACCESS_CODE`, the page asks the student for that course code on first use. It keeps the code and short-lived per-design bearer token in `sessionStorage`. A separate rotating resume credential is persisted only so the same design can be reopened after the tab closes; the backend exchanges it for new credentials and invalidates the old pair. None of these values belong in source files, Git commits, screenshots, or shared logs.
+
+Each mutation request also sends a stable `Idempotency-Key`/`turn_id`, so retrying the same timed-out request does not repeat a model call or advance the workflow twice.
 
 ## Preview locally
 

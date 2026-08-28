@@ -95,6 +95,129 @@ class APISecurityTests(unittest.TestCase):
         self.assertEqual(headers["Vary"], "Origin")
         self.assertEqual(payload["storage"]["provider"], "memory")
 
+    def test_create_idempotency_key_reuses_the_same_design(self) -> None:
+        api = self.make_api(APISettings())
+        headers = {"Idempotency-Key": "create-design-0001"}
+
+        first_status, _, first = call_api(
+            api,
+            "POST",
+            "/v1/designs",
+            {"idea": "我想研究传输线反射"},
+            request_headers=headers,
+        )
+        second_status, _, second = call_api(
+            api,
+            "POST",
+            "/v1/designs",
+            {"idea": "我想研究传输线反射"},
+            request_headers=headers,
+        )
+
+        self.assertTrue(first_status.startswith("201"))
+        self.assertTrue(second_status.startswith("201"))
+        self.assertEqual(first["design_id"], second["design_id"])
+        self.assertEqual(first["design_access_token"], second["design_access_token"])
+
+    def test_turn_idempotency_header_prevents_duplicate_progress(self) -> None:
+        api = self.make_api(APISettings())
+        _, _, created = call_api(
+            api, "POST", "/v1/designs", {"idea": "我想研究静电场"}
+        )
+        headers = {
+            "Authorization": f"Bearer {created['design_access_token']}",
+            "Idempotency-Key": "student-turn-0001",
+        }
+        body = {"message": "我想比较两个点电荷靠近时的电场线变化"}
+
+        _, _, first = call_api(
+            api,
+            "POST",
+            f"/v1/designs/{created['design_id']}/turns",
+            body,
+            request_headers=headers,
+        )
+        _, _, second = call_api(
+            api,
+            "POST",
+            f"/v1/designs/{created['design_id']}/turns",
+            body,
+            request_headers=headers,
+        )
+
+        self.assertEqual(first, second)
+
+    def test_resume_route_rotates_persisted_browser_credential(self) -> None:
+        api = self.make_api(APISettings())
+        _, _, created = call_api(
+            api, "POST", "/v1/designs", {"idea": "我想研究静电场"}
+        )
+
+        status, _, restored = call_api(
+            api,
+            "POST",
+            f"/v1/designs/{created['design_id']}/resume",
+            {"resume_token": created["design_resume_token"]},
+        )
+        old_status, _, _ = call_api(
+            api,
+            "GET",
+            f"/v1/designs/{created['design_id']}",
+            request_headers={
+                "Authorization": f"Bearer {created['design_access_token']}"
+            },
+        )
+        new_status, _, _ = call_api(
+            api,
+            "GET",
+            f"/v1/designs/{created['design_id']}",
+            request_headers={
+                "Authorization": f"Bearer {restored['design_access_token']}"
+            },
+        )
+
+        self.assertTrue(status.startswith("200"))
+        self.assertTrue(old_status.startswith("401"))
+        self.assertTrue(new_status.startswith("200"))
+
+    def test_create_retry_returns_rotated_credentials_after_resume(self) -> None:
+        api = self.make_api(APISettings())
+        idempotency_headers = {"Idempotency-Key": "create-resume-0001"}
+        request_body = {"idea": "我想研究静电场"}
+        _, _, created = call_api(
+            api,
+            "POST",
+            "/v1/designs",
+            request_body,
+            request_headers=idempotency_headers,
+        )
+        _, _, restored = call_api(
+            api,
+            "POST",
+            f"/v1/designs/{created['design_id']}/resume",
+            {"resume_token": created["design_resume_token"]},
+        )
+
+        retry_status, _, retried = call_api(
+            api,
+            "POST",
+            "/v1/designs",
+            request_body,
+            request_headers=idempotency_headers,
+        )
+
+        self.assertTrue(retry_status.startswith("201"))
+        self.assertEqual(retried["design_id"], created["design_id"])
+        self.assertEqual(
+            retried["design_access_token"], restored["design_access_token"]
+        )
+        self.assertEqual(
+            retried["design_resume_token"], restored["design_resume_token"]
+        )
+        self.assertEqual(retried["workflow_status"], restored["status"])
+        self.assertEqual(retried["current_stage"], restored["current_stage"])
+        self.assertIn("assistant_message", retried)
+
     def test_unlisted_origin_is_rejected(self) -> None:
         api = self.make_api(APISettings(allowed_origins=("https://allowed.example",)))
 

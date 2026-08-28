@@ -6,10 +6,12 @@ from copy import deepcopy
 from typing import Any
 
 from ece329_workflow.engine import WorkflowEngine
+from ece329_workflow.dialogue_state import serialize_intent_input
 from ece329_workflow.generator import RuleBasedStageGenerator, build_exploration_scenes
 from ece329_workflow.guardrails import build_stage_one_turn_context
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import DesignSession, InteractionState, Stage
+from ece329_workflow.store import InMemorySessionStore
 from ece329_workflow.openai_generator import (
     FallbackStageGenerator,
     ModelConfigurationError,
@@ -511,13 +513,108 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             guided_session(),
             idea,
             None,
-            {},
+            {
+                "topic_lock": {"locked": False},
+                "intent_entry_context": {
+                    "direction_status": "NOT_ESTABLISHED",
+                },
+                "current_course_evidence": {
+                    "lecture_concepts": [
+                        {"concept": "静电场与材料边界"},
+                    ],
+                    "supplemental_concepts": [],
+                },
+            },
         )
 
         self.assertEqual(len(transport.requests), 2)
         self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
         self.assertEqual(result["target"], "initial_idea")
         self.assertEqual(result["resolved_value"], idea)
+
+    def test_stage_one_unclear_without_course_evidence_opens_breadth_exploration(self) -> None:
+        unclear = {
+            "intent": "UNCLEAR",
+            "target": None,
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.74,
+        }
+        transport = FakeTransport(outputs=[unclear, unclear])
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "请先带我浏览课程里的实验方向",
+            None,
+            {
+                "topic_lock": {"locked": False},
+                "intent_entry_context": {
+                    "direction_status": "NOT_ESTABLISHED",
+                },
+                "current_course_evidence": {
+                    "lecture_concepts": [],
+                    "supplemental_concepts": [],
+                },
+            },
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertEqual(result["target"], "exploration_scenes")
+        self.assertTrue(result["semantic_updates"]["no_direction"])
+        self.assertTrue(result["unresolved_content"])
+
+    def test_stage_one_unclear_with_nonblocking_pending_uses_breadth_recovery(self) -> None:
+        unclear = {
+            "intent": "UNCLEAR",
+            "target": None,
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.74,
+        }
+        pending = {
+            "type": "CONFIRM_OR_MODIFY",
+            "subject": "idea_brainstorming",
+            "proposal": {"alternative_ideas": []},
+            "question": "你想沿着哪个方向继续？",
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "REQUEST_MORE_EXAMPLES",
+                "UNCLEAR",
+            ],
+        }
+        transport = FakeTransport(outputs=[unclear, unclear])
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "请先帮助我拓展课程里的实验思路",
+            pending,
+            {
+                "topic_lock": {"locked": False},
+                "intent_entry_context": {
+                    "direction_status": "NOT_ESTABLISHED",
+                },
+                "current_course_evidence": {
+                    "lecture_concepts": [],
+                    "supplemental_concepts": [],
+                },
+            },
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertTrue(result["semantic_updates"]["no_direction"])
+        self.assertEqual(
+            result["semantic_updates"]["course_scope_status"],
+            "COURSE_CONTENT",
+        )
+        self.assertTrue(result["unresolved_content"])
 
     def test_open_question_cannot_accept_a_missing_candidate(self) -> None:
         answer = "比较同种与异种电荷由远到近时，中间电场线的弯曲和连接方式"
@@ -1830,6 +1927,141 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         info = fallback.runtime_info()
         self.assertEqual(info["last_fallback_reason"], "model_transport_error")
         self.assertEqual(info["fallback_calls"], 1)
+
+    def test_intent_service_failure_keeps_stage_one_entry_non_blocking(self) -> None:
+        fallback = FallbackStageGenerator(
+            primary=OpenAIStageGenerator(
+                transport=FakeTransport(error=ModelServiceError("temporary"))
+            ),
+            fallback=RuleBasedStageGenerator(),
+        )
+        engine = WorkflowEngine(
+            generator=fallback,
+            store=InMemorySessionStore(),
+        )
+
+        first = engine.create_design(
+            "还没有具体思路，先带我浏览课上所学内容的大致方向"
+        )
+        self.assertNotIn("我还没完全明白", first["assistant_message"])
+        self.assertEqual(
+            first["stage_payload"]["input_category"],
+            "COURSE_CONTENT",
+        )
+        self.assertEqual(
+            first["stage_payload"]["brainstorm_phase"],
+            "BREADTH_EXPLORATION",
+        )
+        self.assertEqual(len(first["stage_payload"]["exploration_scenes"]), 3)
+        self.assertEqual(
+            first["stage_payload"]["design_state"]["research_object"],
+            "",
+        )
+
+        second = engine.process_turn(
+            first["design_id"],
+            {"message": "带我浏览课上所学内容的大致方向"},
+        )
+        self.assertNotIn("我还没完全明白", second["assistant_message"])
+        self.assertEqual(len(second["stage_payload"]["exploration_scenes"]), 3)
+        self.assertEqual(
+            second["stage_payload"]["design_state"]["research_object"],
+            "",
+        )
+
+        third = engine.process_turn(
+            first["design_id"],
+            {
+                "message": (
+                    "我想探究静电场中各种物体的电场线分布，"
+                    "以及它们放在一起时如何相互影响"
+                )
+            },
+        )
+        self.assertNotIn("我还没完全明白", third["assistant_message"])
+        self.assertEqual(
+            third["stage_payload"]["input_category"],
+            "COURSE_CONTENT",
+        )
+        self.assertTrue(third["stage_payload"]["direction_locked"])
+        self.assertIn("静电场", third["stage_payload"]["direction_summary"])
+
+        fourth = engine.process_turn(
+            first["design_id"],
+            {
+                "message": (
+                    "开始这个方向：继续研究静电场中多个物体靠近时的"
+                    "电场线分布变化"
+                )
+            },
+        )
+        self.assertNotIn("我还没完全明白", fourth["assistant_message"])
+        session = engine.store.get(first["design_id"])
+        preserved = [
+            item
+            for decision in session.model_context["dialogue_state"]["decision_log"]
+            for item in decision.get("unresolved_content", [])
+            if isinstance(item, dict)
+        ]
+        self.assertTrue(
+            any("还没有具体思路" in item.get("content", "") for item in preserved)
+        )
+        self.assertEqual(
+            fallback.runtime_info()["last_fallback_reason"],
+            "intent_transport_error",
+        )
+
+    def test_intent_output_rejection_is_distinct_from_transport_failure(self) -> None:
+        fallback = FallbackStageGenerator(
+            primary=OpenAIStageGenerator(
+                transport=FakeTransport(
+                    error=ModelOutputError("invalid intent payload")
+                )
+            ),
+            fallback=RuleBasedStageGenerator(),
+        )
+
+        result = fallback.resolve_intent(
+            guided_session(),
+            "请先带我浏览课程方向",
+            None,
+            {
+                "topic_lock": {"locked": False},
+                "intent_entry_context": {
+                    "direction_status": "NOT_ESTABLISHED",
+                },
+                "current_course_evidence": {
+                    "lecture_concepts": [],
+                    "supplemental_concepts": [],
+                },
+            },
+        )
+
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertEqual(
+            fallback.runtime_info()["last_fallback_reason"],
+            "intent_output_rejected",
+        )
+
+    def test_intent_input_exposes_non_blocking_stage_one_entry_context(self) -> None:
+        session = guided_session()
+        carried = {
+            "topic_lock": {"locked": False},
+            "idea_development": {},
+        }
+
+        serialized = json.loads(
+            serialize_intent_input(session, "请帮我拓展方向", None, carried)
+        )
+
+        self.assertTrue(serialized["intent_entry_context"]["is_stage_one_entry"])
+        self.assertTrue(
+            serialized["intent_entry_context"]["pending_action_is_non_blocking"]
+        )
+        self.assertEqual(
+            serialized["intent_entry_context"]["direction_status"],
+            "NOT_ESTABLISHED",
+        )
 
     def test_invalid_model_output_is_repaired_once_before_fallback(self) -> None:
         class SequencedTransport:

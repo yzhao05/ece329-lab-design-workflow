@@ -141,18 +141,101 @@ def _compact_context_items(
     return "、".join(cleaned[:limit])
 
 
-def _confirmed_context_summary(carried: dict[str, Any], limit: int = 3) -> list[str]:
+def _confirmed_context_summary(
+    carried: dict[str, Any],
+    limit: int = 4,
+    stage: Stage | None = None,
+) -> list[str]:
     """Use structured design facts, never raw conversational control phrases."""
 
     summaries: list[str] = []
-    labels = (
-        ("研究方向", carried.get("research_direction")),
-        ("主动改变量", carried.get("independent_variable")),
-        ("观察量", carried.get("observations")),
-        ("控制条件", carried.get("controlled_conditions")),
-        ("流程", carried.get("procedure_steps")),
+    stage_summary = carried.get("stage_context_summary", {})
+    confirmed = (
+        stage_summary.get("confirmed", {})
+        if isinstance(stage_summary, dict)
+        else {}
     )
-    for label, value in labels:
+    confirmed = confirmed if isinstance(confirmed, dict) else {}
+    field_values = {
+        "research_object": confirmed.get("research_object")
+        or carried.get("research_direction"),
+        "course_relationship": confirmed.get("course_relationship")
+        or carried.get("course_relationships"),
+        "learning_objective": confirmed.get("learning_objective")
+        or carried.get("learning_objective"),
+        "research_question": confirmed.get("research_question")
+        or carried.get("research_question"),
+        "baseline_comparisons": confirmed.get("baseline_comparisons")
+        or carried.get("baseline_comparisons"),
+        "independent_variable": confirmed.get("independent_variable")
+        or carried.get("independent_variable"),
+        "observations": confirmed.get("observations")
+        or carried.get("observations"),
+        "controlled_conditions": confirmed.get("controlled_conditions")
+        or carried.get("controlled_conditions"),
+        "hypothesis": confirmed.get("hypothesis") or carried.get("hypothesis"),
+        "procedure_steps": confirmed.get("procedure_steps")
+        or carried.get("procedure_steps"),
+        "visualization_plan": confirmed.get("visualization_plan")
+        or carried.get("visualization_plan"),
+    }
+    label_by_field = {
+        "research_object": "研究方向",
+        "course_relationship": "课程关系",
+        "learning_objective": "学习目标",
+        "research_question": "研究问题",
+        "baseline_comparisons": "基础比较",
+        "independent_variable": "主动改变量",
+        "observations": "观察量",
+        "controlled_conditions": "控制条件",
+        "hypothesis": "预期趋势",
+        "procedure_steps": "流程",
+        "visualization_plan": "显示方式",
+    }
+    stage_order = {
+        Stage.VARIABLES_AND_CONDITIONS: (
+            "research_question",
+            "baseline_comparisons",
+            "hypothesis",
+            "learning_objective",
+        ),
+        Stage.CONCEPTUAL_PROCEDURE: (
+            "research_question",
+            "independent_variable",
+            "observations",
+            "controlled_conditions",
+        ),
+        Stage.EXPECTED_DATA_VISUALIZATION: (
+            "hypothesis",
+            "independent_variable",
+            "observations",
+            "baseline_comparisons",
+        ),
+        Stage.RESULT_INTERPRETATION: (
+            "hypothesis",
+            "research_question",
+            "visualization_plan",
+            "controlled_conditions",
+        ),
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+            "learning_objective",
+            "research_question",
+            "procedure_steps",
+            "visualization_plan",
+        ),
+    }
+    order = stage_order.get(
+        stage,
+        (
+            "research_object",
+            "course_relationship",
+            "learning_objective",
+            "research_question",
+        ),
+    )
+    for field in order:
+        label = label_by_field[field]
+        value = field_values.get(field)
         compact = _compact_context_items(value)
         if compact:
             summaries.append(f"{label}：{compact}")
@@ -197,6 +280,16 @@ def _contextual_stage_question(
     objective = str(carried.get("learning_objective") or "").strip()
     research_question = str(carried.get("research_question") or "").strip()
     hypothesis = str(carried.get("hypothesis") or "").strip()
+    if stage is Stage.VARIABLES_AND_CONDITIONS:
+        return (
+            "上面的变量分工是否符合你的实验设想？如果有偏差，直接指出要调整的"
+            "改变量、观察量或控制条件；如果合适，也可以按这份参考继续。"
+        )
+    if stage is Stage.CONCEPTUAL_PROCEDURE:
+        return (
+            "这套顺序是否能完成你想要的比较？如果不符合，请直接指出需要保留、"
+            "删改或补充的环节。"
+        )
     if stage is Stage.EXPECTED_DATA_VISUALIZATION:
         anchor = hypothesis or research_question
         return (
@@ -245,7 +338,10 @@ def guided_stage_entry_output(
     }.get(session.current_stage, "当前阶段")
     carried = build_carried_context(session)
     question = _contextual_stage_question(session.current_stage, carried)
-    prior_context = _confirmed_context_summary(carried)
+    prior_context = _confirmed_context_summary(
+        carried,
+        stage=session.current_stage,
+    )
     reference_steps = _contextual_reference_steps(
         session.current_stage,
         carried,
@@ -1436,6 +1532,35 @@ class RuleBasedStageGenerator:
                 for relation_id in theory_relation_ids
                 if relation_id in EMVR_THEORY_RELATIONS
             ]
+            support_map = emvr_formula_support_map(
+                theory_relation_ids,
+                structured_requirements,
+            )
+            if not formulas:
+                # The offline generator does not invent semantic relation IDs.
+                # It may, however, use the same grounded course retrieval used
+                # throughout the workflow.  This keeps the PDF complete for a
+                # clearly course-grounded idea without falling back to a fixed
+                # topic/keyword table or listing unrelated theory names.
+                grounded_context = _emvr_context_text(session, idea)
+                formulas = _formula_references(grounded_context)[:4]
+                relation_labels = list(
+                    dict.fromkeys(
+                        str(item.get("name") or item.get("title") or "课程理论关系")
+                        for item in formulas
+                    )
+                )
+                support_target = str(research_focus or grounded_context).strip()
+                support_map = [
+                    {
+                        "formula_id": item.get("id"),
+                        "relation_id": "COURSE_RETRIEVAL",
+                        "relation": item.get("name") or item.get("title"),
+                        "supports_design_content": support_target,
+                    }
+                    for item in formulas
+                    if item.get("id")
+                ]
             return StepOutput(
                 assistant_message=(
                     "我已经只保留能直接解释当前变化条件和观察现象的课程关系。"
@@ -1445,10 +1570,7 @@ class RuleBasedStageGenerator:
                 stage_payload={
                     "physical_mechanism": relation_labels,
                     "core_equations": formulas,
-                    "formula_support_map": emvr_formula_support_map(
-                        theory_relation_ids,
-                        structured_requirements,
-                    ),
+                    "formula_support_map": support_map,
                     "theory_selection_status": (
                         "selected_for_current_research"
                         if formulas

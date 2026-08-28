@@ -23,6 +23,7 @@ from reportlab.platypus import (
 
 from .models import DesignSession, InteractionState, Stage, WorkflowStatus
 from .stages import stage_title
+from .design_quality import evaluate_design_quality, public_quality_review
 
 
 _FIELD_LABELS = {
@@ -321,6 +322,55 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
         original = session.design_context.get("idea", {})
         brief = original.get("current_summary") or original.get("original", "") \
             if isinstance(original, dict) else ""
+    quality = evaluate_design_quality(session, final_review=True)
+    quality_public = public_quality_review(quality, max_issues=8)
+    quality_items: list[dict[str, str]] = [
+        {
+            "label": "因果链",
+            "value": _plain(quality_public.get("causal_chain")),
+        },
+        {
+            "label": "概念可行性",
+            "value": _plain(quality_public.get("feasibility")),
+        },
+    ]
+    for index, issue in enumerate(quality_public.get("issues", []), start=1):
+        if isinstance(issue, dict):
+            quality_items.append(
+                {
+                    "label": f"审阅提醒 {index}",
+                    "value": "；".join(
+                        part
+                        for part in (
+                            _plain(issue.get("finding")),
+                            _plain(issue.get("suggestion")),
+                        )
+                        if part
+                    ),
+                }
+            )
+    if quality_public.get("boundary_cases"):
+        quality_items.append(
+            {
+                "label": "边界情形",
+                "value": _plain(quality_public.get("boundary_cases")),
+            }
+        )
+    if quality_public.get("traceability"):
+        quality_items.append(
+            {
+                "label": "课程关系与设计来源",
+                "value": _plain(quality_public.get("traceability")),
+            }
+        )
+    if session.status is WorkflowStatus.COMPLETE:
+        sections.append(
+            {
+                "stage_id": "FINAL_QUALITY_REVIEW",
+                "title": "最终设计质量检查",
+                "items": [item for item in quality_items if item["value"]],
+            }
+        )
     return {
         "title": "ECE329 EMVR 模拟实验设计报告",
         "design_id": session.design_id,
@@ -330,6 +380,7 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
         "idea": str(brief).strip(),
         "sections": sections,
         "completed_stage_count": len(session.completed_stages),
+        "quality_review": quality_public,
     }
 
 
@@ -478,11 +529,18 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
 def validate_emvr_report_completeness(session: DesignSession) -> None:
     if session.interaction_state is not InteractionState.EMVR_DIRECT:
         raise ValueError("EMVR report validation requires an EMVR design")
+    evaluate_design_quality(session, final_review=True)
 
     def payload(stage: Stage) -> dict[str, Any]:
         stored = session.stage_outputs.get(stage.value, {})
         value = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
         return value if isinstance(value, dict) else {}
+
+    missing_sections: list[str] = []
+
+    research = payload(Stage.RESEARCH_QUESTION)
+    if not _plain(research.get("main_research_question")):
+        missing_sections.append("研究问题")
 
     objectives = payload(Stage.LEARNING_OBJECTIVES)
     required_objectives = (
@@ -492,7 +550,29 @@ def validate_emvr_report_completeness(session: DesignSession) -> None:
         "vr_interaction_objective",
     )
     if any(not _plain(objectives.get(key)) for key in required_objectives):
-        raise ValueError("EMVR report is missing one or more experiment objectives")
+        missing_sections.append("学习目标")
+
+    theory = payload(Stage.THEORETICAL_FRAMEWORK)
+    if not _plain(theory.get("physical_mechanism")):
+        missing_sections.append("物理机制")
+    if not _plain(theory.get("core_equations")):
+        missing_sections.append("理论关系")
+    if not _plain(theory.get("formula_support_map")):
+        missing_sections.append("理论关系与观察内容的对应")
+
+    hypothesis = payload(Stage.HYPOTHESIS)
+    if not _plain(hypothesis.get("research_hypothesis")):
+        missing_sections.append("研究假设")
+    if not _plain(hypothesis.get("expected_trend")):
+        missing_sections.append("预期趋势")
+
+    variables = payload(Stage.VARIABLES_AND_CONDITIONS)
+    if not _plain(variables.get("independent_variable")):
+        missing_sections.append("自变量")
+    if not _plain(variables.get("dependent_variable")):
+        missing_sections.append("观察量")
+    if not _plain(variables.get("controlled_variables")):
+        missing_sections.append("控制条件")
 
     setup = payload(Stage.CONCEPTUAL_OR_VR_SETUP)
     inventory = setup.get("object_inventory")
@@ -506,13 +586,13 @@ def validate_emvr_report_completeness(session: DesignSession) -> None:
         "required",
     }
     if not isinstance(inventory, list) or len(inventory) < 5:
-        raise ValueError("EMVR report requires a complete experiment object inventory")
-    if any(
+        missing_sections.append("完整Unity物体清单")
+    elif any(
         not isinstance(item, dict)
         or any(key not in item or item.get(key) in (None, "") for key in required_object_fields)
         for item in inventory
     ):
-        raise ValueError("Each EMVR experiment object must include its complete design role")
+        missing_sections.append("Unity物体的用途、交互、物理状态和可见反馈")
 
     procedure = payload(Stage.CONCEPTUAL_PROCEDURE).get("procedure_steps")
     if (
@@ -520,4 +600,37 @@ def validate_emvr_report_completeness(session: DesignSession) -> None:
         or len(procedure) < 5
         or any(not isinstance(step, str) or not step.strip() for step in procedure)
     ):
-        raise ValueError("EMVR report requires a complete experiment procedure")
+        missing_sections.append("完整实验流程")
+
+    visualization = payload(Stage.EXPECTED_DATA_VISUALIZATION)
+    stored_visualization = session.stage_outputs.get(
+        Stage.EXPECTED_DATA_VISUALIZATION.value, {}
+    )
+    visual_plan = (
+        stored_visualization.get("visualization")
+        if isinstance(stored_visualization, dict)
+        else None
+    )
+    if not (
+        _plain(visualization.get("student_visualization_requirements"))
+        or _plain(visualization.get("trend_annotation"))
+        or _plain(visual_plan)
+    ):
+        missing_sections.append("可视化方式")
+
+    interpretation = payload(Stage.RESULT_INTERPRETATION)
+    if not _plain(interpretation.get("if_prediction_supported")):
+        missing_sections.append("符合预期时的解释")
+    if not _plain(interpretation.get("if_opposite_trend")):
+        missing_sections.append("相反趋势的解释")
+    if not _plain(interpretation.get("if_no_clear_change")):
+        missing_sections.append("变化不明显时的解释")
+
+    limitations = payload(Stage.DESIGN_VALUE_AND_LIMITATIONS)
+    if not _plain(limitations.get("limitations")):
+        missing_sections.append("设计局限")
+
+    if missing_sections:
+        raise ValueError(
+            "EMVR报告仍缺少：" + "、".join(dict.fromkeys(missing_sections))
+        )

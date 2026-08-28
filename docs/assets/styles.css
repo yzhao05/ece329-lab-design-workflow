@@ -973,6 +973,113 @@ a:focus-visible {
   opacity: 0.62;
 }
 
+.quality-review-card {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.quality-review-block {
+  border-left: 3px solid var(--teal);
+  padding-left: 0.8rem;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  line-height: 1.6;
+}
+
+.quality-review-block:empty {
+  display: none;
+}
+
+.quality-review-block strong {
+  display: block;
+  color: var(--navy);
+  margin-bottom: 0.2rem;
+}
+
+.quality-issue-list {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quality-issue-list li {
+  border-radius: 12px;
+  background: #f4f8f7;
+  padding: 0.75rem 0.85rem;
+  color: var(--ink-soft);
+  font-size: 0.66rem;
+  line-height: 1.55;
+}
+
+.quality-issue-list li.major {
+  background: #fff4df;
+  color: #76501e;
+}
+
+.quality-traceability summary {
+  cursor: pointer;
+  color: var(--teal);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.quality-traceability p,
+.version-results p {
+  margin: 0.55rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.quality-option-item {
+  margin-top: 0.65rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid rgba(13, 126, 120, 0.16);
+  border-radius: 12px;
+  background: rgba(237, 249, 247, 0.55);
+}
+
+.quality-option-item p {
+  margin-top: 0.35rem;
+}
+
+.version-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.version-toolbar button,
+.version-results button {
+  border: 1px solid #b8cfcc;
+  border-radius: 999px;
+  background: #f6fbfa;
+  color: var(--teal);
+  cursor: pointer;
+  padding: 0.5rem 0.85rem;
+  font: inherit;
+  font-size: 0.62rem;
+}
+
+.version-results {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.version-result-item {
+  border-top: 1px solid #d8e3e1;
+  padding-top: 0.55rem;
+}
+
+.version-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
 .toast {
   position: fixed;
   z-index: 50;

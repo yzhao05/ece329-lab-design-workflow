@@ -86,8 +86,20 @@ class DesignSession:
                 "legacy_migrated",
                 "explicitly_cleared_fields",
                 "scene_history_migrated",
+                "semantic_signatures",
+                "topic_lock",
+                "field_provenance",
             ):
                 public_design_state.pop(internal_key, None)
+        public_stage_state = public_design_context.get("stage_design_state")
+        if isinstance(public_stage_state, dict):
+            for internal_key in (
+                "applied_update_ids",
+                "semantic_signatures",
+                "last_updated_stage",
+                "field_provenance",
+            ):
+                public_stage_state.pop(internal_key, None)
         data = {
             "design_id": self.design_id,
             "interaction_state": self.interaction_state.value,
@@ -111,6 +123,8 @@ class TurnRequest:
     context_patch: dict[str, Any] = field(default_factory=dict)
     interaction_state: InteractionState | None = None
     selected_option_id: str | None = None
+    turn_id: str | None = None
+    version_request: dict[str, Any] | None = None
 
 
 class WorkflowError(Exception):

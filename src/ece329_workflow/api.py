@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+from copy import deepcopy
 from http import HTTPStatus
+from threading import RLock
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
@@ -38,6 +41,9 @@ class WorkflowAPI:
             self.settings.rate_limit_requests,
             self.settings.rate_limit_window_seconds,
         )
+        self._create_idempotency: dict[str, dict[str, Any]] = {}
+        self._create_idempotency_lock = RLock()
+        self._create_request_locks: dict[str, RLock] = {}
 
     def __call__(
         self,
@@ -130,8 +136,46 @@ class WorkflowAPI:
                 body = self._read_json(environ)
                 idea = self._required_string(body, "idea", self.settings.max_text_chars)
                 interaction_state = self._optional_string(body, "interaction_state")
-                result = self.engine.create_design(idea, interaction_state)
+                idempotency_key = self._idempotency_key(environ)
+                fingerprint = self._payload_fingerprint(
+                    {"idea": idea, "interaction_state": interaction_state}
+                )
+                if not idempotency_key:
+                    result = self.engine.create_design(idea, interaction_state)
+                else:
+                    with self._create_idempotency_lock:
+                        request_lock = self._create_request_locks.setdefault(
+                            idempotency_key, RLock()
+                        )
+                    with request_lock:
+                        with self._create_idempotency_lock:
+                            cached = self._create_idempotency.get(idempotency_key)
+                        if cached is not None:
+                            if cached.get("fingerprint") != fingerprint:
+                                raise WorkflowError(
+                                    "The same Idempotency-Key cannot be reused for a different design."
+                                )
+                            result = deepcopy(cached["response"])
+                        else:
+                            result = self.engine.create_design(idea, interaction_state)
+                            with self._create_idempotency_lock:
+                                self._create_idempotency[idempotency_key] = {
+                                    "fingerprint": fingerprint,
+                                    "response": deepcopy(result),
+                                }
+                                while len(self._create_idempotency) > 100:
+                                    oldest = next(iter(self._create_idempotency))
+                                    self._create_idempotency.pop(oldest, None)
+                                    self._create_request_locks.pop(oldest, None)
                 return self._respond(start_response, HTTPStatus.CREATED, result)
+
+            resume_match = re.fullmatch(r"/v1/designs/([^/]+)/resume", path)
+            if method == "POST" and resume_match:
+                body = self._read_json(environ)
+                resume_token = self._required_string(body, "resume_token", 256)
+                result = self.engine.resume_design(resume_match.group(1), resume_token)
+                self._refresh_cached_create_response(result)
+                return self._respond(start_response, HTTPStatus.OK, result)
 
             report_match = re.fullmatch(r"/v1/designs/([^/]+)/report\.pdf", path)
             if method == "GET" and report_match:
@@ -145,6 +189,24 @@ class WorkflowAPI:
                     body,
                     [
                         ("Content-Type", "application/pdf"),
+                        ("Content-Disposition", f'attachment; filename="{safe_name}"'),
+                    ],
+                )
+
+            guided_export_match = re.fullmatch(
+                r"/v1/designs/([^/]+)/guided-summary\.txt", path
+            )
+            if method == "GET" and guided_export_match:
+                design_id = guided_export_match.group(1)
+                self._require_design_token(environ, design_id)
+                body = self.engine.render_guided_summary_text(design_id)
+                safe_name = f"ece329-guided-summary-{design_id}.txt"
+                return self._respond_bytes(
+                    start_response,
+                    HTTPStatus.OK,
+                    body,
+                    [
+                        ("Content-Type", "text/plain; charset=utf-8"),
                         ("Content-Disposition", f'attachment; filename="{safe_name}"'),
                     ],
                 )
@@ -166,6 +228,12 @@ class WorkflowAPI:
                 self._require_design_token(environ, turn_match.group(1))
                 body = self._read_json(environ)
                 self._required_string(body, "message", self.settings.max_text_chars)
+                header_turn_id = self._idempotency_key(environ)
+                body_turn_id = body.get("turn_id")
+                if header_turn_id and body_turn_id and header_turn_id != body_turn_id:
+                    raise ValueError("turn_id and Idempotency-Key must match")
+                if header_turn_id and not body_turn_id:
+                    body["turn_id"] = header_turn_id
                 result = self.engine.process_turn(turn_match.group(1), body)
                 return self._respond(start_response, HTTPStatus.OK, result)
 
@@ -226,6 +294,56 @@ class WorkflowAPI:
                 return forwarded.split(",", 1)[0].strip() or "unknown"
         return str(environ.get("REMOTE_ADDR", "unknown")) or "unknown"
 
+    @staticmethod
+    def _idempotency_key(environ: dict[str, Any]) -> str | None:
+        value = str(environ.get("HTTP_IDEMPOTENCY_KEY", "")).strip()
+        if not value:
+            return None
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", value) is None:
+            raise ValueError("Idempotency-Key must be 8-128 URL-safe characters")
+        return value
+
+    @staticmethod
+    def _payload_fingerprint(payload: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _refresh_cached_create_response(self, resumed: dict[str, Any]) -> None:
+        """Refresh delayed create retries after design credentials rotate."""
+
+        design_id = str(resumed.get("design_id") or "")
+        if not design_id:
+            return
+        with self._create_idempotency_lock:
+            for cached in self._create_idempotency.values():
+                response = cached.get("response") if isinstance(cached, dict) else None
+                if not isinstance(response, dict) or response.get("design_id") != design_id:
+                    continue
+                refreshed = deepcopy(response)
+                for field in (
+                    "design_access_token",
+                    "design_resume_token",
+                    "revision",
+                    "current_stage",
+                    "interaction_state",
+                    "quality_review",
+                    "task_report",
+                    "report_ready",
+                    "report_url",
+                    "guided_export_ready",
+                    "guided_export_url",
+                ):
+                    if field in resumed:
+                        refreshed[field] = deepcopy(resumed[field])
+                if "status" in resumed:
+                    refreshed["workflow_status"] = deepcopy(resumed["status"])
+                cached["response"] = refreshed
+
     def _require_admission_code(self, environ: dict[str, Any]) -> None:
         candidate = str(environ.get("HTTP_X_ECE329_ACCESS_CODE", ""))
         if not self.settings.accepts_access_code(candidate):
@@ -279,7 +397,7 @@ class WorkflowAPI:
                 cors_headers.extend(
                     [
                         ("Access-Control-Allow-Origin", allowed_origin),
-                        ("Access-Control-Allow-Headers", "Content-Type, Authorization, X-ECE329-Access-Code, X-ECE329-Debug-Token"),
+                        ("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-ECE329-Access-Code, X-ECE329-Debug-Token"),
                         ("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS"),
                         ("Vary", "Origin"),
                     ]
