@@ -1505,6 +1505,89 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIsNone(output.student_task)
         self.assertIn("同一问题不再重复", output.assistant_message)
 
+    def test_long_answer_that_quotes_previous_question_keeps_useful_response(self) -> None:
+        question = "你想研究什么现象，以及它为什么值得观察？"
+        assistant = (
+            "你刚才回答了‘你想研究什么现象，以及它为什么值得观察’。"
+            "我已经据此整理出导体与介质的研究对象、课程关系和观察重点，"
+            "下面继续展示实验大纲雏形。"
+        )
+        output = StepOutput(
+            assistant_message=assistant,
+            stage_payload={"experiment_outline_seed": {"core_phenomenon": "材料边界"}},
+            student_task="接下来请写出一个可回答的研究问题。",
+        )
+
+        _remove_repeated_guided_question(
+            output,
+            {
+                "type": "ANSWER_STAGE_QUESTION",
+                "subject": Stage.IDEA_BRAINSTORMING.value,
+                "question": question,
+            },
+            "比较导体与介质周围的场线分布",
+        )
+
+        self.assertEqual(output.assistant_message, assistant)
+        self.assertNotIn("repeated_question_avoided", output.stage_payload)
+
+    def test_repeated_substantive_candidate_closes_facet_after_parser_unclear(self) -> None:
+        class AlwaysUnclearGenerator(RuleBasedStageGenerator):
+            def resolve_intent(self, session, user_message, pending_action, carried_context):
+                return resolved_intent(
+                    UserIntent.UNCLEAR,
+                    target=str(pending_action.get("subject") or "") if pending_action else None,
+                    confidence=0.96,
+                    source="SEMANTIC_TEST",
+                )
+
+        engine = WorkflowEngine(generator=AlwaysUnclearGenerator())
+        session = idea_facet_session("design_repeated_candidate_recovery")
+        engine.store.save(session)
+        answer = "比较导体和介质在同样外加电场下，场线的弯曲形态和分布有什么不同。"
+
+        first = engine.process_turn(session.design_id, {"message": answer})
+        self.assertTrue(first["stage_payload"]["clarification_required"])
+        self.assertIn("已经保留", first["assistant_message"])
+
+        second = engine.process_turn(
+            session.design_id,
+            {"message": f"我想比较的是：{answer}"},
+        )
+
+        facet = second["stage_payload"]["idea_development_status"][
+            "facets_by_id"
+        ]["research_question"]
+        self.assertEqual(facet["status"], "CLEAR")
+        self.assertEqual(facet["evidence"], answer)
+        self.assertNotIn("请把当前想法压缩", second["assistant_message"])
+
+    def test_long_initial_course_idea_becomes_direction_detail_without_scene_replay(self) -> None:
+        class CourseAnswerGenerator(RuleBasedStageGenerator):
+            def resolve_intent(self, session, user_message, pending_action, carried_context):
+                return resolved_intent(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    target=Stage.IDEA_BRAINSTORMING.value,
+                    resolved_value=user_message,
+                    confidence=0.97,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={"course_scope_status": "COURSE_CONTENT"},
+                )
+
+        engine = WorkflowEngine(generator=CourseAnswerGenerator())
+        idea = (
+            "我想探究静电场中各种物体周围的电场线分布，以及它们放在一起时"
+            "怎样改变彼此附近的场线形状和空间分布。"
+        )
+
+        result = engine.create_design(idea)
+
+        self.assertEqual(result["stage_payload"]["brainstorm_phase"], "DEPTH_EXPANSION")
+        self.assertEqual(result["stage_payload"]["exploration_scenes"], [])
+        self.assertIn("experiment_outline_seed", result["stage_payload"])
+        stored = engine.store.get(result["design_id"])
+        self.assertEqual(stored.design_context["idea"]["core_phenomenon"], idea)
+
     def test_later_stage_partial_answers_accumulate_without_overwriting(self) -> None:
         class IncrementalStageGenerator(ScriptedSemanticGenerator):
             def __init__(self) -> None:

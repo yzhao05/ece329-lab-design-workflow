@@ -2112,33 +2112,35 @@ class OpenAIStageGenerator:
             and pending_type in OPEN_QUESTION_PENDING_TYPES
             and not explicitly_unanswered
         ):
-            # After two semantic passes, the conversational default for an
-            # open question is to bind the student's turn to that exact
-            # pending question. Safety and explicit reference/new-topic
-            # intents have already been handled before this point. This avoids
-            # asking a student to repeat a substantive answer and does not use
-            # phrase or keyword matching.
+            # The model has twice seen the complete pending-question context
+            # and has not marked the question unanswered, a reference request,
+            # a course question, or a multi-action turn.  Recover the single
+            # answer as the same field-level action required from a successful
+            # parse.  This fixes the old bug where an outer ANSWER intent was
+            # created but then correctly discarded because its authoritative
+            # action array was empty.
+            answer_target = str(pending_action.get("subject") or "")
+            answer_act = {
+                "type": "ANSWER_PENDING_QUESTION",
+                "target": answer_target,
+                "operation": "REPLACE",
+                "content": user_message,
+                "confidence": 0.72,
+            }
             raw["intent"] = "ANSWER_CURRENT_QUESTION"
-            raw["target"] = str(pending_action.get("subject") or "")
+            raw["target"] = answer_target
             raw["resolved_value_json"] = json.dumps(
                 user_message,
                 ensure_ascii=False,
             )
+            raw["dialogue_acts"] = [answer_act]
+            raw["dialogue_acts_json"] = json.dumps(
+                [answer_act],
+                ensure_ascii=False,
+            )
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
             resolved_value = user_message
-            required_facet = required_pending_facet_id(pending_action)
-            if required_facet is not None:
-                semantic_updates = {
-                    **semantic_updates,
-                    "facet_updates": [
-                        {"facet_id": required_facet, "status": "CLEAR"}
-                    ],
-                }
-            else:
-                semantic_updates = {
-                    **semantic_updates,
-                    "pending_answer_status": "CLEAR",
-                }
+            semantic_updates = {}
         elif confirmed_candidate_modification:
             # The first pass already understood the short turn as acceptance.
             # If reparsing the saved candidate still cannot produce field-level

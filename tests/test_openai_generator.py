@@ -1027,10 +1027,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                 self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
                 self.assertEqual(result["resolved_value"], answer)
                 if label == "guided":
-                    self.assertEqual(
-                        result["semantic_updates"]["facet_updates"],
-                        [{"facet_id": "research_question", "status": "CLEAR"}],
-                    )
+                    facet_update = result["semantic_updates"]["facet_updates"][0]
+                    self.assertEqual(facet_update["facet_id"], "research_question")
+                    self.assertEqual(facet_update["status"], "CLEAR")
+                    self.assertEqual(facet_update["operation"], "REPLACE")
+                    self.assertEqual(facet_update["value"], answer)
                 else:
                     self.assertEqual(
                         result["semantic_updates"]["pending_answer_status"],

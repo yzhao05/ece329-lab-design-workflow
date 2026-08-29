@@ -292,7 +292,12 @@ def build_stage_one_turn_context(
     ).strip()
     direction_detail = (
         semantic_direction_detail
-        if scope_confirmed or resolved is not None or resolved_scene_relations
+        if (
+            scope_confirmed
+            or semantic_scope == COURSE_CONTENT
+            or resolved is not None
+            or resolved_scene_relations
+        )
         else ""
     )
     direction_locked_before_turn = bool(

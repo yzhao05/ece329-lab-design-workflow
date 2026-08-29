@@ -23,6 +23,7 @@ from .dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     record_pending_clarification,
+    recover_repeated_pending_answer,
     required_pending_facet_id,
     resolved_intent,
     save_pending_action,
@@ -558,9 +559,27 @@ def _remove_repeated_guided_question(
     next_task = _normalized_question(str(output.student_task or ""))
     assistant = _normalized_question(str(output.assistant_message or ""))
     task_repeated = _question_similarity(previous, next_task) >= 0.84
-    # Assistant bodies can be long reports.  A containment check catches a
-    # replayed visible question without an expensive whole-report comparison.
-    assistant_repeated = bool(previous and previous in assistant)
+    # A long, useful response can legitimately quote the previous question
+    # before answering it.  Only treat the whole assistant response as a
+    # replay when the response unit itself is semantically near-identical;
+    # substring containment used to erase complete scene sets and outlines.
+    assistant_repeated = bool(
+        assistant
+        and (
+            assistant == previous
+            or (
+                max(len(previous), len(assistant))
+                <= min(len(previous), len(assistant)) * 2.2
+                and SequenceMatcher(
+                    None,
+                    previous[:1200],
+                    assistant[:1200],
+                    autojunk=False,
+                ).ratio()
+                >= 0.84
+            )
+        )
+    )
     if not task_repeated and not assistant_repeated:
         return
     if interaction_state is InteractionState.EMVR_DIRECT:
@@ -631,13 +650,6 @@ def _prevent_unrequested_scene_replay(
     # overviews even when the semantic API is temporarily unavailable.
     if isinstance(updates, dict) and updates.get("no_direction") is True:
         return
-    if output.stage_payload.get("input_category") in {
-        "OUT_OF_SCOPE",
-        UNREASONABLE_REQUEST,
-    }:
-        return
-    if turn_intent.get("intent") == UserIntent.NEW_TOPIC.value:
-        return
     idea = session.design_context.get("idea", {})
     idea = idea if isinstance(idea, dict) else {}
     established_topic = bool(
@@ -653,8 +665,9 @@ def _prevent_unrequested_scene_replay(
             )
         )
     )
-    if not established_topic:
-        return
+    unresolved_direction = str(
+        idea.get("unresolved_direction_candidate") or ""
+    ).strip()
     requests_scene_batch = bool(
         turn_intent.get("intent") == UserIntent.REQUEST_MORE_EXAMPLES.value
         and str(turn_intent.get("target") or "")
@@ -665,19 +678,81 @@ def _prevent_unrequested_scene_replay(
     )
     if explicitly_requested:
         return
+    if output.stage_payload.get("input_category") == UNREASONABLE_REQUEST:
+        return
+    if (
+        output.stage_payload.get("input_category") == "OUT_OF_SCOPE"
+        and not established_topic
+        and not unresolved_direction
+    ):
+        return
+    explicit_topic_change = bool(
+        turn_intent.get("intent") == UserIntent.NEW_TOPIC.value
+        and (
+            (
+                isinstance(updates, dict)
+                and updates.get("topic_change_explicit") is True
+            )
+            or turn_intent.get("preserve_current_design") is False
+        )
+    )
+    if explicit_topic_change:
+        return
+    # After an explicit "no direction yet" course overview, one subsequent
+    # course topic may legitimately receive a tailored scene set.  This is an
+    # explicit persisted state, not an inference from an empty topic field.
+    if (
+        idea.get("directionless_browse_active") is True
+        and isinstance(updates, dict)
+        and updates.get("course_scope_status") == COURSE_CONTENT
+        and updates.get("no_direction") is not True
+    ):
+        idea["directionless_browse_active"] = False
+        return
+    if not established_topic and not unresolved_direction:
+        # Compatibility sessions may have shown a generic redirection batch
+        # before the semantic-state fields existed.  With no candidate or
+        # topic to protect, allow one tailored batch when the next message is
+        # course-grounded.  A course-grounded degraded idea is stored above as
+        # unresolved_direction_candidate and therefore never takes this path.
+        return
 
+    candidate = str(
+        updates.get("stage_one_direction_detail") or ""
+        if isinstance(updates, dict)
+        else ""
+    ).strip()
+    if not candidate and isinstance(turn_intent.get("resolved_value"), str):
+        candidate = str(turn_intent.get("resolved_value") or "").strip()
+    if not candidate:
+        candidate = unresolved_direction or student_message.strip()
     retained_pending = record_pending_clarification(
         session,
-        student_message,
+        candidate,
     ) or pending_action
     output.stage_payload["alternative_ideas"] = []
     output.stage_payload["exploration_scenes"] = []
     output.stage_payload["scene_replay_avoided"] = True
     output.stage_payload["clarification_required"] = True
     output.stage_payload["preserve_pending_action"] = True
+    structured_direction_answer = bool(
+        turn_intent.get("intent")
+        in {
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        }
+        and candidate
+        and isinstance(updates, dict)
+        and (
+            updates.get("course_scope_status") == COURSE_CONTENT
+            or updates.get("stage_one_direction_detail")
+            or updates.get("selected_option_ids")
+        )
+    )
     accepted_existing_direction = bool(
         turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
         or "ACCEPT" in controls
+        or structured_direction_answer
     )
     if accepted_existing_direction:
         idea["direction_locked"] = True
@@ -692,6 +767,13 @@ def _prevent_unrequested_scene_replay(
             # Keep the confirmed raw turn only as internal recovery evidence;
             # canonical design fields still require field-level actions.
             idea["confirmed_direction_candidate"] = candidate[:2000]
+            idea["topic_anchor"] = str(
+                idea.get("topic_anchor") or unresolved_direction or candidate
+            ).strip()[:2000]
+            idea["current_focus"] = candidate[:2000]
+            idea["direction_summary"] = candidate[:2000]
+            idea["course_scope_confirmed"] = True
+            idea.pop("unresolved_direction_candidate", None)
         output.stage_payload["direction_locked"] = True
         output.stage_payload["brainstorm_phase"] = INTEREST_DESCRIPTION
         output.stage_payload["clarification_required"] = False
@@ -1477,7 +1559,15 @@ class WorkflowEngine:
                 pending,
                 carried_context,
             )
-            return validate_resolved_intent(semantic, pending), pending
+            validated = validate_resolved_intent(semantic, pending)
+            recovered = recover_repeated_pending_answer(
+                validated,
+                pending,
+                message,
+            )
+            if recovered is not None:
+                validated = validate_resolved_intent(recovered, pending)
+            return validated, pending
         # Offline/rule-only deployments cannot resolve conversational commands.
         # Explicit UI actions still arrive through complete_stage above; typed
         # language remains an answer instead of being guessed from keywords.
@@ -1689,7 +1779,6 @@ class WorkflowEngine:
             and session.current_stage is Stage.IDEA_BRAINSTORMING
             and not has_idea_development(session)
             and isinstance(idea_for_direction_lock, dict)
-            and idea_for_direction_lock.get("course_scope_confirmed") is True
             and turn_intent.get("intent")
             in {
                 UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -1697,6 +1786,22 @@ class WorkflowEngine:
             }
             and isinstance(turn_intent.get("resolved_value"), str)
             and str(turn_intent.get("resolved_value") or "").strip()
+            and (
+                idea_for_direction_lock.get("course_scope_confirmed") is True
+                or (
+                    isinstance(semantic_for_direction_lock, dict)
+                    and semantic_for_direction_lock.get("course_scope_status")
+                    == COURSE_CONTENT
+                )
+                or bool(latest_stage_one_scenes(session.history))
+                or (
+                    isinstance(pending_action, dict)
+                    and isinstance(pending_action.get("proposal"), dict)
+                    and bool(
+                        pending_action["proposal"].get("alternative_ideas")
+                    )
+                )
+            )
         ):
             if not isinstance(semantic_for_direction_lock, dict):
                 semantic_for_direction_lock = {}
@@ -1722,6 +1827,7 @@ class WorkflowEngine:
             and not (
                 isinstance(semantic_for_direction_lock, dict)
                 and semantic_for_direction_lock.get("topic_change_explicit") is True
+                or turn_intent.get("preserve_current_design") is False
             )
         ):
             # Once the student has chosen or described a direction, incidental
@@ -3165,6 +3271,13 @@ class WorkflowEngine:
             # path because it maintains their non-repeating reference cycle.
             idea["course_scope_confirmed"] = True
             idea.setdefault("brainstorm_phase", BREADTH_EXPLORATION)
+            if turn_context.get("stage_one_no_direction") is True:
+                idea["directionless_browse_active"] = True
+            elif message.strip():
+                # Keep a parser-degraded but course-grounded first idea as
+                # internal recovery context.  It is not yet a canonical design
+                # field and therefore cannot pollute the final summary.
+                idea["unresolved_direction_candidate"] = message.strip()[:2000]
             return
         topic_anchor = str(turn_context.get("topic_anchor") or "").strip()
         current_focus = str(turn_context.get("current_focus") or "").strip()
@@ -3194,6 +3307,8 @@ class WorkflowEngine:
                 ),
             }
         )
+        idea.pop("unresolved_direction_candidate", None)
+        idea.pop("directionless_browse_active", None)
         for key in (
             "selected_focus",
             "core_phenomenon",

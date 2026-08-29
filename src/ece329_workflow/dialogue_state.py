@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from copy import deepcopy
+from difflib import SequenceMatcher
 from enum import Enum
 from typing import Any, Protocol
 
@@ -309,6 +310,73 @@ def record_pending_clarification(
                 UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
             )
     return deepcopy(pending)
+
+
+def recover_repeated_pending_answer(
+    resolved: dict[str, Any],
+    pending_action: dict[str, Any] | None,
+    user_message: str,
+) -> dict[str, Any] | None:
+    """Bind a repeated substantive answer to the exact open question.
+
+    A semantic outage may leave the first answer as ``candidate_answer``.
+    When the student then repeats essentially the same answer, that repetition
+    is itself strong contextual confirmation.  Recover it as one structured
+    pending-answer act instead of replaying the question again.  This compares
+    the two complete utterances; it does not maintain a vocabulary of answer
+    phrases and it never guesses a field when no open question exists.
+    """
+
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("intent") != UserIntent.UNCLEAR.value
+        or not isinstance(pending_action, dict)
+        or pending_action.get("type") not in OPEN_QUESTION_PENDING_TYPES
+    ):
+        return None
+    candidate = str(pending_action.get("candidate_answer") or "").strip()
+    current = user_message.strip()
+    if not candidate or not current:
+        return None
+
+    def comparable(value: str) -> str:
+        return re.sub(
+            r"[\s，,。；;：:！!？?、（）()\-—\"'“”‘’]+",
+            "",
+            value,
+        ).casefold()
+
+    left = comparable(candidate)
+    right = comparable(current)
+    if min(len(left), len(right)) < 8:
+        return None
+    similarity = (
+        1.0
+        if left in right or right in left
+        else SequenceMatcher(None, left, right, autojunk=False).ratio()
+    )
+    if similarity < 0.82:
+        return None
+
+    subject = str(pending_action.get("subject") or "").strip()
+    if not subject:
+        return None
+    act = {
+        "type": "ANSWER_PENDING_QUESTION",
+        "target": subject,
+        "operation": "REPLACE",
+        "content": candidate,
+        "confidence": max(0.9, similarity),
+    }
+    return resolved_intent(
+        UserIntent.ANSWER_CURRENT_QUESTION,
+        target=subject,
+        resolved_value=candidate,
+        confidence=max(0.9, similarity),
+        source="SEMANTIC_CONTEXTUAL_REPEATED_ANSWER",
+        dialogue_acts=[act],
+        actions_authoritative=True,
+    )
 
 
 def hydrate_pending_action_from_history(
@@ -2409,7 +2477,16 @@ def clarification_output(
             except (TypeError, ValueError):
                 repeat_count = 1
             question = str(pending_action.get("question") or "").strip()
-            if repeat_count > 2:
+            candidate_saved = bool(
+                str(pending_action.get("candidate_answer") or "").strip()
+            )
+            if candidate_saved:
+                message = (
+                    f"你刚才对“{title}”的回答已经保留，不需要再重复。"
+                    "如果这就是你的最终表述，直接确认沿用即可；"
+                    "如果还要调整，只说需要改变的部分。"
+                )
+            elif repeat_count > 2:
                 message = (
                     f"“{title}”这一点先不要求你重复。"
                     "如果暂时没有想法，可以请我先给一个课程内参考；"
