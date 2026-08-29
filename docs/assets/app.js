@@ -949,7 +949,12 @@ async function handleSubmit(event) {
 
   const uiAction = state.pendingUiAction;
   const isUiAdvance = uiAction === "ADVANCE_STAGE";
-  const retryAction = isUiAdvance ? advanceQuickAction(message) : message;
+  const selectedOptionId = state.pendingOptionId;
+  const retryAction = isUiAdvance
+    ? advanceQuickAction(message)
+    : selectedOptionId
+      ? { label: message, option_id: selectedOptionId }
+      : message;
   if (
     !state.pendingRequest
     || state.pendingRequest.message !== message
@@ -2046,6 +2051,10 @@ function composeAssistantText(response) {
 function deriveQuickActions(response) {
   if (response.quick_actions) return response.quick_actions;
   if (response.workflow_status === "complete" || response.status === "complete") return [];
+  const clarificationChoices = response.stage_payload?.clarification_choices;
+  if (Array.isArray(clarificationChoices) && clarificationChoices.length) {
+    return clarificationChoices;
+  }
   if (state.mode === "EMVR_DIRECT") {
     if (response.stage_payload?.awaiting_user_design_input === true) return [];
     return [advanceQuickAction("保留这部分并继续")];

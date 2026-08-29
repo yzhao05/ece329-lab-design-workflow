@@ -359,23 +359,10 @@ def _parse_intent_response(
         raise ModelOutputError("Intent model output was invalid") from exc
     if not isinstance(raw, dict):
         raise ModelOutputError("Intent model output must be an object")
-    resolved_value = None
-    encoded_value = raw.get("resolved_value_json")
-    if isinstance(encoded_value, str):
-        try:
-            resolved_value = json.loads(encoded_value)
-        except json.JSONDecodeError as exc:
-            raise ModelOutputError("Intent resolved_value_json was invalid") from exc
-    semantic_updates: dict[str, Any] = {}
-    encoded_updates = raw.get("semantic_updates_json")
-    if isinstance(encoded_updates, str):
-        try:
-            parsed_updates = json.loads(encoded_updates)
-        except json.JSONDecodeError as exc:
-            raise ModelOutputError("Intent semantic_updates_json was invalid") from exc
-        if not isinstance(parsed_updates, dict):
-            raise ModelOutputError("Intent semantic_updates_json must encode an object")
-        semantic_updates = parsed_updates
+    # Decode the authoritative action list first. The other encoded fields are
+    # compatibility summaries for older integrations; a malformed summary must
+    # never discard valid field-level actions and send the whole turn into the
+    # generic clarification fallback.
     encoded_acts = raw.get("dialogue_acts_json")
     if isinstance(encoded_acts, str):
         try:
@@ -385,6 +372,41 @@ def _parse_intent_response(
         if not isinstance(parsed_acts, list):
             raise ModelOutputError("Intent dialogue_acts_json must encode an array")
         raw["dialogue_acts"] = parsed_acts
+    executable_actions = bool(
+        isinstance(raw.get("dialogue_acts"), list)
+        and any(
+            isinstance(item, dict)
+            and str(item.get("type") or "").upper() in DIALOGUE_ACT_TYPES
+            and str(item.get("type") or "").upper() != "UNRESOLVED"
+            for item in raw["dialogue_acts"]
+        )
+    )
+
+    resolved_value = None
+    encoded_value = raw.get("resolved_value_json")
+    if isinstance(encoded_value, str):
+        try:
+            resolved_value = json.loads(encoded_value)
+        except json.JSONDecodeError as exc:
+            if not executable_actions:
+                raise ModelOutputError("Intent resolved_value_json was invalid") from exc
+
+    semantic_updates: dict[str, Any] = {}
+    encoded_updates = raw.get("semantic_updates_json")
+    if isinstance(encoded_updates, str):
+        try:
+            parsed_updates = json.loads(encoded_updates)
+        except json.JSONDecodeError as exc:
+            if not executable_actions:
+                raise ModelOutputError("Intent semantic_updates_json was invalid") from exc
+        else:
+            if not isinstance(parsed_updates, dict):
+                if not executable_actions:
+                    raise ModelOutputError(
+                        "Intent semantic_updates_json must encode an object"
+                    )
+            else:
+                semantic_updates = parsed_updates
     return raw, resolved_value, semantic_updates
 
 
@@ -1573,6 +1595,7 @@ class OpenAIStageGenerator:
     _repair_successes: int = field(default=0, init=False, repr=False)
     _intent_api_successes: int = field(default=0, init=False, repr=False)
     _intent_api_failures: int = field(default=0, init=False, repr=False)
+    _intent_repair_successes: int = field(default=0, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -1820,7 +1843,9 @@ class OpenAIStageGenerator:
                 "准备观察的现象，就必须标CLEAR；即使同一句还包含对现象形态的预测，也仍然可以同时"
                 "构成有效研究问题。pending_action若包含candidate_answer，学生用任何语义确认上一句"
                 "就是当前回答、要求沿用上一句或确认该答案时，返回ACCEPT_PREVIOUS_PROPOSAL；不得"
-                "要求学生再复述candidate_answer。"
+                "要求学生再复述candidate_answer。若还包含candidate_turns，必须结合这些连续候选"
+                "判断本轮是在确认、修订还是补充，不能只看孤立短句；学生给出改写后的完整表述时，"
+                "应以本轮的新字段级动作替换旧候选。"
                 "当pending_action.type为ANSWER_STAGE_QUESTION时，若intent为"
                 "ANSWER_CURRENT_QUESTION，semantic_updates_json必须包含pending_answer_status："
                 "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
@@ -1867,10 +1892,42 @@ class OpenAIStageGenerator:
             raise
         try:
             raw, resolved_value, semantic_updates = _parse_intent_response(response)
-        except ModelOutputError:
+        except ModelOutputError as initial_error:
+            if self.repair_attempts < 1:
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise
+            # Retry the semantic task itself before degrading the whole turn to
+            # UNCLEAR. This is stage-independent and keeps multi-action turns
+            # intact when one nested JSON string was malformed or truncated.
+            repair_payload = deepcopy(payload)
+            repair_payload["max_output_tokens"] = max(
+                self.intent_max_output_tokens,
+                2400,
+            )
+            repair_payload["input"][0]["content"].append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "上一份结构化结果无法解析。请重新处理同一轮学生消息。"
+                        "dialogue_acts_json是唯一可执行写入来源：逐项列出本轮所有可执行动作；"
+                        "resolved_value_json与semantic_updates_json只作兼容摘要，内容必须是有效JSON。"
+                        "若一部分无法确定，把那一部分写成UNRESOLVED，但仍保留其他已确定动作。"
+                        "不要回答学生，只返回符合schema的完整结构化结果。"
+                    ),
+                }
+            )
+            try:
+                repair_response = self.transport.create(repair_payload)
+                raw, resolved_value, semantic_updates = _parse_intent_response(
+                    repair_response
+                )
+            except ModelServiceError as repair_error:
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise repair_error from initial_error
             with self._metrics_lock:
-                self._intent_api_failures += 1
-            raise
+                self._intent_repair_successes += 1
         raw_intent = str(raw.get("intent") or "UNCLEAR")
         raw_dialogue_acts = raw.get("dialogue_acts", [])
         has_executable_dialogue_acts = bool(
@@ -2375,6 +2432,7 @@ class OpenAIStageGenerator:
             repair_successes = self._repair_successes
             intent_successes = self._intent_api_successes
             intent_failures = self._intent_api_failures
+            intent_repair_successes = self._intent_repair_successes
         return {
             "provider": "openai",
             "model": self.model,
@@ -2389,6 +2447,7 @@ class OpenAIStageGenerator:
             "repair_successes": repair_successes,
             "intent_api_successes": intent_successes,
             "intent_api_failures": intent_failures,
+            "intent_repair_successes": intent_repair_successes,
         }
 
 
@@ -2476,6 +2535,7 @@ class FallbackStageGenerator:
             "repair_successes": primary_info["repair_successes"],
             "intent_api_successes": primary_info["intent_api_successes"],
             "intent_api_failures": primary_info["intent_api_failures"],
+            "intent_repair_successes": primary_info["intent_repair_successes"],
             "fallback_calls": fallback_calls,
             "last_fallback_reason": last_fallback_reason,
         }

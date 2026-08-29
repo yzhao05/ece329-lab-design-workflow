@@ -1562,6 +1562,111 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(facet["evidence"], answer)
         self.assertNotIn("请把当前想法压缩", second["assistant_message"])
 
+    def test_pending_candidate_has_model_independent_confirmation_action(self) -> None:
+        session = idea_facet_session("design_pending_candidate_ui_action")
+        candidate = "比较同种与异种电荷靠近时，场线如何随距离变化"
+        pending = record_pending_clarification(session, candidate)
+        assert pending is not None
+
+        output = clarification_output(pending)
+        choices = output.stage_payload["clarification_choices"]
+        accept = next(
+            item for item in choices if item["option_id"].startswith("pending_accept::")
+        )
+        resolved = deterministic_intent(
+            accept["label"],
+            pending,
+            selected_option_id=accept["option_id"],
+        )
+        assert resolved is not None
+        validated = validate_resolved_intent(resolved, pending)
+
+        self.assertEqual(
+            validated["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+        )
+        self.assertEqual(validated["resolved_value"], candidate)
+        self.assertEqual(
+            validated["semantic_updates"]["facet_updates"],
+            [{"facet_id": "research_question", "status": "CLEAR"}],
+        )
+
+    def test_pending_confirmation_action_applies_to_every_open_question_type(self) -> None:
+        for pending_type, interaction_state in (
+            ("ANSWER_STAGE_QUESTION", InteractionState.GUIDED_DESIGN),
+            ("ANSWER_EMVR_STAGE_QUESTION", InteractionState.EMVR_DIRECT),
+        ):
+            with self.subTest(pending_type=pending_type):
+                pending = {
+                    "action_id": f"action_{pending_type}",
+                    "type": pending_type,
+                    "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                    "question": "请补充当前设计项。",
+                    "proposal": {"stage": Stage.VARIABLES_AND_CONDITIONS.value},
+                    "candidate_answer": "改变距离，观察场线，并保持源强不变",
+                    "interaction_state": interaction_state.value,
+                    "allowed_intents": [
+                        UserIntent.ANSWER_CURRENT_QUESTION.value,
+                        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                        UserIntent.REQUEST_MORE_EXAMPLES.value,
+                        UserIntent.UNCLEAR.value,
+                    ],
+                }
+                output = clarification_output(pending, interaction_state)
+                accept = next(
+                    item
+                    for item in output.stage_payload["clarification_choices"]
+                    if item["option_id"].startswith("pending_accept::")
+                )
+                resolved = deterministic_intent(
+                    accept["label"],
+                    pending,
+                    selected_option_id=accept["option_id"],
+                )
+                assert resolved is not None
+                validated = validate_resolved_intent(resolved, pending)
+
+                self.assertEqual(
+                    validated["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+                )
+                self.assertEqual(
+                    validated["semantic_updates"]["pending_answer_status"],
+                    "CLEAR",
+                )
+
+    def test_stale_pending_action_id_cannot_become_design_content(self) -> None:
+        session = idea_facet_session("design_stale_pending_ui_action")
+        pending = record_pending_clarification(
+            session,
+            "比较两种电荷配置下的场线变化",
+        )
+        assert pending is not None
+
+        resolved = deterministic_intent(
+            "沿用刚才的表述",
+            pending,
+            selected_option_id="pending_accept::action_from_old_turn",
+        )
+
+        assert resolved is not None
+        self.assertEqual(resolved["intent"], UserIntent.UNCLEAR.value)
+        self.assertIsNone(resolved["resolved_value"])
+
+    def test_unresolved_candidate_turns_preserve_revision_sequence(self) -> None:
+        session = idea_facet_session("design_pending_candidate_history")
+        original = "比较同种与异种电荷靠近时的场线变化"
+        revision = "比较同种与异种电荷靠近过程中，场线如何随距离变化"
+
+        first = record_pending_clarification(session, original)
+        second = record_pending_clarification(session, revision)
+
+        assert first is not None and second is not None
+        self.assertEqual(second["candidate_answer"], original)
+        self.assertEqual(second["candidate_turns"], [original, revision])
+        self.assertNotEqual(
+            clarification_output(first).assistant_message,
+            clarification_output(second).assistant_message,
+        )
+
     def test_long_initial_course_idea_becomes_direction_detail_without_scene_replay(self) -> None:
         class CourseAnswerGenerator(RuleBasedStageGenerator):
             def resolve_intent(self, session, user_message, pending_action, carried_context):

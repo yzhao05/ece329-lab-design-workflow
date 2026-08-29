@@ -159,6 +159,12 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("state.pendingOptionId = optionId", self.app_js)
         self.assertIn("turn.selected_option_id = state.pendingOptionId", self.app_js)
         self.assertIn("option_id: item.option_id || null", self.app_js)
+        self.assertIn("const selectedOptionId = state.pendingOptionId", self.app_js)
+        self.assertIn("{ label: message, option_id: selectedOptionId }", self.app_js)
+        self.assertIn(
+            "response.stage_payload?.clarification_choices",
+            self.app_js,
+        )
 
     def test_stage_one_confirmation_uses_server_preserved_focus(self) -> None:
         self.assertIn("response.stage_payload?.current_focus", self.app_js)

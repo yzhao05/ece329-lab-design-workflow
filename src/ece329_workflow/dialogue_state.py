@@ -296,19 +296,25 @@ def record_pending_clarification(
     recoverable_confirmation = bool(
         pending.get("type") in CONFIRMATION_PENDING_TYPES
     )
-    if (
-        normalized_candidate
-        and (
-            pending.get("type") in OPEN_QUESTION_PENDING_TYPES
-            or recoverable_confirmation
-        )
-        and not str(pending.get("candidate_answer") or "").strip()
+    if normalized_candidate and (
+        pending.get("type") in OPEN_QUESTION_PENDING_TYPES
+        or recoverable_confirmation
     ):
-        pending["candidate_answer"] = normalized_candidate[:2000]
-        if recoverable_confirmation:
-            pending["candidate_resolution"] = (
-                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
-            )
+        candidate_turns = pending.get("candidate_turns", [])
+        candidate_turns = (
+            [str(item).strip()[:2000] for item in candidate_turns if str(item).strip()]
+            if isinstance(candidate_turns, list)
+            else []
+        )
+        if normalized_candidate[:2000] not in candidate_turns:
+            candidate_turns.append(normalized_candidate[:2000])
+        pending["candidate_turns"] = candidate_turns[-4:]
+        if not str(pending.get("candidate_answer") or "").strip():
+            pending["candidate_answer"] = normalized_candidate[:2000]
+            if recoverable_confirmation:
+                pending["candidate_resolution"] = (
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+                )
     return deepcopy(pending)
 
 
@@ -763,6 +769,15 @@ def _normalize_pending_action(
     candidate_answer = raw.get("candidate_answer")
     if isinstance(candidate_answer, str) and candidate_answer.strip():
         normalized["candidate_answer"] = candidate_answer.strip()[:2000]
+    candidate_turns = raw.get("candidate_turns")
+    if isinstance(candidate_turns, list):
+        normalized["candidate_turns"] = list(
+            dict.fromkeys(
+                str(item).strip()[:2000]
+                for item in candidate_turns
+                if isinstance(item, str) and item.strip()
+            )
+        )[-4:]
     candidate_resolution = str(raw.get("candidate_resolution") or "").strip()
     if candidate_resolution in {
         UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -865,6 +880,35 @@ def deterministic_intent(
         )
     if complete_stage:
         return resolved_intent(UserIntent.ADVANCE_STAGE, confidence=1.0)
+    if selected_option_id and isinstance(_pending_action, dict):
+        action_id = str(_pending_action.get("action_id") or "")
+        if action_id and selected_option_id == f"pending_accept::{action_id}" and str(
+            _pending_action.get("candidate_answer") or ""
+        ).strip():
+            return resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                target=str(_pending_action.get("subject") or "") or None,
+                confidence=1.0,
+                source="EXPLICIT_PENDING_UI_ACTION",
+            )
+        if action_id and selected_option_id == f"pending_reference::{action_id}":
+            return resolved_intent(
+                UserIntent.REQUEST_MORE_EXAMPLES,
+                target=str(_pending_action.get("subject") or "") or None,
+                confidence=1.0,
+                source="EXPLICIT_PENDING_UI_ACTION",
+                semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+            )
+        if selected_option_id.startswith(("pending_accept::", "pending_reference::")):
+            # The page can retain an old button while another tab advances the
+            # same design. Never reinterpret a stale internal action id as the
+            # student's answer to the new pending question.
+            return resolved_intent(
+                UserIntent.UNCLEAR,
+                target=str(_pending_action.get("subject") or "") or None,
+                confidence=1.0,
+                source="STALE_PENDING_UI_ACTION",
+            )
     if selected_option_id:
         return resolved_intent(
             UserIntent.ANSWER_CURRENT_QUESTION,
@@ -2481,11 +2525,29 @@ def clarification_output(
                 str(pending_action.get("candidate_answer") or "").strip()
             )
             if candidate_saved:
-                message = (
-                    f"你刚才对“{title}”的回答已经保留，不需要再重复。"
-                    "如果这就是你的最终表述，直接确认沿用即可；"
-                    "如果还要调整，只说需要改变的部分。"
-                )
+                if repeat_count > 2:
+                    message = (
+                        f"“{title}”已经作为待确认草稿保留，我不会再重复原来的问题。"
+                        "你可以直接沿用这份表述，也可以输入修改后的完整版本；"
+                        "需要帮助时，我也可以先给一份课程内参考。"
+                    )
+                else:
+                    message = (
+                        f"你刚才对“{title}”的回答已经保留，不需要再重复。"
+                        "如果这就是你的最终表述，可以直接沿用；"
+                        "如果还要调整，直接写出修改后的版本。"
+                    )
+                action_id = str(pending_action.get("action_id") or "")
+                clarification_choices = [
+                    {
+                        "option_id": f"pending_accept::{action_id}",
+                        "label": "沿用刚才的表述",
+                    },
+                    {
+                        "option_id": f"pending_reference::{action_id}",
+                        "label": "先看一份课程内参考",
+                    },
+                ] if action_id else []
             elif repeat_count > 2:
                 message = (
                     f"“{title}”这一点先不要求你重复。"
@@ -2498,7 +2560,12 @@ def clarification_output(
                 message += " 如果暂时没有想法，我可以先给一个课程内参考。"
             return StepOutput(
                 assistant_message=message,
-                stage_payload={"clarification_required": True},
+                stage_payload={
+                    "clarification_required": True,
+                    "clarification_choices": (
+                        clarification_choices if candidate_saved else []
+                    ),
+                },
                 student_task=None,
             )
         question = str(pending_action.get("question") or "").strip()
@@ -2546,9 +2613,27 @@ def clarification_output(
                         f"{question or '请补充这一部分最重要的设计内容。'}"
                         " 如果暂时没有想法，我可以先给一个可修改的参考。"
                     )
+            action_id = str(pending_action.get("action_id") or "")
+            clarification_choices = (
+                [
+                    {
+                        "option_id": f"pending_accept::{action_id}",
+                        "label": "沿用刚才的表述",
+                    },
+                    {
+                        "option_id": f"pending_reference::{action_id}",
+                        "label": "先看一份参考草稿",
+                    },
+                ]
+                if candidate_saved and action_id
+                else []
+            )
             return StepOutput(
                 assistant_message=message,
-                stage_payload={"clarification_required": True},
+                stage_payload={
+                    "clarification_required": True,
+                    "clarification_choices": clarification_choices,
+                },
                 student_task=None,
             )
         if (

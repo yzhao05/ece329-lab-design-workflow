@@ -285,6 +285,106 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("dialogue_acts_json", schema["required"])
         self.assertIn("同一句可以同时包含", transport.requests[0]["instructions"])
 
+    def test_valid_actions_survive_malformed_compatibility_summaries(self) -> None:
+        research = "比较同种与异种电荷靠近时，场线怎样随距离变化"
+        action = {
+            "type": "ANSWER_PENDING_QUESTION",
+            "target": "research_question",
+            "operation": "REPLACE",
+            "content": research,
+            "confidence": 0.98,
+        }
+        transport = FakeTransport(
+            output={
+                "intent": "ANSWER_CURRENT_QUESTION",
+                "target": "research_question",
+                "resolved_value_json": "{invalid compatibility value",
+                "semantic_updates_json": "{invalid compatibility updates",
+                "dialogue_acts_json": json.dumps([action], ensure_ascii=False),
+                "advance_requested": False,
+                "preserve_current_design": True,
+                "confidence": 0.98,
+            }
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question"},
+            "question": "你想比较什么条件，并观察什么现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            research,
+            pending,
+            {"idea_development": {"active_facet_id": "research_question"}},
+        )
+
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["design_updates"][0]["value"],
+            research,
+        )
+
+    def test_unparseable_intent_gets_one_action_focused_retry(self) -> None:
+        research = "比较距离变化时两个场源之间的场线重排"
+        valid = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "research_question",
+            "resolved_value_json": json.dumps(research, ensure_ascii=False),
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "ANSWER_PENDING_QUESTION",
+                        "target": "research_question",
+                        "operation": "REPLACE",
+                        "content": research,
+                        "confidence": 0.99,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.99,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    **valid,
+                    "dialogue_acts_json": "[{broken",
+                },
+                valid,
+            ]
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question"},
+            "question": "你想比较什么条件，并观察什么现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        generator = OpenAIStageGenerator(transport=transport)
+
+        result = generator.resolve_intent(
+            guided_session(),
+            research,
+            pending,
+            {"idea_development": {"active_facet_id": "research_question"}},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertGreaterEqual(transport.requests[1]["max_output_tokens"], 2400)
+        self.assertIn(
+            "dialogue_acts_json是唯一可执行写入来源",
+            transport.requests[1]["input"][0]["content"][-1]["text"],
+        )
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(generator.runtime_info()["intent_repair_successes"], 1)
+
     def test_intent_resolver_repairs_an_omitted_active_facet_decision(self) -> None:
         base = {
             "intent": "ANSWER_CURRENT_QUESTION",
