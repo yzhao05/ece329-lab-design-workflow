@@ -17,7 +17,7 @@ from ece329_workflow.dialogue_state import (
     save_pending_action,
     validate_resolved_intent,
 )
-from ece329_workflow.engine import WorkflowEngine
+from ece329_workflow.engine import WorkflowEngine, _remove_repeated_guided_question
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.generator import guided_stage_entry_output
 from ece329_workflow.emvr_design import (
@@ -1481,6 +1481,30 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIsNone(result["student_task"])
         self.assertIn("这一问不再重复", result["assistant_message"])
 
+    def test_emvr_repeated_question_is_removed_after_valid_answer(self) -> None:
+        question = "请说明这个VR实验中主要改变和观察的物理量。"
+        output = StepOutput(
+            assistant_message="已整理当前变量草稿。",
+            stage_payload={"independent_variable": "两个场源之间的距离"},
+            student_task="请说明这个VR实验中主要改变、观察的物理量。",
+        )
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+            "question": question,
+        }
+
+        _remove_repeated_guided_question(
+            output,
+            pending,
+            "改变两个场源之间的距离，并观察场线分布",
+            InteractionState.EMVR_DIRECT,
+        )
+
+        self.assertTrue(output.stage_payload["repeated_question_avoided"])
+        self.assertIsNone(output.student_task)
+        self.assertIn("同一问题不再重复", output.assistant_message)
+
     def test_later_stage_partial_answers_accumulate_without_overwriting(self) -> None:
         class IncrementalStageGenerator(ScriptedSemanticGenerator):
             def __init__(self) -> None:
@@ -1634,6 +1658,10 @@ class DialogueStateTests(unittest.TestCase):
         )
         engine.store.save(session)
         generator.intent = UserIntent.REQUEST_MORE_EXAMPLES
+        generator.semantic_updates = {
+            "course_scope_status": "COURSE_CONTENT",
+            "control_actions": ["REQUEST_REFERENCE"],
+        }
 
         result = engine.process_turn(
             first["design_id"],
@@ -1648,6 +1676,44 @@ class DialogueStateTests(unittest.TestCase):
         stored = engine.get_design(first["design_id"])["design_context"]["idea"]
         self.assertEqual(stored["topic_anchor"], "传输线中的反射和驻波")
         self.assertIn("反射", stored["current_focus"])
+
+    def test_scene_selection_cannot_be_replayed_as_another_breadth_batch(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design("我想探索静电场中的物体相互影响")
+        self.assertEqual(len(first["stage_payload"]["exploration_scenes"]), 3)
+        generator = ScriptedSemanticGenerator(
+            UserIntent.REQUEST_MORE_EXAMPLES,
+            target="exploration_scenes",
+            semantic_updates={"course_scope_status": "COURSE_CONTENT"},
+        )
+        engine.generator = generator
+        selection = "我选择两个场源靠近的图景，并想观察它们之间的场线重分布"
+
+        result = engine.process_turn(
+            first["design_id"],
+            {"message": selection},
+        )
+
+        self.assertEqual(result["stage_payload"].get("exploration_scenes"), [])
+        self.assertEqual(result["stage_payload"].get("alternative_ideas"), [])
+        self.assertTrue(result["stage_payload"]["scene_replay_avoided"])
+        self.assertIn("不会再换一组三幅图景", result["assistant_message"])
+        stored = engine.store.get(first["design_id"])
+        pending = current_pending_action(stored)
+        self.assertEqual(pending.get("candidate_answer"), selection)
+
+        generator.intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+        generator.semantic_updates = {}
+        accepted = engine.process_turn(
+            first["design_id"],
+            {"message": "是"},
+        )
+
+        self.assertEqual(accepted["stage_payload"].get("exploration_scenes"), [])
+        self.assertTrue(accepted["stage_payload"]["direction_locked"])
+        self.assertIn("已经按你的确认沿用", accepted["assistant_message"])
+        self.assertNotIn("请确认沿用", accepted["assistant_message"])
+        self.assertIsNone(current_pending_action(engine.store.get(first["design_id"])))
 
     def test_idea_gap_pending_action_names_the_exact_active_facet(self) -> None:
         session = idea_facet_session("design_facet_pending")

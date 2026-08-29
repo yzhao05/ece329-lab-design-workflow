@@ -2464,8 +2464,12 @@ class WorkflowEngineTests(unittest.TestCase):
             ):
                 return resolved_intent(
                     UserIntent.REQUEST_MORE_EXAMPLES,
+                    target="exploration_scenes",
                     confidence=0.98,
                     source="SEMANTIC_TEST",
+                    semantic_updates={
+                        "control_actions": ["REQUEST_REFERENCE"],
+                    },
                 )
 
         engine = WorkflowEngine(generator=MoreScenesGenerator())

@@ -7,6 +7,7 @@ import re
 import secrets
 import uuid
 from copy import deepcopy
+from difflib import SequenceMatcher
 from threading import RLock
 from typing import Any
 
@@ -522,12 +523,32 @@ def _normalized_question(text: str) -> str:
     return re.sub(r"[\s，,。；;：:！!？?、（）()\-—]+", "", text).casefold()
 
 
+def _question_similarity(left: str, right: str) -> float:
+    """Compare visible questions without relying on phrase lists."""
+
+    if not left or not right:
+        return 0.0
+    if left in right or right in left:
+        return 1.0
+    shorter = min(len(left), len(right))
+    longer = max(len(left), len(right))
+    if shorter < 8 or longer > shorter * 3:
+        return 0.0
+    return SequenceMatcher(
+        None,
+        left[:1200],
+        right[:1200],
+        autojunk=False,
+    ).ratio()
+
+
 def _remove_repeated_guided_question(
     output: Any,
     pending_action: dict[str, Any] | None,
     student_message: str,
+    interaction_state: InteractionState = InteractionState.GUIDED_DESIGN,
 ) -> None:
-    """Prevent a completed guided answer from triggering the same question again."""
+    """Prevent a completed answer from triggering the same question again."""
 
     if not isinstance(pending_action, dict):
         return
@@ -536,9 +557,25 @@ def _remove_repeated_guided_question(
         return
     next_task = _normalized_question(str(output.student_task or ""))
     assistant = _normalized_question(str(output.assistant_message or ""))
-    task_repeated = bool(next_task and (next_task == previous or previous in next_task))
-    assistant_repeated = previous in assistant
+    task_repeated = _question_similarity(previous, next_task) >= 0.84
+    # Assistant bodies can be long reports.  A containment check catches a
+    # replayed visible question without an expensive whole-report comparison.
+    assistant_repeated = bool(previous and previous in assistant)
     if not task_repeated and not assistant_repeated:
+        return
+    if interaction_state is InteractionState.EMVR_DIRECT:
+        if assistant_repeated:
+            output.assistant_message = (
+                "已记录本轮对当前设计项的回应，无需再次回答同一问题。"
+                "如需修订，请只指出要调整的设计字段；否则可以继续下一项评审。"
+            )
+        else:
+            output.assistant_message = (
+                f"{output.assistant_message}\n\n"
+                "本轮回应已记录，同一问题不再重复；后续只处理尚未明确的设计项。"
+            )
+        output.student_task = None
+        output.stage_payload["repeated_question_avoided"] = True
         return
     acknowledgement = "收到，这一部分已经按你的意思更新了。"
     if assistant_repeated:
@@ -553,6 +590,126 @@ def _remove_repeated_guided_question(
         )
     output.student_task = None
     output.stage_payload["repeated_question_avoided"] = True
+
+
+def _prevent_unrequested_scene_replay(
+    session: DesignSession,
+    output: StepOutput,
+    pending_action: dict[str, Any] | None,
+    student_message: str,
+    turn_intent: dict[str, Any],
+) -> None:
+    """Require an explicit structured action before showing another A/B/C batch.
+
+    This operates on response units and dialogue acts, not phrases.  A parser
+    fallback or an incomplete compatibility intent therefore cannot turn a
+    scene choice, elaboration, correction, or course question into another
+    breadth-exploration batch.
+    """
+
+    scenes = output.stage_payload.get("exploration_scenes")
+    if (
+        session.interaction_state is not InteractionState.GUIDED_DESIGN
+        or session.current_stage is not Stage.IDEA_BRAINSTORMING
+        or not latest_stage_one_scenes(session.history)
+        or not isinstance(scenes, list)
+        or not scenes
+    ):
+        return
+    updates = turn_intent.get("semantic_updates", {})
+    controls = set(
+        str(item)
+        for item in (
+            updates.get("control_actions", [])
+            if isinstance(updates, dict)
+            and isinstance(updates.get("control_actions"), list)
+            else []
+        )
+    )
+    # An explicitly directionless student is still in breadth exploration.
+    # This state is structured and may legitimately produce successive course
+    # overviews even when the semantic API is temporarily unavailable.
+    if isinstance(updates, dict) and updates.get("no_direction") is True:
+        return
+    if output.stage_payload.get("input_category") in {
+        "OUT_OF_SCOPE",
+        UNREASONABLE_REQUEST,
+    }:
+        return
+    if turn_intent.get("intent") == UserIntent.NEW_TOPIC.value:
+        return
+    idea = session.design_context.get("idea", {})
+    idea = idea if isinstance(idea, dict) else {}
+    established_topic = bool(
+        idea.get("direction_locked") is True
+        or any(
+            str(idea.get(field) or "").strip()
+            for field in (
+                "topic_anchor",
+                "current_focus",
+                "direction_summary",
+                "core_phenomenon",
+                "interest_description",
+            )
+        )
+    )
+    if not established_topic:
+        return
+    requests_scene_batch = bool(
+        turn_intent.get("intent") == UserIntent.REQUEST_MORE_EXAMPLES.value
+        and str(turn_intent.get("target") or "")
+        in {"exploration_scenes", BREADTH_EXPLORATION}
+    )
+    explicitly_requested = bool(
+        requests_scene_batch and "REQUEST_REFERENCE" in controls
+    )
+    if explicitly_requested:
+        return
+
+    retained_pending = record_pending_clarification(
+        session,
+        student_message,
+    ) or pending_action
+    output.stage_payload["alternative_ideas"] = []
+    output.stage_payload["exploration_scenes"] = []
+    output.stage_payload["scene_replay_avoided"] = True
+    output.stage_payload["clarification_required"] = True
+    output.stage_payload["preserve_pending_action"] = True
+    accepted_existing_direction = bool(
+        turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        or "ACCEPT" in controls
+    )
+    if accepted_existing_direction:
+        idea["direction_locked"] = True
+        idea["brainstorm_phase"] = INTEREST_DESCRIPTION
+        candidate_value = (
+            retained_pending.get("candidate_answer")
+            if isinstance(retained_pending, dict)
+            else ""
+        )
+        candidate = str(candidate_value or "").strip()
+        if candidate:
+            # Keep the confirmed raw turn only as internal recovery evidence;
+            # canonical design fields still require field-level actions.
+            idea["confirmed_direction_candidate"] = candidate[:2000]
+        output.stage_payload["direction_locked"] = True
+        output.stage_payload["brainstorm_phase"] = INTEREST_DESCRIPTION
+        output.stage_payload["clarification_required"] = False
+        output.stage_payload["preserve_pending_action"] = False
+        output.assistant_message = (
+            "已经按你的确认沿用刚才说明的研究方向，不会再展示新的三幅图景。"
+            "当前内容会继续保留；你可以直接补充还想观察的现象，或继续完善后面的设计要点。"
+        )
+    else:
+        output.assistant_message = (
+            "我已经保留你刚才对现有方向的选择、补充或纠正，不会再换一组三幅图景。"
+            "为了避免替你改错方向，请确认沿用刚才说明的研究重点；如果还想补充，直接接着描述即可。"
+        )
+    output.student_task = None
+    if isinstance(retained_pending, dict):
+        output.stage_payload["repetition_guard_subject"] = str(
+            retained_pending.get("subject") or ""
+        )
 
 
 def _guided_stage_has_minimum_content(
@@ -2081,10 +2238,6 @@ class WorkflowEngine:
             and not has_structured_turn_updates
             and not student_questions
         )
-        substantive_guided_reply = bool(
-            intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
-            and input_kind != UNREASONABLE_REQUEST
-        )
         idea_facet_reference_turn = bool(
             handled_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -2376,16 +2529,20 @@ class WorkflowEngine:
                 if summary_completed_this_turn:
                     output = _guided_summary_completion_output()
             if (
-                session.interaction_state is InteractionState.GUIDED_DESIGN
-                and handled_stage is not Stage.IDEA_BRAINSTORMING
-                and transitioned_from_stage is None
-                and substantive_guided_reply
-                and intent_name == UserIntent.ANSWER_CURRENT_QUESTION.value
+                transitioned_from_stage is None
+                and pending_action is not None
+                and intent_name
+                in {
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                }
             ):
                 _remove_repeated_guided_question(
                     output,
                     pending_action,
                     generation_message,
+                    session.interaction_state,
                 )
             if (
                 session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -2465,6 +2622,13 @@ class WorkflowEngine:
                 key: deepcopy(recorded_version.get(key))
                 for key in ("version_id", "reason", "source", "changed_fields")
             }
+        _prevent_unrequested_scene_replay(
+            session,
+            output,
+            pending_action,
+            message,
+            turn_intent,
+        )
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(
