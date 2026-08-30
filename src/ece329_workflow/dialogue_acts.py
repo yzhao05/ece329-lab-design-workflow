@@ -54,6 +54,13 @@ STAGE_ACT_FIELD_ORDER = (
 )
 STAGE_ACT_FIELDS = frozenset(STAGE_ACT_FIELD_ORDER)
 
+# Canonical design collections are state-machine owned like text fields, but
+# use dedicated update contracts because replacing one item must not overwrite
+# the whole design.  They are nevertheless valid correction targets: a student
+# can point out an incorrect comparison bundle and provide its replacement in
+# the same sentence.
+COLLECTION_ACT_FIELDS = frozenset({"baseline_comparisons"})
+
 CONTROL_TARGETS = frozenset(
     {
         "ACCEPT",
@@ -424,7 +431,12 @@ def compile_dialogue_acts(
                         str(field)
                         for field in content.get("affected_fields", [])
                         if isinstance(field, str)
-                        and field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS}
+                        and field
+                        in {
+                            *DESIGN_ACT_FIELDS,
+                            *STAGE_ACT_FIELDS,
+                            *COLLECTION_ACT_FIELDS,
+                        }
                     ][:8]
                     if isinstance(content.get("affected_fields"), list)
                     else [],
@@ -472,6 +484,20 @@ def compile_dialogue_acts(
                                 "provenance": "AGENT_SELF_CORRECTION",
                             }
                         )
+                for index, update in enumerate(
+                    content.get("comparison_updates", [])
+                    if isinstance(content.get("comparison_updates"), list)
+                    else []
+                ):
+                    if not isinstance(update, dict):
+                        continue
+                    normalized = deepcopy(update)
+                    normalized.setdefault(
+                        "update_id",
+                        f"{act_id}:correction:comparison:{index}",
+                    )
+                    normalized.setdefault("provenance", "AGENT_SELF_CORRECTION")
+                    comparison_updates.append(normalized)
             else:
                 feedback.append(_text(content))
                 correction_items.append(

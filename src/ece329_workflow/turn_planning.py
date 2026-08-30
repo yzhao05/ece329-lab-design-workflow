@@ -68,7 +68,21 @@ def build_turn_task_plan(
             continue
         act_type = str(act.get("type") or "")
         target = str(act.get("target") or "")
-        if act_type in STATE_ACT_TYPES:
+        correction_content = act.get("content")
+        correction_has_updates = bool(
+            act_type == "CORRECT_ASSISTANT"
+            and isinstance(correction_content, dict)
+            and any(
+                isinstance(correction_content.get(key), list)
+                and correction_content.get(key)
+                for key in (
+                    "design_updates",
+                    "stage_field_updates",
+                    "comparison_updates",
+                )
+            )
+        )
+        if act_type in STATE_ACT_TYPES or correction_has_updates:
             phase = "COMMIT_DESIGN"
         elif act_type in SERVICE_ACT_TYPES:
             phase = "RESPOND_TO_REQUEST"
@@ -161,6 +175,27 @@ def requested_fields_from_plan(plan: Any) -> list[str]:
         elif task.get("type") == "MODIFY_COMPARISON":
             if "baseline_comparisons" not in fields:
                 fields.append("baseline_comparisons")
+        elif task.get("type") == "CORRECT_ASSISTANT":
+            content = task.get("content")
+            if not isinstance(content, dict):
+                continue
+            for update_key in ("design_updates", "stage_field_updates"):
+                for update in (
+                    content.get(update_key, [])
+                    if isinstance(content.get(update_key), list)
+                    else []
+                ):
+                    if not isinstance(update, dict):
+                        continue
+                    field = str(update.get("field") or "")
+                    if field in FIELD_LABELS and field not in fields:
+                        fields.append(field)
+            if (
+                isinstance(content.get("comparison_updates"), list)
+                and content["comparison_updates"]
+                and "baseline_comparisons" not in fields
+            ):
+                fields.append("baseline_comparisons")
     return fields
 
 
@@ -227,8 +262,17 @@ def finalize_turn_task_plan(
         target = str(task.get("target") or "")
         if task.get("type") == "MODIFY_COMPARISON":
             target = "baseline_comparisons"
+        correction_targets: list[str] = []
+        if task.get("type") == "CORRECT_ASSISTANT":
+            correction_targets = requested_fields_from_plan({"tasks": [task]})
         if phase == "COMMIT_DESIGN":
-            if target in changed_fields:
+            if correction_targets and changed_fields.intersection(correction_targets):
+                task["status"] = "APPLIED"
+            elif correction_targets and unchanged_fields.intersection(
+                correction_targets
+            ):
+                task["status"] = "NO_CHANGE"
+            elif target in changed_fields:
                 task["status"] = "APPLIED"
             elif target in unchanged_fields:
                 task["status"] = "NO_CHANGE"

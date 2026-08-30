@@ -2560,11 +2560,27 @@ def apply_semantic_design_updates(
             for field in pending_fields
         )
     )
+    confirmation_updated = bool(
+        isinstance(pending_action, dict)
+        and pending_action.get("type") in CONFIRMATION_PENDING_TYPES
+        and (
+            changed_fields
+            or changed_stage_fields
+            or applied_comparison_updates
+        )
+    )
     pending_resolved = bool(
         isinstance(pending_action, dict)
         and (
             updates.get("pending_answer_status") == "CLEAR"
             or (touched_pending_fields and pending_fields_complete)
+            # A review/modify prompt has been answered once any validated
+            # revision is committed.  Keeping the old review pending after a
+            # cross-field or comparison edit caused the next short reply to
+            # confirm a stale proposal and produced a loop.  Open questions
+            # remain stricter and close only when their own answer fields are
+            # complete.
+            or confirmation_updated
         )
     )
     if pending_resolved:

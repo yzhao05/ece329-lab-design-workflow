@@ -412,6 +412,7 @@ _STUDENT_FIELD_LABELS = {
     "hypothesis": "假设",
     "expected_phenomenon": "预期现象",
     "conceptual_structure": "实验结构",
+    "baseline_comparisons": "基础比较",
     "independent_variable": "主动改变量",
     "observations": "观察内容",
     "controlled_conditions": "控制条件",
@@ -431,7 +432,18 @@ def _multi_act_student_notice(
 ) -> str:
     """Describe committed and unresolved parts without exposing internals."""
 
-    delta_notice = student_change_notice(design_diff, interaction_state)
+    correction_items = semantic_updates.get("correction_items", [])
+    has_correction = bool(
+        isinstance(correction_items, list)
+        and any(isinstance(item, dict) for item in correction_items)
+    )
+    # Self-correction has its own concise notice below. Replaying the ordinary
+    # before/after delta here can expose the very contaminated or mistaken old
+    # text the student asked us to remove, and also acknowledges the same edit
+    # twice.
+    delta_notice = (
+        "" if has_correction else student_change_notice(design_diff, interaction_state)
+    )
     changed = [
         *semantic_updates.get("applied_design_fields", []),
         *semantic_updates.get("applied_stage_fields", []),
@@ -444,7 +456,7 @@ def _multi_act_student_notice(
         )
     )
     notices: list[str] = [delta_notice] if delta_notice else []
-    if labels and not delta_notice:
+    if labels and not delta_notice and not has_correction:
         if interaction_state is InteractionState.EMVR_DIRECT:
             notices.append(f"已同步修订设计中的{'、'.join(labels)}。")
         else:
@@ -454,6 +466,7 @@ def _multi_act_student_notice(
         isinstance(applied_comparisons, list)
         and applied_comparisons
         and not delta_notice
+        and not has_correction
     ):
         notices.append(
             "比较条件的修订也已同步到设计草稿。"

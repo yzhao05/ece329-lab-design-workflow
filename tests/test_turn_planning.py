@@ -16,6 +16,7 @@ from ece329_workflow.turn_planning import (
     build_stage_context_summary,
     build_turn_task_plan,
     compute_design_diff,
+    finalize_turn_task_plan,
     student_change_notice,
     workflow_design_snapshot,
 )
@@ -54,6 +55,42 @@ class TurnPlanningTests(unittest.TestCase):
             ["rewrite_question", "course_reference", "keep_cases"],
         )
         self.assertEqual(len(plan["tasks"]), 3)
+
+    def test_correction_with_nested_updates_is_reported_as_committed_work(self) -> None:
+        plan = build_turn_task_plan(
+            [
+                {
+                    "act_id": "repair_observation",
+                    "type": "CORRECT_ASSISTANT",
+                    "target": "previous_design_draft",
+                    "operation": "MERGE",
+                    "content": {
+                        "error_type": "MISUNDERSTANDING",
+                        "affected_fields": ["observations"],
+                        "stage_field_updates": [
+                            {
+                                "field": "observations",
+                                "operation": "REPLACE",
+                                "value": "中间区域的场量峰值与低谷位置",
+                            }
+                        ],
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(plan["tasks"][0]["execution_phase"], "COMMIT_DESIGN")
+        finalized = finalize_turn_task_plan(
+            plan,
+            {
+                "changed_fields": ["observations"],
+                "unchanged_requested_fields": [],
+            },
+            response_generated=True,
+            transition_requested=False,
+            transition_completed=False,
+        )
+        self.assertEqual(finalized["tasks"][0]["status"], "APPLIED")
 
     def test_semantic_key_prevents_paraphrase_duplication(self) -> None:
         session = DesignSession(

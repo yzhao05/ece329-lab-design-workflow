@@ -3005,6 +3005,177 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(guided_inputs[-1]["content"], corrected)
         self.assertNotIn(feedback, str(guided_inputs[-1]["content"]))
 
+    def test_complex_correction_commits_nested_comparison_replacement(self) -> None:
+        old_cases = ["无损线路", "有损线路"]
+        new_cases = ["直线路径", "圆弧路径", "闭合路径"]
+        message = (
+            "有一处需要调整：基础比较目前写的是“无损线路、有损线路”，"
+            "但这与研究问题（比较不同路径形状下场量分布的差异）不直接对应。"
+            "建议将基础比较改为“直线路径、圆弧路径、闭合路径”，这样更贴近研究方向。"
+        )
+        correction_act = {
+            "type": "CORRECT_ASSISTANT",
+            "target": "previous_design_draft",
+            "operation": "MERGE",
+            "content": {
+                "error_type": "DESIGN_MISMATCH",
+                "explanation": "原基础比较与研究问题不一致",
+                "affected_fields": ["baseline_comparisons"],
+                "comparison_updates": [
+                    {
+                        "comparison_id": "path_cases",
+                        "action": "MODIFY",
+                        "cases": new_cases,
+                        "replace_all": True,
+                        "semantic_key": "probe_path_geometry_cases",
+                    }
+                ],
+            },
+            "confidence": 0.99,
+        }
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator([correction_act])
+        )
+        session = idea_facet_session("design_complex_comparison_correction")
+        set_baseline_comparisons(
+            session,
+            [
+                {
+                    "comparison_id": "path_cases",
+                    "title": "基础比较",
+                    "recommended_cases": old_cases,
+                    "cases": old_cases,
+                    "adoption_status": "ACCEPTED",
+                }
+            ],
+        )
+        old_pending = save_pending_action(
+            session,
+            Stage.IDEA_BRAINSTORMING,
+            StepOutput(
+                assistant_message="请整体看一遍当前想法。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "subject": Stage.IDEA_BRAINSTORMING.value,
+                        "proposal": {"baseline_comparisons": old_cases},
+                        "allowed_intents": [
+                            "ACCEPT_PREVIOUS_PROPOSAL",
+                            "MODIFY_PREVIOUS_PROPOSAL",
+                            "UNCLEAR",
+                        ],
+                    }
+                },
+                student_task="有需要调整的地方可以直接说明。",
+            ),
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": message})
+
+        comparisons = result["stage_payload"]["design_state"][
+            "baseline_comparisons"
+        ]
+        self.assertEqual(comparisons[0]["cases"], new_cases)
+        self.assertNotIn("无损线路", comparisons[0]["cases"])
+        self.assertNotIn("请告诉我具体要改哪一项", result["assistant_message"])
+        self.assertIn("基础比较", result["assistant_message"])
+        stored = engine.store.get(session.design_id)
+        pending = current_pending_action(stored)
+        if pending is not None:
+            self.assertNotEqual(
+                pending.get("action_id"),
+                old_pending.get("action_id"),
+            )
+
+    def test_valid_revision_closes_every_confirmation_type_in_both_modes(self) -> None:
+        for pending_type in ("CONFIRM_OR_MODIFY", "CONFIRM_STAGE_OR_MODIFY"):
+            for mode in (
+                InteractionState.GUIDED_DESIGN,
+                InteractionState.EMVR_DIRECT,
+            ):
+                with self.subTest(pending_type=pending_type, mode=mode.value):
+                    session = DesignSession(
+                        design_id=f"confirm_{pending_type}_{mode.value}",
+                        interaction_state=mode,
+                        current_stage_index=list(Stage).index(
+                            Stage.VARIABLES_AND_CONDITIONS
+                        ),
+                    )
+                    set_baseline_comparisons(
+                        session,
+                        [
+                            {
+                                "comparison_id": "path_cases",
+                                "recommended_cases": ["无损线路", "有损线路"],
+                                "cases": ["无损线路", "有损线路"],
+                                "adoption_status": "ACCEPTED",
+                            }
+                        ],
+                    )
+                    pending = save_pending_action(
+                        session,
+                        Stage.VARIABLES_AND_CONDITIONS,
+                        StepOutput(
+                            assistant_message="请检查当前草稿。",
+                            stage_payload={
+                                "pending_action": {
+                                    "type": pending_type,
+                                    "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                                    "proposal": {
+                                        "baseline_comparisons": [
+                                            "无损线路",
+                                            "有损线路",
+                                        ]
+                                    },
+                                }
+                            },
+                            student_task="需要修改时直接说明。",
+                        ),
+                    )
+                    message = "改为直线路径、圆弧路径和闭合路径。"
+                    raw = resolved_intent(
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                        confidence=0.99,
+                        source="SEMANTIC_MODEL",
+                        dialogue_acts=[
+                            {
+                                "type": "CORRECT_ASSISTANT",
+                                "target": "previous_design_draft",
+                                "operation": "MERGE",
+                                "content": {
+                                    "error_type": "DESIGN_MISMATCH",
+                                    "affected_fields": ["baseline_comparisons"],
+                                    "comparison_updates": [
+                                        {
+                                            "comparison_id": "path_cases",
+                                            "action": "MODIFY",
+                                            "cases": [
+                                                "直线路径",
+                                                "圆弧路径",
+                                                "闭合路径",
+                                            ],
+                                            "replace_all": True,
+                                        }
+                                    ],
+                                },
+                                "confidence": 0.99,
+                            }
+                        ],
+                        actions_authoritative=True,
+                    )
+                    resolved = validate_resolved_intent(raw, pending)
+
+                    apply_resolved_intent(session, resolved, pending, message)
+
+                    self.assertIsNone(current_pending_action(session))
+                    self.assertEqual(
+                        design_state_snapshot(session)["baseline_comparisons"][0][
+                            "cases"
+                        ],
+                        ["直线路径", "圆弧路径", "闭合路径"],
+                    )
+
     def test_emvr_stage_context_excludes_feedback_from_a_mixed_revision(self) -> None:
         feedback = "你刚才把新增交互误解成了新的实验方向"
         interaction = "增加可移动探测器读取中间区域的理论场强"

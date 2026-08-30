@@ -437,6 +437,112 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             research,
         )
 
+    def test_correction_only_result_recovers_concrete_comparison_replacement(self) -> None:
+        new_cases = ["直线路径", "圆弧路径", "闭合路径"]
+        message = (
+            "基础比较“无损线路、有损线路”与研究问题不对应，"
+            "请改为“直线路径、圆弧路径、闭合路径”。"
+        )
+        correction_only = {
+            "intent": "PROVIDE_FEEDBACK",
+            "target": "baseline_comparisons",
+            "resolved_value_json": None,
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "CORRECT_ASSISTANT",
+                        "target": "previous_design_draft",
+                        "operation": "MERGE",
+                        "content": {
+                            "error_type": "DESIGN_MISMATCH",
+                            "explanation": "原基础比较与研究问题不一致",
+                            "affected_fields": ["baseline_comparisons"],
+                        },
+                        "confidence": 0.98,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        compact = {
+            "actions": [
+                {
+                    "type": "CORRECT_ASSISTANT",
+                    "target": "previous_design_draft",
+                    "operation": "MERGE",
+                    "content": json.dumps(
+                        {
+                            "error_type": "DESIGN_MISMATCH",
+                            "explanation": "原基础比较与研究问题不一致",
+                            "affected_fields": ["baseline_comparisons"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "semantic_key": "comparison_mismatch_correction",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_COMPARISON",
+                    "target": "path_cases",
+                    "operation": "REPLACE",
+                    "content": json.dumps(
+                        {
+                            "comparison_id": "path_cases",
+                            "action": "MODIFY",
+                            "cases": new_cases,
+                            "replace_all": True,
+                            "semantic_key": "probe_path_geometry_cases",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "semantic_key": "probe_path_geometry_cases",
+                    "confidence": 0.99,
+                },
+            ]
+        }
+        transport = FakeTransport(outputs=[correction_only, compact])
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "proposal": {"baseline_comparisons": ["无损线路", "有损线路"]},
+            "question": "请整体检查当前实验想法。",
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            message,
+            pending,
+            {
+                "research_question": "比较不同路径形状下场量分布的差异",
+                "baseline_comparisons": [
+                    {
+                        "comparison_id": "path_cases",
+                        "cases": ["无损线路", "有损线路"],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
+        self.assertEqual(
+            result["semantic_updates"]["comparison_updates"][0]["cases"],
+            new_cases,
+        )
+        self.assertIn(
+            "基础比较的增删、替换或改名",
+            transport.requests[1]["instructions"],
+        )
+
     def test_omitted_actions_in_long_variable_answer_use_compact_field_split(self) -> None:
         answer = (
             "把距离和相对方向作为自变量，观察中间区域的场线弯曲与连接，"

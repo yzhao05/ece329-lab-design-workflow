@@ -25,7 +25,11 @@ from .dialogue_state import (
     serialize_intent_input,
     validate_resolved_intent,
 )
-from .dialogue_acts import DIALOGUE_ACT_TYPES
+from .dialogue_acts import (
+    DESIGN_ACT_FIELDS,
+    DIALOGUE_ACT_TYPES,
+    STAGE_ACT_FIELDS,
+)
 from .emvr_design import EMVR_THEORY_RELATIONS
 from .design_state import seen_scene_signatures
 from .generator import (
@@ -410,6 +414,24 @@ def _parse_compact_intent_response(
         if not isinstance(raw_act, dict):
             continue
         act = deepcopy(raw_act)
+        # The recovery schema keeps ``content`` textual so even a small model
+        # can reliably finish the strict envelope.  Dedicated actions still
+        # need structured payloads, so decode their JSON text before the same
+        # normalizer/state machine used by the rich path sees them.  Failure
+        # to decode leaves the act invalid and therefore non-writing; it never
+        # falls back to copying the student's whole sentence into a field.
+        if act.get("type") in {
+            "MODIFY_COMPARISON",
+            "CORRECT_ASSISTANT",
+            "VERSION_CONTROL",
+            "COMPARE_OPTIONS",
+        } and isinstance(act.get("content"), str):
+            try:
+                decoded_content = json.loads(act["content"])
+            except json.JSONDecodeError:
+                decoded_content = None
+            if isinstance(decoded_content, (dict, list)):
+                act["content"] = decoded_content
         if not str(act.get("content") or "").strip() and act.get("type") in {
             "CONTROL",
             "REQUEST_REFERENCE",
@@ -474,6 +496,68 @@ def _parse_compact_intent_response(
         ),
     }
     return raw, resolved_value, {}
+
+
+def _dialogue_act_writes_state(act: Any) -> bool:
+    """Return whether one semantic act contains an executable state change."""
+
+    if not isinstance(act, dict):
+        return False
+    act_type = str(act.get("type") or "").upper()
+    target = str(act.get("target") or "").strip()
+    content = act.get("content")
+    operation = str(act.get("operation") or "MERGE").upper()
+    if act_type == "ANSWER_PENDING_QUESTION":
+        return bool(target and content not in (None, "", [], {}))
+    if act_type == "MODIFY_DESIGN_FIELD":
+        return bool(
+            target in DESIGN_ACT_FIELDS
+            and operation in {"MERGE", "REPLACE", "CLEAR"}
+            and (operation == "CLEAR" or content not in (None, "", [], {}))
+        )
+    if act_type == "MODIFY_STAGE_FIELD":
+        return bool(
+            target in STAGE_ACT_FIELDS
+            and operation in {"MERGE", "REPLACE", "CLEAR"}
+            and (operation == "CLEAR" or content not in (None, "", [], {}))
+        )
+    if act_type == "MODIFY_COMPARISON":
+        return bool(
+            isinstance(content, dict)
+            and str(content.get("action") or "").upper()
+            in {"ACCEPT", "MODIFY", "REJECT", "CREATE"}
+        )
+    if act_type == "NEW_TOPIC":
+        return content not in (None, "", [], {})
+    if act_type != "CORRECT_ASSISTANT":
+        return False
+    content = act.get("content")
+    if not isinstance(content, dict):
+        return False
+    valid_design_update = any(
+        isinstance(update, dict)
+        and str(update.get("field") or "") in DESIGN_ACT_FIELDS
+        and str(update.get("operation") or "REPLACE").upper()
+        in {"MERGE", "REPLACE", "CLEAR"}
+        for update in content.get("design_updates", [])
+        if isinstance(content.get("design_updates"), list)
+    )
+    valid_stage_update = any(
+        isinstance(update, dict)
+        and str(update.get("field") or "") in STAGE_ACT_FIELDS
+        and str(update.get("operation") or "REPLACE").upper()
+        in {"MERGE", "REPLACE", "CLEAR"}
+        for update in content.get("stage_field_updates", [])
+        if isinstance(content.get("stage_field_updates"), list)
+    )
+    valid_comparison_update = any(
+        isinstance(update, dict)
+        and str(update.get("action") or "").upper()
+        in {"ACCEPT", "MODIFY", "REJECT", "CREATE"}
+        for update in content.get("comparison_updates", [])
+        if isinstance(content.get("comparison_updates"), list)
+    )
+    return valid_design_update or valid_stage_update or valid_comparison_update
 
 
 def _parse_intent_response(
@@ -1766,7 +1850,13 @@ class OpenAIStageGenerator:
                 "pending_action.answer_fields和carried_context。回答开放问题时使用"
                 "ANSWER_PENDING_QUESTION，并把target设为实际规范化字段；若answer_fields有多项，"
                 "按学生表达拆成多个动作。修改已保存内容使用MODIFY_DESIGN_FIELD或"
-                "MODIFY_STAGE_FIELD。课程提问、参考请求、总结请求、纠错和控制动作必须分别列出。"
+                "MODIFY_STAGE_FIELD。基础比较的增删、替换或改名必须使用MODIFY_COMPARISON，"
+                "其content写成JSON对象字符串，包含carried_context中的comparison_id、action、"
+                "cases/new_cases/case_refs以及replace_all或merge_with_existing。纠错和具体修改"
+                "同时出现时要分别输出CORRECT_ASSISTANT与对应的修改动作；CORRECT_ASSISTANT的"
+                "content若包含可执行修复，也必须写成JSON对象字符串，并可包含design_updates、"
+                "stage_field_updates和comparison_updates。课程提问、参考请求、总结请求、纠错和"
+                "控制动作必须分别列出。"
                 "不能把整条混合消息塞进一个字段；能确定的动作照常返回，剩余片段才用UNRESOLVED。"
             ),
             "input": [
@@ -1840,8 +1930,11 @@ class OpenAIStageGenerator:
                 "不能保存成实验观点；对遗漏、曲解或重复的反馈必须作为CORRECT_ASSISTANT，除非同句"
                 "还明确给出字段新值，否则不能据此覆盖设计。若能从user_message、上一轮真实回复和"
                 "当前状态确定助手究竟错改或漏改了哪个字段，CORRECT_ASSISTANT.content应返回对象，"
-                "包含error_type、explanation、affected_fields，以及经过核对的design_updates或"
-                "stage_field_updates；只修复有证据的字段，不能用道歉代替修正。无法理解的片段单独放UNRESOLVED，"
+                "包含error_type、explanation、affected_fields，以及经过核对的design_updates、"
+                "stage_field_updates或comparison_updates；基础比较对应的affected_fields值为"
+                "baseline_comparisons。学生在指出错误的同时已经给出目标表述时，必须在同一轮"
+                "返回可执行修改，不能只记录反馈后再次询问学生。只修复有证据的字段，不能用道歉"
+                "代替修正。无法理解的片段单独放UNRESOLVED，"
                 "其他动作仍正常返回。CONTROL的target只能为ACCEPT、REJECT、ADVANCE、RETURN、"
                 "SET_GUIDED_MODE、SET_EMVR_MODE或ACCEPT_QUALITY_REVIEW。VERSION_CONTROL.content"
                 "必须包含action，取值VIEW_RECENT、UNDO_LAST、RESTORE或COMPARE；可包含version_id、"
@@ -2110,6 +2203,44 @@ class OpenAIStageGenerator:
                 raise repair_error from initial_error
             with self._metrics_lock:
                 self._intent_repair_successes += 1
+        # A valid envelope can still be semantically incomplete: the model may
+        # notice that the assistant was wrong but omit the concrete replacement
+        # the student supplied in the same sentence.  That used to enter the
+        # feedback-only branch, which asked for the value again and then looped
+        # on short confirmations.  Re-run such turns through the action-only
+        # contract and adopt it only when it recovers an actual state-write.
+        # This is a semantic second pass over the whole turn, not phrase or
+        # keyword extraction, and therefore applies to every field and stage.
+        initial_acts = raw.get("dialogue_acts", [])
+        correction_without_update = bool(
+            isinstance(initial_acts, list)
+            and any(
+                isinstance(act, dict)
+                and str(act.get("type") or "").upper() == "CORRECT_ASSISTANT"
+                for act in initial_acts
+            )
+            and not any(_dialogue_act_writes_state(act) for act in initial_acts)
+        )
+        if correction_without_update:
+            try:
+                compact_raw, compact_value, compact_updates = (
+                    self._recover_compact_intent(intent_input)
+                )
+            except (ModelOutputError, ModelServiceError):
+                # The initial correction remains safe and read-only.  A failed
+                # recovery must never manufacture a field value or discard the
+                # valid feedback already obtained.
+                pass
+            else:
+                compact_acts = compact_raw.get("dialogue_acts", [])
+                if isinstance(compact_acts, list) and any(
+                    _dialogue_act_writes_state(act) for act in compact_acts
+                ):
+                    raw = compact_raw
+                    resolved_value = compact_value
+                    semantic_updates = compact_updates
+                    with self._metrics_lock:
+                        self._intent_repair_successes += 1
         raw_intent = str(raw.get("intent") or "UNCLEAR")
         raw_dialogue_acts = raw.get("dialogue_acts", [])
         has_executable_dialogue_acts = bool(
