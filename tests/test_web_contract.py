@@ -77,7 +77,7 @@ class WebFrontendContractTests(unittest.TestCase):
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260828-quality-idempotency",
+            "assets/app.js?v=20260830-guided-flow",
             self.index_html,
         )
 

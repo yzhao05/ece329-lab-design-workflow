@@ -35,7 +35,7 @@ from .generator import (
     guided_stage_entry_output,
 )
 from .emvr_design import apply_emvr_field_updates
-from .dialogue_acts import stage_design_state_snapshot
+from .dialogue_acts import apply_stage_field_updates, stage_design_state_snapshot
 from .design_state import (
     apply_design_updates,
     design_state_snapshot,
@@ -869,6 +869,86 @@ def _prepare_guided_stage_completion(
     }
 
 
+def _guided_stage_should_auto_advance(
+    session: DesignSession,
+    stage: Stage,
+    output: StepOutput,
+    pending_action: dict[str, Any] | None,
+    intent_name: str,
+    semantic_updates: dict[str, Any],
+) -> bool:
+    """Advance a complete guided section without asking for an empty confirmation.
+
+    The decision uses the pending action, field-level semantic result and the
+    generator's structured readiness declaration.  It deliberately does not
+    inspect phrases such as "继续" or "没问题".
+    """
+
+    if (
+        session.interaction_state is not InteractionState.GUIDED_DESIGN
+        or stage
+        not in {
+            Stage.VARIABLES_AND_CONDITIONS,
+            Stage.CONCEPTUAL_PROCEDURE,
+            Stage.EXPECTED_DATA_VISUALIZATION,
+            Stage.RESULT_INTERPRETATION,
+            Stage.DESIGN_VALUE_AND_LIMITATIONS,
+        }
+        or not isinstance(pending_action, dict)
+        or pending_action.get("type") != "ANSWER_STAGE_QUESTION"
+        or intent_name
+        not in {
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+        }
+        or semantic_updates.get("pending_answer_status") != "CLEAR"
+    ):
+        return False
+    if any(
+        semantic_updates.get(key)
+        for key in (
+            "student_questions",
+            "feedback_items",
+            "correction_items",
+            "unresolved_content",
+            "quality_review_requests",
+            "option_comparison_requests",
+            "version_requests",
+        )
+    ):
+        return False
+    controls = semantic_updates.get("control_actions", [])
+    if isinstance(controls, list) and controls:
+        return False
+    readiness = output.stage_payload.get("stage_readiness")
+    if not (
+        isinstance(readiness, dict)
+        and readiness.get("ready_for_confirmation") is True
+        and readiness.get("remaining_gaps") == []
+    ):
+        return False
+    structured = stage_design_state_snapshot(session)
+    required_fields = {
+        Stage.VARIABLES_AND_CONDITIONS: (
+            "independent_variable",
+            "observations",
+            "controlled_conditions",
+        ),
+        Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+        Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_plan",),
+        Stage.RESULT_INTERPRETATION: ("result_interpretation",),
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
+    }.get(stage, ())
+    if not required_fields or not all(structured.get(field) for field in required_fields):
+        return False
+    if stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        return isinstance(output.visualization, dict) or isinstance(
+            session.stage_outputs.get(stage.value, {}).get("visualization"),
+            dict,
+        )
+    return True
+
+
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -925,7 +1005,10 @@ def _persist_guided_student_summary(
     if not isinstance(synthesis, dict):
         synthesis = {}
         session.design_context["synthesis"] = synthesis
-    summary = message.strip()
+    stage_state = stage_design_state_snapshot(session)
+    summary = str(stage_state.get("student_summary") or message).strip()
+    if len(summary) < 20:
+        return False
     synthesis.update(
         {
             "student_summary": summary,
@@ -938,16 +1021,40 @@ def _persist_guided_student_summary(
     return True
 
 
-def _guided_summary_completion_output() -> StepOutput:
+def _guided_summary_completion_output(session: DesignSession) -> StepOutput:
+    design = design_state_snapshot(session)
+    stage_state = stage_design_state_snapshot(session)
+    retained_fields = [
+        label
+        for field, label in (
+            ("research_question", "研究问题"),
+            ("learning_objective", "学习目标"),
+            ("independent_variable", "自变量"),
+            ("observations", "观察量"),
+            ("procedure_steps", "实验流程"),
+            ("visualization_plan", "可视化方式"),
+            ("result_interpretation", "结果解释"),
+            ("limitations", "局限与边界"),
+        )
+        if design.get(field) or stage_state.get(field)
+    ]
+    retained_text = "、".join(retained_fields)
     return StepOutput(
         assistant_message=(
             "你已经把研究问题、主要比较、预期现象和课程关系串起来了。"
-            "我按你的原意保存，这次实验设计到这里就完成了。"
+            "这段学生总结已按原意保存。"
+            + (
+                f"前面确认的{retained_text}也仍在当前设计中，没有被这次总结覆盖。"
+                if retained_text
+                else "前面确认的设计内容也仍然保留。"
+            )
+            + "这次实验设计到这里就完成了。"
         ),
         stage_payload={
             "student_summary_received": True,
             "student_summary_confirmed": True,
             "final_proposal_generated": False,
+            "preserved_design_fields": retained_fields,
         },
         student_task=None,
     )
@@ -2460,11 +2567,11 @@ class WorkflowEngine:
             session.turn_context = {}
             completion_error = None
         elif final_summary_confirmation_turn:
-            output = _guided_summary_completion_output()
+            output = _guided_summary_completion_output(session)
             session.turn_context = {}
             completion_error = None
         elif summary_completed_this_turn:
-            output = _guided_summary_completion_output()
+            output = _guided_summary_completion_output(session)
             session.turn_context = {}
             completion_error = None
         elif dialogue_question_turn:
@@ -2494,6 +2601,42 @@ class WorkflowEngine:
                 )
             if not has_structured_turn_updates:
                 output.stage_payload["preserve_pending_action"] = True
+            completion_error = None
+        elif (
+            feedback_only_turn
+            and session.interaction_state is InteractionState.GUIDED_DESIGN
+            and handled_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            and isinstance(pending_action, dict)
+            and len(str(pending_action.get("candidate_answer") or "").strip()) >= 20
+        ):
+            # A correction such as “我上一轮已经总结了” carries no new
+            # design value.  Recover the substantive candidate attached to
+            # the final-summary pending action instead of asking the student
+            # to repeat or explain the correction.
+            recovered_summary = str(
+                pending_action.get("candidate_answer") or ""
+            ).strip()
+            apply_stage_field_updates(
+                session,
+                [
+                    {
+                        "field": "student_summary",
+                        "operation": "REPLACE",
+                        "value": recovered_summary,
+                        "provenance": "STUDENT_CONFIRMED",
+                    }
+                ],
+                stage=handled_stage,
+                provenance="STUDENT_CONFIRMED",
+            )
+            summary_completed_this_turn = _persist_guided_student_summary(
+                session,
+                recovered_summary,
+                {"pending_answer_status": "CLEAR"},
+            )
+            output = _guided_summary_completion_output(session)
+            output.stage_payload["summary_recovered_from_previous_turn"] = True
+            session.turn_context = {}
             completion_error = None
         elif feedback_only_turn:
             correction_items = semantic_updates.get("correction_items", [])
@@ -2633,7 +2776,7 @@ class WorkflowEngine:
                     {"pending_answer_status": "CLEAR"},
                 )
                 if summary_completed_this_turn:
-                    output = _guided_summary_completion_output()
+                    output = _guided_summary_completion_output(session)
             if (
                 transitioned_from_stage is None
                 and pending_action is not None
@@ -2661,7 +2804,76 @@ class WorkflowEngine:
                     UserIntent.REQUEST_MORE_EXAMPLES.value,
                 }
             ):
-                _prepare_guided_stage_completion(session, handled_stage, output)
+                if _guided_stage_should_auto_advance(
+                    session,
+                    handled_stage,
+                    output,
+                    pending_action,
+                    intent_name,
+                    semantic_updates,
+                ):
+                    completed_stage = handled_stage
+                    completed_output = output
+                    _persist_guided_stage_draft(
+                        session,
+                        completed_stage,
+                        completed_output.stage_payload,
+                    )
+                    # Completion validation reads the stored visualization for
+                    # the prediction stage.  Save this completed-stage artifact
+                    # before advancing, then let the normal end-of-turn path
+                    # store the destination stage entry.
+                    session.stage_outputs[completed_stage.value] = {
+                        "revision": session.revision + 1,
+                        **completed_output.to_dict(),
+                    }
+                    try:
+                        self._validate_completion(session, completed_stage)
+                        self._advance(session, completed_stage)
+                    except StageCompletionError as exc:
+                        completion_error = str(exc)
+                        _prepare_guided_stage_completion(
+                            session,
+                            completed_stage,
+                            completed_output,
+                        )
+                    else:
+                        transitioned_from_stage = completed_stage
+                        handled_stage = session.current_stage
+                        definition = STAGES_BY_ID[handled_stage]
+                        next_output = guided_stage_entry_output(session)
+                        next_output.assistant_message = (
+                            f"{completed_output.assistant_message.rstrip()}\n\n"
+                            "这个环节已经能支撑后面的设计，我们直接接着完善下一项。\n\n"
+                            f"{next_output.assistant_message}"
+                        )
+                        next_output.visualization = (
+                            completed_output.visualization
+                            or next_output.visualization
+                        )
+                        next_output.stage_payload["auto_advanced_from_stage"] = (
+                            completed_stage.value
+                        )
+                        output = next_output
+                        guided_stage_entry_turn = True
+                        emvr_stage_entry_turn = False
+                        final_quality_review = (
+                            handled_stage
+                            is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+                        )
+                        quality_review = evaluate_design_quality(
+                            session,
+                            semantic_updates.get("quality_assessment"),
+                            final_review=final_quality_review,
+                        )
+                        turn_context["quality_review"] = deepcopy(quality_review)
+                        completion_error = None
+                else:
+                    _prepare_guided_stage_completion(
+                        session,
+                        handled_stage,
+                        output,
+                    )
         multi_act_notice = _multi_act_student_notice(
             semantic_updates,
             session.interaction_state,
@@ -3008,10 +3220,32 @@ class WorkflowEngine:
         )
         if not summary:
             raise StageCompletionError("尚未找到学生自己完成的总结。")
+        stage_state = stage_design_state_snapshot(session)
+        stage_lines = [
+            f"• {label}：{stage_state[field]}"
+            for field, label in (
+                ("independent_variable", "自变量"),
+                ("observations", "观察量"),
+                ("controlled_conditions", "控制条件"),
+                ("procedure_steps", "实验流程"),
+                ("visualization_plan", "可视化方式"),
+                ("result_interpretation", "结果解释"),
+                ("limitations", "局限与边界"),
+            )
+            if stage_state.get(field)
+        ]
+        confirmed_record = format_design_summary(session)
+        if stage_lines:
+            confirmed_record = (
+                f"{confirmed_record}\n" + "\n".join(stage_lines)
+            )
         body = (
             "ECE329 实验设计学生总结\n"
             f"设计编号：{session.design_id}\n\n"
-            f"{summary}\n"
+            "【学生完成的总结】\n"
+            f"{summary}\n\n"
+            "【已确认并保留的设计记录】\n"
+            f"{confirmed_record}\n"
         )
         return body.encode("utf-8")
 

@@ -43,6 +43,7 @@ _FIELD_LABELS = {
     "limitations": "局限与边界",
     "unity_objects": "Unity对象",
     "interactions": "VR交互",
+    "student_summary": "学生总结",
 }
 
 
@@ -54,6 +55,38 @@ def _text(value: Any) -> str:
     if isinstance(value, dict):
         return "；".join(item for item in (_text(child) for child in value.values()) if item)
     return str(value).strip() if value is not None else ""
+
+
+def _comparison_summary(value: Any) -> str:
+    """Return only student-facing comparison cases, never storage metadata."""
+
+    if not isinstance(value, list):
+        return ""
+    visible: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        cases = item.get("cases")
+        if not isinstance(cases, list) or not cases:
+            cases = item.get("recommended_cases")
+        case_keys = item.get("case_semantic_keys", {})
+        case_keys = case_keys if isinstance(case_keys, dict) else {}
+        if isinstance(cases, list):
+            candidates = cases
+        else:
+            title = _text(item.get("title"))
+            candidates = [title] if title else []
+        for candidate in candidates:
+            label = _text(candidate)
+            if not label:
+                continue
+            identity = _text(case_keys.get(label)) or "".join(label.split()).casefold()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            visible.append(label)
+    return "；".join(visible)
 
 
 def _issue_id(category: str, fields: list[str], finding: str) -> str:
@@ -244,23 +277,48 @@ def _required_fields_for_stage(stage: Stage, *, final_review: bool) -> tuple[str
 
 def _provenance_trace(session: DesignSession) -> list[dict[str, Any]]:
     state = ensure_design_state(session)
+    design_values = design_state_snapshot(session)
+    stage_values = stage_design_state_snapshot(session)
     provenance = state.get("field_provenance", {})
-    if not isinstance(provenance, dict):
-        return []
+    provenance = provenance if isinstance(provenance, dict) else {}
+    stage_state = session.design_context.get("stage_design_state", {})
+    stage_state = stage_state if isinstance(stage_state, dict) else {}
+    stage_provenance = stage_state.get("field_provenance", {})
+    stage_provenance = (
+        stage_provenance if isinstance(stage_provenance, dict) else {}
+    )
+
+    source_labels = {
+        "STUDENT": "学生回答",
+        "STUDENT_TURN": "学生回答",
+        "STUDENT_CONFIRMED": "学生确认",
+        "STUDENT_SEMANTIC": "学生回答",
+        "AGENT_SUGGESTION": "课程助手建议",
+        "AGENT_SELF_CORRECTION": "根据纠错更新",
+        "VERSION_CONTROL": "从设计版本恢复",
+    }
     trace: list[dict[str, Any]] = []
-    for field, records in provenance.items():
-        if field not in _FIELD_LABELS or not isinstance(records, list) or not records:
+    for field in _FIELD_LABELS:
+        value = _text(stage_values.get(field) or design_values.get(field))
+        records = stage_provenance.get(field) or provenance.get(field)
+        if not value or not isinstance(records, list) or not records:
             continue
         latest = records[-1] if isinstance(records[-1], dict) else {}
+        raw_source = str(latest.get("source") or "").upper()
+        source_label = source_labels.get(raw_source, "已确认内容")
         trace.append(
             {
                 "design_field": field,
                 "design_field_label": _FIELD_LABELS[field],
-                "course_item": _FIELD_LABELS[field],
-                "purpose": "记录该设计项最近一次确认或修订的来源。",
-                "source_type": str(latest.get("source") or "UNKNOWN"),
+                "course_item": value[:500],
+                "purpose": f"已写入当前设计；最近更新来源：{source_label}。",
+                "source_type": raw_source or "CONFIRMED",
+                "revision": int(latest.get("revision") or 0),
             }
         )
+    trace.sort(key=lambda item: int(item.get("revision") or 0), reverse=True)
+    for item in trace:
+        item.pop("revision", None)
     return trace
 
 
@@ -305,8 +363,8 @@ def evaluate_design_quality(
     procedure = _text(snapshot.get("procedure_steps"))
     visualization = _text(snapshot.get("visualization_plan"))
     controls = _text(snapshot.get("controlled_conditions"))
-    comparisons = snapshot.get("baseline_comparisons", [])
-    comparison_text = _text(comparisons)
+    comparisons = ensure_design_state(session).get("baseline_comparisons", [])
+    comparison_text = _comparison_summary(comparisons)
 
     if question and (not independent or not observations):
         absent = "自变量" if not independent else "观察量"
@@ -418,6 +476,19 @@ def evaluate_design_quality(
                 else "NEEDS_ATTENTION"
             ),
         }
+    else:
+        # Canonical state is the source of truth for the visible chain.  The
+        # semantic review may explain answerability, but must not echo storage
+        # IDs, adoption flags or stale pre-edit values into the student panel.
+        causal = deepcopy(causal)
+        if independent:
+            causal["cause"] = independent
+        if observations:
+            causal["response"] = observations
+        if mechanism:
+            causal["mechanism"] = mechanism
+        if comparison_text:
+            causal["comparison"] = comparison_text
 
     boundary_cases = semantic.get("boundary_cases", [])
     if not boundary_cases and independent:
@@ -427,20 +498,29 @@ def evaluate_design_quality(
                 "relevance": "用于区分真实趋势、近似失效和显示不明显三种情况。",
             }
         ]
-    traceability = [*_provenance_trace(session), *semantic.get("traceability", [])]
+    local_traceability = _provenance_trace(session)
+    traceability = [*local_traceability, *semantic.get("traceability", [])]
     trace_seen: set[tuple[str, str, str]] = set()
+    traced_fields: set[str] = set()
     unique_traceability: list[dict[str, Any]] = []
     for item in traceability:
         if not isinstance(item, dict):
             continue
+        design_field = str(item.get("design_field") or "")
+        # A locally committed value is stronger evidence than another model
+        # paraphrase of the same field. Show one clear row per field.
+        if design_field and design_field in traced_fields:
+            continue
         identity = (
-            str(item.get("design_field")),
+            design_field,
             str(item.get("course_item")),
             str(item.get("purpose")),
         )
         if identity in trace_seen:
             continue
         trace_seen.add(identity)
+        if design_field:
+            traced_fields.add(design_field)
         unique_traceability.append(item)
     traceability = unique_traceability
     review = {

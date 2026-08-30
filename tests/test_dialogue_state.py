@@ -17,7 +17,11 @@ from ece329_workflow.dialogue_state import (
     save_pending_action,
     validate_resolved_intent,
 )
-from ece329_workflow.engine import WorkflowEngine, _remove_repeated_guided_question
+from ece329_workflow.engine import (
+    WorkflowEngine,
+    _guided_stage_should_auto_advance,
+    _remove_repeated_guided_question,
+)
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.generator import guided_stage_entry_output
 from ece329_workflow.emvr_design import (
@@ -746,12 +750,31 @@ class DialogueStateTests(unittest.TestCase):
         self.assertNotIn("新增基础比较", output.assistant_message)
         self.assertNotIn("模型虚构", output.assistant_message)
 
-    def test_stage_level_confirmation_advances_without_micro_confirmation_loop(self) -> None:
+    def test_complete_stage_answer_advances_without_empty_confirmation_turn(self) -> None:
         class CompletionGenerator(ScriptedSemanticGenerator):
             def __init__(self) -> None:
                 super().__init__(
                     UserIntent.ANSWER_CURRENT_QUESTION,
-                    semantic_updates={"pending_answer_status": "CLEAR"},
+                    semantic_updates={
+                        "pending_answer_status": "CLEAR",
+                        "stage_field_updates": [
+                            {
+                                "field": "independent_variable",
+                                "operation": "REPLACE",
+                                "value": "两个源之间的距离",
+                            },
+                            {
+                                "field": "observations",
+                                "operation": "REPLACE",
+                                "value": "电场线和通量",
+                            },
+                            {
+                                "field": "controlled_conditions",
+                                "operation": "REPLACE",
+                                "value": "电荷量和观察方式",
+                            },
+                        ],
+                    },
                 )
 
             def generate(self, session, user_message):
@@ -802,23 +825,27 @@ class DialogueStateTests(unittest.TestCase):
         }
         engine.store.save(session)
 
-        ready = engine.process_turn(
+        advanced = engine.process_turn(
             session.design_id,
             {"message": "拖拽改变两个源的距离，观察电场线和通量"},
         )
-        self.assertTrue(ready["stage_payload"]["stage_ready_for_confirmation"])
-        self.assertIn("不用再逐项确认", ready["assistant_message"])
-        pending = current_pending_action(engine.store.get(session.design_id))
-        assert pending is not None
-        self.assertEqual(pending["type"], "CONFIRM_STAGE_OR_MODIFY")
-        self.assertTrue(pending["advance_on_accept"])
-
-        advanced = engine.process_turn(session.design_id, {"message": "确认"})
         self.assertEqual(
             advanced["transitioned_from_stage"],
             Stage.VARIABLES_AND_CONDITIONS.value,
         )
-        self.assertEqual(advanced["current_stage"], Stage.CONCEPTUAL_PROCEDURE.value)
+        self.assertEqual(
+            advanced["current_stage"],
+            Stage.CONCEPTUAL_PROCEDURE.value,
+        )
+        self.assertEqual(
+            advanced["stage_payload"]["auto_advanced_from_stage"],
+            Stage.VARIABLES_AND_CONDITIONS.value,
+        )
+        self.assertIn("直接接着完善下一项", advanced["assistant_message"])
+        pending = current_pending_action(engine.store.get(session.design_id))
+        assert pending is not None
+        self.assertEqual(pending["type"], "ANSWER_STAGE_QUESTION")
+        self.assertEqual(pending["subject"], Stage.CONCEPTUAL_PROCEDURE.value)
 
     def test_legacy_micro_confirmation_can_advance_after_upgrade(self) -> None:
         generator = ScriptedSemanticGenerator(UserIntent.ACCEPT_PREVIOUS_PROPOSAL)
@@ -1086,6 +1113,311 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(completed["workflow_status"], "complete")
         self.assertIsNone(completed["completion_error"])
         self.assertIn("到这里就完成了", completed["assistant_message"])
+
+    def test_public_final_stage_answer_act_is_saved_as_student_summary(self) -> None:
+        summary = (
+            "我设计的实验比较两种电荷配置在距离减小时的场线变化，"
+            "并用静电场叠加关系解释中间区域的差异。"
+        )
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value,
+                    "operation": "REPLACE",
+                    "content": summary,
+                    "confidence": 0.99,
+                }
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="design_structured_final_summary",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(
+                Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            ),
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        engine.store.save(session)
+
+        completed = engine.process_turn(session.design_id, {"message": summary})
+
+        self.assertEqual(completed["workflow_status"], "complete")
+        stored = engine.store.get(session.design_id)
+        self.assertEqual(
+            stage_design_state_snapshot(stored)["student_summary"],
+            summary,
+        )
+        self.assertEqual(
+            stored.design_context["synthesis"]["student_summary"],
+            summary,
+        )
+
+    def test_final_stage_correction_recovers_previous_summary_without_reasking(self) -> None:
+        summary = (
+            "我设计的实验比较距离变化时同种与异种电荷的场线分布，"
+            "并通过中间区域的变化检验静电场叠加关系。"
+        )
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "CORRECT_ASSISTANT",
+                    "target": "student_summary",
+                    "operation": "MERGE",
+                    "content": {
+                        "error_type": "IGNORED_PRIOR_ANSWER",
+                        "explanation": "上一轮已经给出了完整总结。",
+                        "affected_fields": ["student_summary"],
+                    },
+                    "confidence": 0.99,
+                }
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="design_recover_final_summary",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(
+                Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            ),
+        )
+        entry = guided_stage_entry_output(session)
+        save_pending_action(session, session.current_stage, entry)
+        session.model_context["dialogue_state"]["pending_action"][
+            "candidate_answer"
+        ] = summary
+        engine.store.save(session)
+
+        completed = engine.process_turn(
+            session.design_id,
+            {"message": "我上一轮已经完成总结了。"},
+        )
+
+        self.assertEqual(completed["workflow_status"], "complete")
+        self.assertTrue(
+            completed["stage_payload"]["summary_recovered_from_previous_turn"]
+        )
+        self.assertNotIn("请告诉我具体要改哪一项", completed["assistant_message"])
+        self.assertEqual(
+            engine.store.get(session.design_id).design_context["synthesis"][
+                "student_summary"
+            ],
+            summary,
+        )
+
+    def test_guided_complete_sections_auto_advance_only_without_open_work(self) -> None:
+        cases = {
+            Stage.VARIABLES_AND_CONDITIONS: (
+                {
+                    "independent_variable": "距离",
+                    "observations": "场线和通量",
+                    "controlled_conditions": "电荷量和观察方式",
+                },
+                None,
+            ),
+            Stage.CONCEPTUAL_PROCEDURE: (
+                {"procedure_steps": ["建立基准", "改变距离", "记录结果"]},
+                None,
+            ),
+            Stage.EXPECTED_DATA_VISUALIZATION: (
+                {"visualization_plan": "同步显示场线和距离读数"},
+                {"data_kind": "theoretical_prediction"},
+            ),
+            Stage.RESULT_INTERPRETATION: (
+                {"result_interpretation": "比较结果是否支持叠加预测"},
+                None,
+            ),
+            Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+                {"limitations": "点电荷近似在过近距离时失效"},
+                None,
+            ),
+        }
+        for stage, (payload, visualization) in cases.items():
+            with self.subTest(stage=stage.value):
+                session = DesignSession(
+                    design_id=f"auto_{stage.value}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=list(Stage).index(stage),
+                )
+                apply_stage_field_updates(
+                    session,
+                    [
+                        {
+                            "field": field,
+                            "operation": "REPLACE",
+                            "value": value,
+                        }
+                        for field, value in payload.items()
+                    ],
+                    stage=stage,
+                )
+                output = StepOutput(
+                    assistant_message="这一部分已经整理清楚。",
+                    stage_payload={
+                        **payload,
+                        "stage_readiness": {
+                            "ready_for_confirmation": True,
+                            "remaining_gaps": [],
+                        },
+                    },
+                    visualization=visualization,
+                )
+                pending = {
+                    "type": "ANSWER_STAGE_QUESTION",
+                    "subject": stage.value,
+                }
+                clear_updates = {"pending_answer_status": "CLEAR"}
+                self.assertTrue(
+                    _guided_stage_should_auto_advance(
+                        session,
+                        stage,
+                        output,
+                        pending,
+                        UserIntent.ANSWER_CURRENT_QUESTION.value,
+                        clear_updates,
+                    )
+                )
+                self.assertFalse(
+                    _guided_stage_should_auto_advance(
+                        session,
+                        stage,
+                        output,
+                        pending,
+                        UserIntent.ANSWER_CURRENT_QUESTION.value,
+                        {
+                            **clear_updates,
+                            "unresolved_content": ["还有一部分未理解"],
+                        },
+                    )
+                )
+
+        incomplete = DesignSession(
+            design_id="auto_incomplete_variables",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+        )
+        apply_stage_field_updates(
+            incomplete,
+            [
+                {
+                    "field": "independent_variable",
+                    "operation": "REPLACE",
+                    "value": "距离",
+                }
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
+        self.assertFalse(
+            _guided_stage_should_auto_advance(
+                incomplete,
+                Stage.VARIABLES_AND_CONDITIONS,
+                StepOutput(
+                    assistant_message="只有自变量已经明确。",
+                    stage_payload={
+                        "stage_readiness": {
+                            "ready_for_confirmation": True,
+                            "remaining_gaps": [],
+                        }
+                    },
+                ),
+                {
+                    "type": "ANSWER_STAGE_QUESTION",
+                    "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                },
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                {"pending_answer_status": "CLEAR"},
+            )
+        )
+
+    def test_every_complete_guided_section_enters_next_meaningful_question(self) -> None:
+        cases = {
+            Stage.VARIABLES_AND_CONDITIONS: {
+                "independent_variable": "距离",
+                "observations": "场线和通量",
+                "controlled_conditions": "电荷量和观察方式",
+            },
+            Stage.CONCEPTUAL_PROCEDURE: {
+                "procedure_steps": "建立基准、改变距离、记录并比较",
+            },
+            Stage.EXPECTED_DATA_VISUALIZATION: {
+                "visualization_plan": "同步显示场线、颜色和距离读数",
+            },
+            Stage.RESULT_INTERPRETATION: {
+                "result_interpretation": "比较结果是否支持原有趋势，并检查偏差来源",
+            },
+            Stage.DESIGN_VALUE_AND_LIMITATIONS: {
+                "limitations": "点电荷近似与显示分辨率限制",
+            },
+        }
+
+        class CompleteSectionGenerator(ScriptedSemanticGenerator):
+            def __init__(self, values: dict[str, str]) -> None:
+                self.values = values
+                super().__init__(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    semantic_updates={
+                        "pending_answer_status": "CLEAR",
+                        "stage_field_updates": [
+                            {
+                                "field": field,
+                                "operation": "REPLACE",
+                                "value": value,
+                            }
+                            for field, value in values.items()
+                        ],
+                    },
+                )
+
+            def generate(self, session, user_message):
+                return StepOutput(
+                    assistant_message="你的说明已经把这一部分补充完整。",
+                    stage_payload={
+                        **self.values,
+                        "stage_readiness": {
+                            "ready_for_confirmation": True,
+                            "remaining_gaps": [],
+                        },
+                    },
+                    student_task="请确认后继续。",
+                    visualization=(
+                        {"data_kind": "theoretical_prediction"}
+                        if session.current_stage
+                        is Stage.EXPECTED_DATA_VISUALIZATION
+                        else None
+                    ),
+                )
+
+        stages = list(Stage)
+        for stage, values in cases.items():
+            with self.subTest(stage=stage.value):
+                engine = WorkflowEngine(generator=CompleteSectionGenerator(values))
+                session = DesignSession(
+                    design_id=f"auto_engine_{stage.value}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=stages.index(stage),
+                )
+                entry = guided_stage_entry_output(session)
+                save_pending_action(session, stage, entry)
+                session.stage_outputs[stage.value] = {
+                    "assistant_message": entry.assistant_message,
+                    "stage_payload": entry.stage_payload,
+                }
+                engine.store.save(session)
+
+                result = engine.process_turn(
+                    session.design_id,
+                    {"message": "这是我对这一部分的完整说明。"},
+                )
+
+                next_stage = stages[stages.index(stage) + 1]
+                self.assertEqual(result["transitioned_from_stage"], stage.value)
+                self.assertEqual(result["current_stage"], next_stage.value)
+                self.assertIn("直接接着完善下一项", result["assistant_message"])
+                pending = current_pending_action(engine.store.get(session.design_id))
+                assert pending is not None
+                self.assertEqual(pending["subject"], next_stage.value)
 
     def test_context_dependent_short_acceptance_uses_semantic_resolution(self) -> None:
         open_question = {
@@ -2299,6 +2631,60 @@ class DialogueStateTests(unittest.TestCase):
         )
         self.assertIn("研究问题", result["assistant_message"])
         self.assertIn("VR实验对象", result["assistant_message"])
+
+    def test_mode_specific_stage_fields_cannot_leak_across_workflows(self) -> None:
+        guided_engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "unity_objects",
+                        "operation": "MERGE",
+                        "content": ["不应进入引导模式的Unity对象"],
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        guided = variable_stage_session("design_guided_reject_emvr_field")
+        guided_engine.store.save(guided)
+        guided_engine.process_turn(
+            guided.design_id,
+            {"message": "增加一个Unity对象，但不要切换模式。"},
+        )
+        self.assertEqual(
+            stage_design_state_snapshot(
+                guided_engine.store.get(guided.design_id)
+            )["unity_objects"],
+            "",
+        )
+
+        emvr_engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "student_summary",
+                        "operation": "REPLACE",
+                        "content": "不应进入EMVR状态的学生总结字段内容",
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        emvr = variable_stage_session("design_emvr_reject_guided_summary")
+        emvr.interaction_state = InteractionState.EMVR_DIRECT
+        emvr_engine.store.save(emvr)
+        emvr_engine.process_turn(
+            emvr.design_id,
+            {"message": "写入学生总结字段。"},
+        )
+        self.assertEqual(
+            stage_design_state_snapshot(
+                emvr_engine.store.get(emvr.design_id)
+            )["student_summary"],
+            "",
+        )
 
     def test_field_update_and_summary_request_both_execute(self) -> None:
         objective = "能够解释距离与电荷极性如何共同改变场线分布"
@@ -3709,6 +4095,7 @@ class DialogueStateTests(unittest.TestCase):
             Stage.EXPECTED_DATA_VISUALIZATION: ["visualization_plan"],
             Stage.RESULT_INTERPRETATION: ["result_interpretation"],
             Stage.DESIGN_VALUE_AND_LIMITATIONS: ["limitations"],
+            Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: ["student_summary"],
         }
         for stage, expected_fields in expectations.items():
             with self.subTest(stage=stage.value):

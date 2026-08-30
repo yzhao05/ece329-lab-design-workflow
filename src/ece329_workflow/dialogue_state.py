@@ -105,6 +105,7 @@ _GUIDED_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_plan",),
     Stage.RESULT_INTERPRETATION: ("result_interpretation",),
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: ("student_summary",),
 }
 
 _EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
@@ -738,6 +739,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             session,
             {"limitations", "invalid_conditions", "parameter_limits"},
         ) if not stage_fields["limitations"] else stage_fields["limitations"],
+        "student_summary": stage_fields["student_summary"],
         "stage_design_state": stage_fields,
         "resolved_decisions": deepcopy(
             session.design_context.get("resolved_decisions", {})
@@ -2494,9 +2496,25 @@ def apply_semantic_design_updates(
                     "value": canonical.get(field, ""),
                 }
             )
+    stage_field_updates = updates.get("stage_field_updates")
+    stage_field_updates = (
+        stage_field_updates if isinstance(stage_field_updates, list) else []
+    )
+    mode_allowed_stage_fields = (
+        STAGE_ACT_FIELDS - {"student_summary"}
+        if session.interaction_state is InteractionState.EMVR_DIRECT
+        else STAGE_ACT_FIELDS - {"unity_objects", "interactions"}
+    )
+    stage_field_updates = [
+        item
+        for item in stage_field_updates
+        if isinstance(item, dict)
+        and str(item.get("field") or "") in mode_allowed_stage_fields
+    ]
+    updates["stage_field_updates"] = stage_field_updates
     changed_stage_fields = apply_stage_field_updates(
         session,
-        updates.get("stage_field_updates"),
+        stage_field_updates,
         stage=session.current_stage,
         provenance="STUDENT_CONFIRMED",
     )

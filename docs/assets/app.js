@@ -760,7 +760,7 @@ function renderQualityReview() {
   const traceability = Array.isArray(review?.traceability) ? review.traceability : [];
   dom.qualityTraceability.hidden = traceability.length === 0;
   dom.qualityTraceabilityContent.replaceChildren();
-  traceability.slice(0, 8).forEach((entry) => {
+  traceability.slice(0, 20).forEach((entry) => {
     const item = document.createElement("p");
     item.textContent = `${entry.design_field_label || "设计内容"}：${entry.course_item || ""}${entry.purpose ? ` — ${entry.purpose}` : ""}`;
     dom.qualityTraceabilityContent.append(item);

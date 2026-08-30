@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 
 from ece329_workflow.design_quality import evaluate_design_quality
-from ece329_workflow.design_state import apply_design_updates, ensure_design_state
+from ece329_workflow.design_state import (
+    apply_design_updates,
+    ensure_design_state,
+    set_baseline_comparisons,
+)
 from ece329_workflow.dialogue_acts import apply_stage_field_updates
 from ece329_workflow.design_versions import (
     ensure_initial_version,
@@ -113,6 +117,61 @@ class DesignQualityTests(unittest.TestCase):
             for field in issue.get("fields", [])
         }
         self.assertNotIn("result_interpretation", completeness_fields)
+
+    def test_quality_panel_uses_visible_comparison_cases_not_internal_metadata(self) -> None:
+        session = DesignSession("quality-comparison", InteractionState.GUIDED_DESIGN)
+        set_baseline_comparisons(
+            session,
+            [
+                {
+                    "comparison_id": "electrostatic_source_polarity_pair",
+                    "title": "电荷极性",
+                    "cases": ["同种电荷", "同号点电荷", "异种电荷"],
+                    "case_semantic_keys": {
+                        "同种电荷": "same_polarity",
+                        "同号点电荷": "same_polarity",
+                        "异种电荷": "opposite_polarity",
+                    },
+                    "adoption_status": "ACCEPTED",
+                    "source_reference": "lecture_02",
+                }
+            ],
+        )
+
+        review = evaluate_design_quality(session)
+
+        comparison = review["causal_chain"]["comparison"]
+        self.assertEqual(comparison, "同种电荷；异种电荷")
+        self.assertNotIn("electrostatic_source_polarity_pair", comparison)
+        self.assertNotIn("ACCEPTED", comparison)
+        self.assertNotIn("lecture_02", comparison)
+
+    def test_quality_trace_shows_committed_value_and_friendly_source(self) -> None:
+        session = DesignSession("quality-trace", InteractionState.GUIDED_DESIGN)
+        question = "距离从远到近时，两种极性配置的中间区域场线怎样变化？"
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "research_question",
+                    "operation": "REPLACE",
+                    "value": question,
+                }
+            ],
+            provenance="STUDENT_CONFIRMED",
+        )
+
+        review = evaluate_design_quality(session)
+        trace = next(
+            item
+            for item in review["traceability"]
+            if item["design_field"] == "research_question"
+        )
+
+        self.assertEqual(trace["course_item"], question)
+        self.assertIn("已写入当前设计", trace["purpose"])
+        self.assertIn("学生确认", trace["purpose"])
+        self.assertNotEqual(trace["course_item"], trace["design_field_label"])
 
     def test_mode_handoff_preserves_design_meaning_and_open_issues(self) -> None:
         session = DesignSession("handoff", InteractionState.GUIDED_DESIGN)
@@ -307,6 +366,47 @@ class ReliabilityTests(unittest.TestCase):
 
         self.assertIn("我设计的实验", text)
         self.assertNotIn("Agent总结", text)
+
+    def test_guided_export_uses_final_committed_design_values(self) -> None:
+        session = DesignSession(
+            "guided-export-committed",
+            InteractionState.GUIDED_DESIGN,
+            status=WorkflowStatus.COMPLETE,
+            design_context={
+                "synthesis": {
+                    "student_summary": "我设计的实验比较距离变化对电场线分布的影响。"
+                }
+            },
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "research_question",
+                    "operation": "REPLACE",
+                    "value": "最终修订后的研究问题",
+                }
+            ],
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "independent_variable",
+                    "operation": "REPLACE",
+                    "value": "最终修订后的距离变量",
+                }
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
+        self.engine.store.save(session)
+
+        text = self.engine.render_guided_summary_text(session.design_id).decode("utf-8")
+
+        self.assertIn("【学生完成的总结】", text)
+        self.assertIn("【已确认并保留的设计记录】", text)
+        self.assertIn("最终修订后的研究问题", text)
+        self.assertIn("最终修订后的距离变量", text)
 
     def test_structured_version_request_bypasses_natural_language_routing(self) -> None:
         created = self.engine.create_design("我想研究静电场")

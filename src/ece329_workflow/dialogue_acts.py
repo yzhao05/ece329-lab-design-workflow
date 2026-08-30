@@ -50,6 +50,7 @@ STAGE_ACT_FIELD_ORDER = (
     "limitations",
     "unity_objects",
     "interactions",
+    "student_summary",
 )
 STAGE_ACT_FIELDS = frozenset(STAGE_ACT_FIELD_ORDER)
 
