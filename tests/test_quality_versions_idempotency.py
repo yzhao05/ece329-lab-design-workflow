@@ -4,6 +4,7 @@ import unittest
 
 from ece329_workflow.design_quality import evaluate_design_quality
 from ece329_workflow.design_state import apply_design_updates, ensure_design_state
+from ece329_workflow.dialogue_acts import apply_stage_field_updates
 from ece329_workflow.design_versions import (
     ensure_initial_version,
     execute_version_request,
@@ -76,6 +77,42 @@ class DesignQualityTests(unittest.TestCase):
         self.assertTrue(
             any(item["source"] == "SEMANTIC_REVIEW" for item in review["issues"])
         )
+
+    def test_final_review_does_not_reask_confirmed_result_interpretation(self) -> None:
+        session = DesignSession(
+            "quality-result-carry-forward",
+            InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT),
+        )
+        result_interpretation = (
+            "若场线变化符合叠加预测，则支持当前解释；若偏离，先检查边界设置和显示精度。"
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "result_interpretation",
+                    "operation": "REPLACE",
+                    "value": result_interpretation,
+                }
+            ],
+            stage=Stage.RESULT_INTERPRETATION,
+            provenance="STUDENT_CONFIRMED",
+        )
+
+        review = evaluate_design_quality(session, final_review=True)
+
+        self.assertEqual(
+            session.design_context["stage_design_state"]["result_interpretation"],
+            result_interpretation,
+        )
+        completeness_fields = {
+            field
+            for issue in review["issues"]
+            if issue.get("category") == "COMPLETENESS"
+            for field in issue.get("fields", [])
+        }
+        self.assertNotIn("result_interpretation", completeness_fields)
 
     def test_mode_handoff_preserves_design_meaning_and_open_issues(self) -> None:
         session = DesignSession("handoff", InteractionState.GUIDED_DESIGN)

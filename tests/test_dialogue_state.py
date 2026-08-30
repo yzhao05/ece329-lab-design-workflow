@@ -37,6 +37,10 @@ from ece329_workflow.idea_development import (
     update_idea_development,
 )
 from ece329_workflow.models import DesignSession, InteractionState, Stage, StepOutput
+from ece329_workflow.dialogue_acts import (
+    apply_stage_field_updates,
+    stage_design_state_snapshot,
+)
 
 
 class ScriptedSemanticGenerator(RuleBasedStageGenerator):
@@ -3693,6 +3697,302 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn("收到这项校正", emvr_result["assistant_message"])
         self.assertIn("物理模型、Unity交互还是展示方式", emvr_result["assistant_message"])
         self.assertNotIn("字段", emvr_result["assistant_message"])
+
+    def test_later_stage_pending_action_names_canonical_answer_fields(self) -> None:
+        expectations = {
+            Stage.VARIABLES_AND_CONDITIONS: [
+                "independent_variable",
+                "observations",
+                "controlled_conditions",
+            ],
+            Stage.CONCEPTUAL_PROCEDURE: ["procedure_steps"],
+            Stage.EXPECTED_DATA_VISUALIZATION: ["visualization_plan"],
+            Stage.RESULT_INTERPRETATION: ["result_interpretation"],
+            Stage.DESIGN_VALUE_AND_LIMITATIONS: ["limitations"],
+        }
+        for stage, expected_fields in expectations.items():
+            with self.subTest(stage=stage.value):
+                session = DesignSession(
+                    design_id=f"design_pending_fields_{stage.value}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=list(Stage).index(stage),
+                )
+                pending = save_pending_action(
+                    session,
+                    stage,
+                    StepOutput(
+                        assistant_message="我们接着完善这一部分。",
+                        stage_payload={},
+                        student_task="请说说你的想法。",
+                    ),
+                )
+                self.assertEqual(pending["answer_fields"], expected_fields)
+
+    def test_emvr_open_questions_name_canonical_answer_fields(self) -> None:
+        expectations = {
+            Stage.IDEA_BRAINSTORMING: [
+                "research_object",
+                "course_relationship",
+                "conceptual_structure",
+            ],
+            Stage.LEARNING_OBJECTIVES: ["learning_objective"],
+            Stage.RESEARCH_QUESTION: ["research_question"],
+            Stage.HYPOTHESIS: ["hypothesis", "expected_phenomenon"],
+            Stage.CONCEPTUAL_OR_VR_SETUP: [
+                "conceptual_structure",
+                "unity_objects",
+                "interactions",
+            ],
+            Stage.VARIABLES_AND_CONDITIONS: [
+                "independent_variable",
+                "observations",
+                "controlled_conditions",
+            ],
+            Stage.CONCEPTUAL_PROCEDURE: ["procedure_steps"],
+            Stage.EXPECTED_DATA_VISUALIZATION: ["visualization_plan"],
+            Stage.DESIGN_VALUE_AND_LIMITATIONS: ["limitations"],
+        }
+        for stage, expected_fields in expectations.items():
+            with self.subTest(stage=stage.value):
+                session = DesignSession(
+                    design_id=f"design_emvr_pending_fields_{stage.value}",
+                    interaction_state=InteractionState.EMVR_DIRECT,
+                    current_stage_index=list(Stage).index(stage),
+                )
+                pending = save_pending_action(
+                    session,
+                    stage,
+                    StepOutput(
+                        assistant_message="请核对本阶段设计。",
+                        stage_payload={
+                            "pending_action": {
+                                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                                "interaction_state": InteractionState.EMVR_DIRECT.value,
+                                "subject": stage.value,
+                                "question": "请补充或修订当前设计。",
+                                "allowed_intents": [
+                                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                                    UserIntent.UNCLEAR.value,
+                                ],
+                            }
+                        },
+                        student_task="请补充或修订当前设计。",
+                    ),
+                )
+                self.assertEqual(pending["answer_fields"], expected_fields)
+
+    def test_each_single_field_guided_stage_commits_answer_and_closes_pending(self) -> None:
+        expectations = {
+            Stage.CONCEPTUAL_PROCEDURE: (
+                "procedure_steps",
+                "建立基准、改变距离、记录场线并比较两种极性情形",
+            ),
+            Stage.EXPECTED_DATA_VISUALIZATION: (
+                "visualization_plan",
+                "同步显示场线形状、场强颜色和距离读数",
+            ),
+            Stage.RESULT_INTERPRETATION: (
+                "result_interpretation",
+                "符合时支持叠加解释，偏离时检查边界设置与显示精度",
+            ),
+            Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+                "limitations",
+                "点电荷和连续场线均属于理想化表示，结论受显示分辨率限制",
+            ),
+        }
+        for stage, (field, answer) in expectations.items():
+            with self.subTest(stage=stage.value):
+                session = DesignSession(
+                    design_id=f"design_single_field_commit_{stage.value}",
+                    interaction_state=InteractionState.GUIDED_DESIGN,
+                    current_stage_index=list(Stage).index(stage),
+                )
+                pending = save_pending_action(
+                    session,
+                    stage,
+                    StepOutput(
+                        assistant_message="我们继续完善这一部分。",
+                        stage_payload={},
+                        student_task="请说说你的判断。",
+                    ),
+                )
+                resolved = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ANSWER_CURRENT_QUESTION,
+                        target=stage.value,
+                        confidence=0.98,
+                        source="SEMANTIC_MODEL",
+                        dialogue_acts=[
+                            {
+                                "type": "ANSWER_PENDING_QUESTION",
+                                "target": stage.value,
+                                "operation": "REPLACE",
+                                "content": answer,
+                                "confidence": 0.98,
+                            }
+                        ],
+                        actions_authoritative=True,
+                    ),
+                    pending,
+                )
+
+                apply_resolved_intent(session, resolved, pending, answer)
+
+                self.assertEqual(stage_design_state_snapshot(session)[field], answer)
+                self.assertIsNone(current_pending_action(session))
+
+    def test_public_stage_answer_binds_to_single_canonical_result_field(self) -> None:
+        session = DesignSession(
+            design_id="design_result_field_binding",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.RESULT_INTERPRETATION),
+        )
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.RESULT_INTERPRETATION.value,
+            "answer_fields": ["result_interpretation"],
+            "question": "结果符合或偏离预期时可能意味着什么？",
+            "allowed_intents": [UserIntent.ANSWER_CURRENT_QUESTION.value],
+        }
+        answer = "符合时支持场叠加解释；偏离时先检查电荷设置和显示精度。"
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                target=Stage.RESULT_INTERPRETATION.value,
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[
+                    {
+                        "type": "ANSWER_PENDING_QUESTION",
+                        "target": Stage.RESULT_INTERPRETATION.value,
+                        "operation": "REPLACE",
+                        "content": answer,
+                        "confidence": 0.98,
+                    }
+                ],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+        apply_resolved_intent(session, resolved, pending, answer)
+
+        self.assertEqual(
+            stage_design_state_snapshot(session)["result_interpretation"],
+            answer,
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
+
+    def test_multi_field_stage_answer_is_committed_field_by_field(self) -> None:
+        session = variable_stage_session("design_variable_field_bundle")
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+            "answer_fields": [
+                "independent_variable",
+                "observations",
+                "controlled_conditions",
+            ],
+            "question": "主动改变、观察和保持不变的量分别是什么？",
+            "allowed_intents": [UserIntent.ANSWER_CURRENT_QUESTION.value],
+        }
+        content = {
+            "independent_variable": "两个电荷之间的距离和相对方向",
+            "observations": "中间区域的场线弯曲与连接",
+            "controlled_conditions": "电荷量、物体尺寸和显示精度",
+        }
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                target=Stage.VARIABLES_AND_CONDITIONS.value,
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[
+                    {
+                        "type": "ANSWER_PENDING_QUESTION",
+                        "target": Stage.VARIABLES_AND_CONDITIONS.value,
+                        "operation": "REPLACE",
+                        "content": content,
+                        "confidence": 0.98,
+                    }
+                ],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+        apply_resolved_intent(session, resolved, pending, str(content))
+
+        snapshot = stage_design_state_snapshot(session)
+        self.assertEqual(snapshot["independent_variable"], content["independent_variable"])
+        self.assertEqual(snapshot["observations"], content["observations"])
+        self.assertEqual(
+            snapshot["controlled_conditions"],
+            content["controlled_conditions"],
+        )
+
+    def test_cross_field_revision_resolves_completed_stage_pending_action(self) -> None:
+        session = variable_stage_session("design_variable_revision_resolves_pending")
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "observations",
+                    "operation": "REPLACE",
+                    "value": "中间区域的场线弯曲程度",
+                },
+                {
+                    "field": "controlled_conditions",
+                    "operation": "REPLACE",
+                    "value": "电荷量、显示比例和观察平面",
+                },
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+            provenance="STUDENT_CONFIRMED",
+        )
+        pending = save_pending_action(
+            session,
+            Stage.VARIABLES_AND_CONDITIONS,
+            StepOutput(
+                assistant_message="变量框架已经有了，我们只需要调整主动改变的量。",
+                stage_payload={},
+                student_task="你想怎样调整自变量？",
+            ),
+        )
+        replacement = "两个电荷之间的距离，并把相对方向作为补充变化"
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                target="independent_variable",
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "independent_variable",
+                        "operation": "REPLACE",
+                        "content": replacement,
+                        "confidence": 0.98,
+                    }
+                ],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+
+        apply_resolved_intent(session, resolved, pending, replacement)
+
+        self.assertEqual(
+            stage_design_state_snapshot(session)["independent_variable"],
+            replacement,
+        )
+        self.assertIsNone(current_pending_action(session))
+        self.assertEqual(
+            resolved["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
 
     def test_clarification_language_matches_interaction_mode(self) -> None:
         pending = {

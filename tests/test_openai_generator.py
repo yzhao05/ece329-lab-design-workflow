@@ -385,6 +385,140 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
         self.assertEqual(generator.runtime_info()["intent_repair_successes"], 1)
 
+    def test_twice_rejected_rich_intent_uses_compact_action_contract(self) -> None:
+        research = "比较距离变化时两个电荷之间的场线重排"
+        malformed = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "research_question",
+            "resolved_value_json": json.dumps(research, ensure_ascii=False),
+            "semantic_updates_json": None,
+            "dialogue_acts_json": "[{broken",
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        compact = {
+            "actions": [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": research,
+                    "semantic_key": "charge_distance_field_line_rearrangement",
+                    "confidence": 0.99,
+                }
+            ]
+        }
+        transport = FakeTransport(outputs=[malformed, malformed, compact])
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "answer_fields": ["research_question"],
+            "proposal": {"facet_id": "research_question"},
+            "question": "你准备比较什么条件，并观察什么现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            research,
+            pending,
+            {"idea_development": {"active_facet_id": "research_question"}},
+        )
+
+        self.assertEqual(len(transport.requests), 3)
+        self.assertEqual(
+            transport.requests[-1]["text"]["format"]["name"],
+            "ece329_compact_dialogue_acts",
+        )
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["design_updates"][0]["value"],
+            research,
+        )
+
+    def test_omitted_actions_in_long_variable_answer_use_compact_field_split(self) -> None:
+        answer = (
+            "把距离和相对方向作为自变量，观察中间区域的场线弯曲与连接，"
+            "电荷量、物体尺寸和显示精度保持不变。"
+        )
+        rich_without_actions = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": Stage.VARIABLES_AND_CONDITIONS.value,
+            "resolved_value_json": json.dumps(answer, ensure_ascii=False),
+            "semantic_updates_json": json.dumps(
+                {"pending_answer_status": "CLEAR"},
+                ensure_ascii=False,
+            ),
+            "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+        }
+        compact = {
+            "actions": [
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "independent_variable",
+                    "operation": "REPLACE",
+                    "content": "距离和相对方向",
+                    "semantic_key": "source_distance_and_relative_orientation",
+                    "confidence": 0.98,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "observations",
+                    "operation": "REPLACE",
+                    "content": "中间区域的场线弯曲与连接",
+                    "semantic_key": "middle_region_field_line_shape",
+                    "confidence": 0.98,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "controlled_conditions",
+                    "operation": "REPLACE",
+                    "content": "电荷量、物体尺寸和显示精度",
+                    "semantic_key": "fixed_charge_geometry_display_precision",
+                    "confidence": 0.98,
+                },
+            ]
+        }
+        transport = FakeTransport(
+            outputs=[rich_without_actions, rich_without_actions, compact]
+        )
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+            "answer_fields": [
+                "independent_variable",
+                "observations",
+                "controlled_conditions",
+            ],
+            "question": "主动改变、观察和保持不变的量分别是什么？",
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(list(Stage).index(Stage.VARIABLES_AND_CONDITIONS)),
+            answer,
+            pending,
+            {"research_direction": "比较两个电荷靠近时的场线变化"},
+        )
+
+        self.assertEqual(len(transport.requests), 3)
+        self.assertEqual(result["intent"], "MODIFY_PREVIOUS_PROPOSAL")
+        self.assertEqual(
+            {
+                item["field"]
+                for item in result["semantic_updates"]["stage_field_updates"]
+            },
+            {"independent_variable", "observations", "controlled_conditions"},
+        )
+
     def test_intent_resolver_repairs_an_omitted_active_facet_decision(self) -> None:
         base = {
             "intent": "ANSWER_CURRENT_QUESTION",

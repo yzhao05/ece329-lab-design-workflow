@@ -255,6 +255,17 @@ def compile_dialogue_acts(
         if isinstance(pending_action, dict)
         else ""
     )
+    pending_answer_fields = (
+        [
+            str(field).strip()
+            for field in pending_action.get("answer_fields", [])
+            if str(field).strip()
+            in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}
+        ]
+        if isinstance(pending_action, dict)
+        and isinstance(pending_action.get("answer_fields"), list)
+        else []
+    )
     design_updates: list[dict[str, Any]] = []
     facet_updates: list[dict[str, Any]] = []
     stage_field_updates: list[dict[str, Any]] = []
@@ -281,7 +292,35 @@ def compile_dialogue_acts(
             # type—not surface wording—declares that this content answers the
             # open question, so preserve the field-level target and clear the
             # pending item independently.
-            answered_pending = answered_pending or bool(pending_action)
+            if target == pending_subject and len(pending_answer_fields) == 1:
+                target = pending_answer_fields[0]
+            elif (
+                target == pending_subject
+                and len(pending_answer_fields) > 1
+                and isinstance(content, dict)
+            ):
+                field_values = [
+                    (field, deepcopy(content.get(field)))
+                    for field in pending_answer_fields
+                    if content.get(field) not in (None, "", [], {})
+                ]
+                for field, value in field_values:
+                    canonical = FACET_TO_DESIGN_FIELD.get(field, field)
+                    update = {
+                        "field": canonical,
+                        "operation": operation,
+                        "value": value,
+                        "update_id": f"{act_id}:{field}",
+                        "semantic_key": semantic_key,
+                    }
+                    if canonical in DESIGN_ACT_FIELDS:
+                        design_updates.append(update)
+                    elif canonical in STAGE_ACT_FIELDS:
+                        stage_field_updates.append(update)
+                answered_pending = answered_pending or bool(field_values)
+                if not field_values:
+                    unresolved.append(_text(content))
+                continue
             field = FACET_TO_DESIGN_FIELD.get(target)
             if field:
                 design_updates.append(
@@ -301,6 +340,7 @@ def compile_dialogue_acts(
                         "value": content,
                     }
                 )
+                answered_pending = True
             elif target in DESIGN_ACT_FIELDS:
                 design_updates.append(
                     {
@@ -311,6 +351,7 @@ def compile_dialogue_acts(
                         "semantic_key": semantic_key,
                     }
                 )
+                answered_pending = True
             elif target in STAGE_ACT_FIELDS:
                 stage_field_updates.append(
                     {
@@ -321,6 +362,12 @@ def compile_dialogue_acts(
                         "semantic_key": semantic_key,
                     }
                 )
+                answered_pending = True
+            else:
+                # A multi-field stage answer must be split into canonical
+                # targets by the semantic parser. Do not clear the pending
+                # item when no field-level state update was produced.
+                unresolved.append(_text(content))
         elif act_type == "MODIFY_DESIGN_FIELD":
             design_updates.append(
                 {

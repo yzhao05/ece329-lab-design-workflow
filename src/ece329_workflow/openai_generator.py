@@ -350,6 +350,132 @@ def _intent_response_schema() -> dict[str, Any]:
     }
 
 
+def _compact_intent_response_schema() -> dict[str, Any]:
+    """A small recovery contract for turns that break the rich JSON envelope.
+
+    The main resolver carries optional compatibility summaries and detailed
+    quality metadata.  If a model truncates or corrupts that envelope, this
+    schema asks only for atomic dialogue acts, which are the sole write path
+    anyway.  Keeping content textual makes the contract substantially easier
+    to complete while still requiring an explicit canonical target.
+    """
+
+    return {
+        "type": "object",
+        "properties": {
+            "actions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": sorted(DIALOGUE_ACT_TYPES)},
+                        "target": {"type": "string"},
+                        "operation": {
+                            "type": "string",
+                            "enum": ["MERGE", "REPLACE", "CLEAR", "EXECUTE"],
+                        },
+                        "content": {"type": "string"},
+                        "semantic_key": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                    "required": [
+                        "type",
+                        "target",
+                        "operation",
+                        "content",
+                        "semantic_key",
+                        "confidence",
+                    ],
+                    "additionalProperties": False,
+                },
+                "maxItems": 12,
+            }
+        },
+        "required": ["actions"],
+        "additionalProperties": False,
+    }
+
+
+def _parse_compact_intent_response(
+    response: dict[str, Any],
+) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+    try:
+        payload = json.loads(_extract_output_text(response))
+    except json.JSONDecodeError as exc:
+        raise ModelOutputError("Compact intent model output was invalid") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("actions"), list):
+        raise ModelOutputError("Compact intent output must contain an action array")
+    acts: list[dict[str, Any]] = []
+    for raw_act in payload["actions"]:
+        if not isinstance(raw_act, dict):
+            continue
+        act = deepcopy(raw_act)
+        if not str(act.get("content") or "").strip() and act.get("type") in {
+            "CONTROL",
+            "REQUEST_REFERENCE",
+            "REQUEST_SUMMARY",
+            "REQUEST_QUALITY_REVIEW",
+        }:
+            act["content"] = None
+        acts.append(act)
+    executable = [act for act in acts if act.get("type") != "UNRESOLVED"]
+    primary = executable[0] if executable else (acts[0] if acts else {})
+    primary_type = str(primary.get("type") or "UNRESOLVED")
+    primary_target = str(primary.get("target") or "")
+    intent_by_type = {
+        "ANSWER_PENDING_QUESTION": "ANSWER_CURRENT_QUESTION",
+        "MODIFY_DESIGN_FIELD": "MODIFY_PREVIOUS_PROPOSAL",
+        "MODIFY_STAGE_FIELD": "MODIFY_PREVIOUS_PROPOSAL",
+        "MODIFY_COMPARISON": "MODIFY_PREVIOUS_PROPOSAL",
+        "ASK_COURSE_QUESTION": "ASK_COURSE_QUESTION",
+        "REQUEST_REFERENCE": "REQUEST_MORE_EXAMPLES",
+        "REQUEST_SUMMARY": "REQUEST_CURRENT_DESIGN_SUMMARY",
+        "REQUEST_QUALITY_REVIEW": "REQUEST_DESIGN_REVIEW",
+        "COMPARE_OPTIONS": "COMPARE_DESIGN_OPTIONS",
+        "VERSION_CONTROL": "MANAGE_DESIGN_VERSION",
+        "CORRECT_ASSISTANT": "PROVIDE_FEEDBACK",
+        "NEW_TOPIC": "NEW_TOPIC",
+        "UNRESOLVED": "UNCLEAR",
+    }
+    intent = intent_by_type.get(primary_type, "UNCLEAR")
+    if primary_type == "CONTROL":
+        intent = {
+            "ACCEPT": "ACCEPT_PREVIOUS_PROPOSAL",
+            "REJECT": "REJECT_PREVIOUS_PROPOSAL",
+            "ADVANCE": "ADVANCE_STAGE",
+            "RETURN": "RETURN_TO_PREVIOUS_POINT",
+            "SET_GUIDED_MODE": "SET_INTERACTION_STATE",
+            "SET_EMVR_MODE": "SET_INTERACTION_STATE",
+            "ACCEPT_QUALITY_REVIEW": "ADVANCE_STAGE",
+        }.get(primary_target, "UNCLEAR")
+    resolved_value = primary.get("content")
+    raw = {
+        "intent": intent,
+        "target": primary_target or None,
+        "resolved_value_json": (
+            json.dumps(resolved_value, ensure_ascii=False)
+            if resolved_value not in (None, "")
+            else None
+        ),
+        "semantic_updates_json": None,
+        "dialogue_acts_json": json.dumps(acts, ensure_ascii=False),
+        "dialogue_acts": acts,
+        "advance_requested": bool(
+            any(
+                act.get("type") == "CONTROL"
+                and act.get("target") in {"ADVANCE", "ACCEPT_QUALITY_REVIEW"}
+                for act in acts
+            )
+        ),
+        "preserve_current_design": True,
+        "confidence": max(
+            (float(act.get("confidence") or 0.0) for act in acts),
+            default=0.0,
+        ),
+    }
+    return raw, resolved_value, {}
+
+
 def _parse_intent_response(
     response: dict[str, Any],
 ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
@@ -1627,6 +1753,43 @@ class OpenAIStageGenerator:
             "OPENAI_FINAL_MAX_OUTPUT_TOKENS",
         )
 
+    def _recover_compact_intent(
+        self,
+        intent_input: str,
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+        """Retry a rejected rich intent envelope with action-only output."""
+
+        compact_payload = {
+            "model": self.model,
+            "instructions": (
+                "只把学生本轮消息拆成原子对话动作，不回答学生。读取输入中的previous_question、"
+                "pending_action.answer_fields和carried_context。回答开放问题时使用"
+                "ANSWER_PENDING_QUESTION，并把target设为实际规范化字段；若answer_fields有多项，"
+                "按学生表达拆成多个动作。修改已保存内容使用MODIFY_DESIGN_FIELD或"
+                "MODIFY_STAGE_FIELD。课程提问、参考请求、总结请求、纠错和控制动作必须分别列出。"
+                "不能把整条混合消息塞进一个字段；能确定的动作照常返回，剩余片段才用UNRESOLVED。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": intent_input}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_compact_dialogue_acts",
+                    "schema": _compact_intent_response_schema(),
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": max(self.intent_max_output_tokens, 1800),
+            "store": False,
+        }
+        response = self.transport.create(compact_payload)
+        return _parse_compact_intent_response(response)
+
     def resolve_intent(
         self,
         session: DesignSession,
@@ -1663,7 +1826,9 @@ class OpenAIStageGenerator:
                 "MODIFY_COMPARISON、ASK_COURSE_QUESTION、REQUEST_REFERENCE、REQUEST_SUMMARY、"
                 "REQUEST_QUALITY_REVIEW、COMPARE_OPTIONS、VERSION_CONTROL、CORRECT_ASSISTANT、"
                 "CONTROL、NEW_TOPIC或UNRESOLVED。"
-                "ANSWER_PENDING_QUESTION只保存真正回答pending_action.subject的内容；"
+                "ANSWER_PENDING_QUESTION只保存真正回答当前待办的内容。pending_action.answer_fields"
+                "列出这个问题允许写入的规范化字段：只有一个字段时target直接使用该字段；有多个字段时，"
+                "把学生长回答按含义拆成多个字段级动作，不要把整段绑定到公开阶段ID；"
                 "MODIFY_DESIGN_FIELD的target只能是research_object、course_relationship、"
                 "learning_objective、research_question、theoretical_framework、hypothesis、"
                 "expected_phenomenon、conceptual_structure；MODIFY_STAGE_FIELD的target只能是"
@@ -1849,7 +2014,9 @@ class OpenAIStageGenerator:
                 "当pending_action.type为ANSWER_STAGE_QUESTION时，若intent为"
                 "ANSWER_CURRENT_QUESTION，semantic_updates_json必须包含pending_answer_status："
                 "学生在语义上回答了previous_question就填CLEAR；只有明确没有想法或确实没有回答"
-                "当前问题时才填MISSING；请求参考、例子或可能判断时必须返回"
+                "当前问题时才填MISSING；同时必须依照pending_action.answer_fields为回答中已经明确的"
+                "每一项生成字段级动作。学生同时调整自变量、观察量或控制条件时应并行保存，不得要求"
+                "把综合回答拆成几轮。请求参考、例子或可能判断时必须返回"
                 "REQUEST_MORE_EXAMPLES。不能因为措辞与问题示例不同而遗漏或填MISSING。"
                 "上述规则同样适用于pending_action.type=ANSWER_EMVR_STAGE_QUESTION；这是EMVR"
                 "开放问题，不是要求学生确认既有方案。学生给出对象、操作、观察现象和目标等"
@@ -1922,6 +2089,19 @@ class OpenAIStageGenerator:
                 raw, resolved_value, semantic_updates = _parse_intent_response(
                     repair_response
                 )
+            except ModelOutputError:
+                # The rich envelope was rejected twice. Fall back to a much
+                # smaller action-only contract instead of treating a format
+                # failure as a total semantic outage and asking the student to
+                # confirm an answer they already gave.
+                try:
+                    raw, resolved_value, semantic_updates = (
+                        self._recover_compact_intent(intent_input)
+                    )
+                except ModelServiceError as compact_error:
+                    with self._metrics_lock:
+                        self._intent_api_failures += 1
+                    raise compact_error from initial_error
             except ModelServiceError as repair_error:
                 with self._metrics_lock:
                     self._intent_api_failures += 1
@@ -2066,11 +2246,16 @@ class OpenAIStageGenerator:
                 raw, resolved_value, semantic_updates = _parse_intent_response(
                     repair_response
                 )
-            except ModelServiceError:
-                with self._metrics_lock:
-                    self._intent_api_failures += 1
-                raise
             except ModelOutputError:
+                try:
+                    raw, resolved_value, semantic_updates = (
+                        self._recover_compact_intent(intent_input)
+                    )
+                except ModelServiceError:
+                    with self._metrics_lock:
+                        self._intent_api_failures += 1
+                    raise
+            except ModelServiceError:
                 with self._metrics_lock:
                     self._intent_api_failures += 1
                 raise
@@ -2098,6 +2283,31 @@ class OpenAIStageGenerator:
             or facet_explicitly_missing
             or semantic_updates.get("course_scope_status") == "OUT_OF_SCOPE"
         )
+        if (
+            not has_executable_dialogue_acts
+            and not explicitly_unanswered
+            and pending_type in OPEN_QUESTION_PENDING_TYPES
+            and isinstance(pending_action, dict)
+            and pending_action.get("answer_fields")
+        ):
+            # A syntactically valid rich response can still omit the only
+            # executable part. Use the same compact semantic pass before any
+            # candidate-confirmation fallback. This is especially important
+            # for variable turns, where one paragraph can update three fields.
+            raw, resolved_value, semantic_updates = self._recover_compact_intent(
+                intent_input
+            )
+            raw_dialogue_acts = raw.get("dialogue_acts", [])
+            has_executable_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    isinstance(item, dict)
+                    and str(item.get("type") or "").upper() in DIALOGUE_ACT_TYPES
+                    and str(item.get("type") or "").upper() != "UNRESOLVED"
+                    for item in raw_dialogue_acts
+                )
+            )
+            repaired_intent = str(raw.get("intent") or "UNCLEAR")
         if has_executable_dialogue_acts:
             # Field-level acts are validated independently downstream.  The
             # compatibility intent may be UNCLEAR without invalidating clear

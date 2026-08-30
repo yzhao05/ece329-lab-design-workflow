@@ -91,6 +91,65 @@ _THEORY_SUPPORT_FIELDS = frozenset(
 )
 
 
+# An open stage question is a request for one or more canonical design fields,
+# not for an opaque answer attached to the public stage id. Persist these
+# targets with the pending action so long turns can be split and a stage-id
+# answer can still be bound when the target is unambiguous.
+_GUIDED_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "independent_variable",
+        "observations",
+        "controlled_conditions",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+    Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_plan",),
+    Stage.RESULT_INTERPRETATION: ("result_interpretation",),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
+}
+
+_EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.IDEA_BRAINSTORMING: (
+        "research_object",
+        "course_relationship",
+        "conceptual_structure",
+    ),
+    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_relationship",),
+    Stage.LEARNING_OBJECTIVES: ("learning_objective",),
+    Stage.RESEARCH_QUESTION: ("research_question",),
+    Stage.THEORETICAL_FRAMEWORK: ("theoretical_framework",),
+    Stage.HYPOTHESIS: ("hypothesis", "expected_phenomenon"),
+    Stage.CONCEPTUAL_OR_VR_SETUP: (
+        "conceptual_structure",
+        "unity_objects",
+        "interactions",
+    ),
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "independent_variable",
+        "observations",
+        "controlled_conditions",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+    Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_plan",),
+    Stage.RESULT_INTERPRETATION: ("result_interpretation",),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
+}
+
+
+def _pending_answer_fields(
+    stage: Stage,
+    interaction_state: InteractionState,
+    subject: str = "",
+) -> list[str]:
+    if subject in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}:
+        return [subject]
+    catalog = (
+        _EMVR_PENDING_ANSWER_FIELDS
+        if interaction_state is InteractionState.EMVR_DIRECT
+        else _GUIDED_PENDING_ANSWER_FIELDS
+    )
+    return list(catalog.get(stage, ()))
+
+
 def _authoritative_emvr_update(
     raw_update: Any,
     acts: list[dict[str, Any]],
@@ -392,6 +451,17 @@ def hydrate_pending_action_from_history(
 
     current = current_pending_action(session)
     if current is not None:
+        if (
+            current.get("type") in OPEN_QUESTION_PENDING_TYPES
+            and not current.get("answer_fields")
+        ):
+            current["answer_fields"] = _pending_answer_fields(
+                session.current_stage,
+                session.interaction_state,
+                str(current.get("subject") or ""),
+            )
+            dialogue_state(session)["pending_action"] = deepcopy(current)
+            set_pending_action_snapshot(session, current)
         migrated = _migrate_legacy_idea_facet_pending(session, current)
         if migrated != current:
             dialogue_state(session)["pending_action"] = deepcopy(migrated)
@@ -766,6 +836,16 @@ def _normalize_pending_action(
         "repeat_count": 1,
         "advance_on_accept": bool(raw.get("advance_on_accept", False)),
     }
+    answer_fields = raw.get("answer_fields", [])
+    if isinstance(answer_fields, list):
+        normalized["answer_fields"] = list(
+            dict.fromkeys(
+                str(field).strip()
+                for field in answer_fields
+                if str(field).strip()
+                in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}
+            )
+        )
     candidate_answer = raw.get("candidate_answer")
     if isinstance(candidate_answer, str) and candidate_answer.strip():
         normalized["candidate_answer"] = candidate_answer.strip()[:2000]
@@ -829,6 +909,14 @@ def save_pending_action(
                 ],
             }
         )
+    if raw.get("type") in OPEN_QUESTION_PENDING_TYPES and not raw.get(
+        "answer_fields"
+    ):
+        raw["answer_fields"] = _pending_answer_fields(
+            stage,
+            session.interaction_state,
+            str(raw.get("subject") or ""),
+        )
     if not question and proposal is None:
         dialogue_state(session).pop("pending_action", None)
         set_pending_action_snapshot(session, None)
@@ -840,6 +928,14 @@ def save_pending_action(
         fallback_question=question,
         fallback_proposal=proposal,
     )
+    if pending.get("type") in OPEN_QUESTION_PENDING_TYPES and not pending.get(
+        "answer_fields"
+    ):
+        pending["answer_fields"] = _pending_answer_fields(
+            session.current_stage,
+            session.interaction_state,
+            str(pending.get("subject") or ""),
+        )
     if stage is Stage.IDEA_BRAINSTORMING:
         pending = _migrate_legacy_idea_facet_pending(session, pending)
     state = dialogue_state(session)
@@ -2415,6 +2511,73 @@ def apply_semantic_design_updates(
     # generation uses it to acknowledge only changes that were actually
     # committed during this turn.
     updates["applied_comparison_updates"] = applied_comparison_updates
+    pending_fields = (
+        [
+            FACET_TO_DESIGN_FIELD.get(str(field), str(field))
+            for field in pending_action.get("answer_fields", [])
+            if str(field)
+        ]
+        if isinstance(pending_action, dict)
+        and isinstance(pending_action.get("answer_fields"), list)
+        else []
+    )
+    touched_fields: set[str] = set()
+    for key in ("design_updates", "stage_field_updates"):
+        raw_field_updates = updates.get(key)
+        if not isinstance(raw_field_updates, list):
+            continue
+        for item in raw_field_updates:
+            if not isinstance(item, dict):
+                continue
+            field = str(item.get("field") or item.get("field_id") or "")
+            if field:
+                touched_fields.add(FACET_TO_DESIGN_FIELD.get(field, field))
+    touched_pending_fields = touched_fields & set(pending_fields)
+    canonical_design = design_state_snapshot(session)
+    canonical_stage = stage_design_state_snapshot(session)
+    pending_fields_complete = bool(
+        pending_fields
+        and all(
+            bool(canonical_design.get(field) or canonical_stage.get(field))
+            for field in pending_fields
+        )
+    )
+    pending_resolved = bool(
+        isinstance(pending_action, dict)
+        and (
+            updates.get("pending_answer_status") == "CLEAR"
+            or (touched_pending_fields and pending_fields_complete)
+        )
+    )
+    if pending_resolved:
+        updates["pending_answer_status"] = "CLEAR"
+        # The visible question has been answered. Remove that exact pending
+        # item before response generation; a genuinely new question may be
+        # saved afterwards with a fresh action id and repeat_count=1. Keeping
+        # the answered item here was the source of many apparent loops.
+        state = dialogue_state(session)
+        current = state.get("pending_action")
+        same_pending = bool(
+            isinstance(current, dict)
+            and (
+                (
+                    current.get("action_id")
+                    and current.get("action_id") == pending_action.get("action_id")
+                )
+                or (
+                    current.get("type") == pending_action.get("type")
+                    and current.get("subject") == pending_action.get("subject")
+                )
+            )
+        )
+        if same_pending:
+            state.pop("pending_action", None)
+            set_pending_action_snapshot(session, None)
+        elif current is None:
+            # A legacy session can carry only the canonical snapshot. Clear it
+            # when no newer dialogue pending item exists, but never erase a
+            # different question that has already replaced the resolved one.
+            set_pending_action_snapshot(session, None)
 
 
 def apply_resolved_intent(
