@@ -126,6 +126,9 @@ def _stage_output_contract(
                 "stage_payload_json必须包含original_idea、target_phenomenon、"
                 "possible_vr_interactions和design_scope；从学生已有的模糊想法整理当前EMVR"
                 "设计起点，不得返回三幅图景、课程方向选项或让学生重新从零选题。"
+                "target_phenomenon必须优先采用context.carried_context.emvr_merged_requirements"
+                "中的observed_quantities和学生已保存的观察重点，描述具体要观察的物理变化，"
+                "不得用宽泛课程模块名称代替目标现象。"
                 "possible_vr_interactions只概括与当前想法直接相关的操作类型。"
                 "本轮不得生成后续阶段的变量表、公式、流程或最终方案。"
             )

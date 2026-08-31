@@ -4291,6 +4291,8 @@ class DialogueStateTests(unittest.TestCase):
             Stage.IDEA_BRAINSTORMING: [
                 "research_object",
                 "course_relationship",
+                "observations",
+                "interactions",
                 "conceptual_structure",
             ],
             Stage.LEARNING_OBJECTIVES: ["learning_objective"],
@@ -4339,6 +4341,372 @@ class DialogueStateTests(unittest.TestCase):
                     ),
                 )
                 self.assertEqual(pending["answer_fields"], expected_fields)
+
+    def test_confirmation_exposes_visible_labels_as_canonical_field_bindings(self) -> None:
+        for mode, stage, expected in (
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.IDEA_BRAINSTORMING,
+                {"目标现象": "observations", "可用交互": "interactions"},
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.COURSE_MAPPING_AND_DIRECTION,
+                {
+                    "设计方向": "research_object",
+                    "课程关系": "course_relationship",
+                    "采用理由": "design_rationale",
+                },
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.CONCEPTUAL_OR_VR_SETUP,
+                {"数据显示": "visualization_plan", "Unity对象": "unity_objects"},
+            ),
+            (
+                InteractionState.GUIDED_DESIGN,
+                Stage.VARIABLES_AND_CONDITIONS,
+                {"自变量": "independent_variable", "观察量": "observations"},
+            ),
+            (
+                InteractionState.GUIDED_DESIGN,
+                Stage.DESIGN_VALUE_AND_LIMITATIONS,
+                {"教学价值": "design_value", "设计局限": "limitations"},
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.DESIGN_VALUE_AND_LIMITATIONS,
+                {"VR附加价值": "design_value", "设计局限": "limitations"},
+            ),
+        ):
+            with self.subTest(mode=mode.value, stage=stage.value):
+                session = DesignSession(
+                    design_id=f"visible_bindings_{mode.value}_{stage.value}",
+                    interaction_state=mode,
+                    current_stage_index=list(Stage).index(stage),
+                )
+                pending = save_pending_action(
+                    session,
+                    stage,
+                    StepOutput(
+                        assistant_message="请核对当前草稿。",
+                        stage_payload={
+                            "pending_action": {
+                                "type": "CONFIRM_STAGE_OR_MODIFY",
+                                "interaction_state": mode.value,
+                                "subject": stage.value,
+                                "proposal": {"stage": stage.value},
+                            }
+                        },
+                        student_task="需要补充时直接指出页面中的对应内容。",
+                    ),
+                )
+                bindings = {
+                    label: str(item["canonical_field"])
+                    for item in pending.get("editable_field_bindings", [])
+                    for label in item.get("visible_labels", [])
+                }
+                for visible_label, canonical_field in expected.items():
+                    self.assertEqual(bindings[visible_label], canonical_field)
+
+    def test_emvr_visible_target_phenomenon_supplement_commits_to_both_states(self) -> None:
+        supplement = "电场线的空间分布与叠加"
+        acts = [
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "observations",
+                "operation": "MERGE",
+                "content": supplement,
+                "semantic_key": "electric_field_line_spatial_superposition",
+                "confidence": 0.99,
+            }
+        ]
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                acts,
+                semantic_updates={
+                    "emvr_design_update": {
+                        "observed_quantities": [supplement],
+                        "field_updates": [
+                            {
+                                "field_id": "observed_quantities",
+                                "operation": "MERGE",
+                                "value": [supplement],
+                            }
+                        ],
+                    }
+                },
+            )
+        )
+        session = DesignSession(
+            design_id="emvr_visible_target_supplement",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            design_context={
+                "idea": {
+                    "original": "两个带电物体靠近时观察电场线变化",
+                    "main_direction": "两个带电物体靠近时观察电场线变化",
+                }
+            },
+        )
+        old_pending = save_pending_action(
+            session,
+            Stage.IDEA_BRAINSTORMING,
+            StepOutput(
+                assistant_message="目标现象：静电场。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.IDEA_BRAINSTORMING.value,
+                        "proposal": {"target_phenomenon": "静电场"},
+                        "advance_on_accept": True,
+                    }
+                },
+                student_task="请核对目标现象，需要补充时直接说明。",
+            ),
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"目标现象再补充“{supplement}”。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        self.assertIn(
+            supplement,
+            stage_design_state_snapshot(stored)["observations"],
+        )
+        self.assertIn(
+            supplement,
+            merge_emvr_structured_requirements(
+                stored.design_context["emvr_design"]
+            )["observed_quantities"],
+        )
+        self.assertIn(supplement, result["assistant_message"])
+        new_pending = current_pending_action(stored)
+        self.assertIsNotNone(new_pending)
+        self.assertNotEqual(
+            new_pending.get("action_id"),
+            old_pending.get("action_id"),
+        )
+
+    def test_guided_visible_observation_supplement_merges_without_reasking(self) -> None:
+        supplement = "同时记录中间区域的场线弯曲程度和场强颜色变化"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "observations",
+                        "operation": "MERGE",
+                        "content": supplement,
+                        "semantic_key": "mid_region_line_bending_and_field_color",
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = variable_stage_session("guided_visible_observation_supplement")
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "observations",
+                    "operation": "REPLACE",
+                    "value": ["电场线形状", "中间区域通量"],
+                }
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
+        save_pending_action(
+            session,
+            Stage.VARIABLES_AND_CONDITIONS,
+            StepOutput(
+                assistant_message="观察量：电场线形状和中间区域通量。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                        "proposal": {"observations": ["电场线形状", "中间区域通量"]},
+                    }
+                },
+                student_task="需要补充时直接指出对应内容。",
+            ),
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": f"观察量还需要补充：{supplement}，其余设置保持不变。"},
+        )
+
+        observations = stage_design_state_snapshot(
+            engine.store.get(session.design_id)
+        )["observations"]
+        self.assertIn(supplement, observations)
+        self.assertIn("电场线形状", observations)
+        self.assertFalse(
+            result["stage_payload"].get("clarification_required", False)
+        )
+
+    def test_visible_supplements_remain_connected_across_later_stages(self) -> None:
+        cases = (
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.COURSE_MAPPING_AND_DIRECTION,
+                "design_rationale",
+                "通过空间观察比较场分布，适合用VR呈现不可见场量",
+                "design_rationale",
+                "selection_reason",
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.CONCEPTUAL_OR_VR_SETUP,
+                "visualization_plan",
+                "同步显示场线、等势面与探针读数",
+                "visualization_requirements",
+                "visualization_layer",
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.DESIGN_VALUE_AND_LIMITATIONS,
+                "design_value",
+                "利用空间视角比较三维场分布并建立参数与现象的联系",
+                "design_values",
+                "student_value_and_limit_notes",
+            ),
+            (
+                InteractionState.GUIDED_DESIGN,
+                Stage.DESIGN_VALUE_AND_LIMITATIONS,
+                "design_value",
+                "帮助学生把边界条件与场分布变化联系起来",
+                "",
+                "student_value_and_limit_notes",
+            ),
+        )
+        for mode, stage, field, supplement, emvr_field, payload_field in cases:
+            with self.subTest(mode=mode.value, stage=stage.value, field=field):
+                engine = WorkflowEngine(
+                    generator=MultiActSemanticGenerator(
+                        [
+                            {
+                                "type": "MODIFY_STAGE_FIELD",
+                                "target": field,
+                                "operation": "MERGE",
+                                "content": supplement,
+                                "semantic_key": f"{field}_supplement",
+                                "confidence": 0.99,
+                            }
+                        ]
+                    )
+                )
+                session = DesignSession(
+                    design_id=f"visible_supplement_{mode.value}_{stage.value}",
+                    interaction_state=mode,
+                    current_stage_index=list(Stage).index(stage),
+                    design_context={
+                        "idea": {
+                            "original": "比较不同条件下的电磁场分布",
+                            "main_direction": "比较不同条件下的电磁场分布",
+                        }
+                    },
+                )
+                save_pending_action(
+                    session,
+                    stage,
+                    StepOutput(
+                        assistant_message="请核对当前设计草稿。",
+                        stage_payload={
+                            "pending_action": {
+                                "type": "CONFIRM_STAGE_OR_MODIFY",
+                                "interaction_state": mode.value,
+                                "subject": stage.value,
+                                "proposal": {"stage": stage.value},
+                            }
+                        },
+                        student_task="需要补充时直接指出页面中的对应内容。",
+                    ),
+                )
+                engine.store.save(session)
+
+                result = engine.process_turn(
+                    session.design_id,
+                    {"message": f"请补充：{supplement}，其余内容保持不变。"},
+                )
+
+                stored = engine.store.get(session.design_id)
+                self.assertIn(
+                    supplement,
+                    str(stage_design_state_snapshot(stored)[field]),
+                )
+                if emvr_field:
+                    merged = merge_emvr_structured_requirements(
+                        stored.design_context["emvr_design"]
+                    )
+                    self.assertIn(supplement, str(merged[emvr_field]))
+                rendered_payload = result["stage_payload"]
+                if payload_field not in rendered_payload:
+                    rendered_payload = stored.stage_outputs.get(
+                        stage.value, {}
+                    ).get("stage_payload", {})
+                self.assertIn(supplement, str(rendered_payload[payload_field]))
+                self.assertFalse(
+                    result["stage_payload"].get("clarification_required", False)
+                )
+
+    def test_multiple_supplements_to_one_emvr_field_are_not_collapsed(self) -> None:
+        additions = ["增加等势面显示", "增加可移动探针的数值读数"]
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "visualization_plan",
+                        "operation": "MERGE",
+                        "content": addition,
+                        "semantic_key": f"visualization_supplement_{index}",
+                        "confidence": 0.99,
+                    }
+                    for index, addition in enumerate(additions)
+                ]
+            )
+        )
+        session = DesignSession(
+            design_id="multiple_emvr_visualization_supplements",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.CONCEPTUAL_OR_VR_SETUP),
+            design_context={"idea": {"main_direction": "比较空间电场分布"}},
+        )
+        save_pending_action(
+            session,
+            Stage.CONCEPTUAL_OR_VR_SETUP,
+            StepOutput(
+                assistant_message="请核对Unity对象和显示方式。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.CONCEPTUAL_OR_VR_SETUP.value,
+                        "proposal": {"stage": Stage.CONCEPTUAL_OR_VR_SETUP.value},
+                    }
+                },
+                student_task="可以一次补充多个显示要求。",
+            ),
+        )
+        engine.store.save(session)
+
+        engine.process_turn(
+            session.design_id,
+            {"message": "请同时增加等势面，并加入可移动探针的数值读数。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        merged = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )["visualization_requirements"]
+        for addition in additions:
+            self.assertIn(addition, merged)
 
     def test_each_single_field_guided_stage_commits_answer_and_closes_pending(self) -> None:
         expectations = {

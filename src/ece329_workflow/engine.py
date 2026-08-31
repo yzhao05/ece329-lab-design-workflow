@@ -34,7 +34,7 @@ from .generator import (
     _guided_reference_output,
     guided_stage_entry_output,
 )
-from .emvr_design import apply_emvr_field_updates
+from .emvr_design import apply_emvr_field_updates, merge_emvr_structured_requirements
 from .dialogue_acts import apply_stage_field_updates, stage_design_state_snapshot
 from .design_state import (
     apply_design_updates,
@@ -419,6 +419,8 @@ _STUDENT_FIELD_LABELS = {
     "procedure_steps": "实验流程",
     "visualization_plan": "显示方式",
     "result_interpretation": "结果解释",
+    "design_rationale": "设计依据",
+    "design_value": "设计价值",
     "limitations": "设计局限",
     "unity_objects": "VR实验对象",
     "interactions": "VR交互",
@@ -1270,10 +1272,36 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
 
 
 def _prepare_emvr_stage_output(
+    session: DesignSession,
     stage: Stage,
     output: StepOutput,
 ) -> None:
     """Make the stage artifact visible and wait for a contextual decision."""
+
+    # The report payload is a view of canonical state, not a second source of
+    # truth.  In particular, a model may describe Stage 1 with a broad course
+    # topic even after the student has supplied a precise observation or
+    # interaction.  Project those saved fields back into the visible draft so
+    # the next revision refers to the content that was actually committed.
+    if stage is Stage.IDEA_BRAINSTORMING:
+        emvr_design = session.design_context.get("emvr_design", {})
+        requirements = merge_emvr_structured_requirements(emvr_design)
+        observations = requirements.get("observed_quantities", [])
+        observations = (
+            [str(item).strip() for item in observations if str(item).strip()]
+            if isinstance(observations, list)
+            else []
+        )
+        interactions = requirements.get("required_behaviors", [])
+        interactions = (
+            [str(item).strip() for item in interactions if str(item).strip()]
+            if isinstance(interactions, list)
+            else []
+        )
+        if observations:
+            output.stage_payload["target_phenomenon"] = "；".join(observations)
+        if interactions:
+            output.stage_payload["possible_vr_interactions"] = interactions
 
     section = stage_report_section(
         stage,
@@ -1335,6 +1363,67 @@ def _prepare_emvr_stage_output(
             UserIntent.UNCLEAR.value,
         ],
     }
+
+
+def _project_committed_stage_fields(
+    session: DesignSession,
+    stage: Stage,
+    output: StepOutput,
+) -> None:
+    """Make every editable later-stage field visible from committed state.
+
+    Model output remains a draft.  These projections ensure a successful
+    supplement cannot disappear merely because the next prose generation
+    omitted it, in either interaction mode.
+    """
+
+    values = stage_design_state_snapshot(session)
+
+    def value(field: str) -> str:
+        return str(values.get(field) or "").strip()
+
+    if stage is Stage.COURSE_MAPPING_AND_DIRECTION and value("design_rationale"):
+        output.stage_payload["selection_reason"] = value("design_rationale")
+    elif stage is Stage.CONCEPTUAL_OR_VR_SETUP:
+        if value("unity_objects"):
+            output.stage_payload["unity_objects"] = value("unity_objects")
+        if value("interactions"):
+            output.stage_payload["interactions"] = value("interactions")
+        if value("visualization_plan"):
+            output.stage_payload["visualization_layer"] = value(
+                "visualization_plan"
+            )
+    elif stage is Stage.VARIABLES_AND_CONDITIONS:
+        if value("independent_variable"):
+            output.stage_payload["independent_variable"] = value(
+                "independent_variable"
+            )
+        if value("observations"):
+            output.stage_payload["dependent_variable"] = value("observations")
+        if value("controlled_conditions"):
+            output.stage_payload["controlled_variables"] = value(
+                "controlled_conditions"
+            )
+    elif stage is Stage.CONCEPTUAL_PROCEDURE and value("procedure_steps"):
+        output.stage_payload["procedure_steps"] = value("procedure_steps")
+    elif (
+        stage is Stage.EXPECTED_DATA_VISUALIZATION
+        and value("visualization_plan")
+    ):
+        output.stage_payload["student_visualization_requirements"] = value(
+            "visualization_plan"
+        )
+    elif stage is Stage.RESULT_INTERPRETATION and value("result_interpretation"):
+        output.stage_payload["student_result_interpretation"] = value(
+            "result_interpretation"
+        )
+    elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
+        if value("design_value"):
+            output.stage_payload["student_value_and_limit_notes"] = value(
+                "design_value"
+            )
+        if value("limitations"):
+            output.stage_payload["limitations"] = value("limitations")
 
 
 def _persist_emvr_brief(
@@ -2159,6 +2248,15 @@ class WorkflowEngine:
             or semantic_updates.get("stage_field_updates")
             or semantic_updates.get("comparison_updates")
             or semantic_updates.get("facet_updates")
+            or (
+                isinstance(semantic_updates.get("emvr_design_update"), dict)
+                and (
+                    semantic_updates["emvr_design_update"].get("field_updates")
+                    or semantic_updates["emvr_design_update"].get(
+                        "theory_link_updates"
+                    )
+                )
+            )
         )
         control_actions = set(
             semantic_updates.get("control_actions", [])
@@ -2771,8 +2869,9 @@ class WorkflowEngine:
                 output = self.generator.generate(session, generation_message)
             finally:
                 session.turn_context = {}
+            _project_committed_stage_fields(session, handled_stage, output)
             if session.interaction_state is InteractionState.EMVR_DIRECT:
-                _prepare_emvr_stage_output(handled_stage, output)
+                _prepare_emvr_stage_output(session, handled_stage, output)
                 # If the student tried to continue from an unanswered EMVR
                 # entry question, this generated draft is the requested
                 # professional reference. Keep the stage active for review
@@ -2887,6 +2986,12 @@ class WorkflowEngine:
                         handled_stage,
                         output,
                     )
+        # Some valid turns are served by a reference/entry/recovery branch
+        # rather than the ordinary generator branch above.  Reconcile the
+        # final visible payload from committed canonical state in every route,
+        # so a supplement cannot be saved internally yet omitted from the
+        # page merely because the response took a different dialogue path.
+        _project_committed_stage_fields(session, handled_stage, output)
         multi_act_notice = _multi_act_student_notice(
             semantic_updates,
             session.interaction_state,

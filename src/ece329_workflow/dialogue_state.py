@@ -41,15 +41,23 @@ from .models import DesignSession, InteractionState, Stage, StepOutput
 
 _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
     Stage.IDEA_BRAINSTORMING.value: frozenset(
-        {"direction_summary", "research_summary"}
+        {
+            "direction_summary",
+            "research_summary",
+            "observed_quantities",
+            "required_behaviors",
+            "object_constraints",
+        }
     ),
-    Stage.COURSE_MAPPING_AND_DIRECTION.value: frozenset({"direction_summary"}),
+    Stage.COURSE_MAPPING_AND_DIRECTION.value: frozenset(
+        {"direction_summary", "research_summary", "design_rationale"}
+    ),
     Stage.LEARNING_OBJECTIVES.value: frozenset({"learning_objectives"}),
     Stage.RESEARCH_QUESTION.value: frozenset(
         {"research_question", "changed_quantities", "observed_quantities"}
     ),
     Stage.THEORETICAL_FRAMEWORK.value: frozenset(),
-    Stage.HYPOTHESIS.value: frozenset({"hypothesis"}),
+    Stage.HYPOTHESIS.value: frozenset({"hypothesis", "observed_quantities"}),
     Stage.CONCEPTUAL_OR_VR_SETUP.value: frozenset(
         {"required_behaviors", "object_constraints", "visualization_requirements"}
     ),
@@ -61,14 +69,22 @@ _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
         {"visualization_requirements"}
     ),
     Stage.RESULT_INTERPRETATION.value: frozenset(),
-    Stage.DESIGN_VALUE_AND_LIMITATIONS.value: frozenset({"limitations"}),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS.value: frozenset(
+        {"design_values", "limitations"}
+    ),
 }
 
 _EMVR_FIELDS_BY_CANONICAL_FIELD: dict[str, frozenset[str]] = {
     "research_object": frozenset({"direction_summary", "research_summary"}),
+    # EMVR has no separate course-relationship paragraph.  At the design
+    # boundary this information explains and narrows the direction summary,
+    # so a student can still revise the visible "course relationship" item
+    # without the update being discarded as an unknown EMVR field.
+    "course_relationship": frozenset({"direction_summary", "research_summary"}),
     "learning_objective": frozenset({"learning_objectives"}),
     "research_question": frozenset({"research_question"}),
     "hypothesis": frozenset({"hypothesis"}),
+    "expected_phenomenon": frozenset({"hypothesis", "observed_quantities"}),
     "conceptual_structure": frozenset({"required_behaviors", "object_constraints"}),
     "independent_variable": frozenset({"changed_quantities"}),
     "observations": frozenset({"observed_quantities"}),
@@ -76,6 +92,8 @@ _EMVR_FIELDS_BY_CANONICAL_FIELD: dict[str, frozenset[str]] = {
     "procedure_steps": frozenset({"procedure_steps"}),
     "visualization_plan": frozenset({"visualization_requirements"}),
     "limitations": frozenset({"limitations"}),
+    "design_rationale": frozenset({"design_rationale"}),
+    "design_value": frozenset({"design_values"}),
     "unity_objects": frozenset({"object_constraints"}),
     "interactions": frozenset({"required_behaviors"}),
 }
@@ -112,9 +130,13 @@ _EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.IDEA_BRAINSTORMING: (
         "research_object",
         "course_relationship",
+        "observations",
+        "interactions",
         "conceptual_structure",
     ),
-    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_relationship",),
+    Stage.COURSE_MAPPING_AND_DIRECTION: (
+        "course_relationship",
+    ),
     Stage.LEARNING_OBJECTIVES: ("learning_objective",),
     Stage.RESEARCH_QUESTION: ("research_question",),
     Stage.THEORETICAL_FRAMEWORK: ("theoretical_framework",),
@@ -135,6 +157,75 @@ _EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
 }
 
+_GUIDED_CONFIRMATION_FIELDS: dict[Stage, tuple[str, ...]] = {
+    **_GUIDED_PENDING_ANSWER_FIELDS,
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("design_value", "limitations"),
+}
+
+_EMVR_CONFIRMATION_FIELDS: dict[Stage, tuple[str, ...]] = {
+    **_EMVR_PENDING_ANSWER_FIELDS,
+    Stage.COURSE_MAPPING_AND_DIRECTION: (
+        "research_object",
+        "course_relationship",
+        "conceptual_structure",
+        "design_rationale",
+    ),
+    Stage.RESEARCH_QUESTION: (
+        "research_question",
+        "independent_variable",
+        "observations",
+    ),
+    Stage.CONCEPTUAL_OR_VR_SETUP: (
+        "conceptual_structure",
+        "unity_objects",
+        "interactions",
+        "visualization_plan",
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("design_value", "limitations"),
+}
+
+
+# Public labels are presentation vocabulary, while the values on the right
+# are the only state-machine fields that may be written.  Passing this map to
+# the semantic resolver lets a student revise what they actually see on the
+# page (for example "目标现象" or "可用交互") without inventing a new field,
+# binding the whole sentence to the stage id, or relying on phrase matching.
+_PUBLIC_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "research_object": ("研究对象", "设计方向", "原始想法", "设计起点"),
+    "course_relationship": ("课程关系", "课程主题", "课程依据"),
+    "learning_objective": ("学习目标", "概念目标", "计算目标", "分析目标", "交互目标"),
+    "research_question": ("研究问题",),
+    "theoretical_framework": ("理论框架", "理论关系", "核心公式", "物理机制"),
+    "hypothesis": ("研究假设",),
+    "expected_phenomenon": ("预期现象", "预期趋势", "边界情形"),
+    "conceptual_structure": ("实验结构", "概念结构", "模型边界", "设计边界"),
+    "independent_variable": ("自变量", "可调内容", "改变的量"),
+    "observations": ("目标现象", "观察量", "可观察内容", "显示现象"),
+    "controlled_conditions": ("控制条件", "控制变量", "基准条件"),
+    "procedure_steps": ("实验流程", "流程环节",),
+    "visualization_plan": ("可视化方案", "显示内容", "数据显示"),
+    "result_interpretation": ("结果解释", "结果判断",),
+    "design_rationale": ("采用理由", "选择理由", "适合VR的原因", "设计依据"),
+    "design_value": ("教学价值", "设计价值", "设计特点", "VR附加价值", "完善建议"),
+    "limitations": ("设计局限", "模型局限", "适用边界"),
+    "unity_objects": ("Unity对象", "VR对象", "实验物体"),
+    "interactions": ("可用交互", "核心操作", "学生操作", "交互与反馈"),
+    "student_summary": ("学生总结",),
+}
+
+
+def _editable_field_bindings(fields: list[str]) -> list[dict[str, Any]]:
+    """Describe visible labels without granting any additional write target."""
+
+    return [
+        {
+            "canonical_field": field,
+            "visible_labels": list(_PUBLIC_FIELD_ALIASES.get(field, (field,))),
+        }
+        for field in fields
+        if field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS}
+    ]
+
 
 def _pending_answer_fields(
     stage: Stage,
@@ -151,6 +242,18 @@ def _pending_answer_fields(
     return list(catalog.get(stage, ()))
 
 
+def _confirmation_answer_fields(
+    stage: Stage,
+    interaction_state: InteractionState,
+) -> list[str]:
+    catalog = (
+        _EMVR_CONFIRMATION_FIELDS
+        if interaction_state is InteractionState.EMVR_DIRECT
+        else _GUIDED_CONFIRMATION_FIELDS
+    )
+    return list(catalog.get(stage, ()))
+
+
 def _authoritative_emvr_update(
     raw_update: Any,
     acts: list[dict[str, Any]],
@@ -159,8 +262,12 @@ def _authoritative_emvr_update(
 ) -> dict[str, Any]:
     """Restrict EMVR persistence to fields authorized by dialogue acts."""
 
-    if not isinstance(raw_update, dict):
-        return {}
+    # The canonical dialogue acts are the write contract.  The model may also
+    # provide a richer EMVR projection, but persistence must not depend on it
+    # repeating the same edit in a second JSON branch.  Otherwise a perfectly
+    # valid supplement updates stage_design_state while silently disappearing
+    # from the EMVR report state.
+    raw_update = raw_update if isinstance(raw_update, dict) else {}
     allowed_fields: set[str] = set()
     theory_allowed = False
     pending_subject = (
@@ -219,6 +326,62 @@ def _authoritative_emvr_update(
             field_updates.append(deepcopy(item))
     if field_updates:
         filtered["field_updates"] = field_updates
+
+    # Back-project every validated field-level edit into the corresponding
+    # EMVR fields when the richer model projection omitted it.  Stage-id
+    # answers are intentionally excluded because their content can span more
+    # than one field; only compiled, explicitly targeted updates are safe.
+    projected_updates = list(field_updates)
+    projected_signatures = {
+        (
+            str(item.get("field_id") or ""),
+            str(item.get("operation") or "").upper(),
+            json.dumps(
+                item.get("value"), ensure_ascii=False, sort_keys=True, default=str
+            ),
+        )
+        for item in projected_updates
+        if isinstance(item, dict)
+    }
+    for item in [
+        *compiled_acts.get("design_updates", []),
+        *compiled_acts.get("stage_field_updates", []),
+    ]:
+        if not isinstance(item, dict):
+            continue
+        canonical = str(item.get("field") or "")
+        operation = str(item.get("operation") or "").upper()
+        if operation not in {"REPLACE", "MERGE", "CLEAR"}:
+            continue
+        for field_id in _EMVR_FIELDS_BY_CANONICAL_FIELD.get(
+            canonical, frozenset()
+        ):
+            signature = (
+                field_id,
+                operation,
+                json.dumps(
+                    item.get("value"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+            if (
+                field_id not in allowed_fields
+                or field_id not in EMVR_EDITABLE_FIELDS
+                or signature in projected_signatures
+            ):
+                continue
+            projected_updates.append(
+                {
+                    "field_id": field_id,
+                    "operation": operation,
+                    "value": deepcopy(item.get("value")),
+                }
+            )
+            projected_signatures.add(signature)
+    if projected_updates:
+        filtered["field_updates"] = projected_updates
 
     if theory_allowed:
         theory_links = []
@@ -452,15 +615,27 @@ def hydrate_pending_action_from_history(
 
     current = current_pending_action(session)
     if current is not None:
-        if (
-            current.get("type") in OPEN_QUESTION_PENDING_TYPES
-            and not current.get("answer_fields")
-        ):
-            current["answer_fields"] = _pending_answer_fields(
-                session.current_stage,
-                session.interaction_state,
-                str(current.get("subject") or ""),
-            )
+        if current.get("type") in {
+            *OPEN_QUESTION_PENDING_TYPES,
+            *CONFIRMATION_PENDING_TYPES,
+        }:
+            if not current.get("answer_fields"):
+                current["answer_fields"] = (
+                    _confirmation_answer_fields(
+                        session.current_stage,
+                        session.interaction_state,
+                    )
+                    if current.get("type") in CONFIRMATION_PENDING_TYPES
+                    else _pending_answer_fields(
+                        session.current_stage,
+                        session.interaction_state,
+                        str(current.get("subject") or ""),
+                    )
+                )
+            if not current.get("editable_field_bindings"):
+                current["editable_field_bindings"] = _editable_field_bindings(
+                    current.get("answer_fields", [])
+                )
             dialogue_state(session)["pending_action"] = deepcopy(current)
             set_pending_action_snapshot(session, current)
         migrated = _migrate_legacy_idea_facet_pending(session, current)
@@ -735,6 +910,8 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             },
         ) if not stage_fields["visualization_plan"] else stage_fields["visualization_plan"],
         "result_interpretation": stage_fields["result_interpretation"],
+        "design_rationale": stage_fields["design_rationale"],
+        "design_value": stage_fields["design_value"],
         "limitations": _find_payload_values(
             session,
             {"limitations", "invalid_conditions", "parameter_limits"},
@@ -848,6 +1025,11 @@ def _normalize_pending_action(
                 in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}
             )
         )
+    normalized_answer_fields = normalized.get("answer_fields", [])
+    if isinstance(normalized_answer_fields, list) and normalized_answer_fields:
+        normalized["editable_field_bindings"] = _editable_field_bindings(
+            normalized_answer_fields
+        )
     candidate_answer = raw.get("candidate_answer")
     if isinstance(candidate_answer, str) and candidate_answer.strip():
         normalized["candidate_answer"] = candidate_answer.strip()[:2000]
@@ -911,13 +1093,18 @@ def save_pending_action(
                 ],
             }
         )
-    if raw.get("type") in OPEN_QUESTION_PENDING_TYPES and not raw.get(
-        "answer_fields"
-    ):
-        raw["answer_fields"] = _pending_answer_fields(
-            stage,
-            session.interaction_state,
-            str(raw.get("subject") or ""),
+    if raw.get("type") in {
+        *OPEN_QUESTION_PENDING_TYPES,
+        *CONFIRMATION_PENDING_TYPES,
+    } and not raw.get("answer_fields"):
+        raw["answer_fields"] = (
+            _confirmation_answer_fields(stage, session.interaction_state)
+            if raw.get("type") in CONFIRMATION_PENDING_TYPES
+            else _pending_answer_fields(
+                stage,
+                session.interaction_state,
+                str(raw.get("subject") or ""),
+            )
         )
     if not question and proposal is None:
         dialogue_state(session).pop("pending_action", None)
@@ -930,13 +1117,24 @@ def save_pending_action(
         fallback_question=question,
         fallback_proposal=proposal,
     )
-    if pending.get("type") in OPEN_QUESTION_PENDING_TYPES and not pending.get(
-        "answer_fields"
-    ):
-        pending["answer_fields"] = _pending_answer_fields(
-            session.current_stage,
-            session.interaction_state,
-            str(pending.get("subject") or ""),
+    if pending.get("type") in {
+        *OPEN_QUESTION_PENDING_TYPES,
+        *CONFIRMATION_PENDING_TYPES,
+    } and not pending.get("answer_fields"):
+        pending["answer_fields"] = (
+            _confirmation_answer_fields(
+                session.current_stage,
+                session.interaction_state,
+            )
+            if pending.get("type") in CONFIRMATION_PENDING_TYPES
+            else _pending_answer_fields(
+                session.current_stage,
+                session.interaction_state,
+                str(pending.get("subject") or ""),
+            )
+        )
+        pending["editable_field_bindings"] = _editable_field_bindings(
+            pending["answer_fields"]
         )
     if stage is Stage.IDEA_BRAINSTORMING:
         pending = _migrate_legacy_idea_facet_pending(session, pending)
@@ -2560,6 +2758,15 @@ def apply_semantic_design_updates(
             for field in pending_fields
         )
     )
+    emvr_update = updates.get("emvr_design_update", {})
+    emvr_revision_present = bool(
+        session.interaction_state is InteractionState.EMVR_DIRECT
+        and isinstance(emvr_update, dict)
+        and (
+            emvr_update.get("field_updates")
+            or emvr_update.get("theory_link_updates")
+        )
+    )
     confirmation_updated = bool(
         isinstance(pending_action, dict)
         and pending_action.get("type") in CONFIRMATION_PENDING_TYPES
@@ -2567,6 +2774,7 @@ def apply_semantic_design_updates(
             changed_fields
             or changed_stage_fields
             or applied_comparison_updates
+            or emvr_revision_present
         )
     )
     pending_resolved = bool(

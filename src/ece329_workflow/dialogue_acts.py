@@ -47,6 +47,8 @@ STAGE_ACT_FIELD_ORDER = (
     "procedure_steps",
     "visualization_plan",
     "result_interpretation",
+    "design_rationale",
+    "design_value",
     "limitations",
     "unity_objects",
     "interactions",

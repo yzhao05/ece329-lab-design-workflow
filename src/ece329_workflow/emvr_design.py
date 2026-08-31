@@ -119,7 +119,13 @@ EMVR_THEORY_RELATION_IDS = frozenset(EMVR_THEORY_RELATIONS)
 # Semantic design fields used by the intent resolver and state machine.  They
 # are deliberately independent of any wording in the student's message.
 EMVR_SCALAR_FIELDS = frozenset(
-    {"direction_summary", "research_summary", "research_question", "hypothesis"}
+    {
+        "direction_summary",
+        "research_summary",
+        "research_question",
+        "hypothesis",
+        "design_rationale",
+    }
 )
 EMVR_LIST_FIELDS = frozenset(
     {
@@ -131,6 +137,7 @@ EMVR_LIST_FIELDS = frozenset(
         "object_constraints",
         "procedure_steps",
         "visualization_requirements",
+        "design_values",
         "limitations",
     }
 )
@@ -428,6 +435,7 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
         "object_constraints": text_list("object_constraints"),
         "procedure_steps": text_list("procedure_steps", limit=20),
         "visualization_requirements": text_list("visualization_requirements"),
+        "design_values": text_list("design_values"),
         "limitations": text_list("limitations"),
         "field_updates": field_updates,
         "theory_link_updates": theory_link_updates,

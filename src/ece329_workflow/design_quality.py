@@ -40,6 +40,8 @@ _FIELD_LABELS = {
     "procedure_steps": "实验流程",
     "visualization_plan": "可视化方式",
     "result_interpretation": "结果解释",
+    "design_rationale": "设计依据",
+    "design_value": "设计价值",
     "limitations": "局限与边界",
     "unity_objects": "Unity对象",
     "interactions": "VR交互",

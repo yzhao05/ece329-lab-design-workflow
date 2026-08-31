@@ -84,6 +84,7 @@ _FIELD_LABELS = {
     "if_prediction_supported": "符合预期时",
     "if_opposite_trend": "趋势相反时",
     "if_no_clear_change": "变化不明显时",
+    "student_result_interpretation": "学生提出的结果解释",
     "limitations": "设计局限",
     "conceptual_feasibility": "概念可行性",
     "teaching_value": "教学价值",
@@ -183,6 +184,7 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "unity_update_event",
     ),
     Stage.RESULT_INTERPRETATION: (
+        "student_result_interpretation",
         "if_prediction_supported",
         "if_opposite_trend",
         "if_no_clear_change",

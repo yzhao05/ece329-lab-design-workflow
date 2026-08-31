@@ -1437,13 +1437,33 @@ class RuleBasedStageGenerator:
             theory_relation_ids = []
 
         if stage is Stage.IDEA_BRAINSTORMING:
+            saved_observations = structured_requirements.get(
+                "observed_quantities", []
+            )
+            saved_observations = (
+                [str(item).strip() for item in saved_observations if str(item).strip()]
+                if isinstance(saved_observations, list)
+                else []
+            )
+            saved_interactions = structured_requirements.get(
+                "required_behaviors", []
+            )
+            saved_interactions = (
+                [str(item).strip() for item in saved_interactions if str(item).strip()]
+                if isinstance(saved_interactions, list)
+                else []
+            )
             return StepOutput(
                 assistant_message="已将你的初步想法整理为Unity VR模拟实验的设计起点。",
                 stage_payload={
                     "original_idea": idea,
                     "normalized_idea": f"围绕“{idea}”设计ECE329交互式模拟实验",
-                    "target_phenomenon": topics[0],
-                    "possible_vr_interactions": [
+                    "target_phenomenon": (
+                        "；".join(saved_observations)
+                        if saved_observations
+                        else latest_stage_input or topics[0]
+                    ),
+                    "possible_vr_interactions": saved_interactions or [
                         "抓取、移动或旋转具有明确物理意义的实验对象",
                         "通过带单位和适用范围的控件调整主要参数",
                         "在固定观察位置或移动探测器后读取理论反馈",
