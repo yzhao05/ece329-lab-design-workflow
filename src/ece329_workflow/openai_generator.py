@@ -379,6 +379,7 @@ def _compact_intent_response_schema() -> dict[str, Any]:
                             "enum": ["MERGE", "REPLACE", "CLEAR", "EXECUTE"],
                         },
                         "content": {"type": "string"},
+                        "source_text": {"type": "string"},
                         "semantic_key": {"type": "string"},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     },
@@ -387,6 +388,7 @@ def _compact_intent_response_schema() -> dict[str, Any]:
                         "target",
                         "operation",
                         "content",
+                        "source_text",
                         "semantic_key",
                         "confidence",
                     ],
@@ -558,6 +560,40 @@ def _dialogue_act_writes_state(act: Any) -> bool:
         if isinstance(content.get("comparison_updates"), list)
     )
     return valid_design_update or valid_stage_update or valid_comparison_update
+
+
+def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
+    """Return substantial source text not accounted for by semantic acts.
+
+    The model supplies exact ``source_text`` spans.  Coverage is deliberately
+    independent of domain vocabulary, stage number and command keywords: it
+    only verifies that a long turn was not partially ignored.  Older model
+    responses without any spans remain compatible and simply skip this audit.
+    """
+
+    if not isinstance(acts, list):
+        return ""
+    spans = [
+        str(act.get("source_text") or "").strip()
+        for act in acts
+        if isinstance(act, dict) and str(act.get("source_text") or "").strip()
+    ]
+    if not spans:
+        return ""
+    remaining = str(user_message or "")
+    matched = 0
+    for span in spans:
+        index = remaining.find(span)
+        if index < 0:
+            continue
+        remaining = f"{remaining[:index]} {remaining[index + len(span):]}"
+        matched += 1
+    if matched == 0:
+        return str(user_message or "").strip()[:1200]
+    substantive = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", remaining)
+    if len(substantive) < 6:
+        return ""
+    return remaining.strip()[:1200]
 
 
 def _parse_intent_response(
@@ -1859,6 +1895,8 @@ class OpenAIStageGenerator:
                 "content若包含可执行修复，也必须写成JSON对象字符串，并可包含design_updates、"
                 "stage_field_updates和comparison_updates。课程提问、参考请求、总结请求、纠错和"
                 "控制动作必须分别列出。"
+                "每个动作的source_text必须逐字复制它所依据的最小学生原文片段；所有source_text"
+                "必须覆盖本轮全部独立要求，不能遗漏较早出现的修改。"
                 "不能把整条混合消息塞进一个字段；能确定的动作照常返回，剩余片段才用UNRESOLVED。"
             ),
             "input": [
@@ -1910,7 +1948,10 @@ class OpenAIStageGenerator:
                 "previous_question预设的格式回答。同一句可以同时包含：回答当前问题、补充或修改"
                 "其他设计字段、修改基础比较、提出课程问题、索取参考或总结、纠正助手理解，以及"
                 "继续或返回等控制动作。必须逐项拆开，不能把整句复制进一个动作，也不能因为一项"
-                "不清楚就丢弃其他清楚项。每个动作包含type、target、operation、content、confidence，"
+                "不清楚就丢弃其他清楚项。每个动作包含type、target、operation、content、confidence"
+                "和source_text；source_text必须逐字复制该动作所依据的最小学生原文片段。所有动作的"
+                "source_text合起来必须覆盖本轮每一项回答、修改、补充、问题、反馈和控制要求，不能只"
+                "覆盖最后一项；连接词和标点不必单独覆盖。"
                 "设计内容动作还应包含semantic_key。semantic_key是简短、稳定、与措辞无关的物理含义"
                 "标识；同一字段中语义等价的说法必须返回相同semantic_key。每个设计动作只表达一个"
                 "原子含义，同一句涉及多个字段或同一字段中的多个独立要点时必须拆成多个动作；"
@@ -1924,6 +1965,11 @@ class OpenAIStageGenerator:
                 "pending_action.editable_field_bindings把页面上学生实际看到的栏目名称映射到规范化字段。"
                 "学生补充或修改某个可见栏目时，必须使用绑定中的canonical_field作为动作target；例如"
                 "EMVR设计起点里的‘目标现象’对应observations，‘可用交互/核心操作’对应interactions。"
+                "字段角色必须按物理因果链区分：course_relationship/theoretical_framework只保存用于解释"
+                "实验的课程概念、定律或公式；interactions只保存学生在VR中能够执行的动作、操控和直接"
+                "反馈，不能保存理论说明；independent_variable只保存学生或系统主动改变的输入参数，"
+                "observations只保存随输入变化而观察、计算或显示的响应现象。一个句子同时描述操作、"
+                "输入量和响应量时必须拆成不同动作，不能因为它们出现在同一句里就归入同一栏目。"
                 "这份绑定只用于解析指代，不能据此写入学生没有修改的其他栏目；"
                 "MODIFY_DESIGN_FIELD的target只能是research_object、course_relationship、"
                 "learning_objective、research_question、theoretical_framework、hypothesis、"
@@ -2047,7 +2093,7 @@ class OpenAIStageGenerator:
                 "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
                 "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
                 "必须根据整句含义和carried_context.emvr_merged_requirements返回结构化物理设计解释。快照字段为："
-                "direction_summary、research_summary、research_question、learning_objectives、"
+                "direction_summary、research_summary、course_relationship、research_question、learning_objectives、"
                 "changed_quantities、observed_quantities、comparison_cases、hypothesis、"
                 "required_behaviors、object_constraints、procedure_steps、"
                 "visualization_requirements、design_rationale、design_values、limitations和theory_links。"
@@ -2250,6 +2296,74 @@ class OpenAIStageGenerator:
                     semantic_updates = compact_updates
                     with self._metrics_lock:
                         self._intent_repair_successes += 1
+        # A response can be perfectly valid JSON and still ignore the first
+        # instruction in a long turn.  Exact source-span coverage detects that
+        # omission without relying on a vocabulary of commands or stage names.
+        # Re-run the complete turn through the compact task planner; if some
+        # text is still uncovered, preserve it as a local unresolved act while
+        # allowing every independently understood action to commit.
+        uncovered_text = _uncovered_dialogue_text(
+            user_message,
+            raw.get("dialogue_acts", []),
+        )
+        if uncovered_text:
+            try:
+                compact_raw, compact_value, compact_updates = (
+                    self._recover_compact_intent(intent_input)
+                )
+            except (ModelOutputError, ModelServiceError):
+                pass
+            else:
+                compact_acts = compact_raw.get("dialogue_acts", [])
+                compact_uncovered = _uncovered_dialogue_text(
+                    user_message,
+                    compact_acts,
+                )
+                if isinstance(compact_acts, list) and compact_acts:
+                    if not compact_uncovered:
+                        raw = compact_raw
+                        resolved_value = compact_value
+                        semantic_updates = compact_updates
+                    elif len(compact_uncovered) < len(uncovered_text):
+                        combined_acts = [
+                            *(
+                                raw.get("dialogue_acts", [])
+                                if isinstance(raw.get("dialogue_acts"), list)
+                                else []
+                            ),
+                            *compact_acts,
+                        ]
+                        raw["dialogue_acts"] = combined_acts
+                        raw["dialogue_acts_json"] = json.dumps(
+                            combined_acts,
+                            ensure_ascii=False,
+                        )
+                    uncovered_text = _uncovered_dialogue_text(
+                        user_message,
+                        raw.get("dialogue_acts", []),
+                    )
+                    with self._metrics_lock:
+                        self._intent_repair_successes += 1
+        if uncovered_text:
+            unresolved_act = {
+                "type": "UNRESOLVED",
+                "target": "",
+                "operation": "MERGE",
+                "content": uncovered_text,
+                "source_text": uncovered_text,
+                "semantic_key": "unresolved_turn_fragment",
+                "confidence": 0.7,
+            }
+            current_acts = (
+                raw.get("dialogue_acts", [])
+                if isinstance(raw.get("dialogue_acts"), list)
+                else []
+            )
+            raw["dialogue_acts"] = [*current_acts, unresolved_act]
+            raw["dialogue_acts_json"] = json.dumps(
+                raw["dialogue_acts"],
+                ensure_ascii=False,
+            )
         raw_intent = str(raw.get("intent") or "UNCLEAR")
         raw_dialogue_acts = raw.get("dialogue_acts", [])
         has_executable_dialogue_acts = bool(
@@ -2355,20 +2469,22 @@ class OpenAIStageGenerator:
                             "previous_question、proposal、candidate_answer与整条学生消息重新判断："
                             "若学生认可原草稿，返回ACCEPT_PREVIOUS_PROPOSAL；若学生增加、替换或"
                             "纠正了对象、操作、条件、观察量、目标或解释，返回"
-                            "MODIFY_PREVIOUS_PROPOSAL，resolved_value_json只写实质修改内容；"
-                             "若candidate_answer保存了上一轮实质补充，而学生说明上一轮就是在"
+                            "MODIFY_PREVIOUS_PROPOSAL，并把每项实质修改拆成字段级dialogue_acts；"
+                            "若candidate_answer保存了上一轮实质补充，而学生说明上一轮就是在"
                             "回应草稿，应把candidate_answer当作本轮需要执行的原始学生修改，返回"
-                            "MODIFY_PREVIOUS_PROPOSAL，并把candidate_answer作为resolved_value；"
-                            "同时必须为其中每个修改生成design_updates、comparison_updates或"
-                            "emvr_design_update。新增且不属于已有基础比较组的维度使用"
+                            "MODIFY_PREVIOUS_PROPOSAL，并为其中每个独立要求生成明确target、operation"
+                            "和content的dialogue_act；不得把candidate_answer整段写入resolved_value"
+                            "或当前待办字段。编译后的design_updates、comparison_updates和"
+                            "emvr_design_update只能作为这些动作的投影。新增且不属于已有基础比较组的维度使用"
                             "comparison_updates.action=CREATE。只有语义仍确实无法确定时才返回UNCLEAR。"
                         )
                         if pending_type in CONFIRMATION_PENDING_TYPES
                         else (
                             "上一份结构化判断没有解决当前阶段的开放问题。请重新判断同一条"
                             "学生消息：若它在语义上回答了previous_question，intent返回"
-                            "ANSWER_CURRENT_QUESTION，并在semantic_updates_json中返回"
-                            "pending_answer_status=CLEAR；若学生正在请求当前问题的参考、例子或"
+                            "ANSWER_CURRENT_QUESTION，并生成一个或多个字段级"
+                            "ANSWER_PENDING_QUESTION动作；semantic_updates_json中的"
+                            "pending_answer_status=CLEAR仅作兼容摘要。若学生正在请求当前问题的参考、例子或"
                             "可能判断，返回REQUEST_MORE_EXAMPLES。不能同时返回"
                             "ANSWER_CURRENT_QUESTION和MISSING，也不要仅因为学生用陈述句或"
                             "综合段落作答就返回UNCLEAR。"
@@ -2473,35 +2589,30 @@ class OpenAIStageGenerator:
             and not str(pending_action.get("candidate_answer") or "").strip()
         ):
             # An open question has nothing to accept until a reference or a
-            # saved candidate exists. Bind the student's substantive turn to
-            # the exact pending subject instead of silently accepting a null
-            # proposal and reopening the same question.
-            raw["intent"] = "ANSWER_CURRENT_QUESTION"
+            # previously field-bound candidate exists.  A mistaken ACCEPT from
+            # the semantic service therefore cannot authorize copying the full
+            # utterance into the pending field: the turn may contain a
+            # cross-field edit, comparison change, question and control action.
+            unresolved_act = {
+                "type": "UNRESOLVED",
+                "target": "",
+                "operation": "MERGE",
+                "content": user_message,
+                "source_text": user_message,
+                "semantic_key": "unresolved_open_question_acceptance",
+                "confidence": 0.7,
+            }
+            raw["intent"] = "UNCLEAR"
             raw["target"] = str(pending_action.get("subject") or "")
-            raw["resolved_value_json"] = json.dumps(
-                user_message,
+            raw["resolved_value_json"] = None
+            raw["dialogue_acts"] = [unresolved_act]
+            raw["dialogue_acts_json"] = json.dumps(
+                [unresolved_act],
                 ensure_ascii=False,
             )
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
-            resolved_value = user_message
-            required_facet = required_pending_facet_id(pending_action)
-            if required_facet is not None:
-                semantic_updates = {
-                    **semantic_updates,
-                    "facet_updates": [
-                        {
-                            "facet_id": required_facet,
-                            "status": "CLEAR",
-                            "operation": "REPLACE",
-                            "value": user_message,
-                        }
-                    ],
-                }
-            else:
-                semantic_updates = {
-                    **semantic_updates,
-                    "pending_answer_status": "CLEAR",
-                }
+            resolved_value = None
+            semantic_updates = {}
         elif (
             repaired_intent == "UNCLEAR"
             and pending_type in OPEN_QUESTION_PENDING_TYPES
@@ -2521,60 +2632,74 @@ class OpenAIStageGenerator:
             and pending_type in OPEN_QUESTION_PENDING_TYPES
             and not explicitly_unanswered
         ):
-            # The model has twice seen the complete pending-question context
-            # and has not marked the question unanswered, a reference request,
-            # a course question, or a multi-action turn.  Recover the single
-            # answer as the same field-level action required from a successful
-            # parse.  This fixes the old bug where an outer ANSWER intent was
-            # created but then correctly discarded because its authoritative
-            # action array was empty.
-            answer_target = str(pending_action.get("subject") or "")
-            answer_act = {
-                "type": "ANSWER_PENDING_QUESTION",
-                "target": answer_target,
-                "operation": "REPLACE",
+            # Two failed semantic passes do not prove that the whole message
+            # answers the visible field.  Preserve it as unresolved content;
+            # copying it into the pending field is precisely how comparison
+            # edits used to end up inside learning objectives.
+            unresolved_act = {
+                "type": "UNRESOLVED",
+                "target": "",
+                "operation": "MERGE",
                 "content": user_message,
-                "confidence": 0.72,
+                "source_text": user_message,
+                "semantic_key": "unresolved_open_question_response",
+                "confidence": 0.7,
             }
-            raw["intent"] = "ANSWER_CURRENT_QUESTION"
-            raw["target"] = answer_target
-            raw["resolved_value_json"] = json.dumps(
-                user_message,
-                ensure_ascii=False,
-            )
-            raw["dialogue_acts"] = [answer_act]
+            raw["intent"] = "UNCLEAR"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = None
+            raw["dialogue_acts"] = [unresolved_act]
             raw["dialogue_acts_json"] = json.dumps(
-                [answer_act],
+                [unresolved_act],
                 ensure_ascii=False,
             )
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
-            resolved_value = user_message
+            resolved_value = None
             semantic_updates = {}
-        elif confirmed_candidate_modification:
-            # The first pass already understood the short turn as acceptance.
-            # If reparsing the saved candidate still cannot produce field-level
-            # actions, its outer compatibility intent (UNCLEAR, ACCEPT, etc.)
-            # must not reopen the same confirmation. Do not pretend the raw
-            # candidate is a safe design update; consume ACCEPT and let the
-            # state machine preserve the existing normalized design.
-            accept_act = {
-                "type": "CONTROL",
-                "target": "ACCEPT",
-                "operation": "EXECUTE",
-                "content": None,
-                "confidence": 0.98,
-            }
+        elif (
+            confirmed_candidate_modification
+            and isinstance(pending_action, dict)
+            and pending_action.get("candidate_binding_authorized") is True
+        ):
+            # System-authored references and previously validated single-field
+            # candidates can be accepted safely. Raw text retained after a
+            # failed parse carries candidate_binding_authorized=False and never
+            # enters this path.
             raw["intent"] = "ACCEPT_PREVIOUS_PROPOSAL"
             raw["target"] = str(pending_action.get("subject") or "")
             raw["resolved_value_json"] = None
-            raw["dialogue_acts"] = [accept_act]
+            raw["advance_requested"] = True
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = None
+            semantic_updates = {
+                **semantic_updates,
+                "control_actions": ["ACCEPT"],
+            }
+        elif confirmed_candidate_modification:
+            # The short confirmation cannot make an unparsed candidate safe.
+            # Preserve it for one local retry, but never advance while silently
+            # dropping the requested modification or binding it to the current
+            # stage field.
+            candidate_text = str(
+                pending_action.get("candidate_answer") or ""
+            ).strip()
+            unresolved_act = {
+                "type": "UNRESOLVED",
+                "target": "",
+                "operation": "MERGE",
+                "content": candidate_text,
+                "source_text": candidate_text,
+                "semantic_key": "unresolved_candidate_revision",
+                "confidence": 0.7,
+            }
+            raw["intent"] = "UNCLEAR"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = None
+            raw["dialogue_acts"] = [unresolved_act]
             raw["dialogue_acts_json"] = json.dumps(
-                [accept_act], ensure_ascii=False
+                [unresolved_act], ensure_ascii=False
             )
-            raw["advance_requested"] = bool(
-                pending_action.get("advance_on_accept") is True
-                or pending_action.get("type") == "CONFIRM_STAGE_OR_MODIFY"
-            )
+            raw["advance_requested"] = False
             raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
             resolved_value = None
             semantic_updates = {}

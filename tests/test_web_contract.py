@@ -77,7 +77,7 @@ class WebFrontendContractTests(unittest.TestCase):
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260830-guided-flow",
+            "assets/app.js?v=20260901-builder-pdf",
             self.index_html,
         )
 
@@ -85,10 +85,14 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('id="taskReportCard"', self.index_html)
         self.assertIn('id="taskReportSections"', self.index_html)
         self.assertIn('id="downloadReportButton"', self.index_html)
+        self.assertIn('id="downloadBuilderInputButton"', self.index_html)
         self.assertIn("function renderTaskReport()", self.app_js)
         self.assertIn("function downloadTaskReport()", self.app_js)
+        self.assertIn("function downloadBuilderInput()", self.app_js)
         self.assertIn("response.task_report", self.app_js)
         self.assertIn("response.report_ready === true", self.app_js)
+        self.assertIn("response.builder_input_ready === true", self.app_js)
+        self.assertIn("response.builder_input_url", self.app_js)
 
     def test_quality_review_versions_and_guided_export_are_visible(self) -> None:
         self.assertIn('id="qualityReviewCard"', self.index_html)

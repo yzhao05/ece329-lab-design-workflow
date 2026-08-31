@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Lock
 
 from ece329_workflow.api import WorkflowAPI
+from ece329_workflow.builder_input import build_builder_gate1_input
 from ece329_workflow.dialogue_state import (
     UserIntent,
     deterministic_intent,
@@ -37,7 +38,7 @@ from ece329_workflow.guardrails import (
 )
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.idea_development import initialize_idea_development
-from ece329_workflow.models import DesignSession, InteractionState, Stage
+from ece329_workflow.models import DesignSession, InteractionState, Stage, StageCompletionError
 from ece329_workflow.stages import public_stage_catalog, stage_title
 
 
@@ -78,6 +79,7 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
     def __init__(self) -> None:
         self.next_intent: UserIntent | None = None
         self.next_emvr_update: dict | None = None
+        self.next_dialogue_acts: list[dict] | None = None
         self.next_advance_requested: bool | None = None
         self.generated_carried_contexts: list[dict] = []
 
@@ -97,6 +99,8 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
         if self.next_emvr_update is not None:
             semantic_updates["emvr_design_update"] = self.next_emvr_update
             self.next_emvr_update = None
+        dialogue_acts = self.next_dialogue_acts or []
+        self.next_dialogue_acts = None
         advance_requested = self.next_advance_requested
         self.next_advance_requested = None
         return resolved_intent(
@@ -112,6 +116,8 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
             confidence=0.99,
             source="SEMANTIC_TEST",
             semantic_updates=semantic_updates,
+            dialogue_acts=dialogue_acts,
+            actions_authoritative=bool(dialogue_acts),
         )
 
     def generate(self, session, user_message):
@@ -743,6 +749,15 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(unclear["stage_payload"]["clarification_required"])
 
         generator.next_intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "research_object",
+                "operation": "REPLACE",
+                "content": brief,
+                "confidence": 0.99,
+            }
+        ]
         recovered = engine.process_turn(
             result["design_id"],
             {"message": "我刚刚就是在回答这个问题"},
@@ -935,7 +950,10 @@ class WorkflowEngineTests(unittest.TestCase):
 
         self.assertTrue(result["report_ready"])
         self.assertTrue(result["report_url"].endswith("/report.pdf"))
+        self.assertTrue(result["builder_input_ready"])
+        self.assertTrue(result["builder_input_url"].endswith("/builder-gate1-input.pdf"))
         self.assertIn("完整设计总结PDF已经生成", result["assistant_message"])
+        self.assertIn("Builder Pack Gate 1", result["assistant_message"])
         self.assertIn("右侧“任务报告”", result["assistant_message"])
         sections = result["task_report"]["sections"]
         setup = next(section for section in sections if section["stage_id"] == Stage.CONCEPTUAL_OR_VR_SETUP.value)
@@ -946,10 +964,42 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertTrue(any(item["label"] == "实验流程" for item in procedure["items"]))
         self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
+        builder_payload = build_builder_gate1_input(
+            engine.store.get(result["design_id"])
+        )
+        self.assertEqual(builder_payload["document"]["target_gate"], "Gate 1 — Brief confirmed")
+        self.assertGreaterEqual(len(builder_payload["objects"]), 5)
+        self.assertGreaterEqual(len(builder_payload["student_tasks"]), 5)
+        self.assertTrue(builder_payload["scene"])
+        self.assertTrue(builder_payload["reuse_requirements"])
+        self.assertTrue(builder_payload["initial_and_action_states"])
+        self.assertTrue(builder_payload["acceptance_and_evidence"])
+        self.assertTrue(builder_payload["builder_runtime_constraints"])
+        self.assertIn(
+            "unresolved",
+            json.dumps(builder_payload, ensure_ascii=False),
+        )
+        self.assertTrue(
+            engine.render_builder_input_pdf(result["design_id"]).startswith(b"%PDF")
+        )
         self.assertNotRegex(
             json.dumps(result["task_report"], ensure_ascii=False),
             r"(?:由|来自)阶段\s*\d+|阶段\s*\d+\s*(?:确定|补充|处理)",
         )
+
+    def test_builder_gate1_pdf_requires_completed_emvr_design(self) -> None:
+        guided_engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        guided = guided_engine.create_design("我想研究静电场")
+        with self.assertRaisesRegex(StageCompletionError, "只适用于EMVR设计"):
+            guided_engine.render_builder_input_pdf(guided["design_id"])
+
+        emvr_engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        emvr = emvr_engine.create_design(
+            "请用EMVR完善一个静电场实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        with self.assertRaisesRegex(StageCompletionError, "EMVR设计完成后"):
+            emvr_engine.render_builder_input_pdf(emvr["design_id"])
 
     def test_emvr3_revisions_research_focus_and_theory_stay_connected(self) -> None:
         generator = ContextAwareEMVRGenerator()
@@ -983,7 +1033,7 @@ class WorkflowEngineTests(unittest.TestCase):
             "连接或形成低场区域的空间分布"
         )
         generator.next_emvr_update = {
-            "research_summary": research_focus,
+            "research_question": research_focus,
             "changed_quantities": ["两个电荷之间的距离从远到近连续变化"],
             "observed_quantities": ["场线弯曲程度", "两电荷之间的场线空间分布"],
             "comparison_cases": ["同种电荷", "异种电荷"],
@@ -993,18 +1043,75 @@ class WorkflowEngineTests(unittest.TestCase):
                 {
                     "relation_id": "ELECTRIC_SOURCE_FIELD",
                     "supports_design_content": "计算每个电荷在观察位置产生的电场",
+                    "supports_design_fields": [
+                        "research_question",
+                        "observations",
+                    ],
                 },
                 {
                     "relation_id": "FIELD_SUPERPOSITION",
                     "supports_design_content": "解释两电荷场线在距离变化时的合成分布",
+                    "supports_design_fields": [
+                        "research_question",
+                        "observations",
+                    ],
                 },
             ],
         }
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "research_question",
+                "operation": "REPLACE",
+                "content": research_focus,
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "independent_variable",
+                "operation": "REPLACE",
+                "content": "两个电荷之间的距离从远到近连续变化",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "observations",
+                "operation": "REPLACE",
+                "content": ["场线弯曲程度", "两电荷之间的场线空间分布"],
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_COMPARISON",
+                "target": "baseline_comparisons",
+                "operation": "REPLACE",
+                "content": {
+                    "comparison_id": "charge_polarity",
+                    "action": "CREATE",
+                    "cases": ["同种电荷", "异种电荷"],
+                    "replace_all": True,
+                },
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "interactions",
+                "operation": "REPLACE",
+                "content": "拖拽时实时重新计算场线",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "theoretical_framework",
+                "operation": "REPLACE",
+                "content": "库仑定律与电场叠加原理",
+                "confidence": 0.99,
+            },
+        ]
         result = engine.process_turn(result["design_id"], {"message": research_focus})
         self.assertEqual(result["stage_payload"]["main_research_question"], research_focus)
         self.assertEqual(
             generator.generated_carried_contexts[-1]["emvr_merged_requirements"][
-                "research_summary"
+                "research_question"
             ],
             research_focus,
         )
@@ -1042,6 +1149,23 @@ class WorkflowEngineTests(unittest.TestCase):
             "同种电荷靠近时场线向外弯曲，异种电荷靠近时场线由正电荷连接到负电荷，"
             "距离越近变化越明显"
         )
+        generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "hypothesis",
+                "operation": "REPLACE",
+                "content": hypothesis,
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "expected_phenomenon",
+                "operation": "REPLACE",
+                "content": hypothesis,
+                "confidence": 0.99,
+            },
+        ]
         result = engine.process_turn(result["design_id"], {"message": hypothesis})
         self.assertEqual(result["stage_payload"]["research_hypothesis"], hypothesis)
         self.assertEqual(result["stage_payload"]["expected_trend"], hypothesis)
@@ -1052,6 +1176,23 @@ class WorkflowEngineTests(unittest.TestCase):
             "学生用手柄拖动两个带电物体，改变它们之间的距离，实时观察场线；"
             "两个带电物体本身就是电磁源"
         )
+        generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "interactions",
+                "operation": "REPLACE",
+                "content": "学生用手柄拖动两个带电物体并实时观察场线",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "conceptual_structure",
+                "operation": "MERGE",
+                "content": "两个带电物体本身就是电磁源",
+                "confidence": 0.99,
+            },
+        ]
         result = engine.process_turn(result["design_id"], {"message": setup})
         generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
         setup_revision = "场线必须随拖拽实时重新计算；两个带电物体就是源，不额外增设源对象"
@@ -1073,8 +1214,33 @@ class WorkflowEngineTests(unittest.TestCase):
                 },
             ],
         }
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "interactions",
+                "operation": "REPLACE",
+                "content": "场线随拖拽实时重新计算",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "conceptual_structure",
+                "operation": "MERGE",
+                "content": ["两个带电物体就是源", "不额外增设源对象"],
+                "confidence": 0.99,
+            },
+        ]
         result = engine.process_turn(result["design_id"], {"message": setup_revision})
-        self.assertIn(setup_revision, result["stage_payload"]["student_constraints"])
+        self.assertTrue(
+            any(
+                "两个带电物体就是源" in item and "不额外增设源对象" in item
+                for item in result["stage_payload"]["student_constraints"]
+            )
+        )
+        self.assertIn(
+            "场线随拖拽实时重新计算",
+            json.dumps(result["stage_payload"], ensure_ascii=False),
+        )
         source_object = result["stage_payload"]["object_inventory"][1]
         self.assertIn("不额外创建重复电磁源", source_object["purpose"])
         self.assertIn("不把预设动画或固定序列当作实验结果", result["stage_payload"]["physics_layer"]["update_policy"])
@@ -2615,6 +2781,43 @@ class WorkflowAPITests(unittest.TestCase):
         self.assertTrue(str(captured["status"]).startswith("200"))
         self.assertEqual(headers["Content-Type"], "application/pdf")
         self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertTrue(body.startswith(b"%PDF"))
+        self.assertGreater(len(body), 5000)
+
+    def test_completed_emvr_builder_gate1_pdf_is_downloadable_with_design_token(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        created = engine.create_design(
+            "请用EMVR完善一个传输线驻波模拟实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        token = created["design_access_token"]
+        result = created
+        while result["workflow_status"] != "complete":
+            result = continue_emvr(engine, result)
+
+        self.assertTrue(result["builder_input_ready"])
+        self.assertTrue(result["builder_input_url"].endswith("/builder-gate1-input.pdf"))
+        api = WorkflowAPI(engine)
+        captured: dict[str, object] = {}
+
+        def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+            captured["status"] = status
+            captured["headers"] = headers
+
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": result["builder_input_url"],
+            "QUERY_STRING": "",
+            "CONTENT_LENGTH": "0",
+            "HTTP_AUTHORIZATION": f"Bearer {token}",
+            "wsgi.input": io.BytesIO(b""),
+        }
+        body = b"".join(api(environ, start_response))
+        headers = dict(captured["headers"])
+
+        self.assertTrue(str(captured["status"]).startswith("200"))
+        self.assertEqual(headers["Content-Type"], "application/pdf")
+        self.assertIn("builder-gate1", headers["Content-Disposition"])
         self.assertTrue(body.startswith(b"%PDF"))
         self.assertGreater(len(body), 5000)
 

@@ -452,6 +452,7 @@ def build_facet_reference_output(session: DesignSession) -> StepOutput:
                 "subject": active,
                 "proposal": {"facet_id": active, "reference": candidate},
                 "candidate_answer": candidate,
+                "candidate_binding_authorized": True,
                 "question": f"请沿着这份参考写出你的“{title}”，或直接说明需要调整的地方。",
                 "allowed_intents": [
                     "ANSWER_CURRENT_QUESTION",

@@ -543,6 +543,100 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             transport.requests[1]["instructions"],
         )
 
+    def test_long_multi_command_turn_recovers_omitted_first_revision(self) -> None:
+        question = "距离从远到近变化时，两种电荷配置的场线重排有何差异？"
+        message = (
+            f"把研究问题改为“{question}”；"
+            "同时把距离和相对方向都加入VR中可调内容。"
+        )
+        second_clause = "同时把距离和相对方向都加入VR中可调内容"
+        rich_missing_first = {
+            "intent": "MODIFY_PREVIOUS_PROPOSAL",
+            "target": "independent_variable",
+            "resolved_value_json": json.dumps(
+                ["两个物体之间的距离", "两个物体的相对方向"],
+                ensure_ascii=False,
+            ),
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "independent_variable",
+                        "operation": "REPLACE",
+                        "content": ["两个物体之间的距离", "两个物体的相对方向"],
+                        "source_text": second_clause,
+                        "semantic_key": "charge_separation_and_orientation",
+                        "confidence": 0.99,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.99,
+        }
+        compact_complete = {
+            "actions": [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": question,
+                    "source_text": f"把研究问题改为“{question}”",
+                    "semantic_key": "distance_polarity_field_line_question",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "independent_variable",
+                    "operation": "REPLACE",
+                    "content": "两个物体之间的距离和相对方向",
+                    "source_text": second_clause,
+                    "semantic_key": "charge_separation_and_orientation",
+                    "confidence": 0.99,
+                },
+            ]
+        }
+        transport = FakeTransport(outputs=[rich_missing_first, compact_complete])
+        session = guided_session(
+            stage_index=list(Stage).index(Stage.RESEARCH_QUESTION)
+        )
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.RESEARCH_QUESTION.value,
+            "answer_fields": [
+                "research_question",
+                "independent_variable",
+                "observations",
+            ],
+            "proposal": {"research_question": "原研究问题"},
+            "question": "请核对当前研究问题。",
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            pending,
+            {"research_question": "原研究问题"},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        design_updates = result["semantic_updates"]["design_updates"]
+        stage_updates = result["semantic_updates"]["stage_field_updates"]
+        self.assertEqual(design_updates[0]["field"], "research_question")
+        self.assertEqual(design_updates[0]["value"], question)
+        self.assertEqual(stage_updates[0]["field"], "independent_variable")
+        self.assertIn("距离", str(stage_updates[0]["value"]))
+        self.assertIn("相对方向", str(stage_updates[0]["value"]))
+
     def test_omitted_actions_in_long_variable_answer_use_compact_field_split(self) -> None:
         answer = (
             "把距离和相对方向作为自变量，观察中间区域的场线弯曲与连接，"
@@ -774,6 +868,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             "question": "是否保留当前材料对照？",
             "candidate_answer": candidate,
             "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "candidate_binding_authorized": True,
             "allowed_intents": [
                 "ACCEPT_PREVIOUS_PROPOSAL",
                 "MODIFY_PREVIOUS_PROPOSAL",
@@ -1014,19 +1109,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         )
 
         self.assertEqual(len(transport.requests), 2)
-        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
-        self.assertEqual(result["resolved_value"], answer)
-        self.assertEqual(
-            result["semantic_updates"]["facet_updates"],
-            [
-                {
-                    "facet_id": "research_question",
-                    "status": "CLEAR",
-                    "operation": "REPLACE",
-                    "value": answer,
-                }
-            ],
-        )
+        self.assertEqual(result["intent"], "UNCLEAR")
+        self.assertIsNone(result["resolved_value"])
+        self.assertFalse(result["semantic_updates"].get("design_updates"))
+        self.assertFalse(result["semantic_updates"].get("facet_updates"))
+        self.assertTrue(result["unresolved_content"])
 
     def test_explicit_structured_no_direction_is_not_forced_into_an_answer(self) -> None:
         response = {
@@ -1097,6 +1184,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             "proposal": {"observations": ["电场线"]},
             "candidate_answer": candidate,
             "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "candidate_binding_authorized": True,
             "allowed_intents": [
                 "ACCEPT_PREVIOUS_PROPOSAL",
                 "MODIFY_PREVIOUS_PROPOSAL",
@@ -1137,6 +1225,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             "proposal": {"observations": ["电场线"]},
             "candidate_answer": candidate,
             "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "candidate_binding_authorized": True,
             "allowed_intents": [
                 "ACCEPT_PREVIOUS_PROPOSAL",
                 "MODIFY_PREVIOUS_PROPOSAL",
@@ -1315,7 +1404,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("MODIFY_PREVIOUS_PROPOSAL", repair_text)
         self.assertIn("candidate_answer", repair_text)
 
-    def test_open_question_context_binding_prevents_repeat_in_both_modes(self) -> None:
+    def test_two_unclear_parses_do_not_autofill_open_questions_in_either_mode(self) -> None:
         student_answers = {
             "guided": (
                 guided_session(),
@@ -1364,19 +1453,10 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                     {"research_direction": "比较闭合曲面上的电场与通量"},
                 )
 
-                self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
-                self.assertEqual(result["resolved_value"], answer)
-                if label == "guided":
-                    facet_update = result["semantic_updates"]["facet_updates"][0]
-                    self.assertEqual(facet_update["facet_id"], "research_question")
-                    self.assertEqual(facet_update["status"], "CLEAR")
-                    self.assertEqual(facet_update["operation"], "REPLACE")
-                    self.assertEqual(facet_update["value"], answer)
-                else:
-                    self.assertEqual(
-                        result["semantic_updates"]["pending_answer_status"],
-                        "CLEAR",
-                    )
+                self.assertIn(result["intent"], {"UNCLEAR", "REQUEST_MORE_EXAMPLES"})
+                self.assertIsNone(result["resolved_value"])
+                self.assertFalse(result["semantic_updates"].get("design_updates"))
+                self.assertFalse(result["semantic_updates"].get("stage_field_updates"))
 
     def test_reference_request_is_not_forced_into_contextual_answer(self) -> None:
         output = {

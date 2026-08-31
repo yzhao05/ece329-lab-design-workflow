@@ -1484,12 +1484,16 @@ class RuleBasedStageGenerator:
                 or latest_stage_input
                 or f"围绕“{idea}”比较学生主动改变条件前后的空间电磁分布"
             )
+            course_relationship = str(
+                structured_requirements.get("course_relationship") or ""
+            ).strip()
             return StepOutput(
                 assistant_message="已选择兼顾ECE329相关性、理论可解释性和VR交互价值的实验方向。",
                 stage_payload={
                     "primary_topic": topics[0],
                     "secondary_topics": topics[1:],
                     "selected_direction": selected_direction,
+                    "course_relationship": course_relationship,
                     "student_revisions": stage_inputs,
                     "course_references": _course_references(design_text),
                     "vr_suitability": "参数可调、结果可计算、现象可空间化展示",

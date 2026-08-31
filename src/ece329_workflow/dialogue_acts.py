@@ -242,6 +242,12 @@ def normalize_dialogue_acts(
             "content": content,
             "confidence": max(0.0, min(confidence, 1.0)),
         }
+        # Exact source spans let the resolver prove that every independent
+        # request in a long turn was considered. They are trace metadata only
+        # and never influence which field is writable.
+        source_text = str(item.get("source_text") or "").strip()[:1200]
+        if source_text:
+            normalized["source_text"] = source_text
         semantic_key = str(item.get("semantic_key") or "").strip()[:180]
         if semantic_key:
             normalized["semantic_key"] = semantic_key

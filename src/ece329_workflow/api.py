@@ -193,6 +193,24 @@ class WorkflowAPI:
                     ],
                 )
 
+            builder_input_match = re.fullmatch(
+                r"/v1/designs/([^/]+)/builder-gate1-input\.pdf", path
+            )
+            if method == "GET" and builder_input_match:
+                design_id = builder_input_match.group(1)
+                self._require_design_token(environ, design_id)
+                body = self.engine.render_builder_input_pdf(design_id)
+                safe_name = f"ece329-emvr-builder-gate1-{design_id}.pdf"
+                return self._respond_bytes(
+                    start_response,
+                    HTTPStatus.OK,
+                    body,
+                    [
+                        ("Content-Type", "application/pdf"),
+                        ("Content-Disposition", f'attachment; filename="{safe_name}"'),
+                    ],
+                )
+
             guided_export_match = re.fullmatch(
                 r"/v1/designs/([^/]+)/guided-summary\.txt", path
             )

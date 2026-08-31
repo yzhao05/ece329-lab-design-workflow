@@ -30,6 +30,7 @@ from ece329_workflow.emvr_design import (
     normalize_emvr_design_update,
 )
 from ece329_workflow.design_state import (
+    apply_design_updates,
     design_state_snapshot,
     ensure_design_state,
     set_baseline_comparisons,
@@ -1128,7 +1129,7 @@ class DialogueStateTests(unittest.TestCase):
                     "content": summary,
                     "confidence": 0.99,
                 }
-            ]
+            ],
         )
         engine = WorkflowEngine(generator=generator)
         session = DesignSession(
@@ -1490,8 +1491,14 @@ class DialogueStateTests(unittest.TestCase):
             interaction_state=InteractionState.EMVR_DIRECT,
         )
 
-        self.assertEqual(guided["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
-        self.assertEqual(emvr["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value)
+        self.assertEqual(
+            guided["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+        )
+        self.assertEqual(
+            emvr["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        )
+        self.assertEqual(guided["resolved_value"], message)
+        self.assertEqual(emvr["resolved_value"], message)
 
     def test_semantic_mode_and_course_scope_are_schema_validated(self) -> None:
         validated = validate_resolved_intent(
@@ -1566,10 +1573,25 @@ class DialogueStateTests(unittest.TestCase):
                                 semantic_updates={},
                             )
                         return resolved_intent(
-                            UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                            UserIntent.ANSWER_CURRENT_QUESTION,
                             target=facet_id,
+                            resolved_value=str(
+                                pending_action.get("candidate_answer") or ""
+                            ),
                             confidence=0.98,
                             source="SEMANTIC_TEST",
+                            semantic_updates={
+                                "facet_updates": [
+                                    {
+                                        "facet_id": facet_id,
+                                        "status": "CLEAR",
+                                        "operation": "REPLACE",
+                                        "value": str(
+                                            pending_action.get("candidate_answer") or ""
+                                        ),
+                                    }
+                                ]
+                            },
                         )
 
                 generator = FacetConfirmationGenerator()
@@ -1660,10 +1682,14 @@ class DialogueStateTests(unittest.TestCase):
                                 semantic_updates={},
                             )
                         return resolved_intent(
-                            UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                            UserIntent.ANSWER_CURRENT_QUESTION,
                             target=stage.value,
+                            resolved_value=str(
+                                pending_action.get("candidate_answer") or ""
+                            ),
                             confidence=0.98,
                             source="SEMANTIC_TEST",
+                            semantic_updates={"pending_answer_status": "CLEAR"},
                         )
 
                     def generate(self, session, user_message):
@@ -1867,7 +1893,7 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(output.assistant_message, assistant)
         self.assertNotIn("repeated_question_avoided", output.stage_payload)
 
-    def test_repeated_substantive_candidate_closes_facet_after_parser_unclear(self) -> None:
+    def test_repeated_unparsed_candidate_never_autofills_a_facet(self) -> None:
         class AlwaysUnclearGenerator(RuleBasedStageGenerator):
             def resolve_intent(self, session, user_message, pending_action, carried_context):
                 return resolved_intent(
@@ -1884,7 +1910,7 @@ class DialogueStateTests(unittest.TestCase):
 
         first = engine.process_turn(session.design_id, {"message": answer})
         self.assertTrue(first["stage_payload"]["clarification_required"])
-        self.assertIn("已经保留", first["assistant_message"])
+        self.assertIn("保留", first["assistant_message"])
 
         second = engine.process_turn(
             session.design_id,
@@ -1894,11 +1920,11 @@ class DialogueStateTests(unittest.TestCase):
         facet = second["stage_payload"]["idea_development_status"][
             "facets_by_id"
         ]["research_question"]
-        self.assertEqual(facet["status"], "CLEAR")
-        self.assertEqual(facet["evidence"], answer)
-        self.assertNotIn("请把当前想法压缩", second["assistant_message"])
+        self.assertEqual(facet["status"], "MISSING")
+        self.assertEqual(facet["evidence"], "")
+        self.assertIn("没有写入", second["assistant_message"])
 
-    def test_pending_candidate_has_model_independent_confirmation_action(self) -> None:
+    def test_unparsed_pending_candidate_has_no_direct_confirmation_action(self) -> None:
         session = idea_facet_session("design_pending_candidate_ui_action")
         candidate = "比较同种与异种电荷靠近时，场线如何随距离变化"
         pending = record_pending_clarification(session, candidate)
@@ -1906,25 +1932,9 @@ class DialogueStateTests(unittest.TestCase):
 
         output = clarification_output(pending)
         choices = output.stage_payload["clarification_choices"]
-        accept = next(
-            item for item in choices if item["option_id"].startswith("pending_accept::")
-        )
-        resolved = deterministic_intent(
-            accept["label"],
-            pending,
-            selected_option_id=accept["option_id"],
-        )
-        assert resolved is not None
-        validated = validate_resolved_intent(resolved, pending)
-
-        self.assertEqual(
-            validated["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
-        )
-        self.assertEqual(validated["resolved_value"], candidate)
-        self.assertEqual(
-            validated["semantic_updates"]["facet_updates"],
-            [{"facet_id": "research_question", "status": "CLEAR"}],
-        )
+        self.assertEqual(choices, [])
+        self.assertFalse(pending["candidate_binding_authorized"])
+        self.assertIn("没有把它写进这一项", output.assistant_message)
 
     def test_pending_confirmation_action_applies_to_every_open_question_type(self) -> None:
         for pending_type, interaction_state in (
@@ -1939,6 +1949,7 @@ class DialogueStateTests(unittest.TestCase):
                     "question": "请补充当前设计项。",
                     "proposal": {"stage": Stage.VARIABLES_AND_CONDITIONS.value},
                     "candidate_answer": "改变距离，观察场线，并保持源强不变",
+                    "candidate_binding_authorized": True,
                     "interaction_state": interaction_state.value,
                     "allowed_intents": [
                         UserIntent.ANSWER_CURRENT_QUESTION.value,
@@ -3309,10 +3320,25 @@ class DialogueStateTests(unittest.TestCase):
                         semantic_updates={},
                     )
                 return resolved_intent(
-                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                    UserIntent.ANSWER_CURRENT_QUESTION,
                     target="research_question",
+                    resolved_value=str(
+                        pending_action.get("candidate_answer") or ""
+                    ),
                     confidence=0.98,
                     source="SEMANTIC_TEST",
+                    semantic_updates={
+                        "facet_updates": [
+                            {
+                                "facet_id": "research_question",
+                                "status": "CLEAR",
+                                "operation": "REPLACE",
+                                "value": str(
+                                    pending_action.get("candidate_answer") or ""
+                                ),
+                            }
+                        ]
+                    },
                 )
 
         generator = CandidateConfirmationGenerator()
@@ -3472,6 +3498,7 @@ class DialogueStateTests(unittest.TestCase):
             "type": "ANSWER_STAGE_QUESTION",
             "subject": Stage.VARIABLES_AND_CONDITIONS.value,
             "candidate_answer": "主动改变距离，观察场线并保持电荷量不变",
+            "candidate_binding_authorized": True,
             "allowed_intents": [
                 UserIntent.ANSWER_CURRENT_QUESTION.value,
                 UserIntent.UNCLEAR.value,
@@ -3507,6 +3534,7 @@ class DialogueStateTests(unittest.TestCase):
             "candidate_answer": (
                 "在VR中拖动两个带电物体改变距离，观察导体与介质附近的电场线变化"
             ),
+            "candidate_binding_authorized": True,
             "allowed_intents": [
                 UserIntent.ANSWER_CURRENT_QUESTION.value,
                 UserIntent.REQUEST_MORE_EXAMPLES.value,
@@ -3594,8 +3622,8 @@ class DialogueStateTests(unittest.TestCase):
         )
         self.assertIsNone(accepted_candidate["resolved_value"])
 
-        # If the next semantic result confirms that the saved turn was a
-        # modification but omits its value, recover the saved content.
+        # A raw candidate retained after an unclear parse is not a field-level
+        # update. A later summary intent cannot make that raw paragraph safe.
         recovered = validate_resolved_intent(
             resolved_intent(
                 UserIntent.MODIFY_PREVIOUS_PROPOSAL,
@@ -3605,8 +3633,8 @@ class DialogueStateTests(unittest.TestCase):
             ),
             stored,
         )
-        self.assertEqual(recovered["resolved_value"], supplement)
-        self.assertEqual(recovered["source"], "CONFIRMED_PENDING_MODIFICATION")
+        self.assertIsNone(recovered["resolved_value"])
+        self.assertEqual(recovered["source"], "SEMANTIC_TEST")
 
     def test_guided_confirmation_recovers_the_same_saved_revision(self) -> None:
         candidate = "补充一个分层介质条件，原有材料对照保持不变"
@@ -4941,6 +4969,437 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn("可修改的参考", guided.assistant_message)
         self.assertIn("当前设计评审", emvr.assistant_message)
         self.assertIn("专业草稿", emvr.assistant_message)
+
+    def test_emvr_field_roles_follow_canonical_dialogue_acts(self) -> None:
+        session = DesignSession(
+            design_id="emvr_canonical_role_isolation",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        acts = [
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "research_object",
+                "operation": "REPLACE",
+                "content": "两个带电物体",
+                "semantic_key": "two_charged_objects",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "course_relationship",
+                "operation": "REPLACE",
+                "content": "库仑定律与叠加原理",
+                "semantic_key": "coulomb_and_superposition",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "interactions",
+                "operation": "REPLACE",
+                "content": "使用手柄拖拽两个带电物体",
+                "semantic_key": "controller_drag_charged_objects",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "independent_variable",
+                "operation": "REPLACE",
+                "content": ["两个物体之间的距离", "两个物体的相对方向"],
+                "semantic_key": "charge_separation_and_orientation",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_STAGE_FIELD",
+                "target": "observations",
+                "operation": "REPLACE",
+                "content": "靠近过程中场线的合并、扭曲和重排",
+                "semantic_key": "field_line_reconfiguration",
+                "confidence": 0.99,
+            },
+        ]
+        generator = MultiActSemanticGenerator(
+            acts,
+            semantic_updates={
+                "emvr_design_update": {
+                    # Deliberately misclassified parallel model output.  The
+                    # state machine must project the canonical acts instead.
+                    "required_behaviors": ["库仑定律与叠加原理共同决定场线"],
+                    "changed_quantities": ["场线的合并、扭曲和重排"],
+                    "observed_quantities": ["两个物体之间的距离"],
+                    "field_updates": [
+                        {
+                            "field_id": "required_behaviors",
+                            "operation": "REPLACE",
+                            "value": ["库仑定律与叠加原理共同决定场线"],
+                        },
+                        {
+                            "field_id": "changed_quantities",
+                            "operation": "REPLACE",
+                            "value": ["场线的合并、扭曲和重排"],
+                        },
+                    ],
+                }
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        engine.store.save(session)
+        engine.process_turn(
+            session.design_id,
+            {"message": "说明研究对象、课程关系、交互、自变量和观察现象。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        merged = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+        self.assertEqual(merged["course_relationship"], "库仑定律与叠加原理")
+        self.assertEqual(
+            merged["required_behaviors"], ["使用手柄拖拽两个带电物体"]
+        )
+        self.assertEqual(
+            merged["changed_quantities"],
+            ["两个物体之间的距离", "两个物体的相对方向"],
+        )
+        self.assertEqual(
+            merged["observed_quantities"],
+            ["靠近过程中场线的合并、扭曲和重排"],
+        )
+
+    def test_emvr_comparison_edit_cannot_fill_learning_objective(self) -> None:
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_COMPARISON",
+                    "target": "charge_polarity_cases",
+                    "operation": "REPLACE",
+                    "content": {
+                        "action": "CREATE",
+                        "title": "电荷极性关系",
+                        "new_cases": ["同种电荷", "异种电荷"],
+                        "semantic_key": "charge_polarity_relation_cases",
+                        "case_semantic_keys": {
+                            "同种电荷": "same_sign_charges",
+                            "异种电荷": "opposite_sign_charges",
+                        },
+                    },
+                    "semantic_key": "charge_polarity_relation_cases",
+                    "confidence": 0.99,
+                }
+            ],
+            semantic_updates={
+                "emvr_design_update": {
+                    # A parallel model snapshot may be stale or misclassified;
+                    # the post-commit canonical comparison must win.
+                    "comparison_cases": ["无损线路", "有损线路"],
+                    "field_updates": [
+                        {
+                            "field_id": "comparison_cases",
+                            "operation": "REPLACE",
+                            "value": ["无损线路", "有损线路"],
+                        }
+                    ],
+                }
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="emvr_comparison_not_objective",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.LEARNING_OBJECTIVES),
+        )
+        save_pending_action(
+            session,
+            Stage.LEARNING_OBJECTIVES,
+            StepOutput(
+                assistant_message="请核对学习目标草稿。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.LEARNING_OBJECTIVES.value,
+                        "proposal": {"learning_objective": "理解场线变化"},
+                    }
+                },
+                student_task="需要修改时直接指出对应内容。",
+            ),
+        )
+        engine.store.save(session)
+
+        engine.process_turn(
+            session.design_id,
+            {"message": "修改基础比较为“同种电荷与异种电荷”。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        snapshot = design_state_snapshot(stored)
+        self.assertEqual(snapshot["learning_objective"], "")
+        self.assertEqual(
+            snapshot["baseline_comparisons"][0]["cases"],
+            ["同种电荷", "异种电荷"],
+        )
+        merged = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+        self.assertEqual(
+            merged["comparison_cases"],
+            ["同种电荷", "异种电荷"],
+        )
+
+    def test_guided_cross_field_edits_do_not_bind_to_visible_pending_item(self) -> None:
+        question = "距离改变时，同种与异种电荷之间的场线形态有何差异？"
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": question,
+                    "semantic_key": "distance_polarity_field_line_question",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_COMPARISON",
+                    "target": "charge_polarity_cases",
+                    "operation": "REPLACE",
+                    "content": {
+                        "action": "CREATE",
+                        "new_cases": ["同种电荷", "异种电荷"],
+                        "semantic_key": "charge_polarity_relation_cases",
+                    },
+                    "semantic_key": "charge_polarity_relation_cases",
+                    "confidence": 0.99,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="guided_cross_field_pending_isolation",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.LEARNING_OBJECTIVES),
+        )
+        save_pending_action(
+            session,
+            Stage.LEARNING_OBJECTIVES,
+            StepOutput(
+                assistant_message="我们来完善学习目标。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "ANSWER_STAGE_QUESTION",
+                        "subject": Stage.LEARNING_OBJECTIVES.value,
+                        "question": "你希望通过实验学会解释什么？",
+                    }
+                },
+                student_task="先说说你的学习目标。",
+            ),
+        )
+        message = (
+            f"先把研究问题改为“{question}”，基础比较改为同种电荷与异种电荷；"
+            "学习目标我稍后再补。"
+        )
+        pending = current_pending_action(session)
+        raw = generator.resolve_intent(session, message, pending, {})
+        validated = validate_resolved_intent(raw, pending)
+        apply_resolved_intent(session, validated, pending, message)
+
+        snapshot = design_state_snapshot(session)
+        self.assertEqual(snapshot["research_question"], question)
+        self.assertEqual(snapshot["learning_objective"], "")
+        self.assertEqual(
+            snapshot["baseline_comparisons"][0]["cases"],
+            ["同种电荷", "异种电荷"],
+        )
+
+    def test_emvr_multiple_revisions_commit_every_named_field(self) -> None:
+        question = (
+            "两个带电物体的距离从远到近变化时，同种与异种电荷配置下的场线"
+            "合并、扭曲和重排有何差异？"
+        )
+        generator = MultiActSemanticGenerator(
+            [
+                {
+                    "type": "MODIFY_DESIGN_FIELD",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": question,
+                    "semantic_key": "distance_polarity_field_line_causal_question",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "independent_variable",
+                    "operation": "MERGE",
+                    "content": "两个带电物体之间的距离",
+                    "semantic_key": "charge_separation_distance",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "independent_variable",
+                    "operation": "MERGE",
+                    "content": "两个带电物体的相对方向",
+                    "semantic_key": "relative_charge_orientation",
+                    "confidence": 0.99,
+                },
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="emvr_multi_revision_all_fields",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+        )
+        save_pending_action(
+            session,
+            Stage.RESEARCH_QUESTION,
+            StepOutput(
+                assistant_message="请核对研究问题草稿。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.RESEARCH_QUESTION.value,
+                        "proposal": {"research_question": "原研究问题"},
+                    }
+                },
+                student_task="可以一次提出多项修改。",
+            ),
+        )
+        engine.store.save(session)
+
+        engine.process_turn(
+            session.design_id,
+            {
+                "message": (
+                    f"把研究问题改为“{question}”；同时把距离和相对方向都加入VR中可调内容。"
+                )
+            },
+        )
+
+        stored = engine.store.get(session.design_id)
+        self.assertEqual(design_state_snapshot(stored)["research_question"], question)
+        variables = stage_design_state_snapshot(stored)["independent_variable"]
+        self.assertIn("两个带电物体之间的距离", variables)
+        self.assertIn("两个带电物体的相对方向", variables)
+        merged = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+        self.assertEqual(merged["research_question"], question)
+        self.assertIn("两个带电物体之间的距离", merged["changed_quantities"])
+        self.assertIn("两个带电物体的相对方向", merged["changed_quantities"])
+
+    def test_cross_field_revision_isolated_from_pending_subject_in_every_stage(self) -> None:
+        """A visible stage prompt must never become an implicit write target."""
+
+        revised_question = "距离变化时，同种与异种电荷的场线分布有何差异？"
+        acts = [
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "research_question",
+                "operation": "REPLACE",
+                "content": revised_question,
+                "semantic_key": "distance_charge_type_field_question",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_COMPARISON",
+                "target": "charge_type_cases",
+                "operation": "REPLACE",
+                "content": {
+                    "action": "CREATE",
+                    "title": "电荷类型",
+                    "new_cases": ["同种电荷", "异种电荷"],
+                    "semantic_key": "charge_type_cases",
+                },
+                "semantic_key": "charge_type_cases",
+                "confidence": 0.99,
+            },
+        ]
+        for interaction_state in (
+            InteractionState.GUIDED_DESIGN,
+            InteractionState.EMVR_DIRECT,
+        ):
+            for stage_index, stage in enumerate(Stage):
+                with self.subTest(mode=interaction_state.value, stage=stage.value):
+                    session = DesignSession(
+                        design_id=(
+                            f"cross_field_{interaction_state.value}_{stage.value}"
+                        ),
+                        interaction_state=interaction_state,
+                        current_stage_index=stage_index,
+                    )
+                    apply_design_updates(
+                        session,
+                        [
+                            {
+                                "field": "learning_objective",
+                                "operation": "REPLACE",
+                                "value": "原学习目标保持不变",
+                            }
+                        ],
+                        provenance="TEST_SETUP",
+                    )
+                    pending = {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "subject": stage.value,
+                        "proposal": {"stage": stage.value},
+                        "interaction_state": interaction_state.value,
+                        "allowed_intents": [
+                            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                            UserIntent.UNCLEAR.value,
+                        ],
+                    }
+                    raw = resolved_intent(
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                        target="research_question",
+                        confidence=0.99,
+                        source="SEMANTIC_TEST",
+                        dialogue_acts=acts,
+                        actions_authoritative=True,
+                        semantic_updates={
+                            "emvr_design_update": {
+                                "learning_objectives": [
+                                    "错误地把整条修改写进当前阶段"
+                                ],
+                                "required_behaviors": ["库仑定律与叠加原理"],
+                                "comparison_cases": ["错误案例"],
+                            }
+                        },
+                    )
+                    validated = validate_resolved_intent(raw, pending)
+                    apply_resolved_intent(
+                        session,
+                        validated,
+                        pending,
+                        "修改研究问题，并把基础比较改为同种电荷与异种电荷",
+                    )
+
+                    snapshot = design_state_snapshot(session)
+                    self.assertEqual(
+                        snapshot["learning_objective"], "原学习目标保持不变"
+                    )
+                    self.assertEqual(snapshot["research_question"], revised_question)
+                    self.assertEqual(
+                        snapshot["baseline_comparisons"][0]["cases"],
+                        ["同种电荷", "异种电荷"],
+                    )
+                    self.assertEqual(session.current_stage, stage)
+                    emvr_update = validated["semantic_updates"].get(
+                        "emvr_design_update"
+                    )
+                    if interaction_state is InteractionState.EMVR_DIRECT:
+                        self.assertFalse(
+                            emvr_update
+                            and emvr_update.get("learning_objectives")
+                        )
+                        self.assertFalse(
+                            emvr_update
+                            and emvr_update.get("required_behaviors")
+                        )
+                        self.assertFalse(
+                            emvr_update
+                            and emvr_update.get("comparison_cases")
+                        )
 
 
 if __name__ == "__main__":

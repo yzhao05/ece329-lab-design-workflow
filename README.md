@@ -12,7 +12,7 @@
 - GUIDED／EMVR状态展示；
 - lecture note概念、公式和页码依据面板；
 - Stage 10理论预测曲线与参数滑块；
-- EMVR阶段草稿、累计任务报告和完成后的PDF下载；
+- EMVR阶段草稿、累计任务报告，以及完成后的学生版设计报告 PDF 与 Builder Gate 1 输入 PDF 下载；
 - 结构化显示设计一致性、因果链、概念可行性、课程追溯与版本差异；
 - GUIDED完成后导出学生自己撰写的设计总结；
 - 浏览器本地会话保存；
@@ -129,7 +129,10 @@ python -m http.server 4173 --directory docs
 - 不创建 Unity 场景或代码；
 - 不修改 Builder Pack；
 - 不替用户批准任何 Gate；
-- EMVR 最终输出只提供可供 Brief/Design 人工审阅的 `builder_pack_handoff`。
+- EMVR 最终输出同时提供学生版设计报告与 Builder Gate 1 输入 PDF。后者按
+  `LabSpecs/templates/lab-brief.template.yaml` 的字段组织，保留
+  `confirmed-from-design-session`、`inferred-needs-confirmation` 和 `unresolved`
+  状态，供 Builder 阶段 1 转写并与用户确认；它不替用户批准 Gate，也不直接修改 Builder Pack。
 
 真正进入 Builder Pack 后，房间/XR Prefab复用、Common API审计、Unity编译、测试和验收仍应按照 Builder Pack 自身规则完成。
 
@@ -255,7 +258,7 @@ Content-Type: application/json
 }
 ```
 
-输入中包含 `EMVR` 标记时会切换为 `EMVR_DIRECT`。系统根据学生的模糊想法和已经确认的内容提供专业、可修改的阶段草稿，不展示三幅通用图景；学生可以逐项修订物理内容、Unity对象、交互或显示要求，确认前不会移动会话指针。每次响应还会返回 `task_report`；最终阶段完成并通过“学习目标、物体清单、实验流程”完整性检查后，返回 `report_ready=true` 和受设计令牌保护的 `report_url`，对话也会明确提示学生在右侧任务报告中查看并下载PDF。
+输入中包含 `EMVR` 标记时会切换为 `EMVR_DIRECT`。系统根据学生的模糊想法和已经确认的内容提供专业、可修改的阶段草稿，不展示三幅通用图景；学生可以逐项修订物理内容、Unity对象、交互或显示要求，确认前不会移动会话指针。每次响应还会返回 `task_report`；最终阶段完成并通过“学习目标、物体清单、实验流程”完整性检查后，返回 `report_ready=true`、`report_url`、`builder_input_ready=true` 和 `builder_input_url`。两个下载地址都受设计令牌保护，分别对应学生版设计报告和 Builder Pack Gate 1 输入 PDF。
 
 ### 继续当前设计
 
@@ -294,6 +297,7 @@ GET /v1/designs/{design_id}                         (需要Bearer令牌)
 GET /v1/designs/{design_id}?include_history=true    (需要Bearer令牌)
 DELETE /v1/designs/{design_id}                      (需要Bearer令牌)
 GET /v1/designs/{design_id}/report.pdf              (EMVR完成后可用，需要Bearer令牌)
+GET /v1/designs/{design_id}/builder-gate1-input.pdf (EMVR完成后可用，需要Bearer令牌)
 GET /v1/designs/{design_id}/guided-summary.txt      (GUIDED完成后可用，需要Bearer令牌)
 ```
 

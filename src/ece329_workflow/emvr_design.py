@@ -122,6 +122,7 @@ EMVR_SCALAR_FIELDS = frozenset(
     {
         "direction_summary",
         "research_summary",
+        "course_relationship",
         "research_question",
         "hypothesis",
         "design_rationale",

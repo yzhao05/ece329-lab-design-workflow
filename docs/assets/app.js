@@ -242,6 +242,7 @@ const dom = {
   taskReportIdea: document.querySelector("#taskReportIdea"),
   taskReportSections: document.querySelector("#taskReportSections"),
   downloadReportButton: document.querySelector("#downloadReportButton"),
+  downloadBuilderInputButton: document.querySelector("#downloadBuilderInputButton"),
   qualityReviewCard: document.querySelector("#qualityReviewCard"),
   qualityReviewStatus: document.querySelector("#qualityReviewStatus"),
   qualityCausalChain: document.querySelector("#qualityCausalChain"),
@@ -299,6 +300,8 @@ function initialState() {
     taskReport: null,
     reportReady: false,
     reportUrl: null,
+    builderInputReady: false,
+    builderInputUrl: null,
     qualityReview: null,
     versionControl: null,
     recentVersions: null,
@@ -674,6 +677,7 @@ function renderTaskReport() {
     dom.taskReportSections.append(details);
   });
   dom.downloadReportButton.hidden = !state.reportReady || !state.reportUrl;
+  dom.downloadBuilderInputButton.hidden = !state.builderInputReady || !state.builderInputUrl;
 }
 
 function renderQualityReview() {
@@ -855,7 +859,33 @@ async function downloadTaskReport() {
     showToast("PDF 下载失败，请确认课程服务已更新后重试");
   } finally {
     dom.downloadReportButton.disabled = false;
-    dom.downloadReportButton.textContent = "下载 PDF 总结";
+    dom.downloadReportButton.textContent = "下载学生版设计报告 PDF";
+  }
+}
+
+async function downloadBuilderInput() {
+  if (!state.designId || !state.builderInputUrl || !apiBase()) return;
+  dom.downloadBuilderInputButton.disabled = true;
+  dom.downloadBuilderInputButton.textContent = "正在生成 Builder 输入 PDF…";
+  try {
+    const response = await authorizedDesignDownload(state.builderInputUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `ece329-emvr-builder-gate1-${state.designId}.pdf`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast("Builder Gate 1 输入 PDF 已下载");
+  } catch (error) {
+    console.warn("Unable to download Builder Gate 1 input", error);
+    showToast("Builder 输入 PDF 下载失败，请确认课程服务已更新后重试");
+  } finally {
+    dom.downloadBuilderInputButton.disabled = false;
+    dom.downloadBuilderInputButton.textContent = "下载 Builder Gate 1 输入 PDF";
   }
 }
 
@@ -1197,6 +1227,10 @@ function applyDesignSnapshot(design) {
   if (design.recent_versions) state.recentVersions = design.recent_versions;
   state.reportReady = design.report_ready === true;
   state.reportUrl = typeof design.report_url === "string" ? design.report_url : null;
+  state.builderInputReady = design.builder_input_ready === true;
+  state.builderInputUrl = typeof design.builder_input_url === "string"
+    ? design.builder_input_url
+    : null;
   state.guidedExportReady = design.guided_export_ready === true;
   state.guidedExportUrl = typeof design.guided_export_url === "string"
     ? design.guided_export_url
@@ -1972,6 +2006,10 @@ function applyResponse(response, userMessage) {
   }
   state.reportReady = response.report_ready === true;
   state.reportUrl = typeof response.report_url === "string" ? response.report_url : null;
+  state.builderInputReady = response.builder_input_ready === true;
+  state.builderInputUrl = typeof response.builder_input_url === "string"
+    ? response.builder_input_url
+    : null;
   state.guidedExportReady = response.guided_export_ready === true;
   state.guidedExportUrl = typeof response.guided_export_url === "string"
     ? response.guided_export_url
@@ -2293,6 +2331,7 @@ dom.chatInput.addEventListener("keydown", (event) => {
 dom.resetButton.addEventListener("click", resetDesign);
 dom.chartParameter.addEventListener("input", drawChart);
 dom.downloadReportButton.addEventListener("click", downloadTaskReport);
+dom.downloadBuilderInputButton.addEventListener("click", downloadBuilderInput);
 dom.downloadGuidedSummaryButton.addEventListener("click", downloadGuidedSummary);
 dom.viewVersionsButton.addEventListener("click", () => sendVersionAction(
   { action: "VIEW_RECENT" },

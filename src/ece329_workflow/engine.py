@@ -38,6 +38,7 @@ from .emvr_design import apply_emvr_field_updates, merge_emvr_structured_require
 from .dialogue_acts import apply_stage_field_updates, stage_design_state_snapshot
 from .design_state import (
     apply_design_updates,
+    baseline_comparisons_snapshot,
     design_state_snapshot,
     ensure_design_state,
     format_design_summary,
@@ -87,6 +88,7 @@ from .reporting import (
     stage_report_section,
     validate_emvr_report_completeness,
 )
+from .builder_input import render_builder_gate1_input_pdf
 from .stages import (
     IDEA_DEVELOPMENT_STAGES,
     STAGES_BY_ID,
@@ -1241,6 +1243,32 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         if reference_draft
         else question
     )
+    pending_type = (
+        "CONFIRM_STAGE_OR_MODIFY"
+        if reference_draft
+        else "ANSWER_EMVR_STAGE_QUESTION"
+    )
+    allowed_intents = (
+        [
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.REJECT_PREVIOUS_PROPOSAL.value,
+            UserIntent.ADVANCE_STAGE.value,
+            UserIntent.REQUEST_MORE_EXAMPLES.value,
+            UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            UserIntent.NEW_TOPIC.value,
+            UserIntent.UNCLEAR.value,
+        ]
+        if reference_draft
+        else [
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.REQUEST_MORE_EXAMPLES.value,
+            UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            UserIntent.NEW_TOPIC.value,
+            UserIntent.UNCLEAR.value,
+        ]
+    )
     return StepOutput(
         assistant_message=f"{acknowledgement}{lead}{reference_text}",
         stage_payload={
@@ -1248,7 +1276,7 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
             "awaiting_user_design_input": True,
             "reference_draft": reference_draft,
             "pending_action": {
-                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "type": pending_type,
                 "interaction_state": InteractionState.EMVR_DIRECT.value,
                 "subject": stage.value,
                 "proposal": {
@@ -1256,15 +1284,8 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
                     "reference_draft": reference_draft,
                 },
                 "question": review_question,
-                "advance_on_accept": False,
-                "allowed_intents": [
-                    UserIntent.ANSWER_CURRENT_QUESTION.value,
-                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-                    UserIntent.REQUEST_MORE_EXAMPLES.value,
-                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
-                    UserIntent.NEW_TOPIC.value,
-                    UserIntent.UNCLEAR.value,
-                ],
+                "advance_on_accept": bool(reference_draft),
+                "allowed_intents": allowed_intents,
             },
         },
         student_task=review_question,
@@ -1610,7 +1631,50 @@ def _persist_emvr_stage_input(
         if isinstance(semantic_updates, dict)
         else None
     )
-    if isinstance(structured_update, dict) and structured_update:
+    structured_update = (
+        deepcopy(structured_update)
+        if isinstance(structured_update, dict)
+        else {}
+    )
+    applied_comparisons = (
+        semantic_updates.get("applied_comparison_updates", [])
+        if isinstance(semantic_updates, dict)
+        else []
+    )
+    if isinstance(applied_comparisons, list) and applied_comparisons:
+        # Baseline comparisons are state-machine-owned.  Rebuild their
+        # EMVR projection from the post-commit canonical state so the
+        # report cannot retain a stale or model-misclassified case list.
+        canonical_cases: list[str] = []
+        for comparison in baseline_comparisons_snapshot(session):
+            if (
+                not isinstance(comparison, dict)
+                or comparison.get("adoption_status") == "REJECTED"
+            ):
+                continue
+            cases = comparison.get("cases", [])
+            if not isinstance(cases, list):
+                continue
+            for case in cases:
+                label = str(case).strip()
+                if label and label not in canonical_cases:
+                    canonical_cases.append(label)
+        structured_update["comparison_cases"] = canonical_cases
+        field_updates = [
+            deepcopy(item)
+            for item in structured_update.get("field_updates", [])
+            if isinstance(item, dict)
+            and str(item.get("field_id") or "") != "comparison_cases"
+        ]
+        field_updates.append(
+            {
+                "field_id": "comparison_cases",
+                "operation": "REPLACE",
+                "value": canonical_cases,
+            }
+        )
+        structured_update["field_updates"] = field_updates
+    if structured_update:
         entry["structured_update"] = deepcopy(structured_update)
         structured_requirements = emvr_design.setdefault(
             "structured_requirements", {}
@@ -1922,6 +1986,10 @@ class WorkflowEngine:
                         "task_report": build_emvr_task_report(session),
                         "report_ready": True,
                         "report_url": f"/v1/designs/{session.design_id}/report.pdf",
+                        "builder_input_ready": True,
+                        "builder_input_url": (
+                            f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
+                        ),
                     }
                 )
             response["turn_id"] = request.turn_id
@@ -3221,7 +3289,7 @@ class WorkflowEngine:
                 f"{response_message.rstrip()}\n\n"
                 "完整设计总结PDF已经生成，其中包含学习目标、Unity VR实验物体清单、"
                 "交互与理论计算关系、实验流程以及设计局限。你可以在右侧“任务报告”中"
-                "展开各部分并下载PDF。"
+                "展开各部分，并分别下载学生版设计报告和用于 EMVR Builder Pack Gate 1 的输入PDF。"
             )
         response = {
             "design_id": session.design_id,
@@ -3257,6 +3325,10 @@ class WorkflowEngine:
             response["report_ready"] = session.status is WorkflowStatus.COMPLETE
             if response["report_ready"]:
                 response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+                response["builder_input_ready"] = True
+                response["builder_input_url"] = (
+                    f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
+                )
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and session.status is WorkflowStatus.COMPLETE
@@ -3292,6 +3364,10 @@ class WorkflowEngine:
             result["report_ready"] = session.status is WorkflowStatus.COMPLETE
             if result["report_ready"]:
                 result["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+                result["builder_input_ready"] = True
+                result["builder_input_url"] = (
+                    f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
+                )
         elif session.status is WorkflowStatus.COMPLETE:
             result["guided_export_ready"] = True
             result["guided_export_url"] = (
@@ -3372,6 +3448,14 @@ class WorkflowEngine:
         if session.status is not WorkflowStatus.COMPLETE:
             raise StageCompletionError("EMVR设计完成后才会生成PDF总结。")
         return render_emvr_report_pdf(session)
+
+    def render_builder_input_pdf(self, design_id: str) -> bytes:
+        session = self.store.get(design_id)
+        if session.interaction_state is not InteractionState.EMVR_DIRECT:
+            raise StageCompletionError("Builder Gate 1输入PDF只适用于EMVR设计。")
+        if session.status is not WorkflowStatus.COMPLETE:
+            raise StageCompletionError("EMVR设计完成后才会生成Builder Gate 1输入PDF。")
+        return render_builder_gate1_input_pdf(session)
 
     def delete_design(self, design_id: str) -> None:
         self.store.delete(design_id)

@@ -50,7 +50,7 @@ _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
         }
     ),
     Stage.COURSE_MAPPING_AND_DIRECTION.value: frozenset(
-        {"direction_summary", "research_summary", "design_rationale"}
+        {"course_relationship", "design_rationale"}
     ),
     Stage.LEARNING_OBJECTIVES.value: frozenset({"learning_objectives"}),
     Stage.RESEARCH_QUESTION.value: frozenset(
@@ -76,16 +76,15 @@ _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
 
 _EMVR_FIELDS_BY_CANONICAL_FIELD: dict[str, frozenset[str]] = {
     "research_object": frozenset({"direction_summary", "research_summary"}),
-    # EMVR has no separate course-relationship paragraph.  At the design
-    # boundary this information explains and narrows the direction summary,
-    # so a student can still revise the visible "course relationship" item
-    # without the update being discarded as an unknown EMVR field.
-    "course_relationship": frozenset({"direction_summary", "research_summary"}),
+    "course_relationship": frozenset({"course_relationship"}),
     "learning_objective": frozenset({"learning_objectives"}),
     "research_question": frozenset({"research_question"}),
     "hypothesis": frozenset({"hypothesis"}),
     "expected_phenomenon": frozenset({"hypothesis", "observed_quantities"}),
-    "conceptual_structure": frozenset({"required_behaviors", "object_constraints"}),
+    # Conceptual structure describes objects, boundaries and model relations.
+    # Student-operable behavior has its own ``interactions`` field and must not
+    # inherit explanatory text from this design facet.
+    "conceptual_structure": frozenset({"object_constraints"}),
     "independent_variable": frozenset({"changed_quantities"}),
     "observations": frozenset({"observed_quantities"}),
     "controlled_conditions": frozenset({"object_constraints"}),
@@ -270,11 +269,6 @@ def _authoritative_emvr_update(
     raw_update = raw_update if isinstance(raw_update, dict) else {}
     allowed_fields: set[str] = set()
     theory_allowed = False
-    pending_subject = (
-        str(pending_action.get("subject") or "")
-        if isinstance(pending_action, dict)
-        else ""
-    )
 
     def authorize_target(target: str) -> None:
         nonlocal theory_allowed
@@ -294,7 +288,11 @@ def _authoritative_emvr_update(
         act_type = str(act.get("type") or "")
         target = str(act.get("target") or "")
         if act_type == "ANSWER_PENDING_QUESTION":
-            authorize_target(target or pending_subject)
+            canonical = FACET_TO_DESIGN_FIELD.get(target, target)
+            if canonical in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS}:
+                authorize_target(canonical)
+            elif target == Stage.THEORETICAL_FRAMEWORK.value:
+                authorize_target("theoretical_framework")
         elif act_type in {"MODIFY_DESIGN_FIELD", "MODIFY_STAGE_FIELD"}:
             authorize_target(target)
         elif act_type == "MODIFY_COMPARISON":
@@ -311,10 +309,31 @@ def _authoritative_emvr_update(
         if isinstance(item, dict):
             authorize_target(str(item.get("field") or ""))
 
+    # Canonical acts have already separated physical roles.  Their projected
+    # targets must not be contaminated by the model's parallel EMVR snapshot
+    # (for example, a theory explanation placed under required_behaviors).
+    canonically_projected_fields = {
+        field_id
+        for item in [
+            *compiled_acts.get("design_updates", []),
+            *compiled_acts.get("stage_field_updates", []),
+        ]
+        if isinstance(item, dict)
+        for field_id in _EMVR_FIELDS_BY_CANONICAL_FIELD.get(
+            str(item.get("field") or ""), frozenset()
+        )
+    }
+    if compiled_acts.get("comparison_updates"):
+        # Comparison bundles are committed by the deterministic state machine.
+        # Never trust a second model-authored comparison_cases snapshot, which
+        # could disagree with the canonical CREATE/MODIFY/REJECT operation.
+        canonically_projected_fields.add("comparison_cases")
+
     filtered: dict[str, Any] = {
         field: deepcopy(raw_update.get(field))
         for field in allowed_fields
         if field in EMVR_EDITABLE_FIELDS
+        and field not in canonically_projected_fields
         and raw_update.get(field) not in (None, "", [], {})
     }
     field_updates = []
@@ -322,7 +341,10 @@ def _authoritative_emvr_update(
         if not isinstance(item, dict):
             continue
         field_id = str(item.get("field_id") or "")
-        if field_id in allowed_fields:
+        if (
+            field_id in allowed_fields
+            and field_id not in canonically_projected_fields
+        ):
             field_updates.append(deepcopy(item))
     if field_updates:
         filtered["field_updates"] = field_updates
@@ -534,6 +556,11 @@ def record_pending_clarification(
         pending["candidate_turns"] = candidate_turns[-4:]
         if not str(pending.get("candidate_answer") or "").strip():
             pending["candidate_answer"] = normalized_candidate[:2000]
+            # Raw text retained after an unclear parse is evidence for a retry,
+            # not proof that it belongs to the currently visible field.  Only
+            # a previously validated field-level binding may opt into direct
+            # candidate confirmation.
+            pending["candidate_binding_authorized"] = False
             if recoverable_confirmation:
                 pending["candidate_resolution"] = (
                     UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
@@ -561,6 +588,7 @@ def recover_repeated_pending_answer(
         or resolved.get("intent") != UserIntent.UNCLEAR.value
         or not isinstance(pending_action, dict)
         or pending_action.get("type") not in OPEN_QUESTION_PENDING_TYPES
+        or pending_action.get("candidate_binding_authorized") is not True
     ):
         return None
     candidate = str(pending_action.get("candidate_answer") or "").strip()
@@ -1033,6 +1061,13 @@ def _normalize_pending_action(
     candidate_answer = raw.get("candidate_answer")
     if isinstance(candidate_answer, str) and candidate_answer.strip():
         normalized["candidate_answer"] = candidate_answer.strip()[:2000]
+        normalized["candidate_binding_authorized"] = bool(
+            # Legacy sessions did not distinguish a system-authored reference
+            # from raw text retained after a failed parse.  Defaulting legacy
+            # candidates to unbound prevents an old ambiguous message from
+            # becoming writable merely because the student later confirms it.
+            raw.get("candidate_binding_authorized", False)
+        )
     candidate_turns = raw.get("candidate_turns")
     if isinstance(candidate_turns, list):
         normalized["candidate_turns"] = list(
@@ -1178,9 +1213,12 @@ def deterministic_intent(
         return resolved_intent(UserIntent.ADVANCE_STAGE, confidence=1.0)
     if selected_option_id and isinstance(_pending_action, dict):
         action_id = str(_pending_action.get("action_id") or "")
-        if action_id and selected_option_id == f"pending_accept::{action_id}" and str(
-            _pending_action.get("candidate_answer") or ""
-        ).strip():
+        if (
+            action_id
+            and selected_option_id == f"pending_accept::{action_id}"
+            and str(_pending_action.get("candidate_answer") or "").strip()
+            and _pending_action.get("candidate_binding_authorized") is True
+        ):
             return resolved_intent(
                 UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
                 target=str(_pending_action.get("subject") or "") or None,
@@ -1230,9 +1268,23 @@ def fallback_intent(
             confidence=0.3,
             source="CONSERVATIVE_FALLBACK",
         )
-    # Offline/rule-only deployments cannot reliably infer contextual intent.
-    # Treat the message as an answer instead of inventing a decision; the
-    # deterministic state machine will therefore preserve the current stage.
+    if pending_action is None:
+        # The rule-only first turn has no prior question or competing field to
+        # mis-bind. Preserve the student's initial idea so the offline breadth
+        # explorer can start; once a pending item exists, field-level semantic
+        # parsing is required for every state write.
+        return resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=None,
+            resolved_value=user_message.strip(),
+            confidence=0.62,
+            source="CONSERVATIVE_FALLBACK",
+            semantic_updates={"pending_answer_status": "CLEAR"},
+        )
+    # This branch is used only when the configured generator has no semantic
+    # resolver (the offline demo and its deterministic tests). It passes the
+    # text to the stage generator as an opaque stage answer; API-backed modes
+    # never use it for canonical field writes and instead require dialogue acts.
     fallback_user_intent = (
         UserIntent.MODIFY_PREVIOUS_PROPOSAL
         if interaction_state is InteractionState.EMVR_DIRECT
@@ -1389,7 +1441,7 @@ def degraded_context_intent(
         return resolved_intent(
             UserIntent.UNCLEAR,
             target=subject or session.current_stage.value,
-            resolved_value=message,
+            resolved_value=None,
             confidence=0.62,
             source=f"{source}_OPEN_QUESTION_LOCAL_CLARIFICATION",
             semantic_updates={"pending_answer_status": "MISSING"},
@@ -1401,7 +1453,7 @@ def degraded_context_intent(
     return resolved_intent(
         UserIntent.UNCLEAR,
         target=subject or None,
-        resolved_value=message,
+        resolved_value=None,
         confidence=0.62,
         source=f"{source}_LOCAL_CLARIFICATION",
         unresolved_content=preserved_input,
@@ -1711,6 +1763,7 @@ def validate_resolved_intent(
         and pending_action.get("type")
         in OPEN_QUESTION_PENDING_TYPES
         and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
     )
     requests_reference_for_open_question = bool(
         intent == UserIntent.REQUEST_MORE_EXAMPLES.value
@@ -1762,6 +1815,7 @@ def validate_resolved_intent(
         and resolved_value in (None, "", [], {})
         and isinstance(pending_action, dict)
         and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
     ):
         resolved_value = str(pending_action["candidate_answer"]).strip()
         source = "CONFIRMED_PENDING_MODIFICATION"
@@ -1771,6 +1825,7 @@ def validate_resolved_intent(
         and pending_action.get("type")
         in OPEN_QUESTION_PENDING_TYPES
         and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
     ):
         candidate_answer = str(pending_action["candidate_answer"]).strip()
         intent = UserIntent.ANSWER_CURRENT_QUESTION.value
@@ -2928,8 +2983,25 @@ def clarification_output(
             question = str(pending_action.get("question") or "").strip()
             candidate_saved = bool(
                 str(pending_action.get("candidate_answer") or "").strip()
+                and pending_action.get("candidate_binding_authorized") is True
             )
-            if candidate_saved:
+            unbound_candidate = bool(
+                str(pending_action.get("candidate_answer") or "").strip()
+                and not candidate_saved
+            )
+            if unbound_candidate:
+                message = (
+                    (
+                        "我把你这几次补充都保留在本轮待处理中，但还没有写入设计，以免归错栏目。"
+                        "请把要修改的栏目和最终表述放在一起再发一次；一句话可以同时修改多项。"
+                    )
+                    if repeat_count > 2
+                    else (
+                        "我保留了你刚才的补充，但还没有把它写进这一项，以免归错位置。"
+                        "请直接重试这项修改；如果一句话里改了多处，也可以一起说明。"
+                    )
+                )
+            elif candidate_saved:
                 if repeat_count > 2:
                     message = (
                         f"“{title}”已经作为待确认草稿保留，我不会再重复原来的问题。"
@@ -2984,6 +3056,11 @@ def clarification_output(
                 repeat_count = 1
             candidate_saved = bool(
                 str(pending_action.get("candidate_answer") or "").strip()
+                and pending_action.get("candidate_binding_authorized") is True
+            )
+            unbound_candidate = bool(
+                str(pending_action.get("candidate_answer") or "").strip()
+                and not candidate_saved
             )
             if (
                 pending_action.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
@@ -2993,6 +3070,18 @@ def clarification_output(
                     "上一轮提供的设计描述已经保留，无需重新录入。"
                     "如果它就是当前设计项的最终表述，请确认沿用；"
                     "如需修订，只补充缺失的物理关系或Unity映射即可。"
+                )
+            elif unbound_candidate:
+                message = (
+                    (
+                        "我保留了你连续补充的内容，但仍没有自动写入设计，以免把多个要求混进一个栏目。"
+                        "请把每个要调整的栏目及其最终表述写在同一条消息里，我会分别处理。"
+                    )
+                    if repeat_count > 2
+                    else (
+                        "我保留了你刚才的设计补充，但没有把它自动塞进当前栏目，以免改错。"
+                        "请直接重试这项修改；你可以在同一句里列出多个需要调整的部分。"
+                    )
                 )
             elif repeat_count > 2:
                 if emvr_mode:
@@ -3045,6 +3134,27 @@ def clarification_output(
             pending_action.get("type") in CONFIRMATION_PENDING_TYPES
             and str(pending_action.get("candidate_answer") or "").strip()
         ):
+            if pending_action.get("candidate_binding_authorized") is not True:
+                try:
+                    repeat_count = int(pending_action.get("repeat_count", 1))
+                except (TypeError, ValueError):
+                    repeat_count = 1
+                message = (
+                    (
+                        "我已经保留这几次修订说明，但尚未改动现有设计，因为其中包含多个可能的修改对象。"
+                        "请把各栏目与最终内容对应写出；其他已确认内容都会保持不变。"
+                    )
+                    if repeat_count > 2
+                    else (
+                        "我保留了你刚才的修订说明，但没有据此覆盖现有设计，以免把它归入错误栏目。"
+                        "请直接重试这项修改；已经确认的其他内容都会保持不变。"
+                    )
+                )
+                return StepOutput(
+                    assistant_message=message,
+                    stage_payload={"clarification_required": True},
+                    student_task=None,
+                )
             if emvr_mode:
                 message = (
                     "现有设计草稿和你刚补充的内容都已保留，无需重新表述。"

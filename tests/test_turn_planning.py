@@ -305,6 +305,10 @@ class TurnPlanningTests(unittest.TestCase):
         self.assertTrue(output.stage_payload["reference_draft"])
         self.assertIn("可调参数", output.assistant_message)
         self.assertIn("观察量", output.assistant_message)
+        pending = output.stage_payload["pending_action"]
+        self.assertEqual(pending["type"], "CONFIRM_STAGE_OR_MODIFY")
+        self.assertTrue(pending["advance_on_accept"])
+        self.assertIn("ACCEPT_PREVIOUS_PROPOSAL", pending["allowed_intents"])
 
     def test_public_session_hides_orchestration_metadata(self) -> None:
         session = DesignSession(
