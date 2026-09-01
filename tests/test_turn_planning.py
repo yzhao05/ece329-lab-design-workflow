@@ -297,6 +297,18 @@ class TurnPlanningTests(unittest.TestCase):
             ],
             stage=Stage.VARIABLES_AND_CONDITIONS,
         )
+        apply_stage_field_updates(
+            session,
+            [
+                {"field": "lab_title", "operation": "REPLACE", "value": "双电荷实验"},
+                {"field": "lab_id", "operation": "REPLACE", "value": "ece329_charge_field"},
+                {"field": "desktop_interaction_plan", "operation": "REPLACE", "value": "鼠标拖动物体，VR映射为手柄抓取"},
+                {"field": "room_spatial_requirements", "operation": "REPLACE", "value": "对象在前方并保留绕行空间"},
+                {"field": "hidden_object_lifecycle", "operation": "REPLACE", "value": "无"},
+                {"field": "parameter_specifications", "operation": "REPLACE", "value": "距离0.2 m至2.0 m，步长0.1 m"},
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
         output = _emvr_stage_entry_output(
             session,
             Stage.VARIABLES_AND_CONDITIONS,

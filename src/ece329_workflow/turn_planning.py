@@ -5,6 +5,7 @@ from typing import Any
 
 from .design_state import design_state_snapshot
 from .dialogue_acts import stage_design_state_snapshot
+from .emvr_design import merge_emvr_structured_requirements
 from .models import DesignSession, InteractionState, Stage
 
 
@@ -13,7 +14,9 @@ STATE_ACT_TYPES = frozenset(
         "ANSWER_PENDING_QUESTION",
         "MODIFY_DESIGN_FIELD",
         "MODIFY_STAGE_FIELD",
+        "MODIFY_EMVR_FIELD",
         "MODIFY_COMPARISON",
+        "NEW_TOPIC_CONTENT",
         "NEW_TOPIC",
     }
 )
@@ -50,6 +53,7 @@ FIELD_LABELS = {
     "limitations": "设计局限",
     "unity_objects": "VR实验对象",
     "interactions": "VR交互",
+    "experiment_brief": "完整实验方向",
 }
 
 
@@ -88,7 +92,7 @@ def build_turn_task_plan(
             phase = "COMMIT_DESIGN"
         elif act_type in SERVICE_ACT_TYPES:
             phase = "RESPOND_TO_REQUEST"
-        elif act_type == "CONTROL":
+        elif act_type in {"CONTROL", "REQUEST_NEW_TOPIC"}:
             phase = "NAVIGATE"
         else:
             phase = "CLARIFY"
@@ -156,7 +160,14 @@ def workflow_design_snapshot(session: DesignSession) -> dict[str, Any]:
 
     canonical = design_state_snapshot(session)
     stage_fields = stage_design_state_snapshot(session)
-    return {**canonical, **stage_fields}
+    emvr_fields = (
+        merge_emvr_structured_requirements(
+            session.design_context.get("emvr_design", {})
+        )
+        if session.interaction_state is InteractionState.EMVR_DIRECT
+        else {}
+    )
+    return {**canonical, **stage_fields, **emvr_fields}
 
 
 def requested_fields_from_plan(plan: Any) -> list[str]:
@@ -170,6 +181,7 @@ def requested_fields_from_plan(plan: Any) -> list[str]:
             "ANSWER_PENDING_QUESTION",
             "MODIFY_DESIGN_FIELD",
             "MODIFY_STAGE_FIELD",
+            "MODIFY_EMVR_FIELD",
         }:
             target = str(task.get("target") or "")
             if target in FIELD_LABELS and target not in fields:
@@ -278,7 +290,7 @@ def finalize_turn_task_plan(
                 task["status"] = "APPLIED"
             elif target in unchanged_fields:
                 task["status"] = "NO_CHANGE"
-            elif task.get("type") == "NEW_TOPIC":
+            elif task.get("type") in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
                 task["status"] = "APPLIED"
             else:
                 task["status"] = "PRESERVED"

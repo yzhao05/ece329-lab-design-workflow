@@ -302,6 +302,7 @@ function initialState() {
     reportUrl: null,
     builderInputReady: false,
     builderInputUrl: null,
+    builderHandoffStatus: null,
     qualityReview: null,
     versionControl: null,
     recentVersions: null,
@@ -650,7 +651,12 @@ function renderTaskReport() {
   dom.taskReportCard.hidden = !emvr || !report;
   if (!emvr || !report) return;
 
-  dom.taskReportStatus.textContent = state.reportReady ? "已完成" : "整理中";
+  const handoff = state.builderHandoffStatus;
+  dom.taskReportStatus.textContent = state.reportReady
+    ? "设计与Builder交接已完整"
+    : handoff && Number.isFinite(handoff.completed) && Number.isFinite(handoff.required)
+      ? `Builder交接 ${handoff.completed}/${handoff.required}`
+      : "整理中";
   dom.taskReportIdea.textContent = report.idea
     ? `当前设计：${report.idea}`
     : "当前设计会随着对话逐步补全。";
@@ -1223,6 +1229,9 @@ function applyDesignSnapshot(design) {
   const index = STAGES.findIndex(([id]) => id === design.current_stage);
   if (index >= 0) state.stageIndex = index;
   if (design.task_report) state.taskReport = design.task_report;
+  if (design.builder_handoff_status) {
+    state.builderHandoffStatus = design.builder_handoff_status;
+  }
   if (design.quality_review) state.qualityReview = design.quality_review;
   if (design.recent_versions) state.recentVersions = design.recent_versions;
   state.reportReady = design.report_ready === true;
@@ -1993,6 +2002,9 @@ function applyResponse(response, userMessage) {
     state.ideaDevelopmentStatus = response.stage_payload.idea_development_status;
   }
   if (response.task_report) state.taskReport = response.task_report;
+  if (response.builder_handoff_status) {
+    state.builderHandoffStatus = response.builder_handoff_status;
+  }
   if (response.quality_review) state.qualityReview = response.quality_review;
   if (response.stage_payload?.quality_review) {
     state.qualityReview = response.stage_payload.quality_review;

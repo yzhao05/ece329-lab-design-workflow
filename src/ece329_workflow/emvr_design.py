@@ -120,12 +120,23 @@ EMVR_THEORY_RELATION_IDS = frozenset(EMVR_THEORY_RELATIONS)
 # are deliberately independent of any wording in the student's message.
 EMVR_SCALAR_FIELDS = frozenset(
     {
+        # ``experiment_brief`` is the authoritative, complete statement of the
+        # student's EMVR direction.  The remaining fields are projections used
+        # for validation, Builder handoff and stage-specific discussion; none
+        # of them may replace the full brief on its own.
+        "experiment_brief",
+        "research_object",
         "direction_summary",
         "research_summary",
         "course_relationship",
         "research_question",
         "hypothesis",
         "design_rationale",
+        "lab_title",
+        "lab_id",
+        "desktop_interaction_plan",
+        "room_spatial_requirements",
+        "hidden_object_lifecycle",
     }
 )
 EMVR_LIST_FIELDS = frozenset(
@@ -140,9 +151,54 @@ EMVR_LIST_FIELDS = frozenset(
         "visualization_requirements",
         "design_values",
         "limitations",
+        "parameter_specifications",
+        "expected_results",
+        "acceptance_criteria",
+        "report_questions",
     }
 )
 EMVR_EDITABLE_FIELDS = EMVR_SCALAR_FIELDS | EMVR_LIST_FIELDS
+
+
+def emvr_stage_one_readiness(emvr_design: Any) -> dict[str, Any]:
+    """Return structural Stage 1 readiness without interpreting raw wording.
+
+    A non-empty sentence is not sufficient.  EMVR can leave the idea stage only
+    after the semantic layer has separated the complete brief into an object,
+    an operation/change and an observable response.  This keeps a mode command
+    or a research-object fragment from masquerading as a complete direction.
+    """
+
+    requirements = merge_emvr_structured_requirements(emvr_design)
+    brief = str(requirements.get("experiment_brief") or "").strip()
+    research_object = str(requirements.get("research_object") or "").strip()
+    object_constraints = requirements.get("object_constraints", [])
+    changed = requirements.get("changed_quantities", [])
+    behaviors = requirements.get("required_behaviors", [])
+    observed = requirements.get("observed_quantities", [])
+
+    def has_items(value: Any) -> bool:
+        return isinstance(value, list) and any(str(item).strip() for item in value)
+
+    checks = {
+        "experiment_brief": bool(brief),
+        "research_object": bool(research_object) or has_items(object_constraints),
+        "operation_or_change": has_items(changed) or has_items(behaviors),
+        "observation": has_items(observed),
+    }
+    labels = {
+        "experiment_brief": "完整实验方向",
+        "research_object": "实验对象",
+        "operation_or_change": "核心操作或变化条件",
+        "observation": "需要观察的现象",
+    }
+    missing = [labels[key] for key, ready in checks.items() if not ready]
+    return {
+        "ready": not missing,
+        "checks": checks,
+        "missing": missing,
+        "missing_fields": [key for key, ready in checks.items() if not ready],
+    }
 
 
 def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
@@ -438,6 +494,10 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
         "visualization_requirements": text_list("visualization_requirements"),
         "design_values": text_list("design_values"),
         "limitations": text_list("limitations"),
+        "parameter_specifications": text_list("parameter_specifications", limit=20),
+        "expected_results": text_list("expected_results", limit=20),
+        "acceptance_criteria": text_list("acceptance_criteria", limit=20),
+        "report_questions": text_list("report_questions", limit=20),
         "field_updates": field_updates,
         "theory_link_updates": theory_link_updates,
         # Relation IDs are derived from explicit semantic links.  A bare ID

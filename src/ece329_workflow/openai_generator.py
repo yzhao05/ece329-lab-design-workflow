@@ -30,7 +30,7 @@ from .dialogue_acts import (
     DIALOGUE_ACT_TYPES,
     STAGE_ACT_FIELDS,
 )
-from .emvr_design import EMVR_THEORY_RELATIONS
+from .emvr_design import EMVR_EDITABLE_FIELDS, EMVR_THEORY_RELATIONS
 from .design_state import seen_scene_signatures
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
@@ -380,6 +380,8 @@ def _compact_intent_response_schema() -> dict[str, Any]:
                         },
                         "content": {"type": "string"},
                         "source_text": {"type": "string"},
+                        "source_start": {"type": "integer", "minimum": -1},
+                        "source_end": {"type": "integer", "minimum": -1},
                         "semantic_key": {"type": "string"},
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     },
@@ -389,6 +391,8 @@ def _compact_intent_response_schema() -> dict[str, Any]:
                         "operation",
                         "content",
                         "source_text",
+                        "source_start",
+                        "source_end",
                         "semantic_key",
                         "confidence",
                     ],
@@ -436,6 +440,7 @@ def _parse_compact_intent_response(
                 act["content"] = decoded_content
         if not str(act.get("content") or "").strip() and act.get("type") in {
             "CONTROL",
+            "REQUEST_NEW_TOPIC",
             "REQUEST_REFERENCE",
             "REQUEST_SUMMARY",
             "REQUEST_QUALITY_REVIEW",
@@ -450,6 +455,7 @@ def _parse_compact_intent_response(
         "ANSWER_PENDING_QUESTION": "ANSWER_CURRENT_QUESTION",
         "MODIFY_DESIGN_FIELD": "MODIFY_PREVIOUS_PROPOSAL",
         "MODIFY_STAGE_FIELD": "MODIFY_PREVIOUS_PROPOSAL",
+        "MODIFY_EMVR_FIELD": "MODIFY_PREVIOUS_PROPOSAL",
         "MODIFY_COMPARISON": "MODIFY_PREVIOUS_PROPOSAL",
         "ASK_COURSE_QUESTION": "ASK_COURSE_QUESTION",
         "REQUEST_REFERENCE": "REQUEST_MORE_EXAMPLES",
@@ -458,6 +464,8 @@ def _parse_compact_intent_response(
         "COMPARE_OPTIONS": "COMPARE_DESIGN_OPTIONS",
         "VERSION_CONTROL": "MANAGE_DESIGN_VERSION",
         "CORRECT_ASSISTANT": "PROVIDE_FEEDBACK",
+        "REQUEST_NEW_TOPIC": "NEW_TOPIC",
+        "NEW_TOPIC_CONTENT": "NEW_TOPIC",
         "NEW_TOPIC": "NEW_TOPIC",
         "UNRESOLVED": "UNCLEAR",
     }
@@ -523,13 +531,21 @@ def _dialogue_act_writes_state(act: Any) -> bool:
             and operation in {"MERGE", "REPLACE", "CLEAR"}
             and (operation == "CLEAR" or content not in (None, "", [], {}))
         )
+    if act_type == "MODIFY_EMVR_FIELD":
+        return bool(
+            target in EMVR_EDITABLE_FIELDS
+            and operation in {"MERGE", "REPLACE", "CLEAR"}
+            and (operation == "CLEAR" or content not in (None, "", [], {}))
+        )
     if act_type == "MODIFY_COMPARISON":
         return bool(
             isinstance(content, dict)
             and str(content.get("action") or "").upper()
             in {"ACCEPT", "MODIFY", "REJECT", "CREATE"}
         )
-    if act_type == "NEW_TOPIC":
+    if act_type == "REQUEST_NEW_TOPIC":
+        return False
+    if act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
         return content not in (None, "", [], {})
     if act_type != "CORRECT_ASSISTANT":
         return False
@@ -565,7 +581,8 @@ def _dialogue_act_writes_state(act: Any) -> bool:
 def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
     """Return substantial source text not accounted for by semantic acts.
 
-    The model supplies exact ``source_text`` spans.  Coverage is deliberately
+    The model supplies exact source offsets (with ``source_text`` retained for
+    older responses).  Coverage is deliberately
     independent of domain vocabulary, stage number and command keywords: it
     only verifies that a long turn was not partially ignored.  Older model
     responses without any spans remain compatible and simply skip this audit.
@@ -573,16 +590,36 @@ def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
 
     if not isinstance(acts, list):
         return ""
+    intervals = [
+        (int(act.get("source_start")), int(act.get("source_end")))
+        for act in acts
+        if isinstance(act, dict)
+        and isinstance(act.get("source_start"), int)
+        and isinstance(act.get("source_end"), int)
+        and 0 <= int(act["source_start"]) < int(act["source_end"]) <= len(user_message)
+    ]
     spans = [
         str(act.get("source_text") or "").strip()
         for act in acts
         if isinstance(act, dict) and str(act.get("source_text") or "").strip()
     ]
-    if not spans:
+    if not spans and not intervals:
         return ""
-    remaining = str(user_message or "")
-    matched = 0
-    for span in spans:
+    original = str(user_message or "")
+    if intervals:
+        covered = [False] * len(original)
+        for start, end in intervals:
+            for index in range(start, end):
+                covered[index] = True
+        remaining = "".join(
+            " " if covered[index] else character
+            for index, character in enumerate(original)
+        )
+        matched = len(intervals)
+    else:
+        remaining = original
+        matched = 0
+    for span in spans if not intervals else []:
         index = remaining.find(span)
         if index < 0:
             continue
@@ -591,7 +628,12 @@ def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
     if matched == 0:
         return str(user_message or "").strip()[:1200]
     substantive = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", remaining)
-    if len(substantive) < 6:
+    # Model-authored spans describe the semantic payload, not conversational
+    # wrappers.  When the acts cover most of a turn, a short residue such as a
+    # lead-in (“我想修改的是…”) is discourse framing rather than a missing
+    # design instruction.  A genuinely omitted parallel request remains long
+    # enough, or occupies enough of the original turn, to trigger repair.
+    if len(substantive) < 14:
         return ""
     return remaining.strip()[:1200]
 
@@ -1949,16 +1991,18 @@ class OpenAIStageGenerator:
                 "其他设计字段、修改基础比较、提出课程问题、索取参考或总结、纠正助手理解，以及"
                 "继续或返回等控制动作。必须逐项拆开，不能把整句复制进一个动作，也不能因为一项"
                 "不清楚就丢弃其他清楚项。每个动作包含type、target、operation、content、confidence"
-                "和source_text；source_text必须逐字复制该动作所依据的最小学生原文片段。所有动作的"
+                "和source_text；source_text必须逐字复制该动作所依据的最小学生原文片段，source_start"
+                "与source_end必须给出该片段在user_message中的零基起止位置（无法定位时均为-1）。所有动作的"
                 "source_text合起来必须覆盖本轮每一项回答、修改、补充、问题、反馈和控制要求，不能只"
                 "覆盖最后一项；连接词和标点不必单独覆盖。"
                 "设计内容动作还应包含semantic_key。semantic_key是简短、稳定、与措辞无关的物理含义"
                 "标识；同一字段中语义等价的说法必须返回相同semantic_key。每个设计动作只表达一个"
                 "原子含义，同一句涉及多个字段或同一字段中的多个独立要点时必须拆成多个动作；"
                 "type只能为ANSWER_PENDING_QUESTION、MODIFY_DESIGN_FIELD、MODIFY_STAGE_FIELD、"
+                "MODIFY_EMVR_FIELD、"
                 "MODIFY_COMPARISON、ASK_COURSE_QUESTION、REQUEST_REFERENCE、REQUEST_SUMMARY、"
                 "REQUEST_QUALITY_REVIEW、COMPARE_OPTIONS、VERSION_CONTROL、CORRECT_ASSISTANT、"
-                "CONTROL、NEW_TOPIC或UNRESOLVED。"
+                "CONTROL、REQUEST_NEW_TOPIC、NEW_TOPIC_CONTENT、NEW_TOPIC或UNRESOLVED。"
                 "ANSWER_PENDING_QUESTION只保存真正回答当前待办的内容。pending_action.answer_fields"
                 "列出这个问题允许写入的规范化字段：只有一个字段时target直接使用该字段；有多个字段时，"
                 "把学生长回答按含义拆成多个字段级动作，不要把整段绑定到公开阶段ID；"
@@ -1976,9 +2020,16 @@ class OpenAIStageGenerator:
                 "expected_phenomenon、conceptual_structure；MODIFY_STAGE_FIELD的target只能是"
                 "independent_variable、observations、controlled_conditions、procedure_steps、"
                 "visualization_plan、result_interpretation、design_rationale、design_value、limitations、"
-                "unity_objects、interactions、"
+                "unity_objects、interactions、lab_title、lab_id、desktop_interaction_plan、"
+                "room_spatial_requirements、hidden_object_lifecycle、parameter_specifications、"
+                "expected_results、acceptance_criteria、report_questions、"
                 "student_summary。student_summary只用于GUIDED_DESIGN最后由学生亲自写出的总结，"
                 "不得由模型代写。"
+                "EMVR_DIRECT下修改完整实验方向或其结构化子项时使用MODIFY_EMVR_FIELD；target只能是"
+                "experiment_brief、research_object、direction_summary、research_summary、course_relationship、"
+                "research_question、hypothesis、design_rationale、learning_objectives、changed_quantities、"
+                "observed_quantities、comparison_cases、required_behaviors、object_constraints、procedure_steps、"
+                "visualization_requirements、design_values、limitations及已列出的Builder字段。"
                 "operation只能为MERGE、REPLACE或CLEAR。课程疑问必须单独作为ASK_COURSE_QUESTION，"
                 "不能保存成实验观点；对遗漏、曲解或重复的反馈必须作为CORRECT_ASSISTANT，除非同句"
                 "还明确给出字段新值，否则不能据此覆盖设计。若能从user_message、上一轮真实回复和"
@@ -2010,7 +2061,11 @@ class OpenAIStageGenerator:
                 "类似‘沿用刚才安排’‘两个都留下’‘不用改，接着做’应根据上一项待办解析，"
                 "不能按孤立关键词判断。只有语义确实不足时才返回UNCLEAR。"
                 "carried_context.topic_lock.locked=true时，学生后续补充默认属于当前研究主题；"
-                "除非学生明确表示放弃当前实验并重新开始，否则不得返回NEW_TOPIC，也不得清空已经"
+                "换题必须拆成两种动作：学生只表示要放弃当前方向、准备另建实验但尚未给出新内容时，"
+                "返回REQUEST_NEW_TOPIC且content为null；学生在同一轮给出了真正的新实验内容时，返回"
+                "NEW_TOPIC_CONTENT，content只含新实验想法，不得包含‘新建方向’等控制外壳。不得把"
+                "REQUEST_NEW_TOPIC当作实验内容。兼容动作NEW_TOPIC也必须含真实主题内容。"
+                "除非学生明确表示放弃当前实验并重新开始，否则不得返回任何换题动作，也不得清空已经"
                 "确认的研究问题、比较对象、观察现象或保留内容。current_edit_target表示当前正在"
                 "讨论的设计项，但不限制同一句对其他字段的明确修改。"
                 "学生明确表示暂时不知道并要求你给出一个可能、参考、示例或你的判断时，应返回"
@@ -2060,7 +2115,9 @@ class OpenAIStageGenerator:
                 "stage_field_updates（后续阶段和EMVR中的字段级更新；每项同样包含semantic_key；field只能为"
                 "independent_variable、observations、controlled_conditions、procedure_steps、"
                 "visualization_plan、result_interpretation、design_rationale、design_value、limitations、"
-                "unity_objects、interactions；"
+                "unity_objects、interactions、lab_title、lab_id、desktop_interaction_plan、"
+                "room_spatial_requirements、hidden_object_lifecycle、parameter_specifications、"
+                "expected_results、acceptance_criteria、report_questions；"
                 "operation同样只能为MERGE、REPLACE、CLEAR。用户一轮修改几项就逐项返回几项）、"
                 "student_questions、feedback_items与unresolved_content（分别保存用户课程问题、"
                 "对助手理解的纠错反馈和仍无法解析的局部内容；这些文字不能写入设计字段）、"
@@ -2093,13 +2150,21 @@ class OpenAIStageGenerator:
                 "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
                 "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
                 "必须根据整句含义和carried_context.emvr_merged_requirements返回结构化物理设计解释。快照字段为："
-                "direction_summary、research_summary、course_relationship、research_question、learning_objectives、"
+                "experiment_brief、research_object、direction_summary、research_summary、course_relationship、research_question、learning_objectives、"
                 "changed_quantities、observed_quantities、comparison_cases、hypothesis、"
                 "required_behaviors、object_constraints、procedure_steps、"
-                "visualization_requirements、design_rationale、design_values、limitations和theory_links。"
+                "visualization_requirements、design_rationale、design_values、limitations、lab_title、lab_id、"
+                "desktop_interaction_plan、room_spatial_requirements、hidden_object_lifecycle、"
+                "parameter_specifications、expected_results、acceptance_criteria、report_questions和theory_links。"
                 "各项使用学生"
                 "实际表达的具体内容；例如变化方向、连续变化方式和指定观察现象都必须保留，"
                 "不能压缩成‘主要参数影响目标响应’。修改请求还必须返回field_updates数组，"
+                "Builder交接字段只在EMVR_DIRECT下使用：desktop_interaction_plan必须说明鼠标如何操作"
+                "哪个对象及其对应VR操作；parameter_specifications必须逐项保留参数范围、单位和步长或"
+                "离散选项；room_spatial_requirements必须保留用户给出的相对摆放、操作空间、灯光与视觉"
+                "要求且不臆造Unity坐标；hidden_object_lifecycle必须说明初始隐藏对象、触发方式和出现后"
+                "状态，用户回答‘无’时原样保存；expected_results、acceptance_criteria和report_questions"
+                "分别保存Lab特有预期结果、通过条件和报告问题，不能用通用汇报格式替代。"
                 "每项为field_id、operation和value；operation只能是REPLACE、MERGE、CLEAR，"
                 "field_id只能来自上述非theory字段。一个请求修改几项就返回几项，逐项绑定，"
                 "不能把整条消息或多个指令合并成每个字段的value。抽象要求如‘把研究问题"
@@ -2138,7 +2203,7 @@ class OpenAIStageGenerator:
                 "但直接给出明确的课内研究设想时，也应把该设想写入stage_one_direction_detail。"
                 "一旦carried_context中的方向已锁定，后续材料、对象、边界或观察细节默认都是对当前"
                 "方向的完善，不是NEW_TOPIC。只有学生明确表示不要原方向、改做另一主题或重新开始时"
-                "才能返回NEW_TOPIC，并把topic_change_explicit设为true。请求更多帮助时应围绕已锁定"
+                "才能返回REQUEST_NEW_TOPIC或NEW_TOPIC_CONTENT，并把topic_change_explicit设为true。请求更多帮助时应围绕已锁定"
                 "方向给参考，不得把target设为exploration_scenes。"
                 "当pending_action.type为ANSWER_IDEA_FACET时，subject就是当前唯一需要判断的facet。"
                 "REQUEST_MORE_EXAMPLES必须区分请求对象：若学生明确要另一组三幅广度图景，"

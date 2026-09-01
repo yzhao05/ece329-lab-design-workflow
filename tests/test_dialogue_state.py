@@ -117,6 +117,29 @@ class MultiActSemanticGenerator(RuleBasedStageGenerator):
         )
 
 
+class SequencedSemanticGenerator(RuleBasedStageGenerator):
+    """Return one contextual semantic result per turn for workflow regressions."""
+
+    def __init__(self, steps) -> None:
+        self.steps = list(steps)
+        self.calls: list[dict] = []
+
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        self.calls.append(
+            {
+                "message": user_message,
+                "pending_action": pending_action,
+                "carried_context": carried_context,
+            }
+        )
+        step = self.steps.pop(0)
+        return (
+            step(session, user_message, pending_action, carried_context)
+            if callable(step)
+            else step
+        )
+
+
 def variable_stage_session(design_id: str) -> DesignSession:
     session = DesignSession(
         design_id=design_id,
@@ -2828,6 +2851,16 @@ class DialogueStateTests(unittest.TestCase):
         )
         session = variable_stage_session("design_emvr_answer_advance")
         session.interaction_state = InteractionState.EMVR_DIRECT
+        session.design_context.setdefault("stage_design_state", {}).update(
+            {
+                "lab_title": "双电荷实验",
+                "lab_id": "ece329_charge_field",
+                "desktop_interaction_plan": "鼠标拖动带电体，VR映射为手柄抓取",
+                "room_spatial_requirements": "对象在前方，面板在两侧并保留操作空间",
+                "hidden_object_lifecycle": "无",
+                "parameter_specifications": "距离0.2 m至2.0 m，步长0.1 m",
+            }
+        )
         session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value][
             "stage_payload"
         ]["awaiting_user_design_input"] = True
@@ -3226,7 +3259,10 @@ class DialogueStateTests(unittest.TestCase):
 
         stored = engine.store.get(session.design_id)
         emvr_design = stored.design_context["emvr_design"]
-        self.assertIn(interaction, emvr_design["current_brief"])
+        self.assertEqual(
+            emvr_design["current_brief"],
+            "比较两个带电物体靠近时的场线变化",
+        )
         self.assertNotIn(feedback, emvr_design["current_brief"])
         stage_entry = emvr_design["stage_inputs"][Stage.IDEA_BRAINSTORMING.value][-1]
         self.assertEqual(stage_entry["content"], interaction)
@@ -3269,6 +3305,241 @@ class DialogueStateTests(unittest.TestCase):
             new_question,
         )
         self.assertNotIn("并把研究问题", stored.design_context["idea"]["original"])
+
+    def test_emvr_topic_recovery_keeps_control_content_and_projections_separate(self) -> None:
+        first_brief = (
+            "学生用手柄拖动两个带电物体，改变距离和相对方向，观察电场线的合并、"
+            "扭曲与重排，从而理解库仑定律和叠加原理。"
+        )
+        second_brief = (
+            "学生在VR中拖动两个点电荷改变间距，比较同种与异种电荷配置下中间区域"
+            "电场线的弯曲和连接变化。"
+        )
+        revised_brief = (
+            "学生在VR中拖动两个点电荷由远到近，比较同种与异种电荷配置下中间区域"
+            "电场线的弯曲、连接与重排。"
+        )
+
+        def parser_failure(session, message, pending, carried):
+            return degraded_context_intent(
+                session,
+                message,
+                pending,
+                carried,
+                source="SEMANTIC_SERVICE_FALLBACK",
+            )
+
+        generator = SequencedSemanticGenerator(
+            [
+                resolved_intent(
+                    UserIntent.SET_INTERACTION_STATE,
+                    target="interaction_state",
+                    resolved_value=InteractionState.EMVR_DIRECT.value,
+                    confidence=1.0,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={
+                        "interaction_state_request": InteractionState.EMVR_DIRECT.value
+                    },
+                ),
+                parser_failure,
+                resolved_intent(
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                    confidence=0.99,
+                    source="SEMANTIC_TEST",
+                ),
+                resolved_intent(
+                    UserIntent.UNCLEAR,
+                    confidence=0.99,
+                    source="SEMANTIC_MODEL",
+                    semantic_updates={"topic_change_explicit": True},
+                    dialogue_acts=[
+                        {
+                            "type": "REQUEST_NEW_TOPIC",
+                            "target": "",
+                            "operation": "EXECUTE",
+                            "content": None,
+                            "confidence": 0.99,
+                        }
+                    ],
+                    actions_authoritative=True,
+                ),
+                resolved_intent(
+                    UserIntent.UNCLEAR,
+                    confidence=0.99,
+                    source="SEMANTIC_MODEL",
+                    semantic_updates={"topic_change_explicit": True},
+                    dialogue_acts=[
+                        {
+                            "type": "NEW_TOPIC_CONTENT",
+                            "target": "experiment_brief",
+                            "operation": "EXECUTE",
+                            "content": second_brief,
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "research_object",
+                            "operation": "REPLACE",
+                            "content": "两个点电荷",
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "required_behaviors",
+                            "operation": "REPLACE",
+                            "content": ["用手柄拖动两个点电荷"],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "changed_quantities",
+                            "operation": "REPLACE",
+                            "content": ["两个点电荷的间距", "电荷极性配置"],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "observed_quantities",
+                            "operation": "REPLACE",
+                            "content": ["中间区域电场线的弯曲和连接变化"],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "learning_objectives",
+                            "operation": "REPLACE",
+                            "content": ["解释库仑定律与场叠加如何共同决定空间场线"],
+                            "confidence": 0.99,
+                        },
+                    ],
+                    actions_authoritative=True,
+                ),
+                resolved_intent(
+                    UserIntent.UNCLEAR,
+                    confidence=0.99,
+                    source="SEMANTIC_MODEL",
+                    dialogue_acts=[
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "experiment_brief",
+                            "operation": "REPLACE",
+                            "content": revised_brief,
+                            "confidence": 0.99,
+                        }
+                    ],
+                    actions_authoritative=True,
+                ),
+                resolved_intent(
+                    UserIntent.ADVANCE_STAGE,
+                    advance_requested=True,
+                    confidence=0.99,
+                    source="SEMANTIC_TEST",
+                ),
+            ]
+        )
+        engine = WorkflowEngine(generator=generator)
+        created = engine.create_design(
+            "进入EMVR模式",
+            InteractionState.EMVR_DIRECT,
+        )
+        design_id = created["design_id"]
+        initial = engine.store.get(design_id)
+        self.assertEqual(initial.design_context["idea"]["original"], "")
+        self.assertEqual(
+            current_pending_action(initial)["answer_fields"],
+            ["experiment_brief"],
+        )
+
+        failed = engine.process_turn(design_id, {"message": first_brief})
+        pending = current_pending_action(engine.store.get(design_id))
+        self.assertTrue(failed["stage_payload"]["clarification_required"])
+        self.assertEqual(pending["candidate_answer"], first_brief)
+        self.assertTrue(pending["candidate_binding_authorized"])
+        self.assertFalse(
+            engine.store.get(design_id).design_context["emvr_design"].get(
+                "experiment_brief"
+            )
+        )
+
+        engine.process_turn(design_id, {"message": "保留这部分并继续"})
+        recovered = engine.store.get(design_id)
+        self.assertEqual(
+            recovered.design_context["emvr_design"]["experiment_brief"],
+            first_brief,
+        )
+
+        requested = engine.process_turn(design_id, {"message": "建立新的实验方向"})
+        after_request = engine.store.get(design_id)
+        self.assertFalse(
+            str(after_request.design_context["idea"].get("original") or "").strip()
+        )
+        self.assertTrue(after_request.design_context["emvr_design"]["awaiting_new_topic"])
+        self.assertNotIn(
+            "建立新的实验方向",
+            str(after_request.design_context),
+        )
+        self.assertTrue(str(requested["student_task"] or "").strip())
+        self.assertEqual(
+            current_pending_action(after_request)["answer_fields"],
+            ["experiment_brief"],
+        )
+
+        engine.process_turn(design_id, {"message": second_brief})
+        supplied = engine.store.get(design_id)
+        requirements = merge_emvr_structured_requirements(
+            supplied.design_context["emvr_design"]
+        )
+        self.assertEqual(requirements["experiment_brief"], second_brief)
+        self.assertEqual(requirements["research_object"], "两个点电荷")
+        self.assertEqual(
+            requirements["changed_quantities"],
+            ["两个点电荷的间距", "电荷极性配置"],
+        )
+        self.assertEqual(
+            requirements["observed_quantities"],
+            ["中间区域电场线的弯曲和连接变化"],
+        )
+
+        engine.process_turn(
+            design_id,
+            {"message": "把完整设计方向改得更准确，但保留已经拆出的字段。"},
+        )
+        revised = engine.store.get(design_id)
+        revised_requirements = merge_emvr_structured_requirements(
+            revised.design_context["emvr_design"]
+        )
+        self.assertEqual(revised_requirements["experiment_brief"], revised_brief)
+        self.assertEqual(revised_requirements["research_object"], "两个点电荷")
+        self.assertNotIn("brief_revisions", revised.design_context["emvr_design"])
+
+        engine.process_turn(design_id, {"message": "确认并进入下一阶段"})
+        advanced = engine.store.get(design_id)
+        self.assertEqual(advanced.current_stage, Stage.COURSE_MAPPING_AND_DIRECTION)
+
+    def test_guided_new_topic_does_not_create_emvr_state(self) -> None:
+        new_topic = "比较不同介质边界附近的电场分布"
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "NEW_TOPIC_CONTENT",
+                        "target": "experiment_direction",
+                        "operation": "EXECUTE",
+                        "content": new_topic,
+                        "confidence": 0.99,
+                    }
+                ],
+                semantic_updates={"topic_change_explicit": True},
+            )
+        )
+        session = variable_stage_session("design_guided_topic_isolation")
+        engine.store.save(session)
+
+        engine.process_turn(session.design_id, {"message": f"换成{new_topic}"})
+
+        stored = engine.store.get(session.design_id)
+        self.assertEqual(stored.design_context["idea"]["original"], new_topic)
+        self.assertNotIn("emvr_design", stored.design_context)
 
     def test_invalid_empty_new_topic_act_cannot_reset_the_design(self) -> None:
         engine = WorkflowEngine(
@@ -3561,6 +3832,100 @@ class DialogueStateTests(unittest.TestCase):
             resolved["resolved_value"], pending["candidate_answer"]
         )
         self.assertEqual(resolved["source"], "CONFIRMED_PENDING_ANSWER")
+
+    def test_emvr_parse_failure_confirmation_commits_any_exact_pending_field(self) -> None:
+        """Later EMVR fields recover like the Stage-1 brief without raw autofill."""
+
+        cases = (
+            (
+                "parameter_specifications",
+                ["距离 0.2–2.0 m，步长 0.1 m"],
+                "stage",
+            ),
+            (
+                "research_question",
+                "距离由远到近时，两种极性配置的中间场线如何变化？",
+                "design",
+            ),
+            (
+                "theoretical_framework",
+                "使用库仑定律与电场叠加解释空间场线变化。",
+                "design",
+            ),
+        )
+        for field, answer, state_kind in cases:
+            with self.subTest(field=field):
+                session = DesignSession(
+                    design_id=f"recover_{field}",
+                    interaction_state=InteractionState.EMVR_DIRECT,
+                    design_context={"emvr_design": {}},
+                )
+                save_pending_action(
+                    session,
+                    Stage.VARIABLES_AND_CONDITIONS,
+                    StepOutput(
+                        assistant_message="请补充这一项。",
+                        stage_payload={
+                            "pending_action": {
+                                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                                "interaction_state": InteractionState.EMVR_DIRECT.value,
+                                "subject": field,
+                                "answer_fields": [field],
+                                "question": "请补充这一项。",
+                                "allowed_intents": [
+                                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                                    UserIntent.UNCLEAR.value,
+                                ],
+                            }
+                        },
+                        student_task="请补充这一项。",
+                    ),
+                )
+                candidate_text = (
+                    answer if isinstance(answer, str) else "；".join(answer)
+                )
+                pending = record_pending_clarification(session, candidate_text)
+                assert pending is not None
+                self.assertTrue(pending["candidate_binding_authorized"])
+                if field == "parameter_specifications":
+                    candidate_text = "距离 0.1–1.5 m，步长 0.05 m"
+                    pending = record_pending_clarification(
+                        session,
+                        candidate_text,
+                    )
+                    assert pending is not None
+                    self.assertEqual(pending["candidate_answer"], candidate_text)
+
+                resolved = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                        confidence=0.99,
+                        source="SEMANTIC_TEST",
+                    ),
+                    pending,
+                )
+                if field in {"parameter_specifications", "research_question"}:
+                    projected_fields = {
+                        str(item.get("field_id") or "")
+                        for item in resolved["semantic_updates"][
+                            "emvr_design_update"
+                        ]["field_updates"]
+                        if isinstance(item, dict)
+                    }
+                    self.assertIn(field, projected_fields)
+                apply_resolved_intent(
+                    session,
+                    resolved,
+                    pending,
+                    user_message="确认沿用",
+                )
+
+                if state_kind == "stage":
+                    stored = stage_design_state_snapshot(session)[field]
+                    self.assertEqual(stored, candidate_text)
+                else:
+                    stored = design_state_snapshot(session)[field]
+                    self.assertEqual(stored, candidate_text)
 
     def test_confirmation_question_recovers_a_substantive_revision_by_context(self) -> None:
         supplement = (

@@ -6,6 +6,8 @@ from copy import deepcopy
 from typing import Any
 
 from .design_state import FACET_TO_DESIGN_FIELD
+from .builder_requirements import BUILDER_REQUIREMENT_FIELDS
+from .emvr_design import EMVR_EDITABLE_FIELDS
 from .models import DesignSession, Stage
 
 
@@ -14,6 +16,7 @@ DIALOGUE_ACT_TYPES = frozenset(
         "ANSWER_PENDING_QUESTION",
         "MODIFY_DESIGN_FIELD",
         "MODIFY_STAGE_FIELD",
+        "MODIFY_EMVR_FIELD",
         "MODIFY_COMPARISON",
         "ASK_COURSE_QUESTION",
         "REQUEST_REFERENCE",
@@ -23,6 +26,10 @@ DIALOGUE_ACT_TYPES = frozenset(
         "VERSION_CONTROL",
         "CORRECT_ASSISTANT",
         "CONTROL",
+        # Topic navigation and topic content are separate.  ``NEW_TOPIC`` is
+        # retained only as a content-bearing compatibility action.
+        "REQUEST_NEW_TOPIC",
+        "NEW_TOPIC_CONTENT",
         "NEW_TOPIC",
         "UNRESOLVED",
     }
@@ -52,6 +59,15 @@ STAGE_ACT_FIELD_ORDER = (
     "limitations",
     "unity_objects",
     "interactions",
+    "lab_title",
+    "lab_id",
+    "desktop_interaction_plan",
+    "room_spatial_requirements",
+    "hidden_object_lifecycle",
+    "parameter_specifications",
+    "expected_results",
+    "acceptance_criteria",
+    "report_questions",
     "student_summary",
 )
 STAGE_ACT_FIELDS = frozenset(STAGE_ACT_FIELD_ORDER)
@@ -72,6 +88,7 @@ CONTROL_TARGETS = frozenset(
         "SET_GUIDED_MODE",
         "SET_EMVR_MODE",
         "ACCEPT_QUALITY_REVIEW",
+        "REQUEST_NEW_TOPIC",
     }
 )
 
@@ -141,6 +158,7 @@ def normalize_dialogue_acts(
                 pending_subject,
                 *DESIGN_ACT_FIELDS,
                 *STAGE_ACT_FIELDS,
+                *EMVR_EDITABLE_FIELDS,
                 *FACET_TO_DESIGN_FIELD,
             }
             if (
@@ -174,6 +192,16 @@ def normalize_dialogue_acts(
             }:
                 unresolved.append(
                     {"content": _text(content), "reason": "阶段字段或操作无效"}
+                )
+                continue
+        elif act_type == "MODIFY_EMVR_FIELD":
+            if target not in EMVR_EDITABLE_FIELDS or operation not in {
+                "MERGE",
+                "REPLACE",
+                "CLEAR",
+            }:
+                unresolved.append(
+                    {"content": _text(content), "reason": "EMVR字段或操作无效"}
                 )
                 continue
             if operation != "CLEAR" and not _text(content):
@@ -218,7 +246,11 @@ def normalize_dialogue_acts(
                 )
                 continue
             operation = "EXECUTE"
-        elif act_type == "NEW_TOPIC":
+        elif act_type == "REQUEST_NEW_TOPIC":
+            target = "REQUEST_NEW_TOPIC"
+            content = None
+            operation = "EXECUTE"
+        elif act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
             if not _text(content):
                 unresolved.append({"content": "", "reason": "新实验方向缺少具体内容"})
                 continue
@@ -248,6 +280,14 @@ def normalize_dialogue_acts(
         source_text = str(item.get("source_text") or "").strip()[:1200]
         if source_text:
             normalized["source_text"] = source_text
+        try:
+            source_start = int(item.get("source_start"))
+            source_end = int(item.get("source_end"))
+        except (TypeError, ValueError):
+            source_start = source_end = -1
+        if 0 <= source_start < source_end:
+            normalized["source_start"] = source_start
+            normalized["source_end"] = source_end
         semantic_key = str(item.get("semantic_key") or "").strip()[:180]
         if semantic_key:
             normalized["semantic_key"] = semantic_key
@@ -276,7 +316,12 @@ def compile_dialogue_acts(
             str(field).strip()
             for field in pending_action.get("answer_fields", [])
             if str(field).strip()
-            in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}
+            in {
+                *DESIGN_ACT_FIELDS,
+                *STAGE_ACT_FIELDS,
+                *EMVR_EDITABLE_FIELDS,
+                *FACET_TO_DESIGN_FIELD,
+            }
         ]
         if isinstance(pending_action, dict)
         and isinstance(pending_action.get("answer_fields"), list)
@@ -285,6 +330,7 @@ def compile_dialogue_acts(
     design_updates: list[dict[str, Any]] = []
     facet_updates: list[dict[str, Any]] = []
     stage_field_updates: list[dict[str, Any]] = []
+    emvr_field_updates: list[dict[str, Any]] = []
     comparison_updates: list[dict[str, Any]] = []
     questions: list[str] = []
     feedback: list[str] = []
@@ -333,6 +379,16 @@ def compile_dialogue_acts(
                         design_updates.append(update)
                     elif canonical in STAGE_ACT_FIELDS:
                         stage_field_updates.append(update)
+                    elif canonical in EMVR_EDITABLE_FIELDS:
+                        emvr_field_updates.append(
+                            {
+                                "field_id": canonical,
+                                "operation": operation,
+                                "value": value,
+                                "update_id": f"{act_id}:{field}",
+                                "semantic_key": semantic_key,
+                            }
+                        )
                 answered_pending = answered_pending or bool(field_values)
                 if not field_values:
                     unresolved.append(_text(content))
@@ -372,6 +428,17 @@ def compile_dialogue_acts(
                 stage_field_updates.append(
                     {
                         "field": target,
+                        "operation": operation,
+                        "value": content,
+                        "update_id": act_id,
+                        "semantic_key": semantic_key,
+                    }
+                )
+                answered_pending = True
+            elif target in EMVR_EDITABLE_FIELDS:
+                emvr_field_updates.append(
+                    {
+                        "field_id": target,
                         "operation": operation,
                         "value": content,
                         "update_id": act_id,
@@ -419,6 +486,16 @@ def compile_dialogue_acts(
                     "value": content,
                     "update_id": act_id,
                     "semantic_key": semantic_key,
+                }
+            )
+        elif act_type == "MODIFY_EMVR_FIELD":
+            emvr_field_updates.append(
+                {
+                    "field_id": target,
+                    "operation": operation,
+                    "value": deepcopy(content),
+                    "update_id": act_id,
+                    "semantic_key": str(act.get("semantic_key") or ""),
                 }
             )
         elif act_type == "MODIFY_COMPARISON" and isinstance(content, dict):
@@ -528,18 +605,21 @@ def compile_dialogue_acts(
             version_requests.append(deepcopy(content))
         elif act_type == "CONTROL":
             controls.append(target)
+        elif act_type == "REQUEST_NEW_TOPIC":
+            controls.append("REQUEST_NEW_TOPIC")
         elif act_type == "REQUEST_REFERENCE":
             controls.append("REQUEST_REFERENCE")
         elif act_type == "REQUEST_SUMMARY":
             controls.append("REQUEST_SUMMARY")
-        elif act_type == "NEW_TOPIC":
-            controls.append("NEW_TOPIC")
+        elif act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
+            controls.append("NEW_TOPIC_CONTENT")
         elif act_type == "UNRESOLVED":
             unresolved.append(_text(content))
     return {
         "design_updates": design_updates,
         "facet_updates": facet_updates,
         "stage_field_updates": stage_field_updates,
+        "emvr_field_updates": emvr_field_updates,
         "comparison_updates": comparison_updates,
         "student_questions": list(dict.fromkeys(item for item in questions if item)),
         "feedback_items": list(dict.fromkeys(item for item in feedback if item)),

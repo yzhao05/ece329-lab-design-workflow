@@ -23,6 +23,7 @@ from .dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     record_pending_clarification,
+    recoverable_emvr_pending_field,
     recover_repeated_pending_answer,
     required_pending_facet_id,
     resolved_intent,
@@ -34,7 +35,11 @@ from .generator import (
     _guided_reference_output,
     guided_stage_entry_output,
 )
-from .emvr_design import apply_emvr_field_updates, merge_emvr_structured_requirements
+from .emvr_design import (
+    apply_emvr_field_updates,
+    emvr_stage_one_readiness,
+    merge_emvr_structured_requirements,
+)
 from .dialogue_acts import apply_stage_field_updates, stage_design_state_snapshot
 from .design_state import (
     apply_design_updates,
@@ -89,6 +94,11 @@ from .reporting import (
     validate_emvr_report_completeness,
 )
 from .builder_input import render_builder_gate1_input_pdf
+from .builder_requirements import (
+    builder_handoff_status,
+    next_due_builder_requirement,
+    validate_builder_requirements,
+)
 from .stages import (
     IDEA_DEVELOPMENT_STAGES,
     STAGES_BY_ID,
@@ -291,6 +301,18 @@ def _contains_emvr_marker(text: str) -> bool:
     return "EMVR" in text.upper()
 
 
+def _emvr_mode_control_only(text: str) -> bool:
+    """Identify the product's explicit mode command, never experiment content.
+
+    This is deliberately scoped to the one literal EMVR shortcut authorized by
+    the product.  All other conversational control continues through semantic
+    dialogue acts rather than an expanding phrase list.
+    """
+
+    compact = re.sub(r"[\s，,。；;：:！!？?、（）()\-—_]+", "", text).upper()
+    return compact in {"EMVR", "进入EMVR模式", "切换到EMVR模式", "使用EMVR模式"}
+
+
 def _record_mode_handoff(
     session: DesignSession,
     previous_state: InteractionState,
@@ -334,7 +356,13 @@ def _record_mode_handoff(
             or design.get("research_object")
             or session.design_context.get("idea", {}).get("original", "")
         ).strip()
-        if transferred_brief:
+        if transferred_brief and not _emvr_mode_control_only(transferred_brief):
+            field_state = emvr.setdefault("field_state", {})
+            if not isinstance(field_state, dict):
+                field_state = {}
+                emvr["field_state"] = field_state
+            field_state["experiment_brief"] = transferred_brief
+            emvr["experiment_brief"] = transferred_brief
             emvr["current_brief"] = transferred_brief
         emvr["mode_handoff"] = deepcopy(handoff)
     return handoff
@@ -373,12 +401,18 @@ def _keep_locked_topic_as_refinement(
         controls = updates.get("control_actions", [])
         if isinstance(controls, list):
             updates["control_actions"] = [
-                item for item in controls if item != "NEW_TOPIC"
+                item
+                for item in controls
+                if item not in {"NEW_TOPIC", "NEW_TOPIC_CONTENT", "REQUEST_NEW_TOPIC"}
             ]
     acts = turn_intent.get("dialogue_acts", [])
     if isinstance(acts, list):
         for act in acts:
-            if not isinstance(act, dict) or act.get("type") != "NEW_TOPIC":
+            if not isinstance(act, dict) or act.get("type") not in {
+                "NEW_TOPIC",
+                "NEW_TOPIC_CONTENT",
+                "REQUEST_NEW_TOPIC",
+            }:
                 continue
             act["type"] = "ANSWER_PENDING_QUESTION"
             act["target"] = resolved_target
@@ -386,7 +420,11 @@ def _keep_locked_topic_as_refinement(
     plan = turn_intent.get("task_plan")
     if isinstance(plan, dict):
         for task in plan.get("tasks", []):
-            if not isinstance(task, dict) or task.get("type") != "NEW_TOPIC":
+            if not isinstance(task, dict) or task.get("type") not in {
+                "NEW_TOPIC",
+                "NEW_TOPIC_CONTENT",
+                "REQUEST_NEW_TOPIC",
+            }:
                 continue
             task["type"] = "CURRENT_TOPIC_REFINEMENT"
             task["target"] = resolved_target
@@ -1095,6 +1133,7 @@ _EMVR_STAGE_LEADS: dict[Stage, str] = {
 
 _EMVR_INTERACTIVE_ENTRY_STAGES = {
     Stage.IDEA_BRAINSTORMING,
+    Stage.COURSE_MAPPING_AND_DIRECTION,
     Stage.LEARNING_OBJECTIVES,
     Stage.RESEARCH_QUESTION,
     Stage.HYPOTHESIS,
@@ -1102,6 +1141,7 @@ _EMVR_INTERACTIVE_ENTRY_STAGES = {
     Stage.VARIABLES_AND_CONDITIONS,
     Stage.CONCEPTUAL_PROCEDURE,
     Stage.EXPECTED_DATA_VISUALIZATION,
+    Stage.RESULT_INTERPRETATION,
     Stage.DESIGN_VALUE_AND_LIMITATIONS,
 }
 
@@ -1216,6 +1256,38 @@ def _emvr_entry_reference(
 
 
 def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput:
+    requirement = next_due_builder_requirement(session, stage)
+    if requirement is not None:
+        field = str(requirement["field"])
+        question = str(requirement["question"])
+        return StepOutput(
+            assistant_message=(
+                f"为了让这份设计可以直接交给 EMVR Builder 使用，"
+                f"现在先明确{requirement['label']}。"
+            ),
+            stage_payload={
+                "emvr_guided_entry": True,
+                "awaiting_user_design_input": True,
+                "builder_requirement_field": field,
+                "builder_handoff_status": builder_handoff_status(session),
+                "pending_action": {
+                    "type": "ANSWER_EMVR_STAGE_QUESTION",
+                    "interaction_state": InteractionState.EMVR_DIRECT.value,
+                    "subject": field,
+                    "answer_fields": [field],
+                    "question": question,
+                    "advance_on_accept": False,
+                    "allowed_intents": [
+                        UserIntent.ANSWER_CURRENT_QUESTION.value,
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                        UserIntent.REQUEST_MORE_EXAMPLES.value,
+                        UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                        UserIntent.UNCLEAR.value,
+                    ],
+                },
+            },
+            student_task=question,
+        )
     lead, question = _EMVR_ENTRY_QUESTIONS[stage]
     context = build_carried_context(session)
     direction = str(context.get("research_direction") or "").strip()
@@ -1248,6 +1320,11 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         if reference_draft
         else "ANSWER_EMVR_STAGE_QUESTION"
     )
+    pending_subject = (
+        "experiment_brief"
+        if stage is Stage.IDEA_BRAINSTORMING and not reference_draft
+        else stage.value
+    )
     allowed_intents = (
         [
             UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
@@ -1278,7 +1355,12 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
             "pending_action": {
                 "type": pending_type,
                 "interaction_state": InteractionState.EMVR_DIRECT.value,
-                "subject": stage.value,
+                "subject": pending_subject,
+                "answer_fields": (
+                    ["experiment_brief"]
+                    if pending_subject == "experiment_brief"
+                    else []
+                ),
                 "proposal": {
                     "carried_context": deepcopy(context),
                     "reference_draft": reference_draft,
@@ -1345,6 +1427,80 @@ def _prepare_emvr_stage_output(
     else:
         output.assistant_message = f"{lead}\n\n{output.assistant_message.strip()}"
 
+    if stage is Stage.IDEA_BRAINSTORMING:
+        readiness = emvr_stage_one_readiness(
+            session.design_context.get("emvr_design", {})
+        )
+        if not readiness["ready"]:
+            missing_key = str(readiness["missing_fields"][0])
+            field_by_gap = {
+                "experiment_brief": "experiment_brief",
+                "research_object": "research_object",
+                "operation_or_change": "changed_quantities",
+                "observation": "observed_quantities",
+            }
+            question_by_gap = {
+                "experiment_brief": "请用一段完整的话说明这个VR实验要操作什么、改变什么并观察什么。",
+                "research_object": "这个VR实验中，学生具体会操作或比较哪些物理对象？",
+                "operation_or_change": "围绕这些对象，学生要执行什么核心操作，或主动改变哪个条件？",
+                "observation": "完成操作或改变条件后，学生需要重点观察哪一种电磁现象或响应？",
+            }
+            target_field = field_by_gap[missing_key]
+            task = question_by_gap[missing_key]
+            output.assistant_message = (
+                f"{output.assistant_message.rstrip()}\n\n"
+                f"完整方向已经保留；现在只补齐{readiness['missing'][0]}，不会要求你重写前面的内容。"
+            )
+            output.student_task = task
+            output.stage_payload["emvr_stage_one_readiness"] = readiness
+            output.stage_payload["awaiting_user_design_input"] = True
+            output.stage_payload["pending_action"] = {
+                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "interaction_state": InteractionState.EMVR_DIRECT.value,
+                "subject": target_field,
+                "answer_fields": [target_field],
+                "question": task,
+                "advance_on_accept": False,
+                "allowed_intents": [
+                    UserIntent.ANSWER_CURRENT_QUESTION.value,
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                    UserIntent.REQUEST_MORE_EXAMPLES.value,
+                    UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                    UserIntent.NEW_TOPIC.value,
+                    UserIntent.UNCLEAR.value,
+                ],
+            }
+            return
+
+    requirement = next_due_builder_requirement(session, stage)
+    output.stage_payload["builder_handoff_status"] = builder_handoff_status(session)
+    if requirement is not None:
+        field = str(requirement["field"])
+        task = str(requirement["question"])
+        output.assistant_message = (
+            f"{output.assistant_message.rstrip()}\n\n"
+            f"这部分还需要明确{requirement['label']}，确认后才会进入 Builder 交接文档。"
+        )
+        output.student_task = task
+        output.stage_payload["awaiting_user_design_input"] = True
+        output.stage_payload["builder_requirement_field"] = field
+        output.stage_payload["pending_action"] = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": field,
+            "answer_fields": [field],
+            "question": task,
+            "advance_on_accept": False,
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        return
+
     if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
         output.assistant_message = (
             f"{output.assistant_message.rstrip()}\n\n"
@@ -1403,8 +1559,13 @@ def _project_committed_stage_fields(
     def value(field: str) -> str:
         return str(values.get(field) or "").strip()
 
-    if stage is Stage.COURSE_MAPPING_AND_DIRECTION and value("design_rationale"):
-        output.stage_payload["selection_reason"] = value("design_rationale")
+    if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
+        if value("design_rationale"):
+            output.stage_payload["selection_reason"] = value("design_rationale")
+        if value("lab_title"):
+            output.stage_payload["lab_title"] = value("lab_title")
+        if value("lab_id"):
+            output.stage_payload["lab_id"] = value("lab_id")
     elif stage is Stage.CONCEPTUAL_OR_VR_SETUP:
         if value("unity_objects"):
             output.stage_payload["unity_objects"] = value("unity_objects")
@@ -1414,6 +1575,13 @@ def _project_committed_stage_fields(
             output.stage_payload["visualization_layer"] = value(
                 "visualization_plan"
             )
+        for field in (
+            "desktop_interaction_plan",
+            "room_spatial_requirements",
+            "hidden_object_lifecycle",
+        ):
+            if value(field):
+                output.stage_payload[field] = value(field)
     elif stage is Stage.VARIABLES_AND_CONDITIONS:
         if value("independent_variable"):
             output.stage_payload["independent_variable"] = value(
@@ -1425,8 +1593,30 @@ def _project_committed_stage_fields(
             output.stage_payload["controlled_variables"] = value(
                 "controlled_conditions"
             )
+        if value("parameter_specifications"):
+            output.stage_payload["parameter_specifications"] = value(
+                "parameter_specifications"
+            )
     elif stage is Stage.CONCEPTUAL_PROCEDURE and value("procedure_steps"):
-        output.stage_payload["procedure_steps"] = value("procedure_steps")
+        committed_steps = values.get("procedure_steps")
+        drafted_steps = output.stage_payload.get("procedure_steps")
+        if (
+            isinstance(drafted_steps, list)
+            and len([item for item in drafted_steps if str(item).strip()]) >= 5
+            and not (
+                isinstance(committed_steps, list)
+                and len([item for item in committed_steps if str(item).strip()]) >= 5
+            )
+        ):
+            # A concise student description may summarize the complete draft
+            # without enumerating every row.  Keep that statement visible as
+            # provenance, but do not replace a Builder-ready ordered flow with
+            # a single sentence.  A genuine field-level list edit still wins.
+            output.stage_payload["student_procedure_notes"] = value(
+                "procedure_steps"
+            )
+        else:
+            output.stage_payload["procedure_steps"] = deepcopy(committed_steps)
     elif (
         stage is Stage.EXPECTED_DATA_VISUALIZATION
         and value("visualization_plan")
@@ -1434,10 +1624,14 @@ def _project_committed_stage_fields(
         output.stage_payload["student_visualization_requirements"] = value(
             "visualization_plan"
         )
-    elif stage is Stage.RESULT_INTERPRETATION and value("result_interpretation"):
-        output.stage_payload["student_result_interpretation"] = value(
-            "result_interpretation"
-        )
+    elif stage is Stage.RESULT_INTERPRETATION:
+        if value("result_interpretation"):
+            output.stage_payload["student_result_interpretation"] = value(
+                "result_interpretation"
+            )
+        for field in ("expected_results", "acceptance_criteria", "report_questions"):
+            if value(field):
+                output.stage_payload[field] = value(field)
     elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
         if value("design_value"):
             output.stage_payload["student_value_and_limit_notes"] = value(
@@ -1454,17 +1648,14 @@ def _persist_emvr_brief(
     stage: Stage | None = None,
     turn_intent: dict[str, Any] | None = None,
 ) -> None:
-    content_stage = stage or session.current_stage
     if (
         session.interaction_state is not InteractionState.EMVR_DIRECT
-        or content_stage is not Stage.IDEA_BRAINSTORMING
         or intent_name
         not in {
             UserIntent.ANSWER_CURRENT_QUESTION.value,
             UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
             UserIntent.NEW_TOPIC.value,
         }
-        or len(message.strip()) < 16
     ):
         return
     emvr_design = session.design_context.setdefault("emvr_design", {})
@@ -1476,29 +1667,48 @@ def _persist_emvr_brief(
         if isinstance(turn_intent, dict)
         else []
     )
-    structured_message = _turn_content_text(
-        _substantive_turn_content(turn_intent)
-    )
-    if isinstance(dialogue_acts, list) and dialogue_acts and not structured_message:
+    brief_operation = ""
+    brief_value = ""
+    for act in dialogue_acts if isinstance(dialogue_acts, list) else []:
+        if not isinstance(act, dict):
+            continue
+        act_type = str(act.get("type") or "")
+        target = str(act.get("target") or "")
+        if act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
+            brief_operation = "REPLACE"
+        elif (
+            act_type in {"ANSWER_PENDING_QUESTION", "MODIFY_EMVR_FIELD"}
+            and target == "experiment_brief"
+        ):
+            brief_operation = str(act.get("operation") or "REPLACE").upper()
+        else:
+            continue
+        brief_value = _turn_content_text(act.get("content"))
+        if brief_value:
+            break
+    if not brief_value:
         return
-    normalized_message = structured_message or message.strip()
-    original_brief = str(emvr_design.get("brief") or "").strip()
-    revisions = emvr_design.get("brief_revisions", [])
-    if not isinstance(revisions, list):
-        revisions = []
-    if intent_name == UserIntent.NEW_TOPIC.value or not original_brief:
-        original_brief = normalized_message
-        revisions = []
-    elif (
-        normalized_message != original_brief
-        and normalized_message not in revisions
-    ):
-        revisions.append(normalized_message)
-        revisions = revisions[-8:]
-    current_brief = "；补充：".join([original_brief, *revisions])
-    emvr_design["brief"] = original_brief
-    emvr_design["brief_revisions"] = revisions
+
+    field_state = emvr_design.setdefault("field_state", {})
+    if not isinstance(field_state, dict):
+        field_state = {}
+        emvr_design["field_state"] = field_state
+    prior = str(field_state.get("experiment_brief") or "").strip()
+    if brief_operation == "CLEAR":
+        current_brief = ""
+    elif brief_operation == "MERGE" and prior:
+        current_brief = "；".join(dict.fromkeys((prior, brief_value)))
+    else:
+        current_brief = brief_value
+    if not current_brief:
+        return
+    field_state["experiment_brief"] = current_brief
+    emvr_design["experiment_brief"] = current_brief
+    # Compatibility views mirror the single authoritative brief; they are no
+    # longer assembled from an unbounded history of raw student revisions.
+    emvr_design["brief"] = current_brief
     emvr_design["current_brief"] = current_brief
+    emvr_design.pop("brief_revisions", None)
     idea = session.design_context.setdefault("idea", {})
     if isinstance(idea, dict):
         idea["current_summary"] = current_brief
@@ -1520,7 +1730,9 @@ def _substantive_turn_content(
         "ANSWER_PENDING_QUESTION",
         "MODIFY_DESIGN_FIELD",
         "MODIFY_STAGE_FIELD",
+        "MODIFY_EMVR_FIELD",
         "MODIFY_COMPARISON",
+        "NEW_TOPIC_CONTENT",
         "NEW_TOPIC",
     }
     values: list[Any] = []
@@ -1553,22 +1765,21 @@ def _turn_content_text(value: Any) -> str:
 
 def _new_topic_content(
     turn_intent: dict[str, Any],
-    fallback_message: str,
 ) -> str:
-    """Use the structured new-topic act instead of copying a mixed command."""
+    """Return only content carried by an explicit content-bearing topic act."""
 
     dialogue_acts = turn_intent.get("dialogue_acts", [])
     if isinstance(dialogue_acts, list):
         for act in dialogue_acts:
-            if not isinstance(act, dict) or act.get("type") != "NEW_TOPIC":
+            if not isinstance(act, dict) or act.get("type") not in {
+                "NEW_TOPIC_CONTENT",
+                "NEW_TOPIC",
+            }:
                 continue
             content = str(act.get("content") or "").strip()
             if content:
                 return content
-    resolved_value = turn_intent.get("resolved_value")
-    if isinstance(resolved_value, str) and resolved_value.strip():
-        return resolved_value.strip()
-    return fallback_message.strip()
+    return ""
 
 
 def _persist_emvr_stage_input(
@@ -1891,9 +2102,10 @@ class WorkflowEngine:
         ]
 
     @staticmethod
-    def _start_new_topic(session: DesignSession, message: str) -> None:
+    def _reset_for_new_topic(session: DesignSession) -> None:
         previous_design = {
             "idea": deepcopy(session.design_context.get("idea", {})),
+            "emvr_design": deepcopy(session.design_context.get("emvr_design", {})),
             "stage_outputs": deepcopy(session.stage_outputs),
         }
         archive = session.model_context.setdefault("previous_designs", [])
@@ -1904,9 +2116,41 @@ class WorkflowEngine:
         session.status = WorkflowStatus.ACTIVE
         session.completed_stages = []
         session.stage_outputs = {}
-        session.design_context = {"idea": {"original": message.strip()}}
+        session.design_context = {"idea": {}}
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            session.design_context["emvr_design"] = {
+                "awaiting_new_topic": True,
+                "field_state": {},
+            }
         session.model_context.pop("openai_previous_response_id", None)
         session.model_context.pop("dialogue_state", None)
+
+    @classmethod
+    def _request_new_topic(cls, session: DesignSession) -> None:
+        """Reset the direction without turning the navigation command into data."""
+
+        cls._reset_for_new_topic(session)
+
+    @classmethod
+    def _start_new_topic(cls, session: DesignSession, message: str) -> bool:
+        """Start a supplied topic only when structured content is present."""
+
+        content = message.strip()
+        if not content or (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and _emvr_mode_control_only(content)
+        ):
+            return False
+        cls._reset_for_new_topic(session)
+        session.design_context["idea"] = {"original": content}
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            emvr_design = session.design_context["emvr_design"]
+            emvr_design["awaiting_new_topic"] = False
+            emvr_design["experiment_brief"] = content
+            emvr_design["brief"] = content
+            emvr_design["current_brief"] = content
+            emvr_design["field_state"] = {"experiment_brief": content}
+        return True
 
     def create_design(
         self,
@@ -1929,11 +2173,23 @@ class WorkflowEngine:
             state = InteractionState.EMVR_DIRECT
         access_token = secrets.token_urlsafe(32)
         resume_token = secrets.token_urlsafe(32)
+        initial_idea = (
+            ""
+            if state is InteractionState.EMVR_DIRECT
+            and _emvr_mode_control_only(idea)
+            else idea.strip()
+        )
+        initial_context: dict[str, Any] = {"idea": {"original": initial_idea}}
+        if state is InteractionState.EMVR_DIRECT:
+            initial_context["emvr_design"] = {
+                "awaiting_new_topic": not bool(initial_idea),
+                "field_state": {},
+            }
         session = DesignSession(
             design_id=f"design_{uuid.uuid4().hex[:12]}",
             interaction_state=state,
             access_token_hash=hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
-            design_context={"idea": {"original": idea.strip()}},
+            design_context=initial_context,
         )
         session.model_context["resume_token_hash"] = hashlib.sha256(
             resume_token.encode("utf-8")
@@ -1984,6 +2240,7 @@ class WorkflowEngine:
                 response.update(
                     {
                         "task_report": build_emvr_task_report(session),
+                        "builder_handoff_status": builder_handoff_status(session),
                         "report_ready": True,
                         "report_url": f"/v1/designs/{session.design_id}/report.pdf",
                         "builder_input_ready": True,
@@ -2130,6 +2387,11 @@ class WorkflowEngine:
                 or ""
             ).strip()
         )
+        emvr_topic_action = any(
+            isinstance(act, dict)
+            and act.get("type") in {"REQUEST_NEW_TOPIC", "NEW_TOPIC_CONTENT"}
+            for act in turn_intent.get("dialogue_acts", [])
+        ) if isinstance(turn_intent.get("dialogue_acts"), list) else False
         if (
             input_kind != UNREASONABLE_REQUEST
             and session.interaction_state is InteractionState.EMVR_DIRECT
@@ -2138,6 +2400,7 @@ class WorkflowEngine:
             and not (
                 isinstance(semantic_for_direction_lock, dict)
                 and semantic_for_direction_lock.get("topic_change_explicit") is True
+                or emvr_topic_action
             )
         ):
             # In EMVR, additional objects, interactions, observations and
@@ -2348,12 +2611,39 @@ class WorkflowEngine:
             )
 
         if intent_name == UserIntent.NEW_TOPIC.value:
-            self._start_new_topic(
-                session,
-                _new_topic_content(turn_intent, message),
-            )
-            pending_action = None
-            apply_resolved_intent(session, turn_intent, pending_action, message)
+            topic_content = _new_topic_content(turn_intent)
+            if (
+                not topic_content
+                and session.interaction_state is InteractionState.GUIDED_DESIGN
+                and turn_intent.get("preserve_current_design") is False
+            ):
+                # Preserve the pre-existing guided workflow contract.  The
+                # strict control/content separation introduced here is scoped
+                # to EMVR; guided mode still receives its already-classified
+                # replacement topic as the turn value.
+                topic_content = (
+                    str(turn_intent.get("resolved_value") or "").strip()
+                    or message.strip()
+                )
+            if topic_content:
+                self._start_new_topic(session, topic_content)
+                pending_action = None
+                apply_resolved_intent(session, turn_intent, pending_action, message)
+            elif (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and "REQUEST_NEW_TOPIC" in control_actions
+            ):
+                self._request_new_topic(session)
+                pending_action = None
+                apply_resolved_intent(session, turn_intent, pending_action, message)
+            else:
+                # A compatibility label without a content-bearing act has no
+                # authority to reset the design.  Preserve the current topic
+                # and let the local clarification path handle the turn.
+                turn_intent["intent"] = UserIntent.UNCLEAR.value
+                turn_intent["source"] = "UNBOUND_NEW_TOPIC_REQUEST"
+                intent_name = UserIntent.UNCLEAR.value
+                content_intent_name = intent_name
         elif (
             intent_name == UserIntent.RETURN_TO_PREVIOUS_POINT.value
             or "RETURN" in control_actions
@@ -2888,7 +3178,17 @@ class WorkflowEngine:
                         for item in clarification_updates.get("facet_updates", [])
                     )
                 )
-                if isinstance(clarification_updates, dict) and (
+                recoverable_emvr_field = bool(
+                    session.interaction_state is InteractionState.EMVR_DIRECT
+                    and isinstance(pending_action, dict)
+                    and recoverable_emvr_pending_field(pending_action)
+                    and str(turn_intent.get("source") or "").startswith(
+                        "SEMANTIC_SERVICE_FALLBACK"
+                    )
+                )
+                if not recoverable_emvr_field and isinstance(
+                    clarification_updates, dict
+                ) and (
                     clarification_updates.get("no_direction") is True
                     or clarification_updates.get("pending_answer_status") == "MISSING"
                     or facet_explicitly_missing
@@ -3322,6 +3622,7 @@ class WorkflowEngine:
         }
         if task_report is not None:
             response["task_report"] = task_report
+            response["builder_handoff_status"] = builder_handoff_status(session)
             response["report_ready"] = session.status is WorkflowStatus.COMPLETE
             if response["report_ready"]:
                 response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
@@ -3361,6 +3662,7 @@ class WorkflowEngine:
         )
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             result["task_report"] = build_emvr_task_report(session)
+            result["builder_handoff_status"] = builder_handoff_status(session)
             result["report_ready"] = session.status is WorkflowStatus.COMPLETE
             if result["report_ready"]:
                 result["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
@@ -3791,6 +4093,21 @@ class WorkflowEngine:
     @staticmethod
     def _validate_completion(session: DesignSession, stage: Stage) -> None:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
+            if stage is Stage.IDEA_BRAINSTORMING:
+                readiness = emvr_stage_one_readiness(
+                    session.design_context.get("emvr_design", {})
+                )
+                if not readiness["ready"]:
+                    missing = "、".join(readiness["missing"][:3])
+                    raise StageCompletionError(
+                        f"实验方向还需要补齐：{missing}。"
+                        "我会继续围绕当前想法逐项确认，不会把模式指令或单个对象当成完整方案。"
+                    )
+            current = next_due_builder_requirement(session, stage)
+            if current is not None:
+                raise StageCompletionError(
+                    f"在继续之前，请先明确{current['label']}。{current['question']}"
+                )
             stage_output = session.stage_outputs.get(stage.value, {})
             stage_payload = (
                 stage_output.get("stage_payload", {})
@@ -3808,6 +4125,7 @@ class WorkflowEngine:
                 )
             if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
                 try:
+                    validate_builder_requirements(session)
                     validate_emvr_report_completeness(session)
                 except ValueError as exc:
                     raise StageCompletionError(str(exc)) from exc

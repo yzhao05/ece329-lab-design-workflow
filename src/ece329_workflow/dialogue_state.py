@@ -13,6 +13,7 @@ from .emvr_design import (
     merge_emvr_structured_requirements,
     normalize_emvr_design_update,
 )
+from .builder_requirements import BUILDER_REQUIREMENT_FIELDS
 from .design_state import (
     DESIGN_FIELD_TO_FACET,
     FACET_TO_DESIGN_FIELD,
@@ -42,6 +43,8 @@ from .models import DesignSession, InteractionState, Stage, StepOutput
 _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
     Stage.IDEA_BRAINSTORMING.value: frozenset(
         {
+            "experiment_brief",
+            "research_object",
             "direction_summary",
             "research_summary",
             "observed_quantities",
@@ -50,7 +53,7 @@ _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
         }
     ),
     Stage.COURSE_MAPPING_AND_DIRECTION.value: frozenset(
-        {"course_relationship", "design_rationale"}
+        {"course_relationship", "design_rationale", "lab_title", "lab_id"}
     ),
     Stage.LEARNING_OBJECTIVES.value: frozenset({"learning_objectives"}),
     Stage.RESEARCH_QUESTION.value: frozenset(
@@ -59,23 +62,39 @@ _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
     Stage.THEORETICAL_FRAMEWORK.value: frozenset(),
     Stage.HYPOTHESIS.value: frozenset({"hypothesis", "observed_quantities"}),
     Stage.CONCEPTUAL_OR_VR_SETUP.value: frozenset(
-        {"required_behaviors", "object_constraints", "visualization_requirements"}
+        {
+            "required_behaviors",
+            "object_constraints",
+            "visualization_requirements",
+            "desktop_interaction_plan",
+            "room_spatial_requirements",
+            "hidden_object_lifecycle",
+        }
     ),
     Stage.VARIABLES_AND_CONDITIONS.value: frozenset(
-        {"changed_quantities", "observed_quantities", "object_constraints"}
+        {
+            "changed_quantities",
+            "observed_quantities",
+            "object_constraints",
+            "parameter_specifications",
+        }
     ),
     Stage.CONCEPTUAL_PROCEDURE.value: frozenset({"procedure_steps"}),
     Stage.EXPECTED_DATA_VISUALIZATION.value: frozenset(
         {"visualization_requirements"}
     ),
-    Stage.RESULT_INTERPRETATION.value: frozenset(),
+    Stage.RESULT_INTERPRETATION.value: frozenset(
+        {"expected_results", "acceptance_criteria", "report_questions"}
+    ),
     Stage.DESIGN_VALUE_AND_LIMITATIONS.value: frozenset(
         {"design_values", "limitations"}
     ),
 }
 
 _EMVR_FIELDS_BY_CANONICAL_FIELD: dict[str, frozenset[str]] = {
-    "research_object": frozenset({"direction_summary", "research_summary"}),
+    "research_object": frozenset(
+        {"research_object", "direction_summary", "research_summary"}
+    ),
     "course_relationship": frozenset({"course_relationship"}),
     "learning_objective": frozenset({"learning_objectives"}),
     "research_question": frozenset({"research_question"}),
@@ -95,6 +114,15 @@ _EMVR_FIELDS_BY_CANONICAL_FIELD: dict[str, frozenset[str]] = {
     "design_value": frozenset({"design_values"}),
     "unity_objects": frozenset({"object_constraints"}),
     "interactions": frozenset({"required_behaviors"}),
+    "lab_title": frozenset({"lab_title"}),
+    "lab_id": frozenset({"lab_id"}),
+    "desktop_interaction_plan": frozenset({"desktop_interaction_plan"}),
+    "room_spatial_requirements": frozenset({"room_spatial_requirements"}),
+    "hidden_object_lifecycle": frozenset({"hidden_object_lifecycle"}),
+    "parameter_specifications": frozenset({"parameter_specifications"}),
+    "expected_results": frozenset({"expected_results"}),
+    "acceptance_criteria": frozenset({"acceptance_criteria"}),
+    "report_questions": frozenset({"report_questions"}),
 }
 
 _THEORY_SUPPORT_FIELDS = frozenset(
@@ -133,9 +161,7 @@ _EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
         "interactions",
         "conceptual_structure",
     ),
-    Stage.COURSE_MAPPING_AND_DIRECTION: (
-        "course_relationship",
-    ),
+    Stage.COURSE_MAPPING_AND_DIRECTION: ("course_relationship",),
     Stage.LEARNING_OBJECTIVES: ("learning_objective",),
     Stage.RESEARCH_QUESTION: ("research_question",),
     Stage.THEORETICAL_FRAMEWORK: ("theoretical_framework",),
@@ -190,9 +216,13 @@ _EMVR_CONFIRMATION_FIELDS: dict[Stage, tuple[str, ...]] = {
 # page (for example "目标现象" or "可用交互") without inventing a new field,
 # binding the whole sentence to the stage id, or relying on phrase matching.
 _PUBLIC_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "experiment_brief": ("完整实验方向", "实验方向", "实验概述"),
     "research_object": ("研究对象", "设计方向", "原始想法", "设计起点"),
+    "direction_summary": ("方向摘要",),
+    "research_summary": ("研究摘要",),
     "course_relationship": ("课程关系", "课程主题", "课程依据"),
     "learning_objective": ("学习目标", "概念目标", "计算目标", "分析目标", "交互目标"),
+    "learning_objectives": ("学习目标", "概念目标"),
     "research_question": ("研究问题",),
     "theoretical_framework": ("理论框架", "理论关系", "核心公式", "物理机制"),
     "hypothesis": ("研究假设",),
@@ -209,8 +239,55 @@ _PUBLIC_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "limitations": ("设计局限", "模型局限", "适用边界"),
     "unity_objects": ("Unity对象", "VR对象", "实验物体"),
     "interactions": ("可用交互", "核心操作", "学生操作", "交互与反馈"),
+    "lab_title": ("实验名称", "Lab名称"),
+    "lab_id": ("实验ID", "Lab ID", "Builder实验ID"),
+    "desktop_interaction_plan": ("桌面鼠标操作", "桌面与VR映射"),
+    "room_spatial_requirements": ("房间摆放", "空间需求", "灯光与视觉风格"),
+    "hidden_object_lifecycle": ("初始隐藏对象", "触发后状态"),
+    "parameter_specifications": ("参数范围", "参数单位", "参数规格"),
+    "expected_results": ("Lab预期结果", "具体预期结果"),
+    "acceptance_criteria": ("通过条件", "验收条件"),
+    "report_questions": ("报告问题", "实验报告问题"),
+    "changed_quantities": ("变化量", "可调参数", "自变量"),
+    "observed_quantities": ("观察量", "目标现象", "记录量"),
+    "comparison_cases": ("比较情形", "基础比较", "对照情形"),
+    "required_behaviors": ("核心操作", "交互行为", "对象行为"),
+    "object_constraints": ("对象约束", "模型边界", "控制条件"),
+    "visualization_requirements": ("可视化要求", "显示要求"),
+    "design_values": ("设计价值", "教学价值"),
     "student_summary": ("学生总结",),
 }
+
+
+def recoverable_emvr_pending_field(
+    pending_action: dict[str, Any] | None,
+) -> str | None:
+    """Return the exact EMVR field that may be confirmed after parse failure.
+
+    Recovery is deliberately a two-turn operation: the failed turn is retained
+    as a candidate but writes nothing; only a later explicit acceptance can
+    bind it.  This is safe for every EMVR question whose pending contract names
+    exactly one canonical field, including later Builder requirements, without
+    guessing from the student's wording or copying a mixed message into the
+    current stage.
+    """
+
+    if (
+        not isinstance(pending_action, dict)
+        or pending_action.get("interaction_state")
+        != InteractionState.EMVR_DIRECT.value
+        or pending_action.get("type") != "ANSWER_EMVR_STAGE_QUESTION"
+    ):
+        return None
+    answer_fields = pending_action.get("answer_fields", [])
+    if not isinstance(answer_fields, list) or len(answer_fields) != 1:
+        return None
+    field = str(answer_fields[0] or "").strip()
+    return (
+        field
+        if field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *EMVR_EDITABLE_FIELDS}
+        else None
+    )
 
 
 def _editable_field_bindings(fields: list[str]) -> list[dict[str, Any]]:
@@ -222,7 +299,7 @@ def _editable_field_bindings(fields: list[str]) -> list[dict[str, Any]]:
             "visible_labels": list(_PUBLIC_FIELD_ALIASES.get(field, (field,))),
         }
         for field in fields
-        if field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS}
+        if field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *EMVR_EDITABLE_FIELDS}
     ]
 
 
@@ -231,7 +308,12 @@ def _pending_answer_fields(
     interaction_state: InteractionState,
     subject: str = "",
 ) -> list[str]:
-    if subject in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}:
+    if subject in {
+        *DESIGN_ACT_FIELDS,
+        *STAGE_ACT_FIELDS,
+        *EMVR_EDITABLE_FIELDS,
+        *FACET_TO_DESIGN_FIELD,
+    }:
         return [subject]
     catalog = (
         _EMVR_PENDING_ANSWER_FIELDS
@@ -295,10 +377,12 @@ def _authoritative_emvr_update(
                 authorize_target("theoretical_framework")
         elif act_type in {"MODIFY_DESIGN_FIELD", "MODIFY_STAGE_FIELD"}:
             authorize_target(target)
+        elif act_type == "MODIFY_EMVR_FIELD":
+            allowed_fields.add(target)
         elif act_type == "MODIFY_COMPARISON":
             allowed_fields.add("comparison_cases")
-        elif act_type == "NEW_TOPIC":
-            allowed_fields.update({"direction_summary", "research_summary"})
+        elif act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
+            allowed_fields.add("experiment_brief")
 
     # CORRECT_ASSISTANT compiles nested field repairs into the same validated
     # update lists, so they receive exactly the same field authorization.
@@ -308,6 +392,9 @@ def _authoritative_emvr_update(
     ]:
         if isinstance(item, dict):
             authorize_target(str(item.get("field") or ""))
+    for item in compiled_acts.get("emvr_field_updates", []):
+        if isinstance(item, dict):
+            allowed_fields.add(str(item.get("field_id") or ""))
 
     # Canonical acts have already separated physical roles.  Their projected
     # targets must not be contaminated by the model's parallel EMVR snapshot
@@ -402,6 +489,29 @@ def _authoritative_emvr_update(
                 }
             )
             projected_signatures.add(signature)
+    for item in compiled_acts.get("emvr_field_updates", []):
+        if not isinstance(item, dict):
+            continue
+        field_id = str(item.get("field_id") or "")
+        operation = str(item.get("operation") or "").upper()
+        if field_id not in EMVR_EDITABLE_FIELDS or operation not in {
+            "REPLACE",
+            "MERGE",
+            "CLEAR",
+        }:
+            continue
+        value = deepcopy(item.get("value"))
+        signature = (
+            field_id,
+            operation,
+            json.dumps(value, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        if signature in projected_signatures:
+            continue
+        projected_updates.append(
+            {"field_id": field_id, "operation": operation, "value": value}
+        )
+        projected_signatures.add(signature)
     if projected_updates:
         filtered["field_updates"] = projected_updates
 
@@ -554,13 +664,29 @@ def record_pending_clarification(
         if normalized_candidate[:2000] not in candidate_turns:
             candidate_turns.append(normalized_candidate[:2000])
         pending["candidate_turns"] = candidate_turns[-4:]
-        if not str(pending.get("candidate_answer") or "").strip():
+        emvr_exact_field_binding = bool(
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and recoverable_emvr_pending_field(pending)
+        )
+        # For an exact EMVR field the most recent failed answer supersedes an
+        # earlier candidate. This lets a student correct or complete a retry
+        # before confirming it; accepting must never commit a stale first
+        # attempt. Unbound guided candidates keep their first diagnostic value
+        # because they can never be written directly.
+        if (
+            not str(pending.get("candidate_answer") or "").strip()
+            or emvr_exact_field_binding
+        ):
             pending["candidate_answer"] = normalized_candidate[:2000]
-            # Raw text retained after an unclear parse is evidence for a retry,
-            # not proof that it belongs to the currently visible field.  Only
-            # a previously validated field-level binding may opt into direct
-            # candidate confirmation.
-            pending["candidate_binding_authorized"] = False
+            # A failed parse normally cannot authorize a field write.  The one
+            # safe exception is an EMVR question whose pending contract names
+            # exactly one canonical field. The candidate is still not written
+            # until a separate acceptance turn confirms that binding.
+            pending["candidate_binding_authorized"] = emvr_exact_field_binding
+            if emvr_exact_field_binding:
+                pending["candidate_resolution"] = (
+                    UserIntent.ANSWER_CURRENT_QUESTION.value
+                )
             if recoverable_confirmation:
                 pending["candidate_resolution"] = (
                     UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
@@ -806,8 +932,16 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             return ""
         return str(facet.get("evidence") or "").strip()
 
+    emvr_design = session.design_context.get("emvr_design", {})
+    emvr_design = emvr_design if isinstance(emvr_design, dict) else {}
+    emvr_requirements = merge_emvr_structured_requirements(emvr_design)
     direction = str(
-        idea.get("main_direction")
+        (
+            emvr_requirements.get("experiment_brief")
+            if session.interaction_state is InteractionState.EMVR_DIRECT
+            else ""
+        )
+        or idea.get("main_direction")
         or idea.get("direction_summary")
         or idea.get("current_focus")
         or outline.get("core_phenomenon")
@@ -865,7 +999,15 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
     pending = current_pending_action(session)
     topic_lock = topic_lock_snapshot(session)
     return {
-        "research_direction": str(canonical.get("research_object") or direction),
+        "research_direction": str(
+            (
+                emvr_merged_requirements.get("experiment_brief")
+                if session.interaction_state is InteractionState.EMVR_DIRECT
+                else ""
+            )
+            or canonical.get("research_object")
+            or direction
+        ),
         "direction_locked": idea.get("direction_locked") is True,
         "topic_lock": topic_lock,
         "current_edit_target": (
@@ -1050,7 +1192,12 @@ def _normalize_pending_action(
                 str(field).strip()
                 for field in answer_fields
                 if str(field).strip()
-                in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *FACET_TO_DESIGN_FIELD}
+                in {
+                    *DESIGN_ACT_FIELDS,
+                    *STAGE_ACT_FIELDS,
+                    *EMVR_EDITABLE_FIELDS,
+                    *FACET_TO_DESIGN_FIELD,
+                }
             )
         )
     normalized_answer_fields = normalized.get("answer_fields", [])
@@ -1262,6 +1409,37 @@ def fallback_intent(
     """Conservative offline behavior when no semantic model is available."""
 
     compact = re.sub(r"[\s，,。；;！!？?]+", "", user_message)
+    answer_fields = (
+        pending_action.get("answer_fields", [])
+        if isinstance(pending_action, dict)
+        else []
+    )
+    if (
+        interaction_state is InteractionState.EMVR_DIRECT
+        and isinstance(answer_fields, list)
+        and len(answer_fields) == 1
+        and str(answer_fields[0])
+        in {*BUILDER_REQUIREMENT_FIELDS, *EMVR_EDITABLE_FIELDS}
+    ):
+        field = str(answer_fields[0])
+        return resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=field,
+            resolved_value=user_message.strip(),
+            confidence=0.9,
+            source="STRUCTURED_BUILDER_QUESTION_FALLBACK",
+            semantic_updates={"pending_answer_status": "CLEAR"},
+            dialogue_acts=[
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": field,
+                    "operation": "REPLACE",
+                    "content": user_message.strip(),
+                    "confidence": 0.9,
+                }
+            ],
+            actions_authoritative=True,
+        )
     if len(compact) < 6:
         return resolved_intent(
             UserIntent.UNCLEAR,
@@ -1545,6 +1723,7 @@ def validate_resolved_intent(
             "design_updates",
             "facet_updates",
             "stage_field_updates",
+            "emvr_field_updates",
             "comparison_updates",
         ):
             merged_updates[update_key] = deepcopy(
@@ -1627,13 +1806,14 @@ def validate_resolved_intent(
                 "design_updates",
                 "facet_updates",
                 "stage_field_updates",
+                "emvr_field_updates",
                 "comparison_updates",
             )
         )
         authoritative_state_acts = bool(actions_authoritative and state_acts)
         if {"SET_EMVR_MODE", "SET_GUIDED_MODE"} & controls:
             intent = UserIntent.SET_INTERACTION_STATE.value
-        elif "NEW_TOPIC" in controls:
+        elif {"REQUEST_NEW_TOPIC", "NEW_TOPIC_CONTENT"} & controls:
             intent = UserIntent.NEW_TOPIC.value
         elif "RETURN" in controls and not state_acts:
             intent = UserIntent.RETURN_TO_PREVIOUS_POINT.value
@@ -1680,7 +1860,9 @@ def validate_resolved_intent(
             "ANSWER_PENDING_QUESTION",
             "MODIFY_DESIGN_FIELD",
             "MODIFY_STAGE_FIELD",
+            "MODIFY_EMVR_FIELD",
             "MODIFY_COMPARISON",
+            "NEW_TOPIC_CONTENT",
             "NEW_TOPIC",
             "ASK_COURSE_QUESTION",
             "CORRECT_ASSISTANT",
@@ -1838,6 +2020,71 @@ def validate_resolved_intent(
             ]
         else:
             semantic_updates["pending_answer_status"] = "CLEAR"
+        recovered_field = recoverable_emvr_pending_field(pending_action)
+        if recovered_field and not any(
+            isinstance(act, dict)
+            and act.get("type") == "ANSWER_PENDING_QUESTION"
+            and act.get("target") == recovered_field
+            for act in dialogue_acts
+        ):
+            recovered_act = {
+                "type": "ANSWER_PENDING_QUESTION",
+                "target": recovered_field,
+                "operation": "REPLACE",
+                "content": candidate_answer,
+                "confidence": 1.0,
+                "semantic_key": f"confirmed_pending:{recovered_field}",
+            }
+            dialogue_acts = [*dialogue_acts, recovered_act]
+            # This synthetic act is created after the model-authored acts were
+            # compiled, so compile it independently and merge only its
+            # validated field-level operations. This keeps the canonical state,
+            # EMVR projection, version history and UI change echo in sync.
+            recovered_compiled = compile_dialogue_acts(
+                [recovered_act],
+                pending_action=pending_action,
+            )
+            for update_key in (
+                "design_updates",
+                "facet_updates",
+                "stage_field_updates",
+                "emvr_field_updates",
+            ):
+                existing = semantic_updates.get(update_key, [])
+                existing = deepcopy(existing) if isinstance(existing, list) else []
+                additions = recovered_compiled.get(update_key, [])
+                if isinstance(additions, list):
+                    existing.extend(deepcopy(additions))
+                if existing:
+                    semantic_updates[update_key] = existing
+            projected = _authoritative_emvr_update(
+                {},
+                [recovered_act],
+                recovered_compiled,
+                pending_action,
+            )
+            if projected:
+                existing_emvr = semantic_updates.get("emvr_design_update")
+                existing_emvr = (
+                    deepcopy(existing_emvr)
+                    if isinstance(existing_emvr, dict)
+                    else {}
+                )
+                existing_fields = existing_emvr.get("field_updates", [])
+                existing_fields = (
+                    deepcopy(existing_fields)
+                    if isinstance(existing_fields, list)
+                    else []
+                )
+                new_fields = projected.get("field_updates", [])
+                if isinstance(new_fields, list):
+                    existing_fields.extend(deepcopy(new_fields))
+                for key, value in projected.items():
+                    if key != "field_updates":
+                        existing_emvr[key] = deepcopy(value)
+                if existing_fields:
+                    existing_emvr["field_updates"] = existing_fields
+                semantic_updates["emvr_design_update"] = existing_emvr
     if (
         source.startswith("SEMANTIC")
         and intent
@@ -2756,7 +3003,8 @@ def apply_semantic_design_updates(
     mode_allowed_stage_fields = (
         STAGE_ACT_FIELDS - {"student_summary"}
         if session.interaction_state is InteractionState.EMVR_DIRECT
-        else STAGE_ACT_FIELDS - {"unity_objects", "interactions"}
+        else STAGE_ACT_FIELDS
+        - {"unity_objects", "interactions", *BUILDER_REQUIREMENT_FIELDS}
     )
     stage_field_updates = [
         item

@@ -407,8 +407,11 @@ def _idea(session: DesignSession, user_message: str) -> str:
     if session.interaction_state is InteractionState.EMVR_DIRECT:
         emvr_design = session.design_context.get("emvr_design", {})
         if isinstance(emvr_design, dict):
+            structured = merge_emvr_structured_requirements(emvr_design)
             current_brief = str(
-                emvr_design.get("current_brief")
+                structured.get("experiment_brief")
+                or emvr_design.get("experiment_brief")
+                or emvr_design.get("current_brief")
                 or emvr_design.get("brief")
                 or ""
             ).strip()
@@ -515,7 +518,10 @@ def _emvr_context_text(session: DesignSession, fallback: str) -> str:
     parts = []
     if isinstance(emvr_design, dict):
         brief = _emvr_content_text(
-            emvr_design.get("current_brief") or emvr_design.get("brief")
+            merge_emvr_structured_requirements(emvr_design).get("experiment_brief")
+            or emvr_design.get("experiment_brief")
+            or emvr_design.get("current_brief")
+            or emvr_design.get("brief")
         )
         if brief:
             parts.append(brief)
@@ -1437,6 +1443,9 @@ class RuleBasedStageGenerator:
             theory_relation_ids = []
 
         if stage is Stage.IDEA_BRAINSTORMING:
+            experiment_brief = str(
+                structured_requirements.get("experiment_brief") or idea
+            ).strip()
             saved_observations = structured_requirements.get(
                 "observed_quantities", []
             )
@@ -1456,8 +1465,9 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="已将你的初步想法整理为Unity VR模拟实验的设计起点。",
                 stage_payload={
-                    "original_idea": idea,
-                    "normalized_idea": f"围绕“{idea}”设计ECE329交互式模拟实验",
+                    "original_idea": experiment_brief,
+                    "normalized_idea": experiment_brief,
+                    "research_object": structured_requirements.get("research_object"),
                     "target_phenomenon": (
                         "；".join(saved_observations)
                         if saved_observations
@@ -1479,7 +1489,8 @@ class RuleBasedStageGenerator:
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             selected_direction = (
-                structured_requirements.get("direction_summary")
+                structured_requirements.get("experiment_brief")
+                or structured_requirements.get("direction_summary")
                 or structured_requirements.get("research_summary")
                 or latest_stage_input
                 or f"围绕“{idea}”比较学生主动改变条件前后的空间电磁分布"
@@ -1490,11 +1501,12 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="已选择兼顾ECE329相关性、理论可解释性和VR交互价值的实验方向。",
                 stage_payload={
+                    "lab_title": structured_requirements.get("lab_title"),
+                    "lab_id": structured_requirements.get("lab_id"),
                     "primary_topic": topics[0],
                     "secondary_topics": topics[1:],
                     "selected_direction": selected_direction,
                     "course_relationship": course_relationship,
-                    "student_revisions": stage_inputs,
                     "course_references": _course_references(design_text),
                     "vr_suitability": "参数可调、结果可计算、现象可空间化展示",
                     "selection_reason": "优先保留你原本的研究意图，并选择能够形成明确输入—输出反馈的方向。",
@@ -1638,6 +1650,15 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="你原有的场景条件已经保留；我在此基础上补全了Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
                 stage_payload={
+                    "desktop_interaction_plan": structured_requirements.get(
+                        "desktop_interaction_plan"
+                    ),
+                    "room_spatial_requirements": structured_requirements.get(
+                        "room_spatial_requirements"
+                    ),
+                    "hidden_object_lifecycle": structured_requirements.get(
+                        "hidden_object_lifecycle"
+                    ),
                     "user_original_design": idea,
                     "existing_context": "保留你已有的场景设定；这一部分不额外改写VR场景。",
                     "student_constraints": stage_inputs,
@@ -1783,8 +1804,11 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="已把实验变量映射到Unity控制、显示和模型约束。",
                 stage_payload={
+                    "parameter_specifications": structured_requirements.get(
+                        "parameter_specifications", []
+                    ),
                     "student_variable_definition": variable_definition,
-                    "independent_variable": {"name": variable_definition or "学生定义的主要变化条件", "unity_control": "与VR对象操作或带单位控件绑定", "range": "限制在理论适用范围"},
+                    "independent_variable": {"name": variable_definition or "学生定义的主要变化条件", "unity_control": "与VR对象操作或带单位控件绑定", "range": "；".join(structured_requirements.get("parameter_specifications", [])) or "需要明确范围与单位"},
                     "dependent_variable": {"name": "；".join(saved_observed) or "研究问题中指定的观察响应", "vr_representation": "数值、曲线和空间编码"},
                     "controlled_variables": ["源条件", "几何条件", "材料或边界中未被选为自变量的参数"],
                     "reference_condition": {"purpose": "建立比较基线", "unity_action": "Reset/Reference preset"},
@@ -1794,23 +1818,30 @@ class RuleBasedStageGenerator:
         if stage is Stage.CONCEPTUAL_PROCEDURE:
             saved_steps = structured_requirements.get("procedure_steps", [])
             saved_steps = saved_steps if isinstance(saved_steps, list) else []
+            reference_steps = [
+                "进入VR实验并阅读本次学习目标、研究问题与模型适用范围",
+                "检查实验对象、源、探测器和显示面板的初始状态",
+                "加载参考条件并记录基准数值、曲线与空间场表现",
+                "只调整当前研究问题规定的一个主要参数",
+                "等待理论计算与空间可视化同步更新",
+                "在固定观察方式下读取数值、曲线和空间现象",
+                "保存当前参数与结果快照，并恢复或切换到下一比较条件",
+                "完成全部保留情形后并列比较结果",
+                "依据ECE329理论关系解释趋势并检查异常或无效条件",
+                "回到学习目标完成反思，确认哪些结论受模型假设限制",
+            ]
             return StepOutput(
                 assistant_message="已将实验逻辑整理为单一、可重复的VR学习闭环。",
                 stage_payload={
                     "procedure_type": "conceptual_vr_flow",
                     "student_required_steps": stage_inputs,
-                    "procedure_steps": saved_steps or [
-                        "进入VR实验并阅读本次学习目标、研究问题与模型适用范围",
-                        "检查实验对象、源、探测器和显示面板的初始状态",
-                        "加载参考条件并记录基准数值、曲线与空间场表现",
-                        "只调整当前研究问题规定的一个主要参数",
-                        "等待理论计算与空间可视化同步更新",
-                        "在固定观察方式下读取数值、曲线和空间现象",
-                        "保存当前参数与结果快照，并恢复或切换到下一比较条件",
-                        "完成全部保留情形后并列比较结果",
-                        "依据ECE329理论关系解释趋势并检查异常或无效条件",
-                        "回到学习目标完成反思，确认哪些结论受模型假设限制",
-                    ],
+                    # A short student paragraph is retained in
+                    # ``student_required_steps`` but cannot replace the full
+                    # ordered Builder flow.  Five or more explicit semantic
+                    # steps are considered a complete student-authored list.
+                    "procedure_steps": (
+                        saved_steps if len(saved_steps) >= 5 else reference_steps
+                    ),
                     "comparison_logic": "每次只改变主要自变量，其余条件保持锁定。",
                     "derived_quantities": ["由当前报告中已筛选的理论关系定义的派生量"],
                 },
@@ -1830,6 +1861,15 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="已为不同结果情形设计物理解释和教学反馈。",
                 stage_payload={
+                    "expected_results": structured_requirements.get(
+                        "expected_results", []
+                    ),
+                    "acceptance_criteria": structured_requirements.get(
+                        "acceptance_criteria", []
+                    ),
+                    "report_questions": structured_requirements.get(
+                        "report_questions", []
+                    ),
                     "if_prediction_supported": "提示理论关系与当前参数条件的一致性。",
                     "if_opposite_trend": "检查符号、边界条件、变量映射和可视化方向。",
                     "if_no_clear_change": "检查参数范围、归一化尺度和模型灵敏度。",
@@ -1864,20 +1904,36 @@ class RuleBasedStageGenerator:
                 "final_design": {"idea": idea, "course_topic": topics[0], "stage_outputs": session.stage_outputs},
                 "builder_pack_handoff": {
                     "purpose": "供EMVR_Blind_BuilderPack的Brief与Design阶段人工审阅，不自动启动或批准任何Gate。",
-                    "lab_identity": {"title": "待用户确认", "lab_id": "待按Builder Pack规则确定", "domain": topics[0]},
+                    "lab_identity": {
+                        "title": structured_requirements.get("lab_title"),
+                        "lab_id": structured_requirements.get("lab_id"),
+                        "domain": topics[0],
+                    },
                     "learning_goals": build_carried_context(session).get("learning_objectives", []),
                     "core_student_flow": build_carried_context(session).get("procedure_steps", []),
                     "physics_and_presets": _focused_emvr_formula_references(
                         theory_relation_ids
                     ),
                     "objects_and_feedback": build_carried_context(session).get("unity_objects", []),
-                    "desktop_xr_interaction_meaning": build_carried_context(session).get("interactions", []),
-                    "initial_and_post_action_states": "使用报告中定义的基准条件和第一次参数调整结果",
-                    "unresolved_builder_inputs": [
-                        "Builder Pack要求的房间、XR Prefab和场景复用决策",
-                        "真实Unity API签名及Common复用审计",
-                        "验收证据与Unity测试结果",
-                    ],
+                    "desktop_xr_interaction_meaning": structured_requirements.get(
+                        "desktop_interaction_plan"
+                    ),
+                    "room_spatial_requirements": structured_requirements.get(
+                        "room_spatial_requirements"
+                    ),
+                    "initial_and_post_action_states": structured_requirements.get(
+                        "hidden_object_lifecycle"
+                    ),
+                    "parameter_specifications": structured_requirements.get(
+                        "parameter_specifications", []
+                    ),
+                    "acceptance_criteria": structured_requirements.get(
+                        "acceptance_criteria", []
+                    ),
+                    "report_questions": structured_requirements.get(
+                        "report_questions", []
+                    ),
+                    "unresolved_builder_inputs": [],
                 },
                 "course_knowledge_source": KNOWLEDGE.source_reference,
             },

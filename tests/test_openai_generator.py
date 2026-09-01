@@ -19,6 +19,7 @@ from ece329_workflow.openai_generator import (
     ModelHTTPError,
     ModelServiceError,
     OpenAIStageGenerator,
+    _uncovered_dialogue_text,
     generator_from_environment,
 )
 from ece329_workflow.prompts import build_prompt_packet
@@ -111,6 +112,35 @@ def retrieved_brainstorm_options(
 
 
 class OpenAIStageGeneratorTests(unittest.TestCase):
+    def test_coverage_audit_ignores_only_short_discourse_wrapper(self) -> None:
+        message = "我想要的设计方向是：比较两个点电荷靠近时中间区域的电场线变化"
+        start = message.index("比较")
+        acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "experiment_brief",
+                "source_start": start,
+                "source_end": len(message),
+            }
+        ]
+
+        self.assertEqual(_uncovered_dialogue_text(message, acts), "")
+
+    def test_coverage_audit_preserves_a_missed_parallel_instruction(self) -> None:
+        first = "把完整实验方向改成比较两个点电荷由远到近时的场线变化"
+        second = "同时把观察量改成中间区域场线的弯曲和连接程度"
+        message = f"{first}；{second}"
+        acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "experiment_brief",
+                "source_start": 0,
+                "source_end": len(first),
+            }
+        ]
+
+        self.assertIn(second, _uncovered_dialogue_text(message, acts))
+
     def test_prompt_defines_interactive_guided_and_professional_emvr_tones(self) -> None:
         guided_packet = build_prompt_packet(
             guided_session(),

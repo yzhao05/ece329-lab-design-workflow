@@ -22,6 +22,7 @@ from ece329_workflow.generator import (
     build_exploration_scenes,
 )
 from ece329_workflow.emvr_design import (
+    EMVR_EDITABLE_FIELDS,
     EMVR_THEORY_RELATIONS,
     EMVR_THEORY_RELATION_IDS,
     apply_emvr_field_updates,
@@ -72,6 +73,34 @@ EMVR_STAGE_ANSWERS = {
     ),
 }
 
+BUILDER_REQUIREMENT_ANSWERS = {
+    "lab_title": "双电荷电场线交互实验",
+    "lab_id": "ece329_charge_field",
+    "desktop_interaction_plan": (
+        "桌面端单击选择带电体，按住左键拖动其位置，滚轮微调距离；"
+        "VR端分别映射为射线选择、手柄抓取移动和摇杆微调。"
+    ),
+    "room_spatial_requirements": (
+        "学生站在房间中央，两个带电体位于前方操作区，参数面板在右侧，"
+        "结果面板在左侧；四周保留绕行观察空间，采用中性照明和高对比标注。"
+    ),
+    "hidden_object_lifecycle": "无",
+    "parameter_specifications": (
+        "两带电体间距0.2 m至2.0 m，步长0.1 m；电荷量为±1 μC和±2 μC离散选项。"
+    ),
+    "expected_results": (
+        "同种电荷靠近时中间场线向外弯曲，异种电荷靠近时场线跨越两者连接；"
+        "距离减小时局部场强变化更加明显。"
+    ),
+    "acceptance_criteria": (
+        "完成同种与异种电荷两组距离扫描，保存每组至少三种距离的场线和场强结果，"
+        "并能用叠加原理解释差异。"
+    ),
+    "report_questions": (
+        "距离减小时两种极性配置的中间区域场线如何变化？这些差异怎样由叠加原理解释？"
+    ),
+}
+
 
 class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
     """Test double that resolves conversational intent from pending state, not wording."""
@@ -89,7 +118,8 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
             if isinstance(pending_action, dict)
             else ""
         )
-        intent = self.next_intent or (
+        explicit_intent = self.next_intent
+        intent = explicit_intent or (
             UserIntent.ACCEPT_PREVIOUS_PROPOSAL
             if pending_type == "CONFIRM_STAGE_OR_MODIFY"
             else UserIntent.ANSWER_CURRENT_QUESTION
@@ -100,6 +130,51 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
             semantic_updates["emvr_design_update"] = self.next_emvr_update
             self.next_emvr_update = None
         dialogue_acts = self.next_dialogue_acts or []
+        if (
+            not dialogue_acts
+            and intent
+            in {
+                UserIntent.ANSWER_CURRENT_QUESTION,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            }
+            and isinstance(pending_action, dict)
+            and pending_action.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+        ):
+            answer_fields = pending_action.get("answer_fields", [])
+            if (
+                isinstance(answer_fields, list)
+                and len(answer_fields) == 1
+                and str(answer_fields[0])
+                in {*BUILDER_REQUIREMENT_ANSWERS, *EMVR_EDITABLE_FIELDS}
+            ):
+                target = str(answer_fields[0])
+                if target == "experiment_brief":
+                    dialogue_acts = [
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": field,
+                            "operation": "REPLACE",
+                            "content": value,
+                            "confidence": 0.99,
+                        }
+                        for field, value in (
+                            ("experiment_brief", user_message),
+                            ("research_object", user_message),
+                            ("required_behaviors", [user_message]),
+                            ("changed_quantities", [user_message]),
+                            ("observed_quantities", [user_message]),
+                        )
+                    ]
+                else:
+                    dialogue_acts = [
+                        {
+                            "type": "ANSWER_PENDING_QUESTION",
+                            "target": target,
+                            "operation": "REPLACE",
+                            "content": user_message,
+                            "confidence": 0.99,
+                        }
+                    ]
         self.next_dialogue_acts = None
         advance_requested = self.next_advance_requested
         self.next_advance_requested = None
@@ -134,7 +209,14 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
 
 def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
     if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
-        message = EMVR_STAGE_ANSWERS[result["current_stage"]]
+        requirement = result.get("stage_payload", {}).get("builder_requirement_field")
+        message = (
+            BUILDER_REQUIREMENT_ANSWERS[requirement]
+            if requirement
+            else EMVR_STAGE_ANSWERS.get(
+                result["current_stage"], "保留当前设计并继续整理"
+            )
+        )
         return engine.process_turn(result["design_id"], {"message": message})
     return engine.process_turn(
         result["design_id"],
@@ -715,8 +797,17 @@ class WorkflowEngineTests(unittest.TestCase):
             brief,
         )
         result = revised
-        result = continue_emvr(self.engine, result)
-        result = continue_emvr(self.engine, result)
+        for _ in range(12):
+            if (
+                result["current_stage"] == Stage.LEARNING_OBJECTIVES.value
+                and result.get("stage_payload", {}).get(
+                    "awaiting_user_design_input"
+                )
+                is True
+            ):
+                break
+            result = continue_emvr(self.engine, result)
+        self.assertEqual(result["current_stage"], Stage.LEARNING_OBJECTIVES.value)
         self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
         result = continue_emvr(self.engine, result)
 
@@ -749,15 +840,6 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(unclear["stage_payload"]["clarification_required"])
 
         generator.next_intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
-        generator.next_dialogue_acts = [
-            {
-                "type": "MODIFY_DESIGN_FIELD",
-                "target": "research_object",
-                "operation": "REPLACE",
-                "content": brief,
-                "confidence": 0.99,
-            }
-        ]
         recovered = engine.process_turn(
             result["design_id"],
             {"message": "我刚刚就是在回答这个问题"},
@@ -778,6 +860,15 @@ class WorkflowEngineTests(unittest.TestCase):
         legacy_pending.pop("interaction_state", None)
         engine.store.save(legacy_session)
         generator.next_intent = UserIntent.ANSWER_CURRENT_QUESTION
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "required_behaviors",
+                "operation": "MERGE",
+                "content": [supplement],
+                "confidence": 0.99,
+            }
+        ]
         refined = engine.process_turn(
             result["design_id"],
             {"message": supplement},
@@ -788,6 +879,15 @@ class WorkflowEngineTests(unittest.TestCase):
         # reopening earlier work.
         second_supplement = "再补充移动探测器读取局部场强，但不改变原来的研究问题。"
         generator.next_intent = UserIntent.NEW_TOPIC
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "required_behaviors",
+                "operation": "MERGE",
+                "content": [second_supplement],
+                "confidence": 0.99,
+            }
+        ]
         refined = engine.process_turn(
             result["design_id"],
             {"message": second_supplement},
@@ -798,16 +898,14 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(stored.current_stage, Stage.IDEA_BRAINSTORMING)
         self.assertEqual(stored.model_context.get("previous_designs", []), [])
         self.assertEqual(emvr_design["brief"], brief)
-        self.assertEqual(
-            emvr_design["brief_revisions"],
-            [supplement, second_supplement],
-        )
-        self.assertIn(brief, emvr_design["current_brief"])
-        self.assertIn(supplement, emvr_design["current_brief"])
-        self.assertIn(second_supplement, emvr_design["current_brief"])
+        self.assertEqual(emvr_design["current_brief"], brief)
+        self.assertNotIn("brief_revisions", emvr_design)
+        requirements = merge_emvr_structured_requirements(emvr_design)
+        self.assertIn(supplement, requirements["required_behaviors"])
+        self.assertIn(second_supplement, requirements["required_behaviors"])
         self.assertIn(brief, refined["stage_payload"]["original_idea"])
-        self.assertIn(supplement, refined["stage_payload"]["original_idea"])
-        self.assertIn(second_supplement, refined["stage_payload"]["original_idea"])
+        self.assertNotIn(supplement, refined["stage_payload"]["original_idea"])
+        self.assertNotIn(second_supplement, refined["stage_payload"]["original_idea"])
 
     def test_modify_and_advance_keeps_emvr_revision_in_the_stage_it_modified(self) -> None:
         generator = ContextAwareEMVRGenerator()
@@ -823,6 +921,22 @@ class WorkflowEngineTests(unittest.TestCase):
         supplement = "增加可移动探测器读取中间平面的局部场强，并保留原有比较。"
         generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
         generator.next_advance_requested = True
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "required_behaviors",
+                "operation": "MERGE",
+                "content": [supplement],
+                "confidence": 0.99,
+            },
+            {
+                "type": "CONTROL",
+                "target": "ADVANCE",
+                "operation": "EXECUTE",
+                "content": None,
+                "confidence": 0.99,
+            },
+        ]
 
         advanced = engine.process_turn(
             result["design_id"],
@@ -836,11 +950,17 @@ class WorkflowEngineTests(unittest.TestCase):
         stored = engine.store.get(result["design_id"])
         stage_inputs = stored.design_context["emvr_design"]["stage_inputs"]
         idea_entries = stage_inputs[Stage.IDEA_BRAINSTORMING.value]
-        self.assertEqual(idea_entries[-1]["content"], supplement)
+        self.assertIn(supplement, idea_entries[-1]["content"])
         self.assertNotIn(Stage.COURSE_MAPPING_AND_DIRECTION.value, stage_inputs)
         self.assertIn(
             supplement,
-            stored.design_context["emvr_design"]["brief_revisions"],
+            merge_emvr_structured_requirements(
+                stored.design_context["emvr_design"]
+            )["required_behaviors"],
+        )
+        self.assertNotIn(
+            "brief_revisions",
+            stored.design_context["emvr_design"],
         )
 
     def test_modify_and_advance_keeps_guided_revision_in_the_stage_it_modified(self) -> None:
@@ -923,7 +1043,10 @@ class WorkflowEngineTests(unittest.TestCase):
 
         result = engine.process_turn(result["design_id"], {"message": "沿用这份草稿并继续"})
         self.assertEqual(result["handled_stage"], Stage.COURSE_MAPPING_AND_DIRECTION.value)
-        result = engine.process_turn(result["design_id"], {"message": "这部分保留，继续整理"})
+        for _ in range(5):
+            if result["current_stage"] == Stage.LEARNING_OBJECTIVES.value:
+                break
+            result = continue_emvr(engine, result)
         self.assertEqual(result["handled_stage"], Stage.LEARNING_OBJECTIVES.value)
         self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
 
@@ -941,17 +1064,28 @@ class WorkflowEngineTests(unittest.TestCase):
         turns = 0
         while result["workflow_status"] != "complete":
             if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
-                message = EMVR_STAGE_ANSWERS[result["current_stage"]]
+                requirement = result.get("stage_payload", {}).get(
+                    "builder_requirement_field"
+                )
+                message = (
+                    BUILDER_REQUIREMENT_ANSWERS[requirement]
+                    if requirement
+                    else EMVR_STAGE_ANSWERS.get(
+                        result["current_stage"], "保留当前设计并继续整理"
+                    )
+                )
             else:
                 message = "保留当前草稿并继续下一部分"
             result = engine.process_turn(result["design_id"], {"message": message})
             turns += 1
-            self.assertLess(turns, 40)
+            self.assertLess(turns, 60)
 
         self.assertTrue(result["report_ready"])
         self.assertTrue(result["report_url"].endswith("/report.pdf"))
         self.assertTrue(result["builder_input_ready"])
         self.assertTrue(result["builder_input_url"].endswith("/builder-gate1-input.pdf"))
+        self.assertTrue(result["builder_handoff_status"]["ready"])
+        self.assertEqual(result["builder_handoff_status"]["completed"], 9)
         self.assertIn("完整设计总结PDF已经生成", result["assistant_message"])
         self.assertIn("Builder Pack Gate 1", result["assistant_message"])
         self.assertIn("右侧“任务报告”", result["assistant_message"])
@@ -975,9 +1109,9 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(builder_payload["initial_and_action_states"])
         self.assertTrue(builder_payload["acceptance_and_evidence"])
         self.assertTrue(builder_payload["builder_runtime_constraints"])
-        self.assertIn(
+        self.assertNotIn(
             "unresolved",
-            json.dumps(builder_payload, ensure_ascii=False),
+            json.dumps(builder_payload, ensure_ascii=False).casefold(),
         )
         self.assertTrue(
             engine.render_builder_input_pdf(result["design_id"]).startswith(b"%PDF")
@@ -1017,11 +1151,30 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotEqual(result["stage_payload"]["original_idea"], "进入EMVR模式")
 
         result = engine.process_turn(result["design_id"], {"message": "保留并继续"})
+        for _ in range(4):
+            if not result.get("stage_payload", {}).get("builder_requirement_field"):
+                break
+            result = continue_emvr(engine, result)
         direction_revision = "比较导体与介质界面附近的场线弯曲与分布特征"
         generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "experiment_brief",
+                "operation": "REPLACE",
+                "content": direction_revision,
+                "confidence": 0.99,
+            }
+        ]
         result = engine.process_turn(result["design_id"], {"message": direction_revision})
         self.assertEqual(result["stage_payload"]["selected_direction"], direction_revision)
-        self.assertIn(direction_revision, result["stage_payload"]["student_revisions"])
+        self.assertEqual(
+            merge_emvr_structured_requirements(
+                engine.store.get(result["design_id"]).design_context["emvr_design"]
+            )["experiment_brief"],
+            direction_revision,
+        )
+        self.assertNotIn("student_revisions", result["stage_payload"])
 
         result = engine.process_turn(result["design_id"], {"message": "保留修改并继续"})
         goals = "解释导体与介质的场线差异，并判断VR显示是否符合静电边界规律"

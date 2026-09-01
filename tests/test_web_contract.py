@@ -77,7 +77,7 @@ class WebFrontendContractTests(unittest.TestCase):
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260901-builder-pdf",
+            "assets/app.js?v=20260901-builder-handoff",
             self.index_html,
         )
 
@@ -93,6 +93,8 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("response.report_ready === true", self.app_js)
         self.assertIn("response.builder_input_ready === true", self.app_js)
         self.assertIn("response.builder_input_url", self.app_js)
+        self.assertIn("response.builder_handoff_status", self.app_js)
+        self.assertIn("Builder交接", self.app_js)
 
     def test_quality_review_versions_and_guided_export_are_visible(self) -> None:
         self.assertIn('id="qualityReviewCard"', self.index_html)

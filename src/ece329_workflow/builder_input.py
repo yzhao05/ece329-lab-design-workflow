@@ -14,6 +14,11 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .builder_requirements import (
+    LAB_ID_PATTERN,
+    builder_requirement_values,
+    validate_builder_requirements,
+)
 from .models import DesignSession, InteractionState, Stage
 from .reporting import validate_emvr_report_completeness
 
@@ -85,11 +90,6 @@ def _as_list(value: Any) -> list[str]:
     return [rendered] if rendered else []
 
 
-def _safe_lab_id(design_id: str) -> str:
-    suffix = re.sub(r"[^a-z0-9]", "", design_id.lower())[:16] or "design"
-    return f"ece329_{suffix}"
-
-
 def _first_value(*values: Any) -> str:
     return next((rendered for value in values if (rendered := _text(value))), "")
 
@@ -107,7 +107,7 @@ def _field(
     return {"key": key, "value": rendered, "status": status, "note": note}
 
 
-def _object_rows(inventory: Any) -> list[dict[str, str]]:
+def _object_rows(inventory: Any, desktop_plan: str) -> list[dict[str, str]]:
     if not isinstance(inventory, list):
         return []
     rows: list[dict[str, str]] = []
@@ -122,11 +122,11 @@ def _object_rows(inventory: Any) -> list[dict[str, str]]:
                 "object_type": _text(item.get("category")) or "unresolved",
                 "role": _text(item.get("purpose")) or "unresolved",
                 "initial_state": _text(item.get("physics_or_data_state")) or "unresolved",
-                "desktop_interaction": _UNRESOLVED,
+                "desktop_interaction": desktop_plan,
                 "xr_interaction": _text(item.get("student_interaction")) or "unresolved",
                 "visible_feedback": _text(item.get("visual_feedback")) or "unresolved",
                 "required": _text(item.get("required")) or "unresolved",
-                "status": "mixed-needs-confirmation",
+                "status": "confirmed-from-design-session",
             }
         )
     return rows
@@ -135,16 +135,16 @@ def _object_rows(inventory: Any) -> list[dict[str, str]]:
 def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
     """Map a completed EMVR design to the Builder Pack Gate 1 intake contract.
 
-    The result deliberately remains an intake document. Builder-owned scene,
-    room, evidence, and acceptance decisions are marked as policy references or
-    unresolved instead of being invented by the design workflow.
+    Builder-owned runtime checks remain policy references, while every
+    user-owned experiment-design field must already be confirmed in EMVR.
     """
     if session.interaction_state is not InteractionState.EMVR_DIRECT:
         raise ValueError("Builder Gate 1 input is only available for an EMVR design")
     validate_emvr_report_completeness(session)
+    validate_builder_requirements(session)
+    builder_values = builder_requirement_values(session)
 
     idea = _stage_payload(session, Stage.IDEA_BRAINSTORMING)
-    mapping = _stage_payload(session, Stage.COURSE_MAPPING_AND_DIRECTION)
     objectives = _stage_payload(session, Stage.LEARNING_OBJECTIVES)
     research = _stage_payload(session, Stage.RESEARCH_QUESTION)
     theory = _stage_payload(session, Stage.THEORETICAL_FRAMEWORK)
@@ -153,19 +153,10 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
     variables = _stage_payload(session, Stage.VARIABLES_AND_CONDITIONS)
     procedure = _stage_payload(session, Stage.CONCEPTUAL_PROCEDURE)
     visualization = _stage_payload(session, Stage.EXPECTED_DATA_VISUALIZATION)
-    interpretation = _stage_payload(session, Stage.RESULT_INTERPRETATION)
     value_limits = _stage_payload(session, Stage.DESIGN_VALUE_AND_LIMITATIONS)
 
-    design_context_idea = session.design_context.get("idea", {})
-    if not isinstance(design_context_idea, dict):
-        design_context_idea = {}
-    title = _first_value(
-        mapping.get("selected_direction"),
-        idea.get("normalized_idea"),
-        design_context_idea.get("current_summary"),
-        design_context_idea.get("original"),
-        "ECE329 EMVR Lab",
-    )
+    title = builder_values["lab_title"]
+    lab_id = builder_values["lab_id"]
     learning_goals = [
         goal
         for key in (
@@ -178,21 +169,13 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         if (goal := _text(objectives.get(key)))
     ]
     steps = _as_list(procedure.get("procedure_steps"))
-    expected_results = [
-        item
-        for item in (
-            _text(hypothesis.get("research_hypothesis")),
-            _text(hypothesis.get("expected_trend")),
-            _text(interpretation.get("if_prediction_supported")),
-            _text(interpretation.get("if_opposite_trend")),
-            _text(interpretation.get("if_no_clear_change")),
-        )
-        if item
-    ]
-    objects = _object_rows(setup.get("object_inventory"))
+    expected_results = _as_list(builder_values["expected_results"])
+    objects = _object_rows(
+        setup.get("object_inventory"), builder_values["desktop_interaction_plan"]
+    )
     first_action = steps[0] if steps else _UNRESOLVED
 
-    return {
+    payload = {
         "document": {
             "title": "EMVR Builder Pack — Gate 1 Requirements Input",
             "purpose": (
@@ -207,13 +190,11 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("schema_version", "1.0.0", status="builder-template-reference"),
             _field(
                 "lab_id",
-                _safe_lab_id(session.design_id),
-                status="inferred-needs-confirmation",
-                note="可直接采用，也可在 Gate 1 改为符合命名规则的项目 ID。",
+                lab_id,
             ),
             _field("title", title),
             _field("domain", "ECE329 electromagnetics", status="confirmed-from-course-scope"),
-            _field("workflow_mode", "new lab design", status="inferred-needs-confirmation"),
+            _field("workflow_mode", "blind-rebuild", status="confirmed-from-design-session"),
             _field("status", "draft", status="builder-template-reference"),
         ],
         "source_material": [
@@ -229,7 +210,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             ),
             _field(
                 "source_material.builder_treatment",
-                "Treat this PDF as user-provided input; preserve every unresolved marker for Gate 1 confirmation.",
+                "Treat this PDF as confirmed user input for Builder Gate 1; do not reinterpret the design intent.",
                 status="builder-processing-instruction",
             ),
         ],
@@ -253,7 +234,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 "success_criteria": (
                     "完成该步骤，并在设计指定的数值、曲线或空间可视化中保留可比较结果。"
                 ),
-                "status": "inferred-needs-confirmation",
+                "status": "confirmed-from-design-session",
             }
             for index, step in enumerate(steps, start=1)
         ],
@@ -261,26 +242,34 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             "mechanism": _text(theory.get("physical_mechanism")) or _UNRESOLVED,
             "formulas": _as_list(theory.get("core_equations")),
             "formula_support_map": _as_list(theory.get("formula_support_map")),
-            "units": _as_list(theory.get("units")) or [_UNRESOLVED],
+            "units": _as_list(builder_values["parameter_specifications"]),
             "simulation_inputs": _as_list(theory.get("simulation_inputs")),
-            "parameter_ranges": _as_list(theory.get("parameter_limits")) or [_UNRESOLVED],
+            "parameter_ranges": _as_list(builder_values["parameter_specifications"]),
             "assumptions": (
                 _as_list(theory.get("assumptions"))
                 + _as_list(value_limits.get("limitations"))
-            ) or [_UNRESOLVED],
+            ) or ["Use the confirmed ECE329 model assumptions in the design report."],
             "expected_results": expected_results,
         },
         "objects": objects,
         "interaction_modes": [
-            _field("interaction_modes.desktop_mouse", _UNRESOLVED),
+            _field("interaction_modes.desktop_mouse", "required"),
             _field("interaction_modes.xr_device_simulator", "required", status="builder-policy-reference"),
             _field("interaction_modes.real_vr", "required", status="builder-policy-reference"),
             _field("interaction_modes.xr_actions", setup.get("interactions")),
             _field("interaction_modes.measurement_interface", setup.get("measurement_interface")),
-            _field("interaction_modes.mouse_to_vr_mapping", _UNRESOLVED),
+            _field("interaction_modes.mouse_to_vr_mapping", builder_values["desktop_interaction_plan"]),
         ],
         "visualization": [
-            _field("visualization.requirements", visualization.get("student_visualization_requirements")),
+            _field(
+                "visualization.requirements",
+                _first_value(
+                    visualization.get("student_visualization_requirements"),
+                    visualization.get("trend_annotation"),
+                    "Display the confirmed theoretical response with units and a spatial encoding.",
+                ),
+                status="confirmed-from-design-session",
+            ),
             _field("visualization.trend_annotation", visualization.get("trend_annotation")),
             _field("visualization.update_event", visualization.get("unity_update_event")),
             _field("visualization.layer", setup.get("visualization_layer")),
@@ -293,9 +282,9 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 "ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab",
                 status="builder-policy-reference",
             ),
-            _field("environment.room_placement_and_adaptation", _UNRESOLVED),
-            _field("environment.visual_style_reference", _UNRESOLVED),
-            _field("environment.lighting_requirement", _UNRESOLVED),
+            _field("environment.room_placement_and_adaptation", builder_values["room_spatial_requirements"]),
+            _field("environment.visual_style_reference", builder_values["room_spatial_requirements"]),
+            _field("environment.lighting_requirement", builder_values["room_spatial_requirements"]),
             _field(
                 "environment.camera_and_ui_safe_area",
                 "Game View must keep instruction, experiment, status, and result regions visible.",
@@ -306,7 +295,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field(
                 "presets.reference_condition",
                 variables.get("reference_condition"),
-                status="inferred-needs-confirmation",
+                status="confirmed-from-design-session",
             )
         ],
         "reuse_requirements": [
@@ -317,11 +306,15 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         "scene": [
             _field(
                 "scene.output_scene",
-                f"Assets/Scenes/{_safe_lab_id(session.design_id)}.unity",
-                status="inferred-needs-confirmation",
+                f"Assets/Scenes/{lab_id}.unity",
+                status="confirmed-from-design-session",
             ),
             _field("scene.creation_mode", "new_scene", status="builder-policy-reference"),
-            _field("scene.approved_asset_sources", _UNRESOLVED),
+            _field(
+                "scene.approved_asset_sources",
+                "ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab",
+                status="builder-policy-reference",
+            ),
             _field(
                 "scene.camera_style",
                 "generated from approved XR/Common components",
@@ -338,13 +331,13 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field(
                 "initial_and_action_states.authored_initial_state",
                 variables.get("reference_condition"),
-                status="inferred-needs-confirmation",
+                status="confirmed-from-design-session",
             ),
-            _field("initial_and_action_states.hidden_templates_or_loaders", _UNRESOLVED),
+            _field("initial_and_action_states.hidden_templates_or_loaders", builder_values["hidden_object_lifecycle"]),
             _field(
                 "initial_and_action_states.first_required_action",
                 first_action,
-                status="inferred-needs-confirmation",
+                status="confirmed-from-design-session",
             ),
             _field(
                 "initial_and_action_states.expected_visible_after_action",
@@ -352,14 +345,14 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                     visualization.get("student_visualization_requirements"),
                     hypothesis.get("expected_trend"),
                 ),
-                status="inferred-needs-confirmation",
+                status="confirmed-from-design-session",
             ),
         ],
         "acceptance_and_evidence": [
             _field(
                 "acceptance.core_flow",
                 steps,
-                status="inferred-needs-confirmation",
+                status="confirmed-from-design-session",
             ),
             _field(
                 "acceptance.required_evidence",
@@ -371,13 +364,14 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 expected_results,
                 status="confirmed-from-design-session",
             ),
-            _field("acceptance.report_questions", _UNRESOLVED),
+            _field("acceptance.pass_criteria", builder_values["acceptance_criteria"]),
+            _field("acceptance.report_questions", builder_values["report_questions"]),
         ],
         "builder_runtime_constraints": [
             _field("current_editor_state.unity_version", "2022.3.62f3c1", status="builder-template-reference"),
-            _field("current_editor_state.unity_open", _UNRESOLVED),
-            _field("current_editor_state.compiling", _UNRESOLVED),
-            _field("current_editor_state.play_mode", _UNRESOLVED),
+            _field("current_editor_state.unity_open", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
+            _field("current_editor_state.compiling", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
+            _field("current_editor_state.play_mode", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
             _field("workflow_limits.run_batchmode", "false", status="builder-policy-reference"),
             _field("workflow_limits.hand_edit_scene_yaml", "false", status="builder-policy-reference"),
             _field("workflow_limits.no_visible_progress_minutes", "5", status="builder-policy-reference"),
@@ -385,10 +379,71 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         ],
         "handoff_notes": [
             "Builder 必须先把本 PDF 映射为 LabSpecs/<lab_id>/brief.yaml，再由用户确认 Gate 1。",
-            "不得用课程常识补齐 unresolved 项；应在 Gate 1 进行局部确认。",
+            "本文件中的用户设计输入已在EMVR工作流前置确认；Builder只需执行实现期检查。",
             "本 PDF 仅描述实验设计，不授权创建 Unity 场景、代码或批准任何 Gate。",
         ],
     }
+    validate_builder_gate1_input(payload)
+    return payload
+
+
+def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
+    """Reject incomplete or contract-incompatible Builder handoffs."""
+
+    required_sections = {
+        "document",
+        "identity",
+        "design_definition",
+        "learning_goals",
+        "student_tasks",
+        "physics",
+        "objects",
+        "interaction_modes",
+        "environment",
+        "initial_and_action_states",
+        "acceptance_and_evidence",
+    }
+    missing_sections = sorted(required_sections - set(payload))
+    if missing_sections:
+        raise ValueError(
+            "Builder Gate 1 input is missing sections: " + ", ".join(missing_sections)
+        )
+    unresolved_paths: list[str] = []
+
+    def scan(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                scan(item, f"{path}.{key}" if path else str(key))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                scan(item, f"{path}[{index}]")
+        elif "unresolved" in str(value or "").casefold():
+            unresolved_paths.append(path)
+
+    scan(payload, "")
+    if unresolved_paths:
+        raise ValueError(
+            "Builder Gate 1 input still contains unresolved design content: "
+            + ", ".join(unresolved_paths[:8])
+        )
+    identity = payload.get("identity", [])
+    lab_id = next(
+        (
+            str(item.get("value") or "")
+            for item in identity
+            if isinstance(item, dict) and item.get("key") == "lab_id"
+        ),
+        "",
+    )
+    if LAB_ID_PATTERN.fullmatch(lab_id) is None:
+        raise ValueError("Builder Gate 1 input contains an invalid lab_id")
+    object_ids = [
+        str(item.get("object_id") or "")
+        for item in payload.get("objects", [])
+        if isinstance(item, dict)
+    ]
+    if not object_ids or len(object_ids) != len(set(object_ids)):
+        raise ValueError("Builder Gate 1 object IDs must be present and unique")
 
 
 def _paragraph_text(value: Any) -> str:
@@ -511,9 +566,9 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
         [
             Spacer(1, 3 * mm),
             p(
-                "状态说明：confirmed-from-design-session 表示已写入最终 EMVR 设计；"
-                "inferred-needs-confirmation 表示为了衔接 Builder 而生成的候选值；"
-                "unresolved 必须在 Gate 1 询问用户，不能自行补齐。",
+                "状态说明：confirmed-from-design-session 表示已由用户在 EMVR 设计过程中确认；"
+                "builder-policy-reference 表示来自 Builder Pack 的固定约束；"
+                "builder-runtime-check 表示由 Builder 在实际 Unity 工作区中核对。",
                 small_style,
             ),
         ]

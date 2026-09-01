@@ -258,7 +258,7 @@ Content-Type: application/json
 }
 ```
 
-输入中包含 `EMVR` 标记时会切换为 `EMVR_DIRECT`。系统根据学生的模糊想法和已经确认的内容提供专业、可修改的阶段草稿，不展示三幅通用图景；学生可以逐项修订物理内容、Unity对象、交互或显示要求，确认前不会移动会话指针。每次响应还会返回 `task_report`；最终阶段完成并通过“学习目标、物体清单、实验流程”完整性检查后，返回 `report_ready=true`、`report_url`、`builder_input_ready=true` 和 `builder_input_url`。两个下载地址都受设计令牌保护，分别对应学生版设计报告和 Builder Pack Gate 1 输入 PDF。
+输入中包含 `EMVR` 标记时会切换为 `EMVR_DIRECT`。系统根据学生的模糊想法和已经确认的内容提供专业、可修改的阶段草稿，不展示三幅通用图景；学生可以逐项修订物理内容、Unity对象、交互或显示要求，确认前不会移动会话指针。EMVR 流程会在相应阶段前置确认 Builder Gate 1 必需的实验名称与ID、桌面鼠标/VR操作映射、房间空间与相对摆放、隐藏对象生命周期、参数范围与单位、Lab特有预期结果、通过条件和报告问题。它不会在下载前再列出若干未明确项，也不会替用户静默补齐。每次响应还会返回 `task_report` 和 `builder_handoff_status`；只有设计报告与全部 Builder 输入均通过校验后，才返回 `report_ready=true`、`report_url`、`builder_input_ready=true` 和 `builder_input_url`。两个下载地址都受设计令牌保护，分别对应学生版设计报告和 Builder Pack Gate 1 输入 PDF。
 
 ### 继续当前设计
 
