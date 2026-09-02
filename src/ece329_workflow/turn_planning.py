@@ -36,6 +36,12 @@ FIELD_LABELS = {
     "research_object": "研究对象",
     "course_relationship": "课程关系",
     "learning_objective": "学习目标",
+    "learning_objectives": "学习目标",
+    "conceptual_objective": "概念目标",
+    "calculation_objective": "计算目标",
+    "analysis_objective": "分析目标",
+    "vr_interaction_objective": "交互目标",
+    "observation_objective": "观察目标",
     "research_question": "研究问题",
     "theoretical_framework": "理论依据",
     "hypothesis": "假设",
@@ -331,7 +337,13 @@ def _compact(value: Any, limit: int = 110) -> str:
         text = "、".join(dict.fromkeys(parts))
     else:
         text = str(value).strip() if value is not None else ""
-    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+    if len(text) <= limit:
+        return text
+    prefix = text[:limit]
+    boundary = max(prefix.rfind(mark) for mark in "。！？；.!?;")
+    if boundary >= max(24, limit // 3):
+        return prefix[: boundary + 1]
+    return f"{prefix[: limit - 1].rstrip('，、：；,;:-—')}…"
 
 
 def student_change_notice(
@@ -351,13 +363,19 @@ def student_change_notice(
         label = str(change.get("label") or "这项设计")
         old_value = _compact(change.get("before"))
         new_value = _compact(change.get("after"))
+        old_is_long = len(str(change.get("before") or "")) > 110
+        new_is_long = len(str(change.get("after") or "")) > 110
         if interaction_state is InteractionState.EMVR_DIRECT:
-            if old_value:
+            if old_is_long or new_is_long:
+                lines.append(f"已按本轮完整说明更新设计中的{label}，其他栏目保持不变。")
+            elif old_value:
                 lines.append(
                     f"已同步修订设计中的{label}：由“{old_value}”调整为“{new_value}”。"
                 )
             else:
                 lines.append(f"已同步修订设计中的{label}：“{new_value}”。")
+        elif old_is_long or new_is_long:
+            lines.append(f"我已经把你刚才完整说明的{label}接进设计了，其他内容没有被覆盖。")
         elif old_value:
             lines.append(f"我已按你的想法把{label}从“{old_value}”调整为“{new_value}”。")
         else:

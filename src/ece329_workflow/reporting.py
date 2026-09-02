@@ -24,6 +24,7 @@ from reportlab.platypus import (
 from .models import DesignSession, InteractionState, Stage, WorkflowStatus
 from .stages import stage_title
 from .design_quality import evaluate_design_quality, public_quality_review
+from .emvr_design import EMVR_THEORY_RELATIONS
 
 
 _FIELD_LABELS = {
@@ -47,7 +48,7 @@ _FIELD_LABELS = {
     "adjustable_quantity_in_vr": "VR中可调内容",
     "observable_quantity_in_vr": "VR中可观察内容",
     "physical_mechanism": "物理机制",
-    "core_equations": "理论关系",
+    "core_equations": "核心公式",
     "formula_support_map": "理论关系与研究内容的对应",
     "theory_selection_status": "理论关系筛选状态",
     "simulation_inputs": "计算输入",
@@ -294,6 +295,40 @@ def stage_report_section(
                         "label": f"物体 {index}｜{name}",
                         "value": "；".join(details),
                     }
+                )
+            continue
+        if field == "formula_support_map" and isinstance(payload.get(field), list):
+            links = []
+            for link in payload[field]:
+                if not isinstance(link, dict):
+                    continue
+                relation_id = str(link.get("relation_id") or "").strip()
+                relation = str(
+                    link.get("relation")
+                    or EMVR_THEORY_RELATIONS.get(relation_id, {}).get("label")
+                    or ""
+                ).strip()
+                supports = str(link.get("supports_design_content") or "").strip()
+                if relation and supports:
+                    links.append(f"{relation}用于解释：{supports}")
+            if links:
+                items.append(
+                    {
+                        "label": _FIELD_LABELS[field],
+                        "value": "；".join(dict.fromkeys(links)),
+                    }
+                )
+            continue
+        if field == "theory_selection_status":
+            status = str(payload.get(field) or "").strip()
+            friendly_status = {
+                "selected_for_current_research": "已按当前研究问题筛选",
+                "course_context_fallback": "已按当前实验的课程关系筛选",
+                "needs_semantic_theory_confirmation": "尚需确认与研究问题直接相关的理论关系",
+            }.get(status, "")
+            if friendly_status:
+                items.append(
+                    {"label": _FIELD_LABELS[field], "value": friendly_status}
                 )
             continue
         value = _plain(payload.get(field))

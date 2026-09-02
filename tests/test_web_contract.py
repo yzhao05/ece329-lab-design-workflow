@@ -121,7 +121,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('advanceQuickAction("保留这部分并继续")', self.app_js)
         self.assertRegex(
             self.app_js,
-            r"error instanceof ApiError && error\.status === 409[\s\S]{0,180}state\.pendingRequest = null",
+            r"error instanceof ApiError && error\.status === 409[\s\S]{0,260}turnId: crypto\.randomUUID\(\)",
         )
 
     def test_live_dialogue_eval_forces_the_real_openai_generator(self) -> None:
@@ -142,7 +142,7 @@ class WebFrontendContractTests(unittest.TestCase):
     def test_typed_completion_language_is_left_to_backend_semantics(self) -> None:
         self.assertNotIn("function isAdvanceIntent", self.app_js)
         self.assertIn("pendingUiAction", self.app_js)
-        self.assertIn('actionType: action.action === "ADVANCE_STAGE"', self.app_js)
+        self.assertIn('["ADVANCE_STAGE", "RETRY_PENDING_REQUEST"].includes(action.action)', self.app_js)
 
     def test_guided_stage_entry_waits_for_student_description(self) -> None:
         self.assertIn("DEMO_GUIDED_STAGE_ENTRY_QUESTIONS", self.app_js)
@@ -163,10 +163,12 @@ class WebFrontendContractTests(unittest.TestCase):
     def test_quick_actions_send_stable_option_id(self) -> None:
         self.assertIn("function normalizeQuickAction(action)", self.app_js)
         self.assertIn("state.pendingOptionId = optionId", self.app_js)
-        self.assertIn("turn.selected_option_id = state.pendingOptionId", self.app_js)
+        self.assertIn("const optionId = state.pendingRequest?.optionId || state.pendingOptionId", self.app_js)
+        self.assertIn("turn.selected_option_id = optionId", self.app_js)
         self.assertIn("option_id: item.option_id || null", self.app_js)
-        self.assertIn("const selectedOptionId = state.pendingOptionId", self.app_js)
-        self.assertIn("{ label: message, option_id: selectedOptionId }", self.app_js)
+        self.assertIn("? state.pendingRequest.optionId || null", self.app_js)
+        self.assertIn("function retryPendingRequest()", self.app_js)
+        self.assertIn('action: "RETRY_PENDING_REQUEST"', self.app_js)
         self.assertIn(
             "response.stage_payload?.clarification_choices",
             self.app_js,

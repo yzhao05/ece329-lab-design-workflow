@@ -72,8 +72,8 @@ def initialize_idea_development(
 ) -> dict[str, Any]:
     idea = session.design_context.get("idea", {})
     idea_text = _idea_text(idea, outline)
-    course_references = KNOWLEDGE.concept_references(idea_text, limit=3)
-    formula_references = KNOWLEDGE.formula_references(idea_text, limit=3)
+    course_references = KNOWLEDGE.concept_references(idea_text, limit=1)
+    formula_references = KNOWLEDGE.focused_formula_references(idea_text, limit=1)
     facets = {
         definition.facet_id: {
             "facet_id": definition.facet_id,
@@ -103,30 +103,9 @@ def initialize_idea_development(
                 "source": "COURSE_RETRIEVAL",
             }
         )
-    if formula_references:
-        facets["theoretical_framework"].update(
-            {
-                "status": CLEAR,
-                "evidence": "；".join(
-                    str(item.get("name") or item.get("title") or item.get("expression") or "").strip()
-                    for item in formula_references
-                    if str(item.get("name") or item.get("title") or item.get("expression") or "").strip()
-                ),
-                "source": "COURSE_RETRIEVAL",
-            }
-        )
-    elif course_references:
-        facets["theoretical_framework"].update(
-            {
-                "status": CLEAR,
-                "evidence": "；".join(
-                    str(item.get("title") or item.get("lecture_title") or "").strip()
-                    for item in course_references
-                    if str(item.get("title") or item.get("lecture_title") or "").strip()
-                ),
-                "source": "COURSE_RETRIEVAL_QUALITATIVE",
-            }
-        )
+    # Course retrieval supplies candidates for discussion, not an accepted
+    # theory framework.  Only a field-level semantic update can make this
+    # facet CLEAR; topical proximity alone must never commit a formula.
     if semantic_updates is not None:
         _apply_structured_facet_updates(
             facets,
@@ -185,8 +164,70 @@ def update_idea_development(
             )
             clarified.append(active_id)
     development["last_clarified_facet_ids"] = clarified
+    _refresh_course_evidence(session, development)
     _refresh(development)
     return development
+
+
+def _refresh_course_evidence(
+    session: DesignSession,
+    development: dict[str, Any],
+) -> None:
+    """Re-rank course support after the student's idea becomes more precise."""
+
+    facets = development.get("facets", {})
+    facets = facets if isinstance(facets, dict) else {}
+    evidence = " ".join(
+        str(facet.get("evidence") or "").strip()
+        for facet in facets.values()
+        if isinstance(facet, dict) and str(facet.get("evidence") or "").strip()
+    )
+    idea = session.design_context.get("idea", {})
+    outline = session.design_context.get("experiment_outline_seed", {})
+    search_text = " ".join(
+        item
+        for item in (
+            _idea_text(
+                idea if isinstance(idea, dict) else {},
+                outline if isinstance(outline, dict) else {},
+            ),
+            evidence,
+        )
+        if item
+    )
+    if not search_text:
+        return
+    course_references = KNOWLEDGE.concept_references(search_text, limit=1)
+    formula_references = KNOWLEDGE.focused_formula_references(search_text, limit=1)
+    if course_references:
+        development["course_references"] = course_references
+        course_facet = facets.get("course_mapping")
+        if (
+            isinstance(course_facet, dict)
+            and str(course_facet.get("source") or "").startswith("COURSE_RETRIEVAL")
+        ):
+            course_facet["evidence"] = "；".join(
+                str(item.get("title") or item.get("lecture_title") or "").strip()
+                for item in course_references
+                if str(item.get("title") or item.get("lecture_title") or "").strip()
+            )
+    if formula_references:
+        development["formula_references"] = formula_references
+    theory_facet = facets.get("theoretical_framework")
+    if (
+        isinstance(theory_facet, dict)
+        and str(theory_facet.get("source") or "").startswith("COURSE_RETRIEVAL")
+    ):
+        # Repair sessions created before retrieval and confirmation were
+        # separated.  Keep the references as candidates, but reopen the facet
+        # until a semantic field update binds a theory explicitly.
+        theory_facet.update(
+            {
+                "status": MISSING,
+                "evidence": "",
+                "source": None,
+            }
+        )
 
 
 def _apply_structured_facet_updates(

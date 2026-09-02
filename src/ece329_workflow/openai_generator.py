@@ -30,7 +30,11 @@ from .dialogue_acts import (
     DIALOGUE_ACT_TYPES,
     STAGE_ACT_FIELDS,
 )
-from .emvr_design import EMVR_EDITABLE_FIELDS, EMVR_THEORY_RELATIONS
+from .emvr_design import (
+    EMVR_EDITABLE_FIELDS,
+    EMVR_THEORY_RELATIONS,
+    candidate_formulas_for_emvr_context,
+)
 from .design_state import seen_scene_signatures
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
@@ -633,9 +637,68 @@ def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
     # lead-in (“我想修改的是…”) is discourse framing rather than a missing
     # design instruction.  A genuinely omitted parallel request remains long
     # enough, or occupies enough of the original turn, to trigger repair.
-    if len(substantive) < 14:
+    # Count each uncovered island independently. A fully handled compound
+    # answer often leaves several short framing islands around the covered
+    # values (for example a lead-in before each field). Adding those islands
+    # together produced a false "unresolved fragment" even though every
+    # substantive value had a field-level act. A genuinely omitted request is
+    # preserved because it remains one substantial contiguous island.
+    uncovered_islands = [
+        island
+        for island in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", remaining)
+        if island
+    ]
+    longest_island = max((len(item) for item in uncovered_islands), default=0)
+    if len(substantive) < 14 or longest_island < 14:
         return ""
     return remaining.strip()[:1200]
+
+
+def _source_backed_unresolved_acts(user_message: str, acts: Any) -> list[dict[str, Any]]:
+    """Discard model-authored ``UNRESOLVED`` paraphrases.
+
+    An unresolved item is evidence about text that was *not* understood.  It
+    must therefore point back to the student's actual message, rather than to
+    a model-generated wrapper or summary.  Executable acts are left untouched;
+    the source-span coverage pass below remains responsible for discovering a
+    genuinely omitted part of a compound turn.
+    """
+
+    if not isinstance(acts, list):
+        return []
+    original = str(user_message or "")
+    cleaned: list[dict[str, Any]] = []
+    for item in acts:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").upper() != "UNRESOLVED":
+            cleaned.append(item)
+            continue
+        start = item.get("source_start")
+        end = item.get("source_end")
+        if (
+            isinstance(start, int)
+            and isinstance(end, int)
+            and 0 <= start < end <= len(original)
+        ):
+            source_slice = original[start:end]
+            candidate = str(item.get("source_text") or item.get("content") or "").strip()
+            if not candidate or candidate == source_slice.strip():
+                normalized = dict(item)
+                normalized["source_text"] = source_slice
+                normalized["content"] = source_slice
+                cleaned.append(normalized)
+            continue
+        candidate = str(item.get("source_text") or item.get("content") or "").strip()
+        if candidate and candidate in original:
+            normalized = dict(item)
+            located = original.find(candidate)
+            normalized["source_start"] = located
+            normalized["source_end"] = located + len(candidate)
+            normalized["source_text"] = candidate
+            normalized["content"] = candidate
+            cleaned.append(normalized)
+    return cleaned
 
 
 def _parse_intent_response(
@@ -870,6 +933,11 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         payload_fields_by_design_field = {
             "direction_summary": ("selected_direction",),
             "research_question": ("main_research_question",),
+            "conceptual_objective": ("conceptual_objective",),
+            "calculation_objective": ("calculation_objective",),
+            "analysis_objective": ("analysis_objective",),
+            "vr_interaction_objective": ("vr_interaction_objective",),
+            "observation_objective": ("observation_objective",),
             "changed_quantities": (
                 "adjustable_quantity_in_vr", "independent_variable", "simulation_inputs"
             ),
@@ -1033,10 +1101,13 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         session.interaction_state is InteractionState.EMVR_DIRECT
         and stage is Stage.THEORETICAL_FRAMEWORK
     ):
-        allowed_formulas = _focused_emvr_formula_references(
-                _emvr_structured_requirements(session).get(
-                    "theory_relation_ids", []
-                ),
+        requirements = _emvr_structured_requirements(session)
+        relation_ids = requirements.get("theory_relation_ids", [])
+        allowed_formulas = _focused_emvr_formula_references(relation_ids)
+        if not allowed_formulas:
+            allowed_formulas = candidate_formulas_for_emvr_context(
+                _emvr_context_text(session, ""),
+                limit=12,
             )
         allowed_formula_ids = {
             str(item.get("id") or "") for item in allowed_formulas
@@ -2027,7 +2098,8 @@ class OpenAIStageGenerator:
                 "不得由模型代写。"
                 "EMVR_DIRECT下修改完整实验方向或其结构化子项时使用MODIFY_EMVR_FIELD；target只能是"
                 "experiment_brief、research_object、direction_summary、research_summary、course_relationship、"
-                "research_question、hypothesis、design_rationale、learning_objectives、changed_quantities、"
+                "research_question、hypothesis、design_rationale、learning_objectives、conceptual_objective、"
+                "calculation_objective、analysis_objective、vr_interaction_objective、observation_objective、changed_quantities、"
                 "observed_quantities、comparison_cases、required_behaviors、object_constraints、procedure_steps、"
                 "visualization_requirements、design_values、limitations及已列出的Builder字段。"
                 "operation只能为MERGE、REPLACE或CLEAR。课程疑问必须单独作为ASK_COURSE_QUESTION，"
@@ -2097,10 +2169,17 @@ class OpenAIStageGenerator:
                 "‘另外我想问’等对话操作本身。若学生只指出受影响字段而没有提供足以确定的新值，"
                 "CORRECT_ASSISTANT只返回affected_fields，不得猜写字段值。"
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
-                "selected_option_ids（必须来自pending_action中的真实option_id）、"
+                "selected_option_ids（必须来自carried_context.latest_exploration_scenes中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
                 "stage_one_direction_detail（只在学生回应三幅图景时，同时说出了自己想研究的"
                 "具体物理现象或关系时填写其实质描述；只选A/B/C时为null）、"
+                "stage_one_scene_response（只能为SELECT_OR_DEVELOP、PROVIDE_BROAD_TOPIC、"
+                "REQUEST_NEW_BATCH或NONE；"
+                "学生选择、组合、评价后沿某幅图景继续，或基于图景补充自己的研究设想时为"
+                "SELECT_OR_DEVELOP；只有学生明确不要当前三幅图景并要求另一批时才为"
+                "REQUEST_NEW_BATCH；学生此前明确没有方向、浏览后只给出一个宽泛课程主题但尚未"
+                "提出具体物理关系时为PROVIDE_BROAD_TOPIC，以便围绕该主题给出一批定向图景；"
+                "其他情况为NONE）、"
                 "topic_change_explicit（只有学生明确放弃、替换当前研究方向时为true）、"
                 "facet_updates（facet_id只能使用carried_context.idea_development中的ID，"
                 "仅在学生明确回答或明确撤回该项时标CLEAR或MISSING；学生是在原内容上补充且"
@@ -2121,6 +2200,10 @@ class OpenAIStageGenerator:
                 "operation同样只能为MERGE、REPLACE、CLEAR。用户一轮修改几项就逐项返回几项）、"
                 "student_questions、feedback_items与unresolved_content（分别保存用户课程问题、"
                 "对助手理解的纠错反馈和仍无法解析的局部内容；这些文字不能写入设计字段）、"
+                "UNRESOLVED动作只能引用user_message中确实未覆盖的最小连续原文片段，source_text与"
+                "content必须逐字来自该片段并给出正确source_start/source_end；不得把学生原话改写成"
+                "‘感兴趣于……这一方向’等模型生成的总结后，再声称这句话没有理解。若设计动作已覆盖"
+                "实质内容，‘我对图景A感兴趣’等承接外壳不应单独成为UNRESOLVED。"
                 "comparison_updates（修改现有组时comparison_id必须来自pending_action或"
                 "carried_context，action为ACCEPT、MODIFY或REJECT；学生提出与现有组不同的"
                 "新比较维度时action=CREATE、comparison_id留空，title和new_cases必须取自学生原话。"
@@ -2151,6 +2234,7 @@ class OpenAIStageGenerator:
                 "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
                 "必须根据整句含义和carried_context.emvr_merged_requirements返回结构化物理设计解释。快照字段为："
                 "experiment_brief、research_object、direction_summary、research_summary、course_relationship、research_question、learning_objectives、"
+                "conceptual_objective、calculation_objective、analysis_objective、vr_interaction_objective、observation_objective、"
                 "changed_quantities、observed_quantities、comparison_cases、hypothesis、"
                 "required_behaviors、object_constraints、procedure_steps、"
                 "visualization_requirements、design_rationale、design_values、limitations、lab_title、lab_id、"
@@ -2159,6 +2243,9 @@ class OpenAIStageGenerator:
                 "各项使用学生"
                 "实际表达的具体内容；例如变化方向、连续变化方式和指定观察现象都必须保留，"
                 "不能压缩成‘主要参数影响目标响应’。修改请求还必须返回field_updates数组，"
+                "学习目标草稿中的概念目标、计算目标、分析目标、交互目标和观察目标是彼此独立的"
+                "可修改字段；学生只点名其中一项时，只更新对应字段，不得用learning_objectives覆盖"
+                "整组目标。"
                 "Builder交接字段只在EMVR_DIRECT下使用：desktop_interaction_plan必须说明鼠标如何操作"
                 "哪个对象及其对应VR操作；parameter_specifications必须逐项保留参数范围、单位和步长或"
                 "离散选项；room_spatial_requirements必须保留用户给出的相对摆放、操作空间、灯光与视觉"
@@ -2171,6 +2258,12 @@ class OpenAIStageGenerator:
                 "改成清晰的因果句’必须读取旧研究问题，生成改写后的research_question并以"
                 "REPLACE保存；value中不得包含操作说明。只改一个字段时，不得顺带重写其他字段；"
                 "明确替换时不能把旧值和新值并列。GUIDED_DESIGN下不得返回此对象。"
+                "学生回答单字段待办时，可以在同一句里说明该对象如何操作、改变什么和观察什么；"
+                "此时用ANSWER_PENDING_QUESTION保存被问字段，并把明确的操作、变化量和观察量分别"
+                "拆成额外字段动作。‘我刚刚是在回答……’‘我们之前的是……’等承接说明只属于会话"
+                "语境，不是新的设计值，也不是未解析的修改命令；只要其后的实质内容已被动作覆盖，"
+                "不要为这些说明单独返回UNRESOLVED。每个动作的content必须是更新后的纯字段值，"
+                "不应包含‘改为’‘只保留’‘其他暂不考虑’等修改过程说明。"
                 "theory_links的每项包含relation_id、supports_design_content与supports_design_fields；"
                 "supports_design_fields只能从research_question、changed_quantities、observed_quantities、"
                 "comparison_cases、object_constraints中选择至少一项，并表示这条理论实际支持的结构化"
@@ -2178,10 +2271,9 @@ class OpenAIStageGenerator:
                 "指出该关系支持当前哪一个变化量、观察量、比较情形或边界条件，不能只重复"
                 "关系名称。relation_id表示真正进入当前实验的物理机制，不是与主题沾边的"
                 "课程知识列表；只选择能计算、解释或约束changed_quantities、"
-                "observed_quantities或边界条件的关系。比如只有实验研究带电粒子的受力或运动时才需要"
-                "CHARGED_PARTICLE_FORCE，只有研究导电电流响应时才需要OHMIC_CONDUCTION，"
-                "只有研究自由电荷随时间消散时才需要CHARGE_RELAXATION。不能因为它们都属于"
-                "电磁学就自动加入。可用关系ID及含义为："
+                "observed_quantities或边界条件的关系。每个关系都必须给出结构化支持字段；"
+                "不能仅因为它属于同一课程模块、共享某个物理量或出现在相邻课程材料中就加入。"
+                "可用关系ID及含义为："
                 f"{json.dumps(emvr_relation_catalog, ensure_ascii=False)}。"
                 "学生增加或删除理论关系时，还必须在emvr_design_update.theory_link_updates中逐项返回"
                 "relation_id和operation（ADD或REMOVE）；ADD必须同时在theory_links中提供上述字段绑定，"
@@ -2201,6 +2293,20 @@ class OpenAIStageGenerator:
                 "自己的研究设想。此时selected_option_ids与stage_one_direction_detail必须同时返回；"
                 "不得只记录选项而丢掉实质想法，也不得因为说得较长就重新展示图景。学生不引用图景"
                 "但直接给出明确的课内研究设想时，也应把该设想写入stage_one_direction_detail。"
+                "只要本轮是在选择、组合、评价并继续发展当前图景，stage_one_scene_response就返回"
+                "SELECT_OR_DEVELOP；这与学生是在第一次还是后续一批图景中选择、以及消息长短无关。"
+                "PROVIDE_BROAD_TOPIC只适用于学生尚未选定任何图景或研究关系、仅从无方向状态提出"
+                "宽泛课程主题的情况；已经评价、引用或沿用当前图景时绝不能使用该值。"
+                "解析图景A/B/C或‘这个方向’等指代时，必须以"
+                "carried_context.latest_exploration_scenes为唯一当前批次，并把对应option_id写入"
+                "selected_option_ids；不得引用更早批次中同名的A/B/C。只有明确否定当前批次并索取"
+                "另外一批时，才同时返回REQUEST_REFERENCE、target=exploration_scenes和"
+                "stage_one_scene_response=REQUEST_NEW_BATCH。一般的课程参考请求不能使用该值。"
+                "stage_one_direction_detail和对应的字段动作必须保存纯物理内容，不得带入‘我感兴趣’、"
+                "‘这一方向’或选项编号等会话外壳。若学生同时说明对象、比较关系和观察现象，应分别"
+                "生成research_object、research_question或observations等字段级动作；其中"
+                "research_object只写研究对象或物理系统，observations只写要观察的响应，"
+                "learning_objective只写学生完成后应能解释、判断或比较的能力，不得整句复制。"
                 "一旦carried_context中的方向已锁定，后续材料、对象、边界或观察细节默认都是对当前"
                 "方向的完善，不是NEW_TOPIC。只有学生明确表示不要原方向、改做另一主题或重新开始时"
                 "才能返回REQUEST_NEW_TOPIC或NEW_TOPIC_CONTENT，并把topic_change_explicit设为true。请求更多帮助时应围绕已锁定"
@@ -2331,6 +2437,15 @@ class OpenAIStageGenerator:
         # contract and adopt it only when it recovers an actual state-write.
         # This is a semantic second pass over the whole turn, not phrase or
         # keyword extraction, and therefore applies to every field and stage.
+        if isinstance(raw.get("dialogue_acts"), list):
+            raw["dialogue_acts"] = _source_backed_unresolved_acts(
+                user_message,
+                raw.get("dialogue_acts", []),
+            )
+            raw["dialogue_acts_json"] = json.dumps(
+                raw["dialogue_acts"],
+                ensure_ascii=False,
+            )
         initial_acts = raw.get("dialogue_acts", [])
         correction_without_update = bool(
             isinstance(initial_acts, list)
@@ -2352,6 +2467,11 @@ class OpenAIStageGenerator:
                 # valid feedback already obtained.
                 pass
             else:
+                if isinstance(compact_raw.get("dialogue_acts"), list):
+                    compact_raw["dialogue_acts"] = _source_backed_unresolved_acts(
+                        user_message,
+                        compact_raw.get("dialogue_acts", []),
+                    )
                 compact_acts = compact_raw.get("dialogue_acts", [])
                 if isinstance(compact_acts, list) and any(
                     _dialogue_act_writes_state(act) for act in compact_acts
@@ -2379,6 +2499,11 @@ class OpenAIStageGenerator:
             except (ModelOutputError, ModelServiceError):
                 pass
             else:
+                if isinstance(compact_raw.get("dialogue_acts"), list):
+                    compact_raw["dialogue_acts"] = _source_backed_unresolved_acts(
+                        user_message,
+                        compact_raw.get("dialogue_acts", []),
+                    )
                 compact_acts = compact_raw.get("dialogue_acts", [])
                 compact_uncovered = _uncovered_dialogue_text(
                     user_message,

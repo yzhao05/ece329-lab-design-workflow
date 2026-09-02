@@ -19,6 +19,7 @@ from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import (
     RuleBasedStageGenerator,
     _focused_emvr_formula_references,
+    _visualization,
     build_exploration_scenes,
 )
 from ece329_workflow.emvr_design import (
@@ -40,6 +41,7 @@ from ece329_workflow.guardrails import (
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.idea_development import initialize_idea_development
 from ece329_workflow.models import DesignSession, InteractionState, Stage, StageCompletionError
+from ece329_workflow.reporting import stage_report_section
 from ece329_workflow.stages import public_stage_catalog, stage_title
 
 
@@ -209,6 +211,38 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
 
 def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
     if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
+        if result["current_stage"] == Stage.THEORETICAL_FRAMEWORK.value:
+            # The rule-based test generator has no semantic resolver.  Model a
+            # successful field-bound theory decision explicitly instead of
+            # restoring production's former topic-keyword formula fallback.
+            session = engine.store.get(result["design_id"])
+            emvr_design = session.design_context.setdefault("emvr_design", {})
+            existing = merge_emvr_structured_requirements(emvr_design)
+            if existing.get("theory_links"):
+                return engine.process_turn(
+                    result["design_id"],
+                    {"message": EMVR_STAGE_ANSWERS.get(result["current_stage"], "保留当前设计并继续整理")},
+                )
+            update = normalize_emvr_design_update(
+                {
+                    "theory_links": [
+                        {
+                            "relation_id": "FIELD_SUPERPOSITION",
+                            "supports_design_content": (
+                                "解释已确认变化条件下目标空间场分布的合成响应"
+                            ),
+                            "supports_design_fields": [
+                                "research_question",
+                                "observed_quantities",
+                            ],
+                        }
+                    ]
+                }
+            )
+            requirements = emvr_design.setdefault("structured_requirements", {})
+            requirements[Stage.THEORETICAL_FRAMEWORK.value] = update
+            apply_emvr_field_updates(emvr_design, update)
+            engine.store.save(session)
         requirement = result.get("stage_payload", {}).get("builder_requirement_field")
         message = (
             BUILDER_REQUIREMENT_ANSWERS[requirement]
@@ -257,6 +291,36 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(result["interaction_state"], InteractionState.GUIDED_DESIGN.value)
         self.assertIsNotNone(result["student_task"])
         self.assertLessEqual(result["student_task"].count("？"), 1)
+
+    def test_emvr_theory_report_hides_internal_relation_fields(self) -> None:
+        section = stage_report_section(
+            Stage.THEORETICAL_FRAMEWORK,
+            {
+                "physical_mechanism": ["电荷源与静电场"],
+                "core_equations": [
+                    {
+                        "id": "coulomb_point_charge",
+                        "name": "Coulomb electric field",
+                        "expression": "E=Q/(4πε₀r²)",
+                    }
+                ],
+                "formula_support_map": [
+                    {
+                        "formula_id": "coulomb_point_charge",
+                        "relation_id": "ELECTRIC_SOURCE_FIELD",
+                        "supports_design_content": "计算两个点电荷在观察位置产生的合场强",
+                    }
+                ],
+                "theory_selection_status": "course_context_fallback",
+            },
+        )
+
+        visible = json.dumps(section, ensure_ascii=False)
+        self.assertIn("电荷源与静电场用于解释", visible)
+        self.assertIn("已按当前实验的课程关系筛选", visible)
+        self.assertNotIn("ELECTRIC_SOURCE_FIELD", visible)
+        self.assertNotIn("supports_design_content", visible)
+        self.assertNotIn("course_context_fallback", visible)
 
     def test_stage_one_reference_request_stays_with_each_pending_facet(self) -> None:
         class ReferenceRequestGenerator(RuleBasedStageGenerator):
@@ -1063,20 +1127,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
         turns = 0
         while result["workflow_status"] != "complete":
-            if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
-                requirement = result.get("stage_payload", {}).get(
-                    "builder_requirement_field"
-                )
-                message = (
-                    BUILDER_REQUIREMENT_ANSWERS[requirement]
-                    if requirement
-                    else EMVR_STAGE_ANSWERS.get(
-                        result["current_stage"], "保留当前设计并继续整理"
-                    )
-                )
-            else:
-                message = "保留当前草稿并继续下一部分"
-            result = engine.process_turn(result["design_id"], {"message": message})
+            result = continue_emvr(engine, result)
             turns += 1
             self.assertLess(turns, 60)
 
@@ -1275,6 +1326,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotRegex(json.dumps(result["stage_payload"], ensure_ascii=False), r"阶段\s*8")
 
         result = engine.process_turn(result["design_id"], {"message": "研究问题保留并继续"})
+        if result["current_stage"] == Stage.THEORETICAL_FRAMEWORK.value:
+            result = continue_emvr(engine, result)
         formula_ids = {item["id"] for item in result["stage_payload"]["core_equations"]}
         self.assertTrue({"coulomb_point_charge", "electric_field_superposition"} <= formula_ids)
         self.assertTrue(
@@ -1772,6 +1825,14 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertFalse(visual["measured"])
         self.assertIsNotNone(visual["unity_binding"])
 
+    def test_visualization_does_not_infer_theory_from_topic_text(self) -> None:
+        visual = _visualization(
+            "一个可能同时关联多个相邻课程概念的宽泛实验描述",
+            emvr=True,
+        )
+
+        self.assertEqual(visual["series"][0]["formula_candidates"], [])
+
     def test_both_workflow_modes_can_reach_their_intended_terminal_state(self) -> None:
         guided = self.engine.create_design("我想研究传输线驻波")
         selected = guided["stage_payload"]["alternative_ideas"][0]
@@ -1985,6 +2046,26 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_second_brainstorm_uses_latest_student_topic(self) -> None:
         first = self.engine.create_design("我还没有具体想法")
+
+        class BroadTopicGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={
+                        "course_scope_status": "COURSE_CONTENT",
+                        "stage_one_scene_response": "PROVIDE_BROAD_TOPIC",
+                    },
+                )
+
+        self.engine.generator = BroadTopicGenerator()
         result = self.engine.process_turn(first["design_id"], {"message": "我想研究偏振"})
 
         self.assertTrue(result["stage_payload"]["alternative_ideas"])
@@ -2330,6 +2411,26 @@ class WorkflowEngineTests(unittest.TestCase):
 
     def test_no_direction_stays_in_breadth_until_student_proposes_an_idea(self) -> None:
         first = self.engine.create_design("我还没有具体方向")
+
+        class BroadTopicGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={
+                        "course_scope_status": "COURSE_CONTENT",
+                        "stage_one_scene_response": "PROVIDE_BROAD_TOPIC",
+                    },
+                )
+
+        self.engine.generator = BroadTopicGenerator()
         result = self.engine.process_turn(
             first["design_id"],
             {"message": "我想研究偏振"},
@@ -2788,6 +2889,7 @@ class WorkflowEngineTests(unittest.TestCase):
                     source="SEMANTIC_TEST",
                     semantic_updates={
                         "control_actions": ["REQUEST_REFERENCE"],
+                        "stage_one_scene_response": "REQUEST_NEW_BATCH",
                     },
                 )
 
@@ -2879,14 +2981,27 @@ class WorkflowEngineTests(unittest.TestCase):
         session.interaction_state = InteractionState.EMVR_DIRECT
         session.current_stage_index = 4
         session.design_context["emvr_design"] = {
+            "field_state": {
+                "research_question": "改变传输线负载并观察反射与驻波",
+                "changed_quantities": ["负载阻抗"],
+                "observed_quantities": ["反射系数", "驻波分布"],
+            },
             "structured_requirements": {
                 Stage.RESEARCH_QUESTION.value: {
                     "research_summary": "改变传输线负载并观察反射与驻波",
                     "changed_quantities": ["负载阻抗"],
                     "observed_quantities": ["反射系数", "驻波分布"],
-                    "theory_relation_ids": [
-                        "TRANSMISSION_LINE_PROPAGATION",
-                        "TRANSMISSION_LINE_REFLECTION",
+                    "theory_links": [
+                        {
+                            "relation_id": "TRANSMISSION_LINE_PROPAGATION",
+                            "supports_design_content": "计算负载变化时线路上的电压电流传播",
+                            "supports_design_fields": ["changed_quantities"],
+                        },
+                        {
+                            "relation_id": "TRANSMISSION_LINE_REFLECTION",
+                            "supports_design_content": "解释反射系数与驻波分布",
+                            "supports_design_fields": ["observed_quantities"],
+                        },
                     ],
                 }
             }
@@ -2894,6 +3009,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.engine.store.save(session)
 
         result = self.engine.process_turn(first["design_id"], {"message": "选择理论公式"})
+        if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
+            result = continue_emvr(self.engine, result)
         formulas = result["stage_payload"]["core_equations"]
 
         catalog_ids = {item["id"] for item in KNOWLEDGE.formulas}

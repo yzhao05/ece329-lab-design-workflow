@@ -23,7 +23,7 @@ from .dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     record_pending_clarification,
-    recoverable_emvr_pending_field,
+    recoverable_pending_field,
     recover_repeated_pending_answer,
     required_pending_facet_id,
     resolved_intent,
@@ -275,6 +275,14 @@ _EMVR_DESIGN_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
 
 
 def _has_structured_stage_content(session: DesignSession, stage: Stage) -> bool:
+    if (
+        session.interaction_state is InteractionState.EMVR_DIRECT
+        and stage is Stage.THEORETICAL_FRAMEWORK
+    ):
+        requirements = merge_emvr_structured_requirements(
+            session.design_context.get("emvr_design", {})
+        )
+        return bool(requirements.get("theory_links"))
     design = design_state_snapshot(session)
     if any(
         design.get(field)
@@ -691,6 +699,11 @@ def _prevent_unrequested_scene_replay(
     ):
         return
     updates = turn_intent.get("semantic_updates", {})
+    scene_response = str(
+        updates.get("stage_one_scene_response") or "NONE"
+        if isinstance(updates, dict)
+        else "NONE"
+    )
     controls = set(
         str(item)
         for item in (
@@ -700,13 +713,29 @@ def _prevent_unrequested_scene_replay(
             else []
         )
     )
+    idea = session.design_context.get("idea", {})
+    idea = idea if isinstance(idea, dict) else {}
+    committed_direction = bool(
+        idea.get("direction_locked") is True
+        or idea.get("selected_course_relations")
+        or str(idea.get("core_phenomenon") or "").strip()
+        or str(idea.get("interest_description") or "").strip()
+    )
     # An explicitly directionless student is still in breadth exploration.
     # This state is structured and may legitimately produce successive course
     # overviews even when the semantic API is temporarily unavailable.
-    if isinstance(updates, dict) and updates.get("no_direction") is True:
+    if (
+        isinstance(updates, dict)
+        and updates.get("no_direction") is True
+        and scene_response != "SELECT_OR_DEVELOP"
+        and not committed_direction
+    ):
         return
-    idea = session.design_context.get("idea", {})
-    idea = idea if isinstance(idea, dict) else {}
+    # A broad course topic supplied after a directionless overview still
+    # needs one topic-specific breadth batch.  This is distinct from selecting
+    # or elaborating one of the visible scenes, which must never replay them.
+    if scene_response == "PROVIDE_BROAD_TOPIC" and not committed_direction:
+        return
     established_topic = bool(
         idea.get("direction_locked") is True
         or any(
@@ -729,7 +758,9 @@ def _prevent_unrequested_scene_replay(
         in {"exploration_scenes", BREADTH_EXPLORATION}
     )
     explicitly_requested = bool(
-        requests_scene_batch and "REQUEST_REFERENCE" in controls
+        requests_scene_batch
+        and "REQUEST_REFERENCE" in controls
+        and scene_response == "REQUEST_NEW_BATCH"
     )
     if explicitly_requested:
         return
@@ -761,10 +792,25 @@ def _prevent_unrequested_scene_replay(
         and isinstance(updates, dict)
         and updates.get("course_scope_status") == COURSE_CONTENT
         and updates.get("no_direction") is not True
+        and not committed_direction
+        and scene_response == "NONE"
+        and not updates.get("selected_option_ids")
+        and not str(updates.get("stage_one_direction_detail") or "").strip()
     ):
         idea["directionless_browse_active"] = False
         return
-    if not established_topic and not unresolved_direction:
+    if (
+        not established_topic
+        and not unresolved_direction
+        and scene_response == "NONE"
+        and not (
+            isinstance(updates, dict)
+            and (
+                updates.get("selected_option_ids")
+                or str(updates.get("stage_one_direction_detail") or "").strip()
+            )
+        )
+    ):
         # Compatibility sessions may have shown a generic redirection batch
         # before the semantic-state fields existed.  With no candidate or
         # topic to protect, allow one tailored batch when the next message is
@@ -791,17 +837,21 @@ def _prevent_unrequested_scene_replay(
     output.stage_payload["clarification_required"] = True
     output.stage_payload["preserve_pending_action"] = True
     structured_direction_answer = bool(
-        turn_intent.get("intent")
-        in {
-            UserIntent.ANSWER_CURRENT_QUESTION.value,
-            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-        }
+        (
+            turn_intent.get("intent")
+            in {
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            }
+            or scene_response == "SELECT_OR_DEVELOP"
+        )
         and candidate
         and isinstance(updates, dict)
         and (
             updates.get("course_scope_status") == COURSE_CONTENT
             or updates.get("stage_one_direction_detail")
             or updates.get("selected_option_ids")
+            or scene_response == "SELECT_OR_DEVELOP"
         )
     )
     accepted_existing_direction = bool(
@@ -812,12 +862,31 @@ def _prevent_unrequested_scene_replay(
     if accepted_existing_direction:
         idea["direction_locked"] = True
         idea["brainstorm_phase"] = INTEREST_DESCRIPTION
+        # Once a scene or a concrete direction has been accepted, the earlier
+        # "browse because no direction was available" state is no longer
+        # active. Leaving it behind could authorize one unrelated breadth
+        # batch during a later clarification turn.
+        idea.pop("directionless_browse_active", None)
         candidate_value = (
             retained_pending.get("candidate_answer")
             if isinstance(retained_pending, dict)
             else ""
         )
         candidate = str(candidate_value or "").strip()
+        canonical_design = design_state_snapshot(session)
+        canonical_direction_parts = [
+            str(canonical_design.get(field) or "").strip()
+            for field in ("research_object", "research_question")
+        ]
+        canonical_direction = "；".join(
+            dict.fromkeys(part for part in canonical_direction_parts if part)
+        )
+        if canonical_direction:
+            # The semantic field updates have already been committed before
+            # this response guard runs.  Prefer those clean field values to a
+            # raw recovery candidate that may still contain conversational
+            # framing such as a scene label or "I am interested in...".
+            candidate = canonical_direction
         if candidate:
             # Keep the confirmed raw turn only as internal recovery evidence;
             # canonical design fields still require field-level actions.
@@ -1136,6 +1205,7 @@ _EMVR_INTERACTIVE_ENTRY_STAGES = {
     Stage.COURSE_MAPPING_AND_DIRECTION,
     Stage.LEARNING_OBJECTIVES,
     Stage.RESEARCH_QUESTION,
+    Stage.THEORETICAL_FRAMEWORK,
     Stage.HYPOTHESIS,
     Stage.CONCEPTUAL_OR_VR_SETUP,
     Stage.VARIABLES_AND_CONDITIONS,
@@ -1157,6 +1227,10 @@ _EMVR_ENTRY_QUESTIONS: dict[Stage, tuple[str, str]] = {
     Stage.RESEARCH_QUESTION: (
         "我会保留前面确定的现象和学习目标，把它们收束成一个可由VR参数与观察结果回答的问题。",
         "在这个实验中，你认为最值得改变的条件是什么，又希望重点观察哪一种响应？",
+    ),
+    Stage.THEORETICAL_FRAMEWORK: (
+        "研究问题已经确定；这里要逐条核对哪些课程关系真正计算、解释或约束当前变化量与观察量。",
+        "请说明你认为最直接的一条ECE329理论关系，以及它具体支持当前哪个变化量、观察量、比较情形或边界条件。",
     ),
     Stage.HYPOTHESIS: (
         "研究问题和理论关系已经保留，这一步需要明确参数变化时应出现的方向性结果及适用边界。",
@@ -1220,6 +1294,12 @@ def _emvr_entry_reference(
             f"问题主线：围绕“{question}”组织可调条件与观察响应",
             f"条件端：{variable}",
             f"响应端：{observations}",
+        ],
+        Stage.THEORETICAL_FRAMEWORK: [
+            f"研究问题：{question}",
+            f"需要连接的变化量：{variable}",
+            f"需要解释的观察量：{observations}",
+            "筛选原则：每条理论关系都要明确绑定以上设计内容，不能仅因属于相邻课程主题而加入",
         ],
         Stage.HYPOTHESIS: [
             f"待检验趋势：{hypothesis}",
@@ -1309,15 +1389,19 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         if reference_draft
         else ""
     )
+    # The theory reference lists committed variables and the binding rule; it
+    # is context, not a proposed theory answer. A bare acceptance must not skip
+    # generation of the theory payload consumed by the final report.
+    reference_is_confirmable = bool(reference_draft) and stage is not Stage.THEORETICAL_FRAMEWORK
     review_question = (
         "这份草稿是否准确承接了当前研究问题？如需修订，请直接指出对应的物理内容、"
         "Unity映射或展示要求。"
-        if reference_draft
+        if reference_is_confirmable
         else question
     )
     pending_type = (
         "CONFIRM_STAGE_OR_MODIFY"
-        if reference_draft
+        if reference_is_confirmable
         else "ANSWER_EMVR_STAGE_QUESTION"
     )
     pending_subject = (
@@ -1336,7 +1420,7 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
             UserIntent.NEW_TOPIC.value,
             UserIntent.UNCLEAR.value,
         ]
-        if reference_draft
+        if reference_is_confirmable
         else [
             UserIntent.ANSWER_CURRENT_QUESTION.value,
             UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
@@ -1449,7 +1533,8 @@ def _prepare_emvr_stage_output(
             task = question_by_gap[missing_key]
             output.assistant_message = (
                 f"{output.assistant_message.rstrip()}\n\n"
-                f"完整方向已经保留；现在只补齐{readiness['missing'][0]}，不会要求你重写前面的内容。"
+                f"你已经给出的方向信息都会保留；现在只补齐"
+                f"{readiness['missing'][0]}，不会要求你重写前面的内容。"
             )
             output.student_task = task
             output.stage_payload["emvr_stage_one_readiness"] = readiness
@@ -1559,7 +1644,24 @@ def _project_committed_stage_fields(
     def value(field: str) -> str:
         return str(values.get(field) or "").strip()
 
-    if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
+    if (
+        stage is Stage.LEARNING_OBJECTIVES
+        and session.interaction_state is InteractionState.EMVR_DIRECT
+    ):
+        requirements = merge_emvr_structured_requirements(
+            session.design_context.get("emvr_design", {})
+        )
+        for field in (
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+        ):
+            saved = str(requirements.get(field) or "").strip()
+            if saved:
+                output.stage_payload[field] = saved
+    elif stage is Stage.COURSE_MAPPING_AND_DIRECTION:
         if value("design_rationale"):
             output.stage_payload["selection_reason"] = value("design_rationale")
         if value("lab_title"):
@@ -1847,6 +1949,43 @@ def _persist_emvr_stage_input(
         if isinstance(structured_update, dict)
         else {}
     )
+    # NEW_TOPIC_CONTENT and an explicit experiment_brief revision are
+    # authoritative actions in their own right.  They are processed before
+    # the per-field projection, so mirror that exact action into the update
+    # batch.  Otherwise a simultaneously supplied research object, operation
+    # and observation could cause the derived brief to overwrite the complete
+    # wording that the student just supplied.
+    explicit_brief_edit: dict[str, Any] | None = None
+    for act in dialogue_acts if isinstance(dialogue_acts, list) else []:
+        if not isinstance(act, dict):
+            continue
+        act_type = str(act.get("type") or "")
+        target = str(act.get("target") or "")
+        if act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"} or (
+            act_type in {"ANSWER_PENDING_QUESTION", "MODIFY_EMVR_FIELD"}
+            and target == "experiment_brief"
+        ):
+            value = _turn_content_text(act.get("content"))
+            if value:
+                explicit_brief_edit = {
+                    "field_id": "experiment_brief",
+                    "operation": (
+                        "REPLACE"
+                        if act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}
+                        else str(act.get("operation") or "REPLACE").upper()
+                    ),
+                    "value": value,
+                }
+                break
+    if explicit_brief_edit is not None:
+        field_updates = [
+            deepcopy(item)
+            for item in structured_update.get("field_updates", [])
+            if isinstance(item, dict)
+            and str(item.get("field_id") or "") != "experiment_brief"
+        ]
+        field_updates.append(explicit_brief_edit)
+        structured_update["field_updates"] = field_updates
     applied_comparisons = (
         semantic_updates.get("applied_comparison_updates", [])
         if isinstance(semantic_updates, dict)
@@ -2011,6 +2150,33 @@ class WorkflowEngine:
         resolver = getattr(self.generator, "resolve_intent", None)
         if callable(resolver):
             carried_context = build_carried_context(session)
+            # Give the semantic resolver the currently visible scene set, not
+            # merely the full conversation history.  This makes a reference
+            # such as “use scene B” resolve to the latest B after another batch
+            # has been shown, rather than an older scene with the same label.
+            carried_context["latest_exploration_scenes"] = [
+                {
+                    "label": str(scene.get("label") or ""),
+                    "title": str(scene.get("title") or ""),
+                    "scene_id": str(
+                        scene.get("catalog_scene_id")
+                        or scene.get("scene_id")
+                        or ""
+                    ),
+                    "option_id": str(
+                        (
+                            scene.get("course_anchor", {}).get("option_id")
+                            if isinstance(scene.get("course_anchor"), dict)
+                            else ""
+                        )
+                        or ""
+                    ),
+                    "course_anchor": deepcopy(scene.get("course_anchor", {})),
+                    "physical_picture": str(scene.get("physical_picture") or ""),
+                }
+                for scene in latest_stage_one_scenes(session.history)
+                if isinstance(scene, dict)
+            ]
             carried_context["current_course_evidence"] = {
                 "lecture_concepts": [
                     {
@@ -3178,15 +3344,18 @@ class WorkflowEngine:
                         for item in clarification_updates.get("facet_updates", [])
                     )
                 )
-                recoverable_emvr_field = bool(
-                    session.interaction_state is InteractionState.EMVR_DIRECT
-                    and isinstance(pending_action, dict)
-                    and recoverable_emvr_pending_field(pending_action)
-                    and str(turn_intent.get("source") or "").startswith(
-                        "SEMANTIC_SERVICE_FALLBACK"
+                recoverable_exact_field = bool(
+                    isinstance(pending_action, dict)
+                    and recoverable_pending_field(pending_action)
+                    and (
+                        pending_action.get("interaction_state")
+                        == InteractionState.EMVR_DIRECT.value
+                        or str(turn_intent.get("source") or "").startswith(
+                            "SEMANTIC_SERVICE_FALLBACK"
+                        )
                     )
                 )
-                if not recoverable_emvr_field and isinstance(
+                if not recoverable_exact_field and isinstance(
                     clarification_updates, dict
                 ) and (
                     clarification_updates.get("no_direction") is True
@@ -3198,6 +3367,7 @@ class WorkflowEngine:
                 pending_action = record_pending_clarification(
                     session,
                     clarification_candidate,
+                    allow_exact_field_binding=recoverable_exact_field,
                 ) or pending_action
                 output = clarification_output(
                     pending_action,

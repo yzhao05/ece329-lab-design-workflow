@@ -10,6 +10,7 @@ from .dialogue_state import (
     hydrate_pending_action_from_history,
 )
 from .emvr_design import (
+    candidate_formulas_for_emvr_context,
     formulas_for_emvr_relations,
     merge_emvr_structured_requirements,
 )
@@ -59,6 +60,8 @@ GUIDED_DESIGN状态下进入一个新的公开阶段时，必须先读取前面�
 理解偏差时才简短概括关键内容。不得把助手自己的默认方案伪装成学生已经决定的内容。
 学生可见回复要像自然的课程讨论：开头可以简短回应一个具体物理点，但不要每轮都用相同的确认句；
 优先使用短句和日常表达，少用“当前阶段、设计依据、结构化、已结合到、本轮”等项目化或报告式措辞。
+学生输入较长时先按物理含义分句整理，再生成完整、通顺的中文句子；不得在词组或从句中间硬截断，
+不得把几个字段摘要直接拼成缺少主谓关系的长句，也不得为了回显而重复整段原话。
 互动性来自承接学生真正说过的内容和给出恰当启发，不来自反复复述、夸奖或让学生确认显而易见的细节。
 GUIDED_DESIGN的语气应像教师与学生共同推敲想法：先回应学生刚提出的一个具体物理判断，说明它如何影响
 正在形成的实验，再给一个贴近该想法的启发或只追问一个真正缺失的点。可以使用“我们接着看”“你这里
@@ -217,7 +220,7 @@ def _stage_output_contract(
             return "stage_payload_json必须包含objective_types数组，本轮只引导一种学习目标。"
         return (
             "stage_payload_json必须包含conceptual_objective、calculation_objective、"
-            "analysis_objective和vr_interaction_objective。"
+            "analysis_objective、vr_interaction_objective和observation_objective。"
         )
     if stage is Stage.RESEARCH_QUESTION:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
@@ -397,10 +400,17 @@ def build_prompt_packet(
         emvr_requirements = merge_emvr_structured_requirements(
             session.design_context.get("emvr_design", {})
         )
-        formulas = formulas_for_emvr_relations(
-            emvr_requirements.get("theory_relation_ids", []),
-            limit=12,
-        )
+        relation_ids = emvr_requirements.get("theory_relation_ids", [])
+        formulas = formulas_for_emvr_relations(relation_ids, limit=12)
+        if not formulas and session.current_stage is Stage.THEORETICAL_FRAMEWORK:
+            # Let the language model select from grounded, catalog-bound
+            # candidates using the complete design context. The candidate pool
+            # is not persisted as accepted theory until the stage output and a
+            # subsequent student decision pass validation.
+            formulas = candidate_formulas_for_emvr_context(
+                retrieval_text,
+                limit=12,
+            )
     else:
         formulas = KNOWLEDGE.formula_references(retrieval_text, limit=12)
     shown_option_ids = shown_exploration_option_ids(session.history)

@@ -485,6 +485,43 @@ class LectureKnowledgeBase:
         ]
         return matches[:limit]
 
+    def focused_formula_references(
+        self,
+        text: str,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Return formulas tied to the strongest course concept match.
+
+        ``formula_references`` intentionally exposes a broad retrieval set for
+        evidence panels.  A design summary needs a narrower contract: formulas
+        from adjacent matched lectures must not be presented as if they all
+        explain the student's experiment.  Selecting the first concept that
+        actually has formulas keeps this decision grounded in the existing
+        semantic course matcher rather than in a new vocabulary of topics.
+        """
+
+        concept_ids = [
+            str(item.get("id") or "")
+            for item in self.match_concepts(text, limit=5)
+            if str(item.get("id") or "")
+        ]
+        if not concept_ids:
+            for supplemental in self.match_supplemental_concepts(text, limit=1):
+                concept_ids.extend(
+                    str(item)
+                    for item in supplemental.get("course_scope_concept_ids", [])
+                    if str(item).strip()
+                )
+        for concept_id in dict.fromkeys(concept_ids):
+            matches = [
+                formula
+                for formula in self.formulas
+                if concept_id in formula.get("concept_ids", [])
+            ]
+            if matches:
+                return matches[:limit]
+        return []
+
     def public_concepts(self) -> list[dict[str, Any]]:
         return self.lectures
 

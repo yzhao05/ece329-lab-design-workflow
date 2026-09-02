@@ -19,6 +19,7 @@ from ece329_workflow.openai_generator import (
     ModelHTTPError,
     ModelServiceError,
     OpenAIStageGenerator,
+    _source_backed_unresolved_acts,
     _uncovered_dialogue_text,
     generator_from_environment,
 )
@@ -140,6 +141,72 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         ]
 
         self.assertIn(second, _uncovered_dialogue_text(message, acts))
+
+    def test_unresolved_paraphrase_cannot_be_shown_as_student_text(self) -> None:
+        message = "我对图景A感兴趣，主要比较导体和介质在同一外加场中的场线弯曲"
+        acts = [
+            {
+                "type": "UNRESOLVED",
+                "content": "感兴趣于导体和介质这一方向",
+                "source_text": "感兴趣于导体和介质这一方向",
+            },
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "research_object",
+                "content": "导体和介质在同一外加场中的场线",
+            },
+        ]
+
+        cleaned = _source_backed_unresolved_acts(message, acts)
+
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned[0]["type"], "MODIFY_DESIGN_FIELD")
+
+    def test_unresolved_exact_source_fragment_is_retained(self) -> None:
+        message = "保留研究对象；但显示方式我还没有确定"
+        fragment = "显示方式我还没有确定"
+        cleaned = _source_backed_unresolved_acts(
+            message,
+            [{"type": "UNRESOLVED", "content": fragment}],
+        )
+
+        self.assertEqual(cleaned[0]["content"], fragment)
+        self.assertEqual(message[cleaned[0]["source_start"]:cleaned[0]["source_end"]], fragment)
+
+    def test_focused_formula_reference_avoids_adjacent_mechanism_list(self) -> None:
+        formulas = KNOWLEDGE.focused_formula_references(
+            "导体和介质在同一外加静电场中的场线与边界响应",
+            limit=1,
+        )
+
+        self.assertEqual(len(formulas), 1)
+        self.assertNotIn(formulas[0].get("id"), {"ohm_law_density", "charge_relaxation"})
+
+    def test_coverage_audit_ignores_separate_field_wrappers_in_compound_answer(self) -> None:
+        question = "两个带电物体靠近时，场线如何随距离和电荷类型变化"
+        changed = "距离和电荷类型"
+        observed = "场线的空间分布形态和重排特征"
+        message = (
+            f"我们之前的研究问题是：{question}；"
+            f"条件端是{changed}，响应端是{observed}"
+        )
+        acts = []
+        for target, value in (
+            ("research_question", question),
+            ("changed_quantities", changed),
+            ("observed_quantities", observed),
+        ):
+            start = message.index(value)
+            acts.append(
+                {
+                    "type": "MODIFY_EMVR_FIELD",
+                    "target": target,
+                    "source_start": start,
+                    "source_end": start + len(value),
+                }
+            )
+
+        self.assertEqual(_uncovered_dialogue_text(message, acts), "")
 
     def test_prompt_defines_interactive_guided_and_professional_emvr_tones(self) -> None:
         guided_packet = build_prompt_packet(

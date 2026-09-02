@@ -265,6 +265,7 @@ let state = loadState();
 let typingMessageId = null;
 let toastTimer = null;
 let connectionState = apiBase() ? "checking" : "demo";
+let replayingPendingRequest = false;
 
 function initialState() {
   return {
@@ -562,6 +563,10 @@ function renderQuickActions() {
     button.className = "quick-action";
     button.textContent = label;
     button.addEventListener("click", () => {
+      if (actionType === "RETRY_PENDING_REQUEST") {
+        retryPendingRequest();
+        return;
+      }
       dom.chatInput.value = label;
       state.pendingOptionId = optionId;
       state.pendingUiAction = actionType;
@@ -580,8 +585,25 @@ function normalizeQuickAction(action) {
   return {
     label: String(action.label || action.focus || action.direction || "").trim(),
     optionId: typeof action.option_id === "string" ? action.option_id : null,
-    actionType: action.action === "ADVANCE_STAGE" ? "ADVANCE_STAGE" : null,
+    actionType: ["ADVANCE_STAGE", "RETRY_PENDING_REQUEST"].includes(action.action)
+      ? action.action
+      : null,
   };
+}
+
+function retryPendingRequest() {
+  const pending = state.pendingRequest;
+  if (!pending || dom.sendButton.disabled) return;
+  replayingPendingRequest = true;
+  dom.chatInput.value = pending.message || "";
+  state.pendingUiAction = pending.uiAction || null;
+  state.pendingOptionId = pending.optionId || null;
+  autoGrowInput();
+  dom.chatForm.requestSubmit();
+}
+
+function pendingRequestRetryAction() {
+  return { label: "重新发送刚才的回答", action: "RETRY_PENDING_REQUEST" };
 }
 
 function renderEvidence() {
@@ -983,14 +1005,15 @@ async function handleSubmit(event) {
   const message = dom.chatInput.value.trim();
   if (!message || dom.sendButton.disabled) return;
 
-  const uiAction = state.pendingUiAction;
+  const isPendingReplay = replayingPendingRequest && Boolean(state.pendingRequest);
+  replayingPendingRequest = false;
+  const uiAction = isPendingReplay
+    ? state.pendingRequest.uiAction || null
+    : state.pendingUiAction;
   const isUiAdvance = uiAction === "ADVANCE_STAGE";
-  const selectedOptionId = state.pendingOptionId;
-  const retryAction = isUiAdvance
-    ? advanceQuickAction(message)
-    : selectedOptionId
-      ? { label: message, option_id: selectedOptionId }
-      : message;
+  const selectedOptionId = isPendingReplay
+    ? state.pendingRequest.optionId || null
+    : state.pendingOptionId;
   if (
     !state.pendingRequest
     || state.pendingRequest.message !== message
@@ -1000,6 +1023,7 @@ async function handleSubmit(event) {
       turnId: crypto.randomUUID(),
       message,
       uiAction,
+      optionId: selectedOptionId,
       versionRequest: null,
     };
   }
@@ -1011,7 +1035,7 @@ async function handleSubmit(event) {
     state.stageIndex === STAGES.length - 1 && !isUiAdvance
   );
   state.lastStudentInput = message;
-  addMessage("user", message);
+  if (!isPendingReplay) addMessage("user", message);
   dom.chatInput.value = "";
   autoGrowInput();
   setBusy(true);
@@ -1063,20 +1087,26 @@ async function handleSubmit(event) {
         ["稍后重试"],
         { meta: "ECE329 Agent" },
       );
-      state.quickActions = [retryAction];
+      state.quickActions = [pendingRequestRetryAction()];
       return;
     }
     if (error instanceof ApiError && error.status === 409) {
       await reloadApiDesignState();
       // A conflicting idempotency key must never be reused for the next attempt.
-      state.pendingRequest = null;
+      state.pendingRequest = {
+        ...(state.pendingRequest || {}),
+        turnId: crypto.randomUUID(),
+        message,
+        uiAction,
+        optionId: selectedOptionId,
+      };
       addMessage(
         "assistant",
         "设计可能已在另一个窗口更新。我已同步当前设计，请重新发送本轮内容。",
         ["状态已刷新"],
         { meta: "ECE329 Agent" },
       );
-      state.quickActions = [retryAction];
+      state.quickActions = [pendingRequestRetryAction()];
       return;
     }
     setConnectionState("error", "课程服务暂时不可用");
@@ -1089,7 +1119,7 @@ async function handleSubmit(event) {
       ["连接失败"],
       { meta: "ECE329 Agent" },
     );
-    state.quickActions = [retryAction];
+    state.quickActions = [pendingRequestRetryAction()];
     showToast("请求失败，当前设计已保留");
   } finally {
     setBusy(false);
@@ -1252,9 +1282,9 @@ function buildTurnRequest(message, uiAction = null, versionRequest = null) {
   const turnId = state.pendingRequest?.turnId || crypto.randomUUID();
   const turn = { message, turn_id: turnId };
   if (versionRequest) turn.version_request = versionRequest;
-  if (state.pendingOptionId) {
-    turn.selected_option_id = state.pendingOptionId;
-    state.pendingOptionId = null;
+  const optionId = state.pendingRequest?.optionId || state.pendingOptionId;
+  if (optionId) {
+    turn.selected_option_id = optionId;
   }
   if (uiAction !== "ADVANCE_STAGE") return turn;
 
@@ -2074,6 +2104,8 @@ function applyResponse(response, userMessage) {
     dom.chartDescription.textContent = response.visualization.disclaimer || "该图表示理论预测，不是实际测量数据。";
   }
   state.pendingRequest = null;
+  state.pendingOptionId = null;
+  state.pendingUiAction = null;
   renderTaskReport();
   renderQualityReview();
 }
@@ -2356,10 +2388,20 @@ dom.undoVersionButton.addEventListener("click", () => sendVersionAction(
 window.addEventListener("resize", drawChart);
 
 async function initializePage() {
+  setBusy(true);
   render();
-  await checkConnection();
-  if (connectionState === "online" && state.designId && state.sessionKind === "api") {
-    await reloadApiDesignState();
+  try {
+    await checkConnection();
+    if (connectionState === "online" && state.designId && state.sessionKind === "api") {
+      await reloadApiDesignState();
+    }
+  } finally {
+    if (state.pendingRequest) {
+      state.quickActions = [pendingRequestRetryAction()];
+    }
+    setBusy(false);
+    render();
+    saveState();
   }
 }
 

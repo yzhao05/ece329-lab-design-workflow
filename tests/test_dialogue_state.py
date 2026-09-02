@@ -207,6 +207,28 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_guided_service_failure_candidate_can_rebind_to_exact_open_field(self) -> None:
+        session = idea_facet_session("design_guided_retry_binding")
+        pending = current_pending_action(session)
+        assert pending is not None
+        answer = "能够比较两种材料边界对静电场线弯曲与分布的影响"
+
+        retained = record_pending_clarification(
+            session,
+            answer,
+            allow_exact_field_binding=True,
+        )
+
+        assert retained is not None
+        self.assertTrue(retained["candidate_binding_authorized"])
+        accepted = validate_resolved_intent(
+            resolved_intent(UserIntent.ACCEPT_PREVIOUS_PROPOSAL, confidence=0.98),
+            retained,
+        )
+        self.assertEqual(accepted["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+        updates = accepted["semantic_updates"]["design_updates"]
+        self.assertEqual(updates[0]["value"], answer)
+
     def test_action_contract_splits_pending_answer_and_comparison_replacement(self) -> None:
         session = idea_facet_session("design_mixed_learning_and_comparison")
         set_baseline_comparisons(
@@ -475,7 +497,12 @@ class DialogueStateTests(unittest.TestCase):
             ["ELECTROSTATIC_BOUNDARY"],
         )
 
-        emvr_design: dict = {}
+        emvr_design: dict = {
+            "field_state": {
+                "object_constraints": ["比较不同导体边界"],
+                "observed_quantities": ["边界附近的场线方向"],
+            }
+        }
         initial = normalize_emvr_design_update(
             {
                 "theory_links": [
@@ -547,6 +574,9 @@ class DialogueStateTests(unittest.TestCase):
             "supports_design_fields": ["object_constraints"],
         }
         emvr_design = {
+            "field_state": {
+                "object_constraints": ["导体边界"],
+            },
             "structured_requirements": {
                 Stage.THEORETICAL_FRAMEWORK.value: {
                     "theory_links": [boundary_link]
@@ -2219,6 +2249,7 @@ class DialogueStateTests(unittest.TestCase):
         generator.semantic_updates = {
             "course_scope_status": "COURSE_CONTENT",
             "control_actions": ["REQUEST_REFERENCE"],
+            "stage_one_scene_response": "REQUEST_NEW_BATCH",
         }
 
         result = engine.process_turn(
@@ -3732,6 +3763,221 @@ class DialogueStateTests(unittest.TestCase):
         stored = engine.store.get(first["design_id"])
         self.assertTrue(stored.design_context["idea"]["direction_locked"])
         self.assertIn("idea_development", stored.design_context)
+
+    def test_scene_reference_control_cannot_override_substantive_direction_content(self) -> None:
+        """A long scene response is content, even if the parser also emits REQUEST_REFERENCE."""
+
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.REQUEST_MORE_EXAMPLES,
+                target="exploration_scenes",
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "selected_option_ids": ["scene_option_17"],
+                    "stage_one_direction_detail": (
+                        "我想沿着导体与介质在同一外加电场中的场线分布差异继续，"
+                        "并重点比较材料边界附近的弯曲。"
+                    ),
+                    "stage_one_scene_response": "SELECT_OR_DEVELOP",
+                },
+                dialogue_acts=[
+                    {
+                        "type": "REQUEST_REFERENCE",
+                        "target": "exploration_scenes",
+                        "operation": "EXECUTE",
+                        "content": "",
+                        "confidence": 0.92,
+                    }
+                ],
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["selected_option_ids"],
+            ["scene_option_17"],
+        )
+        self.assertIn(
+            "材料边界附近",
+            resolved["semantic_updates"]["stage_one_direction_detail"],
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["stage_one_scene_response"],
+            "SELECT_OR_DEVELOP",
+        )
+
+    def test_scene_continuation_without_detail_overrides_misclassified_reference(self) -> None:
+        """A scene choice remains a continuation even when no new physics detail is added."""
+
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.REQUEST_MORE_EXAMPLES,
+                target="exploration_scenes",
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "selected_option_ids": ["latest_scene_b"],
+                    "stage_one_scene_response": "SELECT_OR_DEVELOP",
+                },
+                dialogue_acts=[
+                    {
+                        "type": "REQUEST_REFERENCE",
+                        "target": "exploration_scenes",
+                        "operation": "EXECUTE",
+                        "content": "",
+                        "confidence": 0.92,
+                    }
+                ],
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["selected_option_ids"],
+            ["latest_scene_b"],
+        )
+
+    def test_scene_selection_resolver_receives_the_latest_visible_batch(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design("我想探索静电场中的物体相互影响")
+        scenes = first["stage_payload"]["exploration_scenes"]
+        latest_b = scenes[1]["course_anchor"]
+        generator = ScriptedSemanticGenerator(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            semantic_updates={
+                "selected_option_ids": [latest_b["option_id"]],
+                "stage_one_scene_response": "SELECT_OR_DEVELOP",
+                "course_scope_status": "COURSE_CONTENT",
+            },
+        )
+        engine.generator = generator
+
+        result = engine.process_turn(
+            first["design_id"],
+            {"message": "我想沿刚才的图景B继续展开"},
+        )
+
+        visible = generator.calls[0]["carried_context"][
+            "latest_exploration_scenes"
+        ]
+        self.assertEqual(
+            [item["option_id"] for item in visible],
+            [scene["course_anchor"]["option_id"] for scene in scenes],
+        )
+        self.assertEqual(
+            result["stage_payload"]["selected_course_relations"],
+            [latest_b],
+        )
+        self.assertEqual(result["stage_payload"]["exploration_scenes"], [])
+        self.assertNotIn("下面不是一组标准答案", result["assistant_message"])
+
+    def test_scene_choice_ends_directionless_browsing_instead_of_replaying_scenes(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design("我想先浏览课程方向")
+        scenes = first["stage_payload"].get("exploration_scenes", [])
+        if not scenes:
+            # Recreate the exact persisted state produced by a directionless
+            # breadth turn without coupling this regression to lexical input
+            # classification in the offline generator.
+            first = engine.create_design("我想探索静电场中的物体相互影响")
+            scenes = first["stage_payload"]["exploration_scenes"]
+        session = engine.store.get(first["design_id"])
+        session.design_context.setdefault("idea", {})[
+            "directionless_browse_active"
+        ] = True
+        engine.store.save(session)
+        selected = scenes[0]["course_anchor"]
+        generator = ScriptedSemanticGenerator(
+            UserIntent.REQUEST_MORE_EXAMPLES,
+            target="exploration_scenes",
+            semantic_updates={
+                "selected_option_ids": [selected["option_id"]],
+                "course_scope_status": "COURSE_CONTENT",
+                "stage_one_scene_response": "SELECT_OR_DEVELOP",
+                "control_actions": ["REQUEST_REFERENCE"],
+            },
+        )
+        engine.generator = generator
+
+        result = engine.process_turn(
+            first["design_id"],
+            {"message": "这个图景比较典型，我想沿这个方向继续"},
+        )
+
+        self.assertEqual(result["stage_payload"]["exploration_scenes"], [])
+        self.assertEqual(result["stage_payload"]["alternative_ideas"], [])
+        self.assertTrue(result["stage_payload"]["direction_locked"])
+        self.assertNotIn("下面不是一组标准答案", result["assistant_message"])
+        stored = engine.store.get(first["design_id"])
+        self.assertNotIn(
+            "directionless_browse_active",
+            stored.design_context.get("idea", {}),
+        )
+
+    def test_new_scene_batch_requires_scene_specific_semantic_decision(self) -> None:
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.REQUEST_MORE_EXAMPLES,
+                target="exploration_scenes",
+                confidence=0.98,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "stage_one_scene_response": "REQUEST_NEW_BATCH",
+                },
+                dialogue_acts=[
+                    {
+                        "type": "REQUEST_REFERENCE",
+                        "target": "exploration_scenes",
+                        "operation": "EXECUTE",
+                        "content": "",
+                        "confidence": 0.98,
+                    }
+                ],
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            resolved["intent"], UserIntent.REQUEST_MORE_EXAMPLES.value
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["stage_one_scene_response"],
+            "REQUEST_NEW_BATCH",
+        )
 
     def test_locked_direction_turns_scene_request_into_current_facet_reference(self) -> None:
         engine = WorkflowEngine(generator=RuleBasedStageGenerator())
@@ -5651,6 +5897,206 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(merged["research_question"], question)
         self.assertIn("两个带电物体之间的距离", merged["changed_quantities"])
         self.assertIn("两个带电物体的相对方向", merged["changed_quantities"])
+
+    def test_emvr_objective_revision_updates_only_the_named_objective(self) -> None:
+        emvr_design = {
+            "field_state": {
+                "conceptual_objective": "理解库仑定律与叠加原理",
+                "calculation_objective": "计算两个点电荷的合场强",
+                "analysis_objective": "比较同种与异种电荷的场线差异",
+                "vr_interaction_objective": "通过拖拽改变两个电荷的间距",
+                "observation_objective": "观察中间区域场线的弯曲与重排",
+                "learning_objectives": [
+                    "理解库仑定律与叠加原理",
+                    "计算两个点电荷的合场强",
+                    "比较同种与异种电荷的场线差异",
+                    "通过拖拽改变两个电荷的间距",
+                    "观察中间区域场线的弯曲与重排",
+                ],
+            }
+        }
+
+        apply_emvr_field_updates(
+            emvr_design,
+            normalize_emvr_design_update(
+                {
+                    "field_updates": [
+                        {
+                            "field_id": "calculation_objective",
+                            "operation": "REPLACE",
+                            "value": "计算不同间距下中点场强的大小和方向",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        merged = merge_emvr_structured_requirements(emvr_design)
+        self.assertEqual(
+            merged["calculation_objective"],
+            "计算不同间距下中点场强的大小和方向",
+        )
+        self.assertEqual(
+            merged["conceptual_objective"], "理解库仑定律与叠加原理"
+        )
+        self.assertEqual(
+            merged["vr_interaction_objective"],
+            "通过拖拽改变两个电荷的间距",
+        )
+        self.assertEqual(len(merged["learning_objectives"]), 5)
+        self.assertIn(
+            "计算不同间距下中点场强的大小和方向",
+            merged["learning_objectives"],
+        )
+        self.assertNotIn(
+            "计算两个点电荷的合场强",
+            merged["learning_objectives"],
+        )
+
+    def test_emvr_theory_relation_without_committed_field_binding_is_discarded(self) -> None:
+        emvr_design = {
+            "field_state": {
+                "research_question": "比较两个场源靠近时的场线变化",
+                "observed_quantities": ["空间场线分布"],
+            }
+        }
+        update = normalize_emvr_design_update(
+            {
+                "theory_links": [
+                    {
+                        "relation_id": "CHARGED_PARTICLE_FORCE",
+                        "supports_design_content": "属于相邻的电磁学知识",
+                        "supports_design_fields": ["object_constraints"],
+                    }
+                ]
+            }
+        )
+
+        apply_emvr_field_updates(emvr_design, update)
+
+        merged = merge_emvr_structured_requirements(emvr_design)
+        self.assertNotIn("theory_links", merged)
+        self.assertNotIn("theory_relation_ids", merged)
+
+    def test_emvr_theory_binding_is_invalidated_when_supported_design_changes(self) -> None:
+        emvr_design = {
+            "field_state": {
+                "research_question": "改变两个场源的距离时，空间场分布如何变化？",
+                "observed_quantities": ["空间场分布"],
+            }
+        }
+        theory = normalize_emvr_design_update(
+            {
+                "theory_links": [
+                    {
+                        "relation_id": "FIELD_SUPERPOSITION",
+                        "supports_design_content": "解释两个场源共同产生的空间场",
+                        "supports_design_fields": [
+                            "research_question",
+                            "observed_quantities",
+                        ],
+                    }
+                ]
+            }
+        )
+        apply_emvr_field_updates(emvr_design, theory)
+        self.assertIn(
+            "FIELD_SUPERPOSITION",
+            merge_emvr_structured_requirements(emvr_design)["theory_relation_ids"],
+        )
+
+        apply_emvr_field_updates(
+            emvr_design,
+            normalize_emvr_design_update(
+                {
+                    "field_updates": [
+                        {
+                            "field_id": "research_question",
+                            "operation": "REPLACE",
+                            "value": "改变材料损耗时，传播衰减如何变化？",
+                        }
+                    ]
+                }
+            ),
+        )
+
+        merged = merge_emvr_structured_requirements(emvr_design)
+        self.assertNotIn("theory_links", merged)
+        self.assertNotIn("theory_relation_ids", merged)
+        self.assertEqual(emvr_design.get("theory_link_state"), {})
+
+    def test_emvr_precise_fields_replace_a_vague_authoritative_brief(self) -> None:
+        emvr_design = {
+            "field_state": {"experiment_brief": "我想做一个静电场实验"},
+            "experiment_brief": "我想做一个静电场实验",
+            "current_brief": "我想做一个静电场实验",
+        }
+        apply_emvr_field_updates(
+            emvr_design,
+            normalize_emvr_design_update(
+                {
+                    "field_updates": [
+                        {
+                            "field_id": "research_object",
+                            "operation": "REPLACE",
+                            "value": "两个点电荷",
+                        },
+                        {
+                            "field_id": "required_behaviors",
+                            "operation": "REPLACE",
+                            "value": ["用手柄拖拽两个点电荷"],
+                        },
+                        {
+                            "field_id": "changed_quantities",
+                            "operation": "REPLACE",
+                            "value": ["电荷间距", "电荷类型"],
+                        },
+                        {
+                            "field_id": "observed_quantities",
+                            "operation": "REPLACE",
+                            "value": ["场线的合并、扭曲和重排"],
+                        },
+                    ]
+                }
+            ),
+        )
+
+        merged = merge_emvr_structured_requirements(emvr_design)
+        brief = merged["experiment_brief"]
+        self.assertIn("两个点电荷", brief)
+        self.assertIn("手柄拖拽", brief)
+        self.assertIn("电荷间距", brief)
+        self.assertIn("场线的合并、扭曲和重排", brief)
+        self.assertNotEqual(brief, "我想做一个静电场实验")
+        self.assertEqual(emvr_design["brief_source"], "STRUCTURED_FIELD_SYNTHESIS")
+
+    def test_emvr_rule_fallback_does_not_commit_unbound_course_theory(self) -> None:
+        session = DesignSession(
+            design_id="emvr_no_unconfirmed_theory",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.THEORETICAL_FRAMEWORK),
+            design_context={
+                "emvr_design": {
+                    "field_state": {
+                        "research_question": "两个点电荷靠近时场线如何重新分布？",
+                        "changed_quantities": ["两个点电荷的间距"],
+                        "observed_quantities": ["场线形态"],
+                    }
+                }
+            },
+        )
+
+        output = RuleBasedStageGenerator().generate(session, "")
+
+        formula_ids = {
+            item["id"] for item in output.stage_payload["core_equations"]
+        }
+        self.assertEqual(formula_ids, set())
+        self.assertEqual(output.stage_payload["formula_support_map"], [])
+        self.assertEqual(
+            output.stage_payload["theory_selection_status"],
+            "needs_semantic_theory_confirmation",
+        )
 
     def test_cross_field_revision_isolated_from_pending_subject_in_every_stage(self) -> None:
         """A visible stage prompt must never become an implicit write target."""

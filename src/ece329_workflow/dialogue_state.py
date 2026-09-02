@@ -55,7 +55,16 @@ _EMVR_FIELDS_BY_PENDING_SUBJECT: dict[str, frozenset[str]] = {
     Stage.COURSE_MAPPING_AND_DIRECTION.value: frozenset(
         {"course_relationship", "design_rationale", "lab_title", "lab_id"}
     ),
-    Stage.LEARNING_OBJECTIVES.value: frozenset({"learning_objectives"}),
+    Stage.LEARNING_OBJECTIVES.value: frozenset(
+        {
+            "learning_objectives",
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+        }
+    ),
     Stage.RESEARCH_QUESTION.value: frozenset(
         {"research_question", "changed_quantities", "observed_quantities"}
     ),
@@ -200,6 +209,13 @@ _EMVR_CONFIRMATION_FIELDS: dict[Stage, tuple[str, ...]] = {
         "independent_variable",
         "observations",
     ),
+    Stage.LEARNING_OBJECTIVES: (
+        "conceptual_objective",
+        "calculation_objective",
+        "analysis_objective",
+        "vr_interaction_objective",
+        "observation_objective",
+    ),
     Stage.CONCEPTUAL_OR_VR_SETUP: (
         "conceptual_structure",
         "unity_objects",
@@ -221,8 +237,13 @@ _PUBLIC_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "direction_summary": ("方向摘要",),
     "research_summary": ("研究摘要",),
     "course_relationship": ("课程关系", "课程主题", "课程依据"),
-    "learning_objective": ("学习目标", "概念目标", "计算目标", "分析目标", "交互目标"),
+    "learning_objective": ("学习目标",),
     "learning_objectives": ("学习目标", "概念目标"),
+    "conceptual_objective": ("概念目标",),
+    "calculation_objective": ("计算目标",),
+    "analysis_objective": ("分析目标",),
+    "vr_interaction_objective": ("交互目标", "VR交互目标"),
+    "observation_objective": ("观察目标",),
     "research_question": ("研究问题",),
     "theoretical_framework": ("理论框架", "理论关系", "核心公式", "物理机制"),
     "hypothesis": ("研究假设",),
@@ -287,6 +308,38 @@ def recoverable_emvr_pending_field(
         field
         if field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *EMVR_EDITABLE_FIELDS}
         else None
+    )
+
+
+def recoverable_guided_pending_field(
+    pending_action: dict[str, Any] | None,
+) -> str | None:
+    """Return one canonical guided field named by an open-question contract."""
+
+    if not isinstance(pending_action, dict):
+        return None
+    pending_type = str(pending_action.get("type") or "")
+    if pending_type == "ANSWER_IDEA_FACET":
+        facet_id = str(pending_action.get("subject") or "").strip()
+        field = FACET_TO_DESIGN_FIELD.get(facet_id)
+        return field if field in DESIGN_ACT_FIELDS else None
+    if pending_type != "ANSWER_STAGE_QUESTION":
+        return None
+    answer_fields = pending_action.get("answer_fields", [])
+    if not isinstance(answer_fields, list) or len(answer_fields) != 1:
+        return None
+    field = str(answer_fields[0] or "").strip()
+    return field if field in {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS} else None
+
+
+def recoverable_pending_field(
+    pending_action: dict[str, Any] | None,
+) -> str | None:
+    """Return an exact single-field recovery target for either interaction mode."""
+
+    return (
+        recoverable_emvr_pending_field(pending_action)
+        or recoverable_guided_pending_field(pending_action)
     )
 
 
@@ -554,8 +607,21 @@ def _authoritative_emvr_update(
                     {"relation_id": relation_id, "operation": "REMOVE"}
                 )
             elif operation == "ADD" and relation_id in permitted_relation_ids:
+                link = next(
+                    (
+                        deepcopy(candidate)
+                        for candidate in theory_links
+                        if str(candidate.get("relation_id") or "").strip().upper()
+                        == relation_id
+                    ),
+                    None,
+                )
                 theory_link_updates.append(
-                    {"relation_id": relation_id, "operation": "ADD"}
+                    {
+                        "relation_id": relation_id,
+                        "operation": "ADD",
+                        "link": link,
+                    }
                 )
         if theory_link_updates:
             filtered["theory_link_updates"] = theory_link_updates
@@ -635,6 +701,8 @@ def current_pending_action(session: DesignSession) -> dict[str, Any] | None:
 def record_pending_clarification(
     session: DesignSession,
     candidate_answer: str = "",
+    *,
+    allow_exact_field_binding: bool | None = None,
 ) -> dict[str, Any] | None:
     """Count a clarification without replacing the decision still awaiting input."""
 
@@ -664,26 +732,34 @@ def record_pending_clarification(
         if normalized_candidate[:2000] not in candidate_turns:
             candidate_turns.append(normalized_candidate[:2000])
         pending["candidate_turns"] = candidate_turns[-4:]
-        emvr_exact_field_binding = bool(
-            session.interaction_state is InteractionState.EMVR_DIRECT
-            and recoverable_emvr_pending_field(pending)
+        if allow_exact_field_binding is None:
+            # Preserve the established EMVR recovery behavior for direct
+            # callers. Guided binding is enabled only when the engine knows
+            # the semantic service itself failed, not merely because the model
+            # judged an ordinary answer unclear.
+            allow_exact_field_binding = (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+            )
+        exact_field_binding = bool(
+            allow_exact_field_binding and recoverable_pending_field(pending)
         )
-        # For an exact EMVR field the most recent failed answer supersedes an
+        # For an exact field the most recent failed answer supersedes an
         # earlier candidate. This lets a student correct or complete a retry
         # before confirming it; accepting must never commit a stale first
-        # attempt. Unbound guided candidates keep their first diagnostic value
-        # because they can never be written directly.
+        # attempt. Multi-field candidates remain unbound because copying them
+        # into one field would recreate the mixed-message contamination this
+        # recovery path is designed to avoid.
         if (
             not str(pending.get("candidate_answer") or "").strip()
-            or emvr_exact_field_binding
+            or exact_field_binding
         ):
             pending["candidate_answer"] = normalized_candidate[:2000]
             # A failed parse normally cannot authorize a field write.  The one
-            # safe exception is an EMVR question whose pending contract names
+            # safe exception is an open question whose pending contract names
             # exactly one canonical field. The candidate is still not written
             # until a separate acceptance turn confirms that binding.
-            pending["candidate_binding_authorized"] = emvr_exact_field_binding
-            if emvr_exact_field_binding:
+            pending["candidate_binding_authorized"] = exact_field_binding
+            if exact_field_binding:
                 pending["candidate_resolution"] = (
                     UserIntent.ANSWER_CURRENT_QUESTION.value
                 )
@@ -1810,6 +1886,15 @@ def validate_resolved_intent(
                 "comparison_updates",
             )
         )
+        stage_one_direction_content = bool(
+            merged_updates.get("selected_option_ids")
+            or str(merged_updates.get("stage_one_direction_detail") or "").strip()
+            or merged_updates.get("stage_one_scene_response")
+            == "SELECT_OR_DEVELOP"
+        )
+        stage_one_scene_response = str(
+            merged_updates.get("stage_one_scene_response") or "NONE"
+        )
         authoritative_state_acts = bool(actions_authoritative and state_acts)
         if {"SET_EMVR_MODE", "SET_GUIDED_MODE"} & controls:
             intent = UserIntent.SET_INTERACTION_STATE.value
@@ -1819,7 +1904,12 @@ def validate_resolved_intent(
             intent = UserIntent.RETURN_TO_PREVIOUS_POINT.value
         elif "REQUEST_SUMMARY" in controls and not state_acts:
             intent = UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value
-        elif "REQUEST_REFERENCE" in controls and not state_acts:
+        elif (
+            "REQUEST_REFERENCE" in controls
+            and not state_acts
+            and not stage_one_direction_content
+            and stage_one_scene_response != "SELECT_OR_DEVELOP"
+        ):
             intent = UserIntent.REQUEST_MORE_EXAMPLES.value
         elif "ADVANCE" in controls and not state_acts:
             intent = UserIntent.ADVANCE_STAGE.value
@@ -1827,10 +1917,11 @@ def validate_resolved_intent(
             intent = UserIntent.REJECT_PREVIOUS_PROPOSAL.value
         elif "ACCEPT" in controls and not state_acts:
             intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
-        elif state_acts:
+        elif state_acts or stage_one_direction_content:
             intent = (
                 UserIntent.ANSWER_CURRENT_QUESTION.value
                 if compiled_acts.get("answered_pending")
+                or stage_one_direction_content
                 else UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
             )
             if "ADVANCE" in controls:
@@ -2020,7 +2111,7 @@ def validate_resolved_intent(
             ]
         else:
             semantic_updates["pending_answer_status"] = "CLEAR"
-        recovered_field = recoverable_emvr_pending_field(pending_action)
+        recovered_field = recoverable_pending_field(pending_action)
         if recovered_field and not any(
             isinstance(act, dict)
             and act.get("type") == "ANSWER_PENDING_QUESTION"
@@ -2054,14 +2145,31 @@ def validate_resolved_intent(
                 existing = deepcopy(existing) if isinstance(existing, list) else []
                 additions = recovered_compiled.get(update_key, [])
                 if isinstance(additions, list):
-                    existing.extend(deepcopy(additions))
+                    for addition in additions:
+                        if (
+                            update_key == "facet_updates"
+                            and isinstance(addition, dict)
+                            and any(
+                                isinstance(item, dict)
+                                and item.get("facet_id") == addition.get("facet_id")
+                                and item.get("status") == addition.get("status")
+                                for item in existing
+                            )
+                        ):
+                            continue
+                        existing.append(deepcopy(addition))
                 if existing:
                     semantic_updates[update_key] = existing
-            projected = _authoritative_emvr_update(
-                {},
-                [recovered_act],
-                recovered_compiled,
-                pending_action,
+            projected = (
+                _authoritative_emvr_update(
+                    {},
+                    [recovered_act],
+                    recovered_compiled,
+                    pending_action,
+                )
+                if pending_action.get("interaction_state")
+                == InteractionState.EMVR_DIRECT.value
+                else {}
             )
             if projected:
                 existing_emvr = semantic_updates.get("emvr_design_update")
@@ -2300,6 +2408,16 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
     stage_one_direction_detail = str(
         raw.get("stage_one_direction_detail") or ""
     ).strip()[:1200]
+    stage_one_scene_response = str(
+        raw.get("stage_one_scene_response") or "NONE"
+    ).strip().upper()
+    if stage_one_scene_response not in {
+        "SELECT_OR_DEVELOP",
+        "PROVIDE_BROAD_TOPIC",
+        "REQUEST_NEW_BATCH",
+        "NONE",
+    }:
+        stage_one_scene_response = "NONE"
     emvr_design_update = normalize_emvr_design_update(raw.get("emvr_design_update"))
     from .design_quality import normalize_quality_assessment
 
@@ -2406,6 +2524,12 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         # a direction choice and a useful design contribution, without
         # guessing from message length or topic keywords.
         "stage_one_direction_detail": stage_one_direction_detail or None,
+        # Stage-one scene handling is deliberately separate from the generic
+        # reference intent.  A substantive continuation and a request for a
+        # fresh A/B/C batch are different dialogue acts even when both mention
+        # the displayed examples.  The state machine consumes this semantic
+        # distinction instead of inferring it from message length or words.
+        "stage_one_scene_response": stage_one_scene_response,
         # A locked direction may be replaced only when the semantic resolver
         # confirms that the student explicitly abandoned or replaced it.
         "topic_change_explicit": raw.get("topic_change_explicit") is True,

@@ -134,10 +134,16 @@ def _compact_context_items(
     else:
         items = []
     cleaned = list(dict.fromkeys(item.strip() for item in items if item.strip()))
-    cleaned = [
-        item if len(item) <= item_length else f"{item[: item_length - 1]}…"
-        for item in cleaned
-    ]
+    def compact_item(item: str) -> str:
+        if len(item) <= item_length:
+            return item
+        prefix = item[:item_length]
+        boundary = max(prefix.rfind(mark) for mark in "。！？；.!?;")
+        if boundary >= max(20, item_length // 3):
+            return prefix[: boundary + 1]
+        return f"{prefix[: item_length - 1].rstrip('，、：；,;:-—')}…"
+
+    cleaned = [compact_item(item) for item in cleaned]
     return "、".join(cleaned[:limit])
 
 
@@ -766,7 +772,12 @@ def _format_exploration_scenes(scenes: list[dict[str, Any]]) -> str:
     return f"{formatted_blocks}\n\n{invitation}"
 
 
-def _visualization(idea: str, emvr: bool) -> dict[str, Any]:
+def _visualization(
+    idea: str,
+    emvr: bool,
+    *,
+    formula_candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "type": "interactive_line_chart",
         "title": "ECE329理论预测参考窗口",
@@ -778,7 +789,10 @@ def _visualization(idea: str, emvr: bool) -> dict[str, Any]:
                 "label": "理论预测",
                 "points": [],
                 "source": KNOWLEDGE.source_reference,
-                "formula_candidates": _formula_references(idea),
+                # The visualization may expose only formulas selected through
+                # the structured theory-binding contract. Topic retrieval is
+                # a candidate source, not authority to attach adjacent theory.
+                "formula_candidates": list(formula_candidates or []),
             }
         ],
         "controls": [
@@ -1516,18 +1530,31 @@ class RuleBasedStageGenerator:
             saved_objectives = structured_requirements.get("learning_objectives", [])
             saved_objectives = saved_objectives if isinstance(saved_objectives, list) else []
             conceptual_objective = (
-                saved_objectives[0]
-                if saved_objectives
-                else latest_stage_input or f"解释{topics[0]}中的核心物理机制"
+                structured_requirements.get("conceptual_objective")
+                or (saved_objectives[0] if saved_objectives else "")
+                or latest_stage_input
+                or f"解释{topics[0]}中的核心物理机制"
             )
             return StepOutput(
                 assistant_message="已将课程学习与VR操作组织为一致的学习目标。",
                 stage_payload={
                     "conceptual_objective": conceptual_objective,
-                    "calculation_objective": "依据与当前研究问题直接相关的ECE329关系式作出理论预测",
-                    "analysis_objective": "比较学生定义的条件变化、理论输出和空间电磁分布",
-                    "vr_interaction_objective": "通过学生定义的VR操作改变具有明确物理意义的模型输入",
-                    "observation_objective": "从数值和空间表现中判断预期关系是否成立",
+                    "calculation_objective": structured_requirements.get(
+                        "calculation_objective"
+                    )
+                    or "依据与当前研究问题直接相关的ECE329关系式作出理论预测",
+                    "analysis_objective": structured_requirements.get(
+                        "analysis_objective"
+                    )
+                    or "比较学生定义的条件变化、理论输出和空间电磁分布",
+                    "vr_interaction_objective": structured_requirements.get(
+                        "vr_interaction_objective"
+                    )
+                    or "通过学生定义的VR操作改变具有明确物理意义的模型输入",
+                    "observation_objective": structured_requirements.get(
+                        "observation_objective"
+                    )
+                    or "从数值和空间表现中判断预期关系是否成立",
                 },
             )
         if stage is Stage.RESEARCH_QUESTION:
@@ -1558,10 +1585,15 @@ class RuleBasedStageGenerator:
                 assumptions=["后续变量设计只负责给已有研究问题补充单位、范围和控制条件，不改写问题。"],
             )
         if stage is Stage.THEORETICAL_FRAMEWORK:
-            formulas = _focused_emvr_formula_references(theory_relation_ids)
             research_focus = (
                 structured_requirements.get("research_question")
                 or _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
+            )
+            formulas = _focused_emvr_formula_references(theory_relation_ids)
+            theory_selection_status = (
+                "selected_for_current_research"
+                if formulas
+                else "needs_semantic_theory_confirmation"
             )
             relation_labels = [
                 EMVR_THEORY_RELATIONS[relation_id]["label"]
@@ -1572,31 +1604,6 @@ class RuleBasedStageGenerator:
                 theory_relation_ids,
                 structured_requirements,
             )
-            if not formulas:
-                # The offline generator does not invent semantic relation IDs.
-                # It may, however, use the same grounded course retrieval used
-                # throughout the workflow.  This keeps the PDF complete for a
-                # clearly course-grounded idea without falling back to a fixed
-                # topic/keyword table or listing unrelated theory names.
-                grounded_context = _emvr_context_text(session, idea)
-                formulas = _formula_references(grounded_context)[:4]
-                relation_labels = list(
-                    dict.fromkeys(
-                        str(item.get("name") or item.get("title") or "课程理论关系")
-                        for item in formulas
-                    )
-                )
-                support_target = str(research_focus or grounded_context).strip()
-                support_map = [
-                    {
-                        "formula_id": item.get("id"),
-                        "relation_id": "COURSE_RETRIEVAL",
-                        "relation": item.get("name") or item.get("title"),
-                        "supports_design_content": support_target,
-                    }
-                    for item in formulas
-                    if item.get("id")
-                ]
             return StepOutput(
                 assistant_message=(
                     "我已经只保留能直接解释当前变化条件和观察现象的课程关系。"
@@ -1607,11 +1614,7 @@ class RuleBasedStageGenerator:
                     "physical_mechanism": relation_labels,
                     "core_equations": formulas,
                     "formula_support_map": support_map,
-                    "theory_selection_status": (
-                        "selected_for_current_research"
-                        if formulas
-                        else "needs_semantic_theory_confirmation"
-                    ),
+                    "theory_selection_status": theory_selection_status,
                     "simulation_inputs": [
                         *structured_requirements.get("changed_quantities", []),
                         "其余保持不变的控制条件",
@@ -1854,7 +1857,13 @@ class RuleBasedStageGenerator:
                     "trend_annotation": "由当前理论模型计算后标注",
                     "unity_update_event": "OnSimulationParameterChanged",
                 },
-                visualization=_visualization(idea, emvr=True),
+                visualization=_visualization(
+                    idea,
+                    emvr=True,
+                    formula_candidates=formulas_for_emvr_relations(
+                        structured_requirements.get("theory_relation_ids", [])
+                    ),
+                ),
             )
             return output
         if stage is Stage.RESULT_INTERPRETATION:
