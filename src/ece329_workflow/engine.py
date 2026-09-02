@@ -729,12 +729,18 @@ def _prevent_unrequested_scene_replay(
         and updates.get("no_direction") is True
         and scene_response != "SELECT_OR_DEVELOP"
         and not committed_direction
+        and updates.get("scene_batch_authorized") is True
     ):
         return
     # A broad course topic supplied after a directionless overview still
     # needs one topic-specific breadth batch.  This is distinct from selecting
     # or elaborating one of the visible scenes, which must never replay them.
-    if scene_response == "PROVIDE_BROAD_TOPIC" and not committed_direction:
+    if (
+        scene_response == "PROVIDE_BROAD_TOPIC"
+        and not committed_direction
+        and isinstance(updates, dict)
+        and updates.get("scene_batch_authorized") is True
+    ):
         return
     established_topic = bool(
         idea.get("direction_locked") is True
@@ -761,6 +767,8 @@ def _prevent_unrequested_scene_replay(
         requests_scene_batch
         and "REQUEST_REFERENCE" in controls
         and scene_response == "REQUEST_NEW_BATCH"
+        and isinstance(updates, dict)
+        and updates.get("scene_batch_authorized") is True
     )
     if explicitly_requested:
         return
@@ -796,6 +804,7 @@ def _prevent_unrequested_scene_replay(
         and scene_response == "NONE"
         and not updates.get("selected_option_ids")
         and not str(updates.get("stage_one_direction_detail") or "").strip()
+        and updates.get("scene_batch_authorized") is True
     ):
         idea["directionless_browse_active"] = False
         return
@@ -810,6 +819,8 @@ def _prevent_unrequested_scene_replay(
                 or str(updates.get("stage_one_direction_detail") or "").strip()
             )
         )
+        and isinstance(updates, dict)
+        and updates.get("scene_batch_authorized") is True
     ):
         # Compatibility sessions may have shown a generic redirection batch
         # before the semantic-state fields existed.  With no candidate or
@@ -902,10 +913,16 @@ def _prevent_unrequested_scene_replay(
         output.stage_payload["brainstorm_phase"] = INTEREST_DESCRIPTION
         output.stage_payload["clarification_required"] = False
         output.stage_payload["preserve_pending_action"] = False
-        output.assistant_message = (
-            "已经按你的确认沿用刚才说明的研究方向，不会再展示新的三幅图景。"
-            "当前内容会继续保留；你可以直接补充还想观察的现象，或继续完善后面的设计要点。"
-        )
+        if turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value:
+            output.assistant_message = (
+                "已经按你的确认沿用刚才说明的研究方向，不会再展示新的三幅图景。"
+                "当前内容会继续保留；你可以直接补充还想观察的现象，或继续完善后面的设计要点。"
+            )
+        else:
+            output.assistant_message = (
+                "你选定并补充的研究重点已经保留下来，不会再换一组三幅图景。"
+                "接下来会沿着这个方向继续完善；你可以进一步描述最想观察的变化。"
+            )
     else:
         output.assistant_message = (
             "我已经保留你刚才对现有方向的选择、补充或纠正，不会再换一组三幅图景。"
@@ -3111,6 +3128,13 @@ class WorkflowEngine:
             and handled_stage is not Stage.IDEA_BRAINSTORMING
             and "REQUEST_REFERENCE" in control_actions
         )
+        emvr_stage_reference_turn = bool(
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and (
+                intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+                or "REQUEST_REFERENCE" in control_actions
+            )
+        )
         if version_only_turn:
             output = StepOutput(
                 assistant_message="\n\n".join(
@@ -3162,6 +3186,28 @@ class WorkflowEngine:
                 student_task="你更看重哪一项判断标准，或者已经想采用其中一个方案？",
             )
             session.turn_context = {}
+            completion_error = None
+        elif emvr_stage_reference_turn:
+            # A request for examples is a temporary response strategy, not a
+            # stage answer.  Let the online generator answer it from the
+            # current EMVR context, but do not pass the result through the
+            # normal EMVR report formatter: that formatter deliberately
+            # rebuilds the stage draft and used to erase the examples before
+            # they reached the student.  The outstanding design question stays
+            # active so the student can answer it after reading the reference.
+            try:
+                output = self.generator.generate(
+                    session,
+                    resolved_student_message or message,
+                )
+            finally:
+                session.turn_context = {}
+            output.stage_payload["reference_only"] = True
+            output.stage_payload["preserve_pending_action"] = True
+            if isinstance(pending_action, dict):
+                dialogue_state(session)["pending_action"] = deepcopy(
+                    pending_action
+                )
             completion_error = None
         elif design_summary_request:
             summary_snapshot = design_state_snapshot(session)
@@ -3578,14 +3624,24 @@ class WorkflowEngine:
             priority_issue = quality_review["priority_issue"]
             finding = str(priority_issue.get("finding") or "").strip()
             next_question = str(priority_issue.get("student_question") or "").strip()
-            if finding:
+            # In EMVR, the stage entry already asks the exact Builder-facing
+            # question for the current deliverable.  A generic quality issue
+            # may still be shown in the side panel, but it must not replace
+            # that question and send the conversation back to an earlier
+            # field.  Guided mode keeps the existing coaching bridge.
+            quality_may_steer_response = not (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and emvr_stage_entry_turn
+                and bool(output.student_task)
+            )
+            if finding and quality_may_steer_response:
                 bridge = (
                     f"从当前方案的衔接看，{finding}"
                     if session.interaction_state is InteractionState.EMVR_DIRECT
                     else f"结合前面已经确定的内容，{finding}"
                 )
                 output.assistant_message = f"{output.assistant_message.rstrip()}\n\n{bridge}"
-            if next_question:
+            if next_question and quality_may_steer_response:
                 output.student_task = next_question
         output.stage_payload["quality_review"] = public_quality_review(
             quality_review,

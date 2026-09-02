@@ -8,6 +8,7 @@ from typing import Any
 from .design_state import design_state_snapshot, ensure_design_state
 from .dialogue_acts import stage_design_state_snapshot
 from .models import DesignSession, InteractionState, Stage
+from .turn_planning import workflow_design_snapshot
 
 
 QUALITY_CATEGORIES = frozenset(
@@ -333,8 +334,11 @@ def evaluate_design_quality(
     """Combine deterministic completeness checks with model semantic review."""
 
     design = design_state_snapshot(session)
-    stage_state = stage_design_state_snapshot(session)
-    snapshot = {**design, **stage_state}
+    # In EMVR mode the canonical causal chain is projected from Builder-facing
+    # fields by ``workflow_design_snapshot``.  Guided mode receives the same
+    # values it used previously.  This prevents a saved EMVR variable or
+    # observation from being reported as missing at a later stage.
+    snapshot = workflow_design_snapshot(session)
     semantic = normalize_quality_assessment(semantic_assessment)
     issues: list[dict[str, Any]] = []
 

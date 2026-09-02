@@ -2250,6 +2250,7 @@ class DialogueStateTests(unittest.TestCase):
             "course_scope_status": "COURSE_CONTENT",
             "control_actions": ["REQUEST_REFERENCE"],
             "stage_one_scene_response": "REQUEST_NEW_BATCH",
+            "scene_batch_authorized": True,
         }
 
         result = engine.process_turn(
@@ -2273,7 +2274,13 @@ class DialogueStateTests(unittest.TestCase):
         generator = ScriptedSemanticGenerator(
             UserIntent.REQUEST_MORE_EXAMPLES,
             target="exploration_scenes",
-            semantic_updates={"course_scope_status": "COURSE_CONTENT"},
+            semantic_updates={
+                "course_scope_status": "COURSE_CONTENT",
+                "control_actions": ["REQUEST_REFERENCE"],
+                "stage_one_scene_response": "REQUEST_NEW_BATCH",
+                # Deliberately omit scene_batch_authorized: this reproduces a
+                # broad-parser false positive like trail31 and must fail safe.
+            },
         )
         engine.generator = generator
         selection = "我选择两个场源靠近的图景，并想观察它们之间的场线重分布"
@@ -3957,6 +3964,7 @@ class DialogueStateTests(unittest.TestCase):
                 source="SEMANTIC_TEST",
                 semantic_updates={
                     "stage_one_scene_response": "REQUEST_NEW_BATCH",
+                    "scene_batch_authorized": True,
                 },
                 dialogue_acts=[
                     {

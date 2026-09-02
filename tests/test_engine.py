@@ -40,7 +40,13 @@ from ece329_workflow.guardrails import (
 )
 from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.idea_development import initialize_idea_development
-from ece329_workflow.models import DesignSession, InteractionState, Stage, StageCompletionError
+from ece329_workflow.models import (
+    DesignSession,
+    InteractionState,
+    Stage,
+    StageCompletionError,
+    StepOutput,
+)
 from ece329_workflow.reporting import stage_report_section
 from ece329_workflow.stages import public_stage_catalog, stage_title
 
@@ -425,6 +431,68 @@ class WorkflowEngineTests(unittest.TestCase):
                 pending = saved_session.model_context["dialogue_state"]["pending_action"]
                 self.assertEqual(pending["type"], "ANSWER_IDEA_FACET")
                 self.assertEqual(pending["subject"], facet_id)
+
+    def test_emvr_reference_request_is_answered_without_replaying_stage_draft(self) -> None:
+        class EMVRReferenceGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                if user_message != "我不确定，请给几个常见例子":
+                    return resolved_intent(
+                        UserIntent.ANSWER_CURRENT_QUESTION,
+                        confidence=0.99,
+                        source="SEMANTIC_TEST",
+                    )
+                return resolved_intent(
+                    UserIntent.REQUEST_MORE_EXAMPLES,
+                    target=(pending_action or {}).get("subject"),
+                    confidence=0.99,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+                    dialogue_acts=[
+                        {
+                            "type": "REQUEST_REFERENCE",
+                            "target": (pending_action or {}).get("subject") or "",
+                            "operation": "EXECUTE",
+                            "content": None,
+                            "confidence": 0.99,
+                        }
+                    ],
+                    actions_authoritative=True,
+                )
+
+            def generate(self, session, user_message):
+                if user_message == "我不确定，请给几个常见例子":
+                    return StepOutput(
+                        assistant_message=(
+                            "可以参考三个常见对象组合：两个可移动点电荷、带电球与接地平板、"
+                            "导体球与介质球。它们分别适合观察叠加、感应和材料边界效应。"
+                        ),
+                        stage_payload={"reference_examples": True},
+                        student_task="哪一种对象组合最接近你想在VR里呈现的现象？",
+                    )
+                return super().generate(session, user_message)
+
+        engine = WorkflowEngine(generator=EMVRReferenceGenerator())
+        initial = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        result = engine.process_turn(
+            initial["design_id"],
+            {"message": "我不确定，请给几个常见例子"},
+        )
+
+        self.assertTrue(result["stage_payload"]["reference_only"])
+        self.assertIn("两个可移动点电荷", result["assistant_message"])
+        self.assertNotIn("当前已形成的专业设计草稿", result["assistant_message"])
+        stored = engine.store.get(initial["design_id"])
+        pending = stored.model_context["dialogue_state"]["pending_action"]
+        self.assertEqual(pending["subject"], "experiment_brief")
 
     def test_guided_brainstorm_requires_student_confirmation(self) -> None:
         first = self.engine.create_design("研究传输线驻波")
@@ -2062,6 +2130,7 @@ class WorkflowEngineTests(unittest.TestCase):
                     semantic_updates={
                         "course_scope_status": "COURSE_CONTENT",
                         "stage_one_scene_response": "PROVIDE_BROAD_TOPIC",
+                        "scene_batch_authorized": True,
                     },
                 )
 
@@ -2427,6 +2496,7 @@ class WorkflowEngineTests(unittest.TestCase):
                     semantic_updates={
                         "course_scope_status": "COURSE_CONTENT",
                         "stage_one_scene_response": "PROVIDE_BROAD_TOPIC",
+                        "scene_batch_authorized": True,
                     },
                 )
 
@@ -2890,6 +2960,7 @@ class WorkflowEngineTests(unittest.TestCase):
                     semantic_updates={
                         "control_actions": ["REQUEST_REFERENCE"],
                         "stage_one_scene_response": "REQUEST_NEW_BATCH",
+                        "scene_batch_authorized": True,
                     },
                 )
 

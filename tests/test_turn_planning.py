@@ -9,6 +9,8 @@ from ece329_workflow.design_state import (
     topic_lock_snapshot,
 )
 from ece329_workflow.dialogue_acts import apply_stage_field_updates
+from ece329_workflow.dialogue_state import build_carried_context
+from ece329_workflow.design_quality import evaluate_design_quality
 from ece329_workflow.engine import _emvr_stage_entry_output
 from ece329_workflow.generator import guided_stage_entry_output
 from ece329_workflow.models import DesignSession, InteractionState, Stage
@@ -23,6 +25,49 @@ from ece329_workflow.turn_planning import (
 
 
 class TurnPlanningTests(unittest.TestCase):
+    def test_emvr_builder_fields_feed_quality_and_stage_context(self) -> None:
+        session = DesignSession(
+            design_id="emvr_unified_context",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.THEORETICAL_FRAMEWORK),
+            design_context={
+                "emvr_design": {
+                    "field_state": {
+                        "experiment_brief": "在VR中改变两个带电物体的距离并观察场线变化",
+                        "research_question": "距离变化如何影响两物体之间的场线分布？",
+                        "changed_quantities": ["两个带电物体之间的距离"],
+                        "observed_quantities": ["中间区域的电场线弯曲与连接"],
+                        "conceptual_objective": "解释静电场叠加如何改变空间场线",
+                    }
+                }
+            },
+        )
+
+        snapshot = workflow_design_snapshot(session)
+        context = build_carried_context(session)
+        review = evaluate_design_quality(session)
+
+        self.assertEqual(
+            snapshot["independent_variable"],
+            ["两个带电物体之间的距离"],
+        )
+        self.assertEqual(
+            context["observations"],
+            ["中间区域的电场线弯曲与连接"],
+        )
+        self.assertIn("解释静电场叠加", str(context["learning_objective"]))
+        completeness_missing = {
+            field
+            for issue in review["issues"]
+            if issue.get("category") == "COMPLETENESS"
+            for field in issue.get("fields", [])
+        }
+        self.assertNotIn("independent_variable", completeness_missing)
+        self.assertNotIn("observations", completeness_missing)
+        self.assertTrue(
+            review["feasibility"]["independent_variable_can_change"]
+        )
+
     def test_mixed_turn_is_planned_as_independent_tasks(self) -> None:
         plan = build_turn_task_plan(
             [

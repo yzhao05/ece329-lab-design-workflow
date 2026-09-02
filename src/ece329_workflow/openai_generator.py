@@ -410,6 +410,39 @@ def _compact_intent_response_schema() -> dict[str, Any]:
     }
 
 
+def _scene_batch_verification_schema() -> dict[str, Any]:
+    """Strict contract for independently reviewing a proposed scene reset."""
+
+    return {
+        "type": "object",
+        "properties": {
+            "decision": {
+                "type": "string",
+                "enum": [
+                    "REQUEST_NEW_BATCH",
+                    "PROVIDE_BROAD_TOPIC",
+                    "SELECT_OR_DEVELOP",
+                    "OTHER",
+                ],
+            },
+            "selected_option_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 3,
+            },
+            "direction_detail": {"type": ["string", "null"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": [
+            "decision",
+            "selected_option_ids",
+            "direction_detail",
+            "confidence",
+        ],
+        "additionalProperties": False,
+    }
+
+
 def _parse_compact_intent_response(
     response: dict[str, Any],
 ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
@@ -2000,14 +2033,23 @@ class OpenAIStageGenerator:
                 "学生引用页面栏目名称时，使用editable_field_bindings中的canonical_field作为target。"
                 "回答开放问题时使用"
                 "ANSWER_PENDING_QUESTION，并把target设为实际规范化字段；若answer_fields有多项，"
-                "按学生表达拆成多个动作。修改已保存内容使用MODIFY_DESIGN_FIELD或"
-                "MODIFY_STAGE_FIELD。基础比较的增删、替换或改名必须使用MODIFY_COMPARISON，"
+                "按学生表达拆成多个动作。修改通用设计内容使用MODIFY_DESIGN_FIELD或"
+                "MODIFY_STAGE_FIELD；EMVR栏目必须使用MODIFY_EMVR_FIELD，target只能来自："
+                f"{json.dumps(sorted(EMVR_EDITABLE_FIELDS), ensure_ascii=False)}。"
+                "conceptual_objective、calculation_objective、analysis_objective、"
+                "vr_interaction_objective与observation_objective是彼此独立的目标；学生同时修改"
+                "多项时必须逐项生成动作。字段必须按内容的物理角色归类：changed_quantities是主动"
+                "改变的输入，observed_quantities是观察响应，required_behaviors是用户操作与系统"
+                "反馈，theory_links才是理论依据；当前阶段和上一问题不能覆盖学生明确点名的栏目。"
+                "基础比较的增删、替换或改名必须使用MODIFY_COMPARISON，"
                 "其content写成JSON对象字符串，包含carried_context中的comparison_id、action、"
                 "cases/new_cases/case_refs以及replace_all或merge_with_existing。纠错和具体修改"
                 "同时出现时要分别输出CORRECT_ASSISTANT与对应的修改动作；CORRECT_ASSISTANT的"
                 "content若包含可执行修复，也必须写成JSON对象字符串，并可包含design_updates、"
                 "stage_field_updates和comparison_updates。课程提问、参考请求、总结请求、纠错和"
-                "控制动作必须分别列出。"
+                "控制动作必须分别列出。学生表示暂时不能确定并要求举例时，用REQUEST_REFERENCE"
+                "覆盖这整个请求，不要再把‘不确定’单列为UNRESOLVED；参考请求只改变本轮回答方式，"
+                "不能改写设计字段或清除当前待办。"
                 "每个动作的source_text必须逐字复制它所依据的最小学生原文片段；所有source_text"
                 "必须覆盖本轮全部独立要求，不能遗漏较早出现的修改。"
                 "不能把整条混合消息塞进一个字段；能确定的动作照常返回，剩余片段才用UNRESOLVED。"
@@ -2032,6 +2074,110 @@ class OpenAIStageGenerator:
         }
         response = self.transport.create(compact_payload)
         return _parse_compact_intent_response(response)
+
+    def _verify_scene_batch_request(
+        self,
+        session: DesignSession,
+        user_message: str,
+        pending_action: dict[str, Any] | None,
+        carried_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Independently distinguish replacing scenes from developing one.
+
+        The broad turn parser has many simultaneous responsibilities and can
+        occasionally label a detailed scene choice as another-example
+        request. This focused semantic pass reviews only that consequential
+        decision against the batch the student actually saw.
+        """
+
+        latest_scenes = carried_context.get("latest_exploration_scenes", [])
+        latest_scenes = latest_scenes if isinstance(latest_scenes, list) else []
+        verification_input = json.dumps(
+            {
+                "current_stage": session.current_stage.value,
+                "previous_question": str(
+                    pending_action.get("question") or ""
+                ) if isinstance(pending_action, dict) else "",
+                "pending_action": pending_action,
+                "visible_scene_batch": latest_scenes,
+                "user_message": user_message,
+            },
+            ensure_ascii=False,
+        )
+        payload = {
+            "model": self.model,
+            "instructions": (
+                "只复核学生是否真的要求替换当前可见的三幅图景，不回答学生。"
+                "REQUEST_NEW_BATCH仅表示学生不采用或暂不采用当前批次，并要求展示另一批不同图景。"
+                "PROVIDE_BROAD_TOPIC只表示学生尚未选定图景，但在此前没有方向的情况下给出了一个"
+                "新的宽泛ECE329主题，需要围绕该主题展示一批更具体的图景。"
+                "SELECT_OR_DEVELOP表示学生选择、引用、比较、组合、评价当前批次中的图景，或在其"
+                "基础上补充自己的研究对象、物理关系、观察现象或目标；消息较长不改变这一判断。"
+                "OTHER表示既不是换批，也没有沿当前图景形成可辨认的方向。"
+                "visible_scene_batch是唯一可解析的当前A/B/C批次；若选择或发展了其中内容，"
+                "selected_option_ids只能复制其中真实option_id，direction_detail只保留学生表达的"
+                "纯物理研究内容，不含选项编号、选择动作或会话外壳。不要依据孤立关键词判断，"
+                "必须比较整条消息与当前可见图景的语义关系。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": verification_input}
+                    ],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_scene_batch_verification",
+                    "schema": _scene_batch_verification_schema(),
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": max(700, min(self.intent_max_output_tokens, 1200)),
+            "store": False,
+        }
+        response = self.transport.create(payload)
+        try:
+            result = json.loads(_extract_output_text(response))
+        except (json.JSONDecodeError, ModelOutputError) as exc:
+            raise ModelOutputError("Scene batch verification was invalid") from exc
+        if not isinstance(result, dict):
+            raise ModelOutputError("Scene batch verification must be an object")
+        valid_ids = {
+            str(scene.get("option_id") or "")
+            for scene in latest_scenes
+            if isinstance(scene, dict) and str(scene.get("option_id") or "")
+        }
+        decision = str(result.get("decision") or "OTHER")
+        if decision not in {
+            "REQUEST_NEW_BATCH",
+            "PROVIDE_BROAD_TOPIC",
+            "SELECT_OR_DEVELOP",
+            "OTHER",
+        }:
+            decision = "OTHER"
+        selected_ids = result.get("selected_option_ids", [])
+        selected_ids = selected_ids if isinstance(selected_ids, list) else []
+        try:
+            confidence = float(result.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        return {
+            "decision": decision,
+            "selected_option_ids": list(
+                dict.fromkeys(
+                    str(option_id)
+                    for option_id in selected_ids
+                    if str(option_id) in valid_ids
+                )
+            )[:3],
+            "direction_detail": str(result.get("direction_detail") or "").strip()[:1200]
+            or None,
+            "confidence": max(0.0, min(confidence, 1.0)),
+        }
 
     def resolve_intent(
         self,
@@ -2447,6 +2593,73 @@ class OpenAIStageGenerator:
                 ensure_ascii=False,
             )
         initial_acts = raw.get("dialogue_acts", [])
+        initial_unresolved_count = sum(
+            1
+            for act in initial_acts
+            if isinstance(act, dict)
+            and str(act.get("type") or "").upper() == "UNRESOLVED"
+        ) if isinstance(initial_acts, list) else 0
+        if initial_unresolved_count:
+            # A rich response can technically cover the complete source by
+            # labelling the difficult part UNRESOLVED.  Source coverage alone
+            # therefore cannot distinguish a genuine ambiguity from a missed
+            # reference request or several EMVR field edits.  Give the compact
+            # task planner one chance to produce more executable actions and
+            # adopt it only when it resolves more of the turn without dropping
+            # any state writes already recovered by the rich pass.
+            try:
+                compact_raw, compact_value, compact_updates = (
+                    self._recover_compact_intent(intent_input)
+                )
+            except (ModelOutputError, ModelServiceError):
+                pass
+            else:
+                if isinstance(compact_raw.get("dialogue_acts"), list):
+                    compact_raw["dialogue_acts"] = _source_backed_unresolved_acts(
+                        user_message,
+                        compact_raw.get("dialogue_acts", []),
+                    )
+                compact_acts = compact_raw.get("dialogue_acts", [])
+                compact_unresolved_count = sum(
+                    1
+                    for act in compact_acts
+                    if isinstance(act, dict)
+                    and str(act.get("type") or "").upper() == "UNRESOLVED"
+                ) if isinstance(compact_acts, list) else initial_unresolved_count
+                initial_write_count = sum(
+                    1 for act in initial_acts if _dialogue_act_writes_state(act)
+                ) if isinstance(initial_acts, list) else 0
+                compact_write_count = sum(
+                    1 for act in compact_acts if _dialogue_act_writes_state(act)
+                ) if isinstance(compact_acts, list) else 0
+                compact_has_executable_act = bool(
+                    isinstance(compact_acts, list)
+                    and any(
+                        isinstance(act, dict)
+                        and str(act.get("type") or "").upper() != "UNRESOLVED"
+                        for act in compact_acts
+                    )
+                )
+                compact_uncovered = _uncovered_dialogue_text(
+                    user_message,
+                    compact_acts,
+                )
+                if (
+                    compact_has_executable_act
+                    and compact_unresolved_count < initial_unresolved_count
+                    and not compact_uncovered
+                    and compact_write_count >= initial_write_count
+                ):
+                    raw = compact_raw
+                    raw["dialogue_acts_json"] = json.dumps(
+                        compact_acts,
+                        ensure_ascii=False,
+                    )
+                    resolved_value = compact_value
+                    semantic_updates = compact_updates
+                    initial_acts = compact_acts
+                    with self._metrics_lock:
+                        self._intent_repair_successes += 1
         correction_without_update = bool(
             isinstance(initial_acts, list)
             and any(
@@ -2914,6 +3127,97 @@ class OpenAIStageGenerator:
                     **semantic_updates,
                     "pending_answer_status": "CLEAR",
                 }
+        topic_lock = carried_context.get("topic_lock", {})
+        topic_lock = topic_lock if isinstance(topic_lock, dict) else {}
+        scene_decision_needs_review = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and carried_context.get("latest_exploration_scenes")
+            and topic_lock.get("locked") is not True
+            and semantic_updates.get("stage_one_scene_response")
+            != "SELECT_OR_DEVELOP"
+        )
+        if scene_decision_needs_review:
+            # A fresh batch changes the student's conversational focus. Never
+            # authorize it solely because the broad parser used the generic
+            # REQUEST_REFERENCE action; independently review its relationship
+            # to the batch currently visible in the page.
+            try:
+                scene_decision = self._verify_scene_batch_request(
+                    session,
+                    user_message,
+                    pending_action,
+                    carried_context,
+                )
+            except (ModelServiceError, ModelOutputError):
+                # Fail closed. The response guard will preserve the current
+                # direction and ask one local clarification instead of
+                # replaying another three scenes.
+                scene_decision = {
+                    "decision": "OTHER",
+                    "selected_option_ids": [],
+                    "direction_detail": None,
+                    "confidence": 0.0,
+                }
+            verified_new_batch = bool(
+                scene_decision["decision"] == "REQUEST_NEW_BATCH"
+                and scene_decision["confidence"] >= 0.75
+            )
+            verified_broad_topic = bool(
+                scene_decision["decision"] == "PROVIDE_BROAD_TOPIC"
+                and scene_decision["confidence"] >= 0.75
+            )
+            semantic_updates = {
+                **semantic_updates,
+                "scene_batch_authorized": (
+                    verified_new_batch or verified_broad_topic
+                ),
+            }
+            if verified_new_batch:
+                semantic_updates["stage_one_scene_response"] = "REQUEST_NEW_BATCH"
+                semantic_updates["control_actions"] = list(
+                    dict.fromkeys(
+                        [
+                            *semantic_updates.get("control_actions", []),
+                            "REQUEST_REFERENCE",
+                        ]
+                    )
+                )
+                raw["intent"] = "REQUEST_MORE_EXAMPLES"
+                raw["target"] = "exploration_scenes"
+                raw["advance_requested"] = False
+            elif verified_broad_topic:
+                semantic_updates["stage_one_scene_response"] = "PROVIDE_BROAD_TOPIC"
+                semantic_updates["no_direction"] = False
+                raw["intent"] = "ANSWER_CURRENT_QUESTION"
+                raw["advance_requested"] = False
+            elif scene_decision["decision"] == "SELECT_OR_DEVELOP":
+                semantic_updates["stage_one_scene_response"] = "SELECT_OR_DEVELOP"
+                semantic_updates["no_direction"] = False
+                semantic_updates["selected_option_ids"] = scene_decision[
+                    "selected_option_ids"
+                ]
+                if scene_decision.get("direction_detail"):
+                    semantic_updates["stage_one_direction_detail"] = scene_decision[
+                        "direction_detail"
+                    ]
+                semantic_updates["control_actions"] = [
+                    action
+                    for action in semantic_updates.get("control_actions", [])
+                    if action != "REQUEST_REFERENCE"
+                ]
+                raw["intent"] = "ANSWER_CURRENT_QUESTION"
+                raw["target"] = (
+                    str(pending_action.get("subject") or "stage_one_direction")
+                    if isinstance(pending_action, dict)
+                    else "stage_one_direction"
+                )
+                raw["advance_requested"] = False
+            else:
+                # Remove every unverified authorization-shaped summary.  The
+                # authoritative actions remain available for non-scene work,
+                # but they cannot cause another A/B/C batch to appear.
+                semantic_updates["stage_one_scene_response"] = "NONE"
         candidate = resolved_intent(
             str(raw.get("intent") or "UNCLEAR"),
             target=str(raw.get("target") or "") or None,

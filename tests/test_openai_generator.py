@@ -640,6 +640,161 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             transport.requests[1]["instructions"],
         )
 
+    def test_emvr_reference_request_recovers_uncertainty_without_unresolved_loop(self) -> None:
+        message = "我不确定，需要你给几个常见的例子"
+        rich = {
+            "intent": "REQUEST_MORE_EXAMPLES",
+            "target": "research_object",
+            "resolved_value_json": None,
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "UNRESOLVED",
+                        "target": "research_object",
+                        "operation": "MERGE",
+                        "content": "我不确定",
+                        "source_text": "我不确定",
+                        "source_start": 0,
+                        "source_end": 4,
+                        "semantic_key": "unsure_about_objects",
+                        "confidence": 0.74,
+                    },
+                    {
+                        "type": "REQUEST_REFERENCE",
+                        "target": "research_object",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "source_text": "需要你给几个常见的例子",
+                        "source_start": 5,
+                        "source_end": len(message),
+                        "semantic_key": "request_object_examples",
+                        "confidence": 0.98,
+                    },
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        compact = {
+            "actions": [
+                {
+                    "type": "REQUEST_REFERENCE",
+                    "target": "research_object",
+                    "operation": "EXECUTE",
+                    "content": "",
+                    "source_text": message,
+                    "source_start": 0,
+                    "source_end": len(message),
+                    "semantic_key": "request_object_examples",
+                    "confidence": 0.99,
+                }
+            ]
+        }
+        transport = FakeTransport(outputs=[rich, compact])
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            {
+                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "subject": "research_object",
+                "answer_fields": ["research_object"],
+                "question": "这个VR实验需要哪些核心对象？",
+            },
+            {},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertEqual(result["unresolved_content"], [])
+        self.assertIn("MODIFY_EMVR_FIELD", transport.requests[1]["instructions"])
+        self.assertIn("changed_quantities", transport.requests[1]["instructions"])
+
+    def test_compact_recovery_splits_parallel_emvr_objective_edits(self) -> None:
+        clauses = [
+            "概念目标再精简一些",
+            "比较目标改得更具体",
+            "交互目标改为通过拖动对象理解距离变化",
+        ]
+        message = "；".join(clauses)
+        rich = {
+            "intent": "UNCLEAR",
+            "target": None,
+            "resolved_value_json": None,
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "UNRESOLVED",
+                        "target": "learning_objectives",
+                        "operation": "MERGE",
+                        "content": message,
+                        "source_text": message,
+                        "source_start": 0,
+                        "source_end": len(message),
+                        "semantic_key": "objective_revisions",
+                        "confidence": 0.72,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.72,
+        }
+        targets = [
+            "conceptual_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+        ]
+        values = [
+            "解释场线重排的物理原因",
+            "具体比较同种与异种电荷的中间区域场线",
+            "通过拖动对象理解距离变化",
+        ]
+        actions = []
+        search_start = 0
+        for clause, target, value in zip(clauses, targets, values):
+            start = message.index(clause, search_start)
+            actions.append(
+                {
+                    "type": "MODIFY_EMVR_FIELD",
+                    "target": target,
+                    "operation": "REPLACE",
+                    "content": value,
+                    "source_text": clause,
+                    "source_start": start,
+                    "source_end": start + len(clause),
+                    "semantic_key": f"revise_{target}",
+                    "confidence": 0.98,
+                }
+            )
+            search_start = start + len(clause)
+        transport = FakeTransport(outputs=[rich, {"actions": actions}])
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            {
+                "type": "CONFIRM_STAGE_OR_MODIFY",
+                "subject": Stage.LEARNING_OBJECTIVES.value,
+                "question": "这组学习目标是否准确？",
+            },
+            {},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        updates = result["semantic_updates"]["emvr_design_update"]["field_updates"]
+        self.assertEqual([item["field_id"] for item in updates], targets)
+        self.assertFalse(result["unresolved_content"])
+
     def test_long_multi_command_turn_recovers_omitted_first_revision(self) -> None:
         question = "距离从远到近变化时，两种电荷配置的场线重排有何差异？"
         message = (
@@ -2092,6 +2247,173 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(output.stage_payload["brainstorm_phase"], "INTEREST_DESCRIPTION")
         self.assertEqual(output.stage_payload["alternative_ideas"], [])
 
+    def test_scene_choice_overrides_a_misclassified_new_batch_request(self) -> None:
+        message = (
+            "我对图景A感兴趣，主要是关于导体和介质在同样外加电场下，"
+            "场线分布和弯曲有什么不同。"
+        )
+        visible_scenes = [
+            {
+                "label": "图景 A",
+                "option_id": "scene:material-boundary",
+                "title": "把同一物体换成不同材料",
+                "physical_picture": "比较导体与介质在同一外加场中的场线分布",
+            },
+            {
+                "label": "图景 B",
+                "option_id": "scene:transmission-line",
+                "title": "观察传输线反射",
+                "physical_picture": "改变端接并观察反射波",
+            },
+            {
+                "label": "图景 C",
+                "option_id": "scene:magnetic-map",
+                "title": "绘制磁场参数图",
+                "physical_picture": "改变回路条件并比较磁场",
+            },
+        ]
+        request_act = {
+            "type": "REQUEST_REFERENCE",
+            "target": "exploration_scenes",
+            "operation": "EXECUTE",
+            "content": "",
+            "source_text": message,
+            "source_start": 0,
+            "source_end": len(message),
+            "semantic_key": "another_scene_batch",
+            "confidence": 0.94,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    "intent": "REQUEST_MORE_EXAMPLES",
+                    "target": "exploration_scenes",
+                    "resolved_value_json": None,
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "control_actions": ["REQUEST_REFERENCE"],
+                            "course_scope_status": "COURSE_CONTENT",
+                            # Reproduce the stale directionless label visible
+                            # in trail31's repeated-scene response.
+                            "no_direction": True,
+                            "stage_one_scene_response": "REQUEST_NEW_BATCH",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "dialogue_acts_json": json.dumps(
+                        [request_act], ensure_ascii=False
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.94,
+                },
+                {
+                    "decision": "SELECT_OR_DEVELOP",
+                    "selected_option_ids": ["scene:material-boundary"],
+                    "direction_detail": (
+                        "比较导体和介质在同一外加电场中的场线分布与弯曲差异"
+                    ),
+                    "confidence": 0.99,
+                },
+            ]
+        )
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "question": "你想沿哪幅图景继续？",
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "REQUEST_MORE_EXAMPLES",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            message,
+            pending,
+            {"latest_exploration_scenes": visible_scenes},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["stage_one_scene_response"],
+            "SELECT_OR_DEVELOP",
+        )
+        self.assertFalse(result["semantic_updates"]["scene_batch_authorized"])
+        self.assertFalse(result["semantic_updates"]["no_direction"])
+        self.assertEqual(
+            result["semantic_updates"]["selected_option_ids"],
+            ["scene:material-boundary"],
+        )
+        self.assertIn(
+            "导体和介质",
+            result["semantic_updates"]["stage_one_direction_detail"],
+        )
+
+    def test_new_scene_batch_requires_independent_semantic_authorization(self) -> None:
+        message = "这三幅图景都不是我想研究的，请另外展示一批不同图景。"
+        visible_scenes = [
+            {"label": "图景 A", "option_id": "scene:a", "title": "A"},
+            {"label": "图景 B", "option_id": "scene:b", "title": "B"},
+            {"label": "图景 C", "option_id": "scene:c", "title": "C"},
+        ]
+        request_act = {
+            "type": "REQUEST_REFERENCE",
+            "target": "exploration_scenes",
+            "operation": "EXECUTE",
+            "content": "",
+            "source_text": message,
+            "source_start": 0,
+            "source_end": len(message),
+            "semantic_key": "another_scene_batch",
+            "confidence": 0.98,
+        }
+        transport = FakeTransport(
+            outputs=[
+                {
+                    "intent": "REQUEST_MORE_EXAMPLES",
+                    "target": "exploration_scenes",
+                    "resolved_value_json": None,
+                    "semantic_updates_json": json.dumps(
+                        {
+                            "control_actions": ["REQUEST_REFERENCE"],
+                            "stage_one_scene_response": "REQUEST_NEW_BATCH",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "dialogue_acts_json": json.dumps(
+                        [request_act], ensure_ascii=False
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.98,
+                },
+                {
+                    "decision": "REQUEST_NEW_BATCH",
+                    "selected_option_ids": [],
+                    "direction_detail": None,
+                    "confidence": 0.99,
+                },
+            ]
+        )
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            message,
+            None,
+            {"latest_exploration_scenes": visible_scenes},
+        )
+
+        self.assertEqual(result["intent"], "REQUEST_MORE_EXAMPLES")
+        self.assertTrue(result["semantic_updates"]["scene_batch_authorized"])
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(
+            transport.requests[1]["text"]["format"]["name"],
+            "ece329_scene_batch_verification",
+        )
+
     def test_selected_direction_rejects_a_new_visible_scene_list(self) -> None:
         session = guided_session()
         options = KNOWLEDGE.brainstorm_options("研究静电场中的两个源", limit=3)
@@ -2515,7 +2837,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(info["last_fallback_reason"], "model_transport_error")
         self.assertEqual(info["fallback_calls"], 1)
 
-    def test_intent_service_failure_keeps_stage_one_entry_non_blocking(self) -> None:
+    def test_intent_service_failure_preserves_visible_stage_one_batch(self) -> None:
         fallback = FallbackStageGenerator(
             primary=OpenAIStageGenerator(
                 transport=FakeTransport(error=ModelServiceError("temporary"))
@@ -2550,7 +2872,11 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             {"message": "带我浏览课上所学内容的大致方向"},
         )
         self.assertNotIn("我还没完全明白", second["assistant_message"])
-        self.assertEqual(len(second["stage_payload"]["exploration_scenes"]), 3)
+        # Once a batch is visible, a failed semantic service cannot safely
+        # decide whether the student wants another batch or is selecting the
+        # current one. Preserve the batch/focus instead of replaying scenes.
+        self.assertEqual(second["stage_payload"]["exploration_scenes"], [])
+        self.assertTrue(second["stage_payload"]["scene_replay_avoided"])
         self.assertEqual(
             second["stage_payload"]["design_state"]["research_object"],
             "",

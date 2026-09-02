@@ -36,7 +36,11 @@ from .dialogue_acts import (
     normalize_dialogue_acts,
     stage_design_state_snapshot,
 )
-from .turn_planning import build_stage_context_summary, build_turn_task_plan
+from .turn_planning import (
+    build_stage_context_summary,
+    build_turn_task_plan,
+    workflow_design_snapshot,
+)
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
 
@@ -1072,6 +1076,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
     )
     last_summary = dialogue_state(session).get("last_presented_design_summary")
     stage_fields = stage_design_state_snapshot(session)
+    unified_fields = workflow_design_snapshot(session)
     pending = current_pending_action(session)
     topic_lock = topic_lock_snapshot(session)
     return {
@@ -1090,7 +1095,7 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             str(pending.get("subject") or "") if isinstance(pending, dict) else ""
         ),
         "course_relationships": (
-            str(canonical.get("course_relationship") or "")
+            str(unified_fields.get("course_relationship") or "")
             or deepcopy(
                 outline.get("course_relationships")
                 or idea.get("selected_course_relations")
@@ -1098,66 +1103,101 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             )
         ),
         "learning_objective": (
-            str(canonical.get("learning_objective") or "")
+            (
+                "；".join(
+                    str(item).strip()
+                    for item in unified_fields.get("learning_objective", [])
+                    if str(item).strip()
+                )
+                if isinstance(unified_fields.get("learning_objective"), list)
+                else str(unified_fields.get("learning_objective") or "")
+            )
             or facet_evidence("learning_objective")
             or ("；".join(learning_objectives) if learning_objectives else "")
         ),
-        "learning_objectives": learning_objectives,
+        "learning_objectives": (
+            deepcopy(unified_fields.get("learning_objective"))
+            if isinstance(unified_fields.get("learning_objective"), list)
+            else learning_objectives
+        ),
         "research_question": (
-            str(canonical.get("research_question") or "")
+            str(unified_fields.get("research_question") or "")
             or facet_evidence("research_question")
             or (research_questions[0] if research_questions else "")
         ),
         "hypothesis": (
-            str(canonical.get("hypothesis") or "")
+            str(unified_fields.get("hypothesis") or "")
             or facet_evidence("hypothesis")
             or ("；".join(hypotheses) if hypotheses else "")
         ),
         "conceptual_structure": (
-            str(canonical.get("conceptual_structure") or "")
+            (
+                "；".join(
+                    str(item).strip()
+                    for item in unified_fields.get("conceptual_structure", [])
+                    if str(item).strip()
+                )
+                if isinstance(unified_fields.get("conceptual_structure"), list)
+                else str(unified_fields.get("conceptual_structure") or "")
+            )
             or facet_evidence("conceptual_structure")
             or ("；".join(unity_objects) if unity_objects else "")
         ),
         "baseline_comparisons": baseline_comparisons_snapshot(session),
-        "independent_variable": _find_payload_values(
-            session,
-            {"independent_variable", "adjustable_quantity_in_vr"},
-        ) if not stage_fields["independent_variable"] else stage_fields["independent_variable"],
-        "observations": _find_payload_values(
-            session,
-            {
-                "dependent_variable",
-                "observation_focus",
-                "observable_quantity_in_vr",
-                "observations",
-                "calculated_outputs",
-            },
-        ) if not stage_fields["observations"] else stage_fields["observations"],
-        "controlled_conditions": _find_payload_values(
-            session,
-            {"controlled_variables", "controlled_conditions", "reference_condition"},
-        ) if not stage_fields["controlled_conditions"] else stage_fields["controlled_conditions"],
-        "procedure_steps": _find_payload_values(
-            session,
-            {"procedure_steps", "reference_draft"},
-        ) if not stage_fields["procedure_steps"] else stage_fields["procedure_steps"],
-        "unity_objects": stage_fields["unity_objects"] or unity_objects,
-        "interactions": stage_fields["interactions"] or interactions,
+        "independent_variable": deepcopy(
+            unified_fields.get("independent_variable")
+            or _find_payload_values(
+                session,
+                {"independent_variable", "adjustable_quantity_in_vr"},
+            )
+        ),
+        "observations": deepcopy(
+            unified_fields.get("observations")
+            or _find_payload_values(
+                session,
+                {
+                    "dependent_variable",
+                    "observation_focus",
+                    "observable_quantity_in_vr",
+                    "observations",
+                    "calculated_outputs",
+                },
+            )
+        ),
+        "controlled_conditions": deepcopy(
+            unified_fields.get("controlled_conditions")
+            or _find_payload_values(
+                session,
+                {"controlled_variables", "controlled_conditions", "reference_condition"},
+            )
+        ),
+        "procedure_steps": deepcopy(
+            unified_fields.get("procedure_steps")
+            or _find_payload_values(
+                session,
+                {"procedure_steps", "reference_draft"},
+            )
+        ),
+        "unity_objects": deepcopy(unified_fields.get("unity_objects") or unity_objects),
+        "interactions": deepcopy(unified_fields.get("interactions") or interactions),
         "emvr_stage_inputs": emvr_stage_inputs,
         "emvr_structured_requirements": emvr_structured_requirements,
         "emvr_merged_requirements": emvr_merged_requirements,
         "guided_stage_inputs": guided_stage_inputs,
-        "visualization_plan": _find_payload_values(
-            session,
-            {
-                "visualization_layer",
-                "measurement_interface",
-                "trend_annotation",
-            },
-        ) if not stage_fields["visualization_plan"] else stage_fields["visualization_plan"],
+        "visualization_plan": deepcopy(
+            unified_fields.get("visualization_plan")
+            or _find_payload_values(
+                session,
+                {
+                    "visualization_layer",
+                    "measurement_interface",
+                    "trend_annotation",
+                },
+            )
+        ),
         "result_interpretation": stage_fields["result_interpretation"],
         "design_rationale": stage_fields["design_rationale"],
-        "design_value": stage_fields["design_value"],
+        "design_value": deepcopy(unified_fields.get("design_value")),
         "limitations": _find_payload_values(
             session,
             {"limitations", "invalid_conditions", "parameter_limits"},
@@ -2530,6 +2570,10 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         # the displayed examples.  The state machine consumes this semantic
         # distinction instead of inferring it from message length or words.
         "stage_one_scene_response": stage_one_scene_response,
+        # Replacing the visible batch is a consequential control action.  The
+        # broad intent result cannot authorize it on its own; an independent
+        # semantic review must set this flag.
+        "scene_batch_authorized": raw.get("scene_batch_authorized") is True,
         # A locked direction may be replaced only when the semantic resolver
         # confirms that the student explicitly abandoned or replaced it.
         "topic_change_explicit": raw.get("topic_change_explicit") is True,

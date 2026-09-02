@@ -173,7 +173,59 @@ def workflow_design_snapshot(session: DesignSession) -> dict[str, Any]:
         if session.interaction_state is InteractionState.EMVR_DIRECT
         else {}
     )
-    return {**canonical, **stage_fields, **emvr_fields}
+    # EMVR stores Builder-facing names (for example ``changed_quantities``),
+    # while quality review and stage hand-off use the mode-neutral design
+    # names.  Keep one authoritative projection here so every downstream
+    # consumer sees the same committed meaning instead of mistaking a saved
+    # EMVR value for a missing guided field.
+    emvr_projection: dict[str, Any] = {}
+    if emvr_fields:
+        objective_values = [
+            str(emvr_fields.get(field) or "").strip()
+            for field in (
+                "conceptual_objective",
+                "calculation_objective",
+                "analysis_objective",
+                "vr_interaction_objective",
+                "observation_objective",
+            )
+            if str(emvr_fields.get(field) or "").strip()
+        ]
+        if not objective_values:
+            raw_objectives = emvr_fields.get("learning_objectives", [])
+            objective_values = (
+                [str(item).strip() for item in raw_objectives if str(item).strip()]
+                if isinstance(raw_objectives, list)
+                else []
+            )
+        theory_links = emvr_fields.get("theory_links", [])
+        theory_summary = [
+            str(item.get("supports_design_content") or "").strip()
+            for item in theory_links
+            if isinstance(item, dict)
+            and str(item.get("supports_design_content") or "").strip()
+        ] if isinstance(theory_links, list) else []
+        aliases = {
+            "learning_objective": objective_values,
+            "independent_variable": emvr_fields.get("changed_quantities"),
+            "observations": emvr_fields.get("observed_quantities"),
+            "theoretical_framework": theory_summary,
+            "conceptual_structure": emvr_fields.get("object_constraints"),
+            "interactions": emvr_fields.get("required_behaviors"),
+            "visualization_plan": emvr_fields.get("visualization_requirements"),
+            "design_value": emvr_fields.get("design_values"),
+        }
+        emvr_projection = {
+            field: deepcopy(value)
+            for field, value in aliases.items()
+            if value not in (None, "", [], {})
+        }
+    return {
+        **canonical,
+        **stage_fields,
+        **emvr_fields,
+        **emvr_projection,
+    }
 
 
 def requested_fields_from_plan(plan: Any) -> list[str]:
