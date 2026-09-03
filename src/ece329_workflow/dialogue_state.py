@@ -917,6 +917,55 @@ def hydrate_pending_action_from_history(
 
     current = current_pending_action(session)
     if current is not None:
+        idea = session.design_context.get("idea", {})
+        locked_direction_has_stale_confirmation = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and isinstance(idea, dict)
+            and idea.get("direction_locked") is True
+            and current.get("candidate_purpose")
+            == STAGE_ONE_DIRECTION_CANDIDATE
+        )
+        if locked_direction_has_stale_confirmation:
+            # The direction was already committed on an earlier turn. Keeping
+            # its old confirmation pending after reload makes every later
+            # response appear to answer the obsolete prompt and can recreate
+            # the three-scene loop. The confirmed direction remains in the idea
+            # state; only the stale conversation edge is removed.
+            dialogue_state(session).pop("pending_action", None)
+            set_pending_action_snapshot(session, None)
+            return None
+        # Releases before the Stage-1 direction contract was introduced could
+        # persist the guarded scene response and its candidate separately.  On
+        # reload that candidate then looked like an ordinary, unbound answer,
+        # so even a correctly parsed confirmation could never resolve it.  The
+        # response marker is structural evidence that this text was retained by
+        # the scene-replay guard.  Restore only the direction-level permission;
+        # this still does not authorize copying the utterance into a canonical
+        # design field.
+        latest_output = (
+            session.history[-1].get("output", {})
+            if session.history and isinstance(session.history[-1], dict)
+            else {}
+        )
+        latest_payload = (
+            latest_output.get("stage_payload", {})
+            if isinstance(latest_output, dict)
+            else {}
+        )
+        legacy_guarded_direction = bool(
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and str(current.get("candidate_answer") or "").strip()
+            and isinstance(latest_payload, dict)
+            and latest_payload.get("scene_replay_avoided") is True
+        )
+        if legacy_guarded_direction:
+            current["candidate_binding_authorized"] = True
+            current["candidate_purpose"] = STAGE_ONE_DIRECTION_CANDIDATE
+            current["candidate_resolution"] = (
+                UserIntent.ANSWER_CURRENT_QUESTION.value
+            )
         if current.get("type") in {
             *OPEN_QUESTION_PENDING_TYPES,
             *CONFIRMATION_PENDING_TYPES,
@@ -1894,8 +1943,12 @@ def validate_resolved_intent(
     ] if isinstance(raw.get("unresolved_content"), list) else []
     actions_authoritative = raw.get("actions_authoritative") is True
     raw_acts_supplied = isinstance(raw.get("dialogue_acts"), list)
+    candidate_resolution_intent = intent in {
+        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+        UserIntent.ADVANCE_STAGE.value,
+    }
     stage_one_direction_control_acceptance = bool(
-        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        candidate_resolution_intent
         and isinstance(pending_action, dict)
         and pending_action.get("candidate_purpose")
         == STAGE_ONE_DIRECTION_CANDIDATE
@@ -1903,7 +1956,7 @@ def validate_resolved_intent(
         and pending_action.get("candidate_binding_authorized") is True
     )
     exact_field_candidate_control_acceptance = bool(
-        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        candidate_resolution_intent
         and isinstance(pending_action, dict)
         and pending_action.get("type") in OPEN_QUESTION_PENDING_TYPES
         and str(pending_action.get("candidate_answer") or "").strip()
@@ -2169,7 +2222,11 @@ def validate_resolved_intent(
         raw = {**raw, "source": "SEMANTIC_CONFIRMATION_CONTENT"}
     allowed = set(pending_action.get("allowed_intents", [])) if pending_action else set(ALL_INTENTS)
     confirms_saved_candidate = bool(
-        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        intent
+        in {
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+            UserIntent.ADVANCE_STAGE.value,
+        }
         and isinstance(pending_action, dict)
         and pending_action.get("type")
         in OPEN_QUESTION_PENDING_TYPES
@@ -2209,7 +2266,9 @@ def validate_resolved_intent(
             (float(item.get("confidence") or 0.0) for item in dialogue_acts),
             default=confidence,
         )
+    low_confidence_intent = ""
     if confidence < 0.55:
+        low_confidence_intent = intent
         intent = UserIntent.UNCLEAR.value
     semantic_updates = (
         {}
@@ -2217,12 +2276,70 @@ def validate_resolved_intent(
         else _normalize_semantic_updates(raw.get("semantic_updates"))
     )
     source = str(raw.get("source") or "SEMANTIC")
+    if low_confidence_intent:
+        # Retain the rejected semantic category for recovery policy only.  It
+        # never executes because the public intent remains UNCLEAR, but lets
+        # the engine distinguish a low-confidence control action from a
+        # low-confidence substantive correction without inspecting wording.
+        source = f"LOW_CONFIDENCE_{low_confidence_intent}:{source}"
     resolved_value = raw.get("resolved_value")
     normalized_controls = set(
         str(item)
         for item in semantic_updates.get("control_actions", [])
         if str(item)
     )
+    advances_saved_candidate = bool(
+        intent != UserIntent.UNCLEAR.value
+        and (
+            intent == UserIntent.ADVANCE_STAGE.value
+            or "ADVANCE" in normalized_controls
+        )
+        and isinstance(pending_action, dict)
+        and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
+        and (
+            pending_action.get("candidate_purpose")
+            == STAGE_ONE_DIRECTION_CANDIDATE
+            or (
+                pending_action.get("type") in OPEN_QUESTION_PENDING_TYPES
+                and recoverable_pending_field(pending_action) is not None
+            )
+        )
+    )
+    if advances_saved_candidate:
+        # "Continue" while a safely bound candidate is waiting means
+        # "keep this answer and continue from it", not "skip the unanswered
+        # item".  Consume the candidate first and let the normal readiness
+        # calculation choose the next missing item.  Only a pending contract
+        # explicitly marked advance_on_accept may request a public stage jump.
+        intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        controls = [
+            str(item)
+            for item in semantic_updates.get("control_actions", [])
+            if str(item) and str(item) != "ADVANCE"
+        ]
+        if "ACCEPT" not in controls:
+            controls.append("ACCEPT")
+        semantic_updates["control_actions"] = controls
+        normalized_controls = set(controls)
+        raw = {
+            **raw,
+            "advance_requested": bool(
+                pending_action.get("advance_on_accept") is True
+            ),
+        }
+        normalized_acts: list[dict[str, Any]] = []
+        for act in dialogue_acts:
+            normalized_act = deepcopy(act)
+            if (
+                normalized_act.get("type") == "CONTROL"
+                and normalized_act.get("target") == "ADVANCE"
+            ):
+                normalized_act["target"] = "ACCEPT"
+            normalized_acts.append(normalized_act)
+        dialogue_acts = normalized_acts
+        task_plan = build_turn_task_plan(dialogue_acts, unresolved_acts)
+        source = "CONFIRMED_CANDIDATE_AND_CONTINUED"
     accepts_saved_candidate = bool(
         intent != UserIntent.UNCLEAR.value
         and (

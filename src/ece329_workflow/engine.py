@@ -722,6 +722,50 @@ def _prevent_unrequested_scene_replay(
         or str(idea.get("core_phenomenon") or "").strip()
         or str(idea.get("interest_description") or "").strip()
     )
+
+    def continue_from_locked_direction(prefix: str) -> None:
+        """Replace an accidental scene replay with the next unresolved facet."""
+
+        direction = str(
+            idea.get("direction_summary")
+            or idea.get("current_focus")
+            or idea.get("topic_anchor")
+            or idea.get("confirmed_direction_candidate")
+            or ""
+        ).strip()
+        if not has_idea_development(session):
+            initialize_idea_development(
+                session,
+                {"core_phenomenon": direction},
+            )
+        next_output = build_gap_output(session, "")
+        output.assistant_message = (
+            f"{prefix}\n\n{next_output.assistant_message}"
+        ).strip()
+        output.student_task = next_output.student_task
+        output.stage_payload.update(deepcopy(next_output.stage_payload))
+        output.stage_payload.update(
+            {
+                "alternative_ideas": [],
+                "exploration_scenes": [],
+                "scene_replay_avoided": True,
+                "direction_locked": True,
+                "clarification_required": False,
+                "preserve_pending_action": False,
+            }
+        )
+
+    if idea.get("direction_locked") is True:
+        # Once the student has established a direction, no later control turn,
+        # long elaboration, parser fallback, or stale generator response may
+        # reopen breadth exploration.  Continue from the structured idea gaps
+        # instead of retaining the control utterance as another direction
+        # candidate—the latter was the source of the repeated confirmation
+        # loop after students typed "continue" more than once.
+        continue_from_locked_direction(
+            "这个研究方向已经确定，我们直接沿着它继续完善。"
+        )
+        return
     # An explicitly directionless student is still in breadth exploration.
     # This state is structured and may legitimately produce successive course
     # overviews even when the semantic API is temporarily unavailable.
@@ -915,15 +959,14 @@ def _prevent_unrequested_scene_replay(
         output.stage_payload["clarification_required"] = False
         output.stage_payload["preserve_pending_action"] = False
         if turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value:
-            output.assistant_message = (
-                "已经按你的确认沿用刚才说明的研究方向，不会再展示新的三幅图景。"
-                "当前内容会继续保留；你可以直接补充还想观察的现象，或继续完善后面的设计要点。"
+            acknowledgement = (
+                "已经沿用刚才确定的研究方向，接下来不会再回到三幅图景。"
             )
         else:
-            output.assistant_message = (
-                "你选定并补充的研究重点已经保留下来，不会再换一组三幅图景。"
-                "接下来会沿着这个方向继续完善；你可以进一步描述最想观察的变化。"
+            acknowledgement = (
+                "你选定并补充的研究重点已经保留下来，接下来不会再回到三幅图景。"
             )
+        continue_from_locked_direction(acknowledgement)
     else:
         output.assistant_message = (
             "我已经保留你刚才对现有方向的选择、补充或纠正，不会再换一组三幅图景。"
@@ -944,7 +987,8 @@ def _prevent_unrequested_scene_replay(
             if action_id
             else []
         )
-    output.student_task = None
+    if not accepted_existing_direction:
+        output.student_task = None
     if isinstance(retained_pending, dict):
         output.stage_payload["repetition_guard_subject"] = str(
             retained_pending.get("subject") or ""
@@ -3218,6 +3262,50 @@ class WorkflowEngine:
                 )
             finally:
                 session.turn_context = {}
+            reference_payload = output.stage_payload
+            reference_has_detail = bool(
+                isinstance(reference_payload, dict)
+                and (
+                    reference_payload.get("reference_examples")
+                    or reference_payload.get("reference_draft")
+                )
+            ) or len(output.assistant_message.strip()) >= 80
+            if (
+                not reference_has_detail
+                and isinstance(pending_action, dict)
+                and pending_action.get("subject") == "experiment_brief"
+            ):
+                retained_idea = str(
+                    pending_action.get("candidate_answer") or ""
+                ).strip()
+                starting_point = (
+                    f"你目前给出的起点是“{retained_idea}”。\n\n"
+                    if retained_idea
+                    else ""
+                )
+                example = (
+                    "可修改的参考写法是：学生进入VR后操作两个带电物体，通过拖动改变"
+                    "它们的间距或相对位置，同时观察电场线与场强分布的变化，并用库仑定律"
+                    "和叠加原理解释不同条件下的差异。"
+                )
+                output.assistant_message = (
+                    f"{starting_point}{example}\n\n"
+                    "这只是用来展示完整设计方向应包含的结构；对象、操作、变化条件和观察现象"
+                    "都可以按你的真实设想修改。"
+                )
+                output.student_task = (
+                    "请直接说明这份参考中哪些内容符合你的想法，以及需要怎样修改。"
+                )
+                output.stage_payload["reference_scaffold"] = {
+                    "field": "experiment_brief",
+                    "components": [
+                        "操作对象",
+                        "学生操作",
+                        "主动变化条件",
+                        "观察现象",
+                        "课程物理关系",
+                    ],
+                }
             output.stage_payload["reference_only"] = True
             output.stage_payload["preserve_pending_action"] = True
             if isinstance(pending_action, dict):
@@ -3395,6 +3483,30 @@ class WorkflowEngine:
             else:
                 clarification_candidate = message
                 clarification_updates = turn_intent.get("semantic_updates", {})
+                # A control-only turn is never a new design answer.  In
+                # particular, a low-confidence ADVANCE/ACCEPT parse must not
+                # overwrite an already bound recovery candidate with the
+                # literal control utterance.  The candidate remains available
+                # for a later high-confidence semantic decision or UI action.
+                existing_bound_candidate = bool(
+                    isinstance(pending_action, dict)
+                    and str(pending_action.get("candidate_answer") or "").strip()
+                    and pending_action.get("candidate_binding_authorized") is True
+                )
+                low_confidence_control = str(
+                    turn_intent.get("source") or ""
+                ).startswith(
+                    (
+                        f"LOW_CONFIDENCE_{UserIntent.ADVANCE_STAGE.value}:",
+                        f"LOW_CONFIDENCE_{UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value}:",
+                    )
+                )
+                if (
+                    existing_bound_candidate
+                    and low_confidence_control
+                    and not has_structured_turn_updates
+                ):
+                    clarification_candidate = ""
                 required_facet = required_pending_facet_id(pending_action)
                 facet_explicitly_missing = bool(
                     required_facet

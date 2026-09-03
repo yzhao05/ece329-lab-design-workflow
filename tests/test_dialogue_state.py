@@ -2318,10 +2318,12 @@ class DialogueStateTests(unittest.TestCase):
 
         self.assertEqual(accepted["stage_payload"].get("exploration_scenes"), [])
         self.assertTrue(accepted["stage_payload"]["direction_locked"])
-        self.assertIn("已经按你的确认沿用", accepted["assistant_message"])
+        self.assertIn("已经沿用刚才确定的研究方向", accepted["assistant_message"])
         self.assertNotIn("请确认沿用", accepted["assistant_message"])
         confirmed_session = engine.store.get(first["design_id"])
-        self.assertIsNone(current_pending_action(confirmed_session))
+        next_pending = current_pending_action(confirmed_session)
+        self.assertIsNotNone(next_pending)
+        self.assertEqual(next_pending["subject"], "research_question")
         after_confirmation = design_state_snapshot(confirmed_session)
         # Confirming the direction is a dialogue-state transition. It must not
         # copy the complete scene-selection utterance into the facet that was
@@ -2331,6 +2333,23 @@ class DialogueStateTests(unittest.TestCase):
             before_confirmation["learning_objective"],
         )
         self.assertNotEqual(after_confirmation["learning_objective"], selection)
+
+        generator.intent = UserIntent.ADVANCE_STAGE
+        generator.semantic_updates = {}
+        continued = engine.process_turn(
+            first["design_id"],
+            {"message": "继续完善后面的内容"},
+        )
+
+        self.assertEqual(continued["stage_payload"].get("exploration_scenes"), [])
+        self.assertNotIn("请确认沿用", continued["assistant_message"])
+        self.assertNotIn("我已经保留你刚才", continued["assistant_message"])
+        continued_pending = current_pending_action(engine.store.get(first["design_id"]))
+        self.assertIsNotNone(continued_pending)
+        self.assertEqual(continued_pending["subject"], "research_question")
+        self.assertFalse(
+            str(continued_pending.get("candidate_answer") or "").strip()
+        )
 
     def test_authoritative_control_only_scene_confirmation_closes_candidate(self) -> None:
         """The Responses schema may encode a confirmation with no field acts."""
@@ -2372,6 +2391,167 @@ class DialogueStateTests(unittest.TestCase):
             accepted["semantic_updates"]["stage_one_direction_detail"],
             candidate,
         )
+
+    def test_authoritative_advance_consumes_saved_scene_direction(self) -> None:
+        """Continuing from a saved direction must not replay its confirmation."""
+
+        candidate = "比较两个场源靠近时中间区域的电场线重分布"
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "direction_outline",
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": True,
+            "candidate_purpose": STAGE_ONE_DIRECTION_CANDIDATE,
+            "allowed_intents": [UserIntent.UNCLEAR.value],
+            "advance_on_accept": False,
+        }
+
+        accepted = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ADVANCE_STAGE,
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            accepted["intent"], UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        )
+        self.assertEqual(accepted["source"], "CONFIRMED_STAGE_ONE_DIRECTION")
+        self.assertFalse(accepted["advance_requested"])
+        self.assertIn("ACCEPT", accepted["semantic_updates"]["control_actions"])
+        self.assertNotIn("ADVANCE", accepted["semantic_updates"]["control_actions"])
+
+        controlled = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.UNCLEAR,
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    }
+                ],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            controlled["intent"], UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        )
+        self.assertEqual(
+            controlled["dialogue_acts"][0]["target"],
+            "ACCEPT",
+        )
+        self.assertFalse(controlled["advance_requested"])
+
+    def test_authoritative_advance_consumes_saved_emvr_field_then_asks_next(self) -> None:
+        """EMVR continuation commits the exact candidate before readiness runs."""
+
+        engine = WorkflowEngine(
+            generator=ScriptedSemanticGenerator(UserIntent.ADVANCE_STAGE)
+        )
+        created = engine.create_design(
+            "进入EMVR模式",
+            InteractionState.EMVR_DIRECT,
+        )
+        design_id = created["design_id"]
+        session = engine.store.get(design_id)
+        candidate = (
+            "学生在VR中拖动两个带电物体改变间距，并观察两者之间电场线的弯曲与重排"
+        )
+        pending = record_pending_clarification(
+            session,
+            candidate,
+            allow_exact_field_binding=True,
+        )
+        self.assertIsNotNone(pending)
+        engine.store.save(session)
+
+        result = engine.process_turn(design_id, {"message": "继续进行后面的设计"})
+        stored = engine.store.get(design_id)
+        requirements = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+
+        self.assertEqual(requirements["experiment_brief"], candidate)
+        self.assertNotIn("上一轮提供的设计描述已经保留", result["assistant_message"])
+        next_pending = current_pending_action(stored)
+        self.assertIsNotNone(next_pending)
+        self.assertEqual(next_pending["subject"], "research_object")
+        self.assertTrue(str(result.get("student_task") or "").strip())
+
+    def test_legacy_guarded_scene_candidate_is_relinked_after_reload(self) -> None:
+        """Persisted pre-contract Stage-1 sessions recover their direction link."""
+
+        session = DesignSession(
+            design_id="legacy_guarded_direction",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        state = session.model_context.setdefault("dialogue_state", {})
+        state["pending_action"] = {
+            "action_id": "legacy_action",
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "direction_outline",
+            "candidate_answer": "比较不同介质边界附近的电场线变化",
+            "candidate_binding_authorized": False,
+            "allowed_intents": [UserIntent.UNCLEAR.value],
+            "status": "PENDING",
+        }
+        session.history.append(
+            {
+                "handled_stage": Stage.IDEA_BRAINSTORMING.value,
+                "output": {
+                    "assistant_message": "",
+                    "stage_payload": {"scene_replay_avoided": True},
+                },
+            }
+        )
+
+        migrated = hydrate_pending_action_from_history(session)
+
+        self.assertIsNotNone(migrated)
+        self.assertTrue(migrated["candidate_binding_authorized"])
+        self.assertEqual(
+            migrated["candidate_purpose"], STAGE_ONE_DIRECTION_CANDIDATE
+        )
+
+    def test_locked_legacy_direction_discards_stale_confirmation_pending(self) -> None:
+        """A confirmed direction must not keep an obsolete direction prompt alive."""
+
+        session = DesignSession(
+            design_id="legacy_locked_direction",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "direction_locked": True,
+                    "direction_summary": "比较不同边界附近的电场线变化",
+                }
+            },
+        )
+        state = session.model_context.setdefault("dialogue_state", {})
+        state["pending_action"] = {
+            "action_id": "obsolete_direction_action",
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "direction_outline",
+            "candidate_answer": "此前已确认的方向",
+            "candidate_binding_authorized": True,
+            "candidate_purpose": STAGE_ONE_DIRECTION_CANDIDATE,
+            "status": "PENDING",
+        }
+
+        migrated = hydrate_pending_action_from_history(session)
+
+        self.assertIsNone(migrated)
+        self.assertIsNone(current_pending_action(session))
 
     def test_low_confidence_scene_confirmation_cannot_lock_direction(self) -> None:
         candidate = "比较导体和介质在相同外加电场中的场线分布"

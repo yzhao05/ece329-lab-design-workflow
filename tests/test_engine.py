@@ -12,7 +12,9 @@ from ece329_workflow.api import WorkflowAPI
 from ece329_workflow.builder_input import build_builder_gate1_input
 from ece329_workflow.dialogue_state import (
     UserIntent,
+    current_pending_action,
     deterministic_intent,
+    record_pending_clarification,
     resolved_intent,
 )
 from ece329_workflow.engine import WorkflowEngine
@@ -493,6 +495,159 @@ class WorkflowEngineTests(unittest.TestCase):
         stored = engine.store.get(initial["design_id"])
         pending = stored.model_context["dialogue_state"]["pending_action"]
         self.assertEqual(pending["subject"], "experiment_brief")
+
+    def test_sparse_emvr_brief_reference_is_completed_with_an_editable_example(self) -> None:
+        class SparseReferenceGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                if user_message == "请先给一份参考草稿":
+                    return resolved_intent(
+                        UserIntent.REQUEST_MORE_EXAMPLES,
+                        target=(pending_action or {}).get("subject"),
+                        confidence=0.99,
+                        source="SEMANTIC_TEST",
+                        semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+                        dialogue_acts=[
+                            {
+                                "type": "REQUEST_REFERENCE",
+                                "target": (pending_action or {}).get("subject") or "",
+                                "operation": "EXECUTE",
+                                "content": None,
+                                "confidence": 0.99,
+                            }
+                        ],
+                        actions_authoritative=True,
+                    )
+                return resolved_intent(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    target=(pending_action or {}).get("subject"),
+                    resolved_value=user_message,
+                    confidence=0.99,
+                    source="SEMANTIC_TEST",
+                )
+
+            def generate(self, session, user_message):
+                if user_message == "请先给一份参考草稿":
+                    return StepOutput(
+                        assistant_message="已整理为设计起点。",
+                        stage_payload={},
+                        student_task=None,
+                    )
+                return super().generate(session, user_message)
+
+        engine = WorkflowEngine(generator=SparseReferenceGenerator())
+        initial = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        session = engine.store.get(initial["design_id"])
+        record_pending_clarification(
+            session,
+            "我想做一个静电场实验",
+            allow_exact_field_binding=True,
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            initial["design_id"],
+            {"message": "请先给一份参考草稿"},
+        )
+
+        self.assertTrue(result["stage_payload"]["reference_only"])
+        self.assertEqual(
+            result["stage_payload"]["reference_scaffold"]["field"],
+            "experiment_brief",
+        )
+        self.assertIn("我想做一个静电场实验", result["assistant_message"])
+        self.assertIn("操作两个带电物体", result["assistant_message"])
+        self.assertIn("哪些内容符合你的想法", result["student_task"])
+        stored = engine.store.get(initial["design_id"])
+        self.assertEqual(
+            current_pending_action(stored)["candidate_answer"],
+            "我想做一个静电场实验",
+        )
+
+    def test_low_confidence_control_turn_cannot_replace_bound_emvr_candidate(self) -> None:
+        class LowConfidenceControlGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ADVANCE_STAGE,
+                    target=(pending_action or {}).get("subject"),
+                    confidence=0.31,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={"control_actions": ["ADVANCE"]},
+                )
+
+        engine = WorkflowEngine(generator=LowConfidenceControlGenerator())
+        initial = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        session = engine.store.get(initial["design_id"])
+        candidate = "学生拖动两个带电物体改变距离，并观察中间区域的电场线变化"
+        record_pending_clarification(
+            session,
+            candidate,
+            allow_exact_field_binding=True,
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(initial["design_id"], {"message": "继续"})
+        stored = engine.store.get(initial["design_id"])
+        pending = current_pending_action(stored)
+
+        self.assertTrue(result["stage_payload"]["clarification_required"])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["candidate_answer"], candidate)
+        self.assertNotEqual(pending["candidate_answer"], "继续")
+
+    def test_low_confidence_substantive_retry_can_replace_bound_emvr_candidate(self) -> None:
+        class LowConfidenceAnswerGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    target=(pending_action or {}).get("subject"),
+                    confidence=0.31,
+                    source="SEMANTIC_TEST",
+                )
+
+        engine = WorkflowEngine(generator=LowConfidenceAnswerGenerator())
+        initial = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        session = engine.store.get(initial["design_id"])
+        original = "学生观察两个带电物体周围的静电场"
+        replacement = "学生拖动两个带电物体改变距离，并观察中间区域的电场线变化"
+        record_pending_clarification(
+            session,
+            original,
+            allow_exact_field_binding=True,
+        )
+        engine.store.save(session)
+
+        engine.process_turn(initial["design_id"], {"message": replacement})
+        pending = current_pending_action(engine.store.get(initial["design_id"]))
+
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["candidate_answer"], replacement)
 
     def test_guided_brainstorm_requires_student_confirmation(self) -> None:
         first = self.engine.create_design("研究传输线驻波")
