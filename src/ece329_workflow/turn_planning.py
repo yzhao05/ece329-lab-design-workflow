@@ -470,6 +470,19 @@ def build_stage_context_summary(
         for field in fields
         if snapshot.get(field) not in (None, "", [], {})
     }
+    comparisons = confirmed.get("baseline_comparisons")
+    if isinstance(comparisons, list):
+        accepted = [
+            deepcopy(item)
+            for item in comparisons
+            if isinstance(item, dict)
+            and str(item.get("adoption_status") or "PENDING").upper()
+            in {"ACCEPTED", "MODIFIED"}
+        ]
+        if accepted:
+            confirmed["baseline_comparisons"] = accepted
+        else:
+            confirmed.pop("baseline_comparisons", None)
     return {
         "for_stage": current.value,
         "confirmed": confirmed,

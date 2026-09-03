@@ -171,8 +171,7 @@ def _confirmed_context_summary(
         or carried.get("learning_objective"),
         "research_question": confirmed.get("research_question")
         or carried.get("research_question"),
-        "baseline_comparisons": confirmed.get("baseline_comparisons")
-        or carried.get("baseline_comparisons"),
+        "baseline_comparisons": confirmed.get("baseline_comparisons"),
         "independent_variable": confirmed.get("independent_variable")
         or carried.get("independent_variable"),
         "observations": confirmed.get("observations")
@@ -259,7 +258,17 @@ def _contextual_reference_steps(
     variable = _compact_context_items(carried.get("independent_variable"))
     observations = _compact_context_items(carried.get("observations"))
     controls = _compact_context_items(carried.get("controlled_conditions"))
-    comparisons = _compact_context_items(carried.get("baseline_comparisons"))
+    stage_summary = carried.get("stage_context_summary", {})
+    confirmed = (
+        stage_summary.get("confirmed", {})
+        if isinstance(stage_summary, dict)
+        else {}
+    )
+    comparisons = _compact_context_items(
+        confirmed.get("baseline_comparisons")
+        if isinstance(confirmed, dict)
+        else None
+    )
     if stage is Stage.VARIABLES_AND_CONDITIONS:
         return [
             f"把{variable or '前面确定的变化主轴'}整理为主动改变的量",
@@ -824,7 +833,17 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
     variable = _compact_context_items(carried.get("independent_variable"))
     observations = _compact_context_items(carried.get("observations"))
     controls = _compact_context_items(carried.get("controlled_conditions"))
-    comparisons = _compact_context_items(carried.get("baseline_comparisons"))
+    stage_summary = carried.get("stage_context_summary", {})
+    confirmed = (
+        stage_summary.get("confirmed", {})
+        if isinstance(stage_summary, dict)
+        else {}
+    )
+    comparisons = _compact_context_items(
+        confirmed.get("baseline_comparisons")
+        if isinstance(confirmed, dict)
+        else None
+    )
     objective = str(carried.get("learning_objective") or "").strip()
     follow_up = "你可以直接说哪里符合你的想法，或者指出一处想改的地方。"
     readiness = {

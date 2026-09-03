@@ -501,9 +501,9 @@ def _multi_act_student_notice(
     ]
     labels = list(
         dict.fromkeys(
-            _STUDENT_FIELD_LABELS.get(str(field), str(field))
+            _STUDENT_FIELD_LABELS[str(field)]
             for field in changed
-            if str(field).strip()
+            if str(field) in _STUDENT_FIELD_LABELS
         )
     )
     notices: list[str] = [delta_notice] if delta_notice else []
@@ -553,17 +553,21 @@ def _self_correction_notice(
         return ""
     affected = list(
         dict.fromkeys(
-            _STUDENT_FIELD_LABELS.get(str(field), str(field))
+            _STUDENT_FIELD_LABELS[str(field)]
             for item in corrections
             for field in item.get("affected_fields", [])
-            if str(field).strip()
+            if str(field) in _STUDENT_FIELD_LABELS
         )
     )
     changed = design_diff.get("changed_fields", []) if isinstance(design_diff, dict) else []
     if changed:
         labels = "、".join(
-            _STUDENT_FIELD_LABELS.get(str(field), str(field)) for field in changed[:4]
+            _STUDENT_FIELD_LABELS[str(field)]
+            for field in changed[:4]
+            if str(field) in _STUDENT_FIELD_LABELS
         )
+        if not labels:
+            labels = "相关设计内容"
         return (
             f"你指出的理解偏差已经具体修正：这次只调整了{labels}，其他设计内容保持不变。"
             if interaction_state is InteractionState.EMVR_DIRECT
@@ -576,11 +580,12 @@ def _self_correction_notice(
             if interaction_state is InteractionState.EMVR_DIRECT
             else f"我重新核对了{labels}，这次没有实际变化，所以不会只口头说“已经修改”。"
         )
-    explanation = str(corrections[0].get("explanation") or "").strip()
     return (
-        f"我确认上一轮的问题是：{explanation}。这条反馈不会被写进实验内容；接下来会沿用已经确认的设计。"
-        if explanation
-        else "我确认上一轮的处理有偏差。这条反馈不会被写进实验内容，已经确认的设计继续保留。"
+        "我已经核对了你指出的问题。这轮还没有形成可提交的具体修改，"
+        "所以不会假装已经改好，也不会把反馈文字写进实验内容。"
+        "请直接给出需要调整那一项的最终表述，我会只更新对应内容。"
+        if interaction_state is InteractionState.GUIDED_DESIGN
+        else "已核对该项反馈；本轮没有形成可提交的具体调整，因此现有设计保持不变。"
     )
 
 
@@ -968,9 +973,22 @@ def _prevent_unrequested_scene_replay(
             )
         continue_from_locked_direction(acknowledgement)
     else:
+        repeat_count = (
+            int(retained_pending.get("repeat_count", 1))
+            if isinstance(retained_pending, dict)
+            and str(retained_pending.get("repeat_count", 1)).isdigit()
+            else 1
+        )
         output.assistant_message = (
-            "我已经保留你刚才对现有方向的选择、补充或纠正，不会再换一组三幅图景。"
-            "为了避免替你改错方向，请确认沿用刚才说明的研究重点；如果还想补充，直接接着描述即可。"
+            (
+                "研究重点已经作为候选内容保留，三幅图景不会再次展示。"
+                "请点击“沿用这个研究重点”继续；如果还要修改，直接写出新的研究重点即可。"
+            )
+            if repeat_count <= 2
+            else (
+                "这份研究重点仍在等待确认，重复输入不会覆盖它。"
+                "请点击“沿用这个研究重点”继续，或直接发送修改后的完整表述。"
+            )
         )
         action_id = (
             str(retained_pending.get("action_id") or "")
@@ -2957,7 +2975,10 @@ class WorkflowEngine:
                         idea["student_confirmed"] = True
             try:
                 self._validate_completion(session, previous_stage)
-                if previous_stage is Stage.IDEA_BRAINSTORMING:
+                if (
+                    previous_stage is Stage.IDEA_BRAINSTORMING
+                    and session.interaction_state is InteractionState.EMVR_DIRECT
+                ):
                     accept_pending_comparisons_on_advance(session)
                 self._advance(session, previous_stage)
                 transitioned_from_stage = previous_stage

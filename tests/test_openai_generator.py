@@ -142,6 +142,31 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
 
         self.assertIn(second, _uncovered_dialogue_text(message, acts))
 
+    def test_coverage_audit_does_not_repeat_content_already_bound_to_field(self) -> None:
+        observation = (
+            "观察方式为场线和等势面的空间分布图，重点关注尖角处和窄缝处的"
+            "场线密度和等势面弯曲程度"
+        )
+        message = (
+            "对象包括形状可调的导体边界和外加静电场源。"
+            f"{observation}。"
+        )
+        acts = [
+            {
+                "type": "MODIFY_DESIGN_FIELD",
+                "target": "conceptual_structure",
+                "operation": "REPLACE",
+                "content": message,
+                # The model's source span is narrower than the content it
+                # successfully committed, which must not create a fake second
+                # question for the student.
+                "source_start": 0,
+                "source_end": message.index(observation),
+            }
+        ]
+
+        self.assertEqual(_uncovered_dialogue_text(message, acts), "")
+
     def test_unresolved_paraphrase_cannot_be_shown_as_student_text(self) -> None:
         message = "我对图景A感兴趣，主要比较导体和介质在同一外加场中的场线弯曲"
         acts = [
@@ -1959,7 +1984,9 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                     "confidence": 0.82,
                 }
                 generator = OpenAIStageGenerator(
-                    transport=FakeTransport(outputs=[unclear, unclear])
+                    transport=FakeTransport(
+                        outputs=[unclear, unclear, {"actions": []}]
+                    )
                 )
 
                 result = generator.resolve_intent(
@@ -1973,6 +2000,191 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
                 self.assertIsNone(result["resolved_value"])
                 self.assertFalse(result["semantic_updates"].get("design_updates"))
                 self.assertFalse(result["semantic_updates"].get("stage_field_updates"))
+
+    def test_guided_facet_uses_compact_semantic_recovery_before_clarifying(self) -> None:
+        answer = (
+            "比较规则导体边界和尖角或窄缝边界对电场线与等势面分布的影响"
+        )
+        unclear = {
+            "intent": "UNCLEAR",
+            "target": "research_question",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.82,
+        }
+        compact = {
+            "actions": [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "research_question",
+                    "operation": "REPLACE",
+                    "content": answer,
+                    "source_text": answer,
+                    "source_start": 0,
+                    "source_end": len(answer),
+                    "semantic_key": "boundary_shape_field_distribution_question",
+                    "confidence": 0.99,
+                }
+            ]
+        }
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question"},
+            "question": "你想比较什么条件，并观察什么现象？",
+            "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+        }
+        transport = FakeTransport(outputs=[unclear, unclear, compact])
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            answer,
+            pending,
+            {"research_direction": "导体边界形状与静电场分布"},
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(result["dialogue_acts"][0]["target"], "research_question")
+        self.assertEqual(result["dialogue_acts"][0]["content"], answer)
+        self.assertEqual(len(transport.requests), 3)
+
+    def test_emvr_long_open_answer_uses_field_only_recovery(self) -> None:
+        answer = (
+            "学生用手柄拖拽两个点电荷来改变距离和相对位置。比较同种电荷和异种电荷"
+            "两种配置下的场线分布，观察电场线的合并、扭曲和重排。"
+        )
+        unclear = {
+            "intent": "UNCLEAR",
+            "target": "research_object",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.7,
+        }
+        recovered_actions = {
+            "actions": [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "research_object",
+                    "operation": "REPLACE",
+                    "content": "两个点电荷",
+                    "source_text": "两个点电荷",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "two_point_charges",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_EMVR_FIELD",
+                    "target": "required_behaviors",
+                    "operation": "REPLACE",
+                    "content": "用手柄拖拽两个点电荷",
+                    "source_text": "学生用手柄拖拽两个点电荷",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "controller_drag_charges",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_EMVR_FIELD",
+                    "target": "changed_quantities",
+                    "operation": "REPLACE",
+                    "content": "两个点电荷的距离和相对位置",
+                    "source_text": "改变距离和相对位置",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "charge_distance_relative_position",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_EMVR_FIELD",
+                    "target": "comparison_cases",
+                    "operation": "REPLACE",
+                    "content": "同种电荷和异种电荷两种配置",
+                    "source_text": "同种电荷和异种电荷两种配置",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "same_opposite_charge_cases",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_EMVR_FIELD",
+                    "target": "observed_quantities",
+                    "operation": "REPLACE",
+                    "content": "电场线的合并、扭曲和重排",
+                    "source_text": "观察电场线的合并、扭曲和重排",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "field_line_reconfiguration",
+                    "confidence": 0.99,
+                },
+            ]
+        }
+        invalid_compact = {
+            "actions": [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "student_objects",
+                    "operation": "REPLACE",
+                    "content": answer,
+                    "source_text": answer,
+                    "source_start": 0,
+                    "source_end": len(answer),
+                    "semantic_key": "invalid_unregistered_target",
+                    "confidence": 0.99,
+                }
+            ]
+        }
+        transport = FakeTransport(
+            outputs=[unclear, unclear, invalid_compact, recovered_actions]
+        )
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        session.design_context = {
+            "idea": {"original": "我想做一个静电场实验"},
+            "emvr_design": {
+                "experiment_brief": "我想做一个静电场实验",
+                "field_state": {"experiment_brief": "我想做一个静电场实验"},
+            },
+        }
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "research_object",
+            "answer_fields": ["research_object"],
+            "question": "这个VR实验中，学生具体会操作或比较哪些物理对象？",
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            answer,
+            pending,
+            {"research_direction": "我想做一个静电场实验"},
+        )
+
+        self.assertEqual(len(transport.requests), 4)
+        self.assertEqual(
+            transport.requests[-1]["text"]["format"]["name"],
+            "ece329_emvr_open_answer_recovery",
+        )
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        emvr_updates = result["semantic_updates"]["emvr_design_update"][
+            "field_updates"
+        ]
+        self.assertTrue(
+            {
+                "research_object",
+                "required_behaviors",
+                "changed_quantities",
+                "comparison_cases",
+                "observed_quantities",
+            }.issubset({item["field_id"] for item in emvr_updates})
+        )
 
     def test_reference_request_is_not_forced_into_contextual_answer(self) -> None:
         output = {

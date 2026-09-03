@@ -2716,6 +2716,12 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             continue
         comparison_id = str(item.get("comparison_id") or "")[:80]
         action = str(item.get("action") or "").upper()
+        if action == "REPLACE":
+            action = "MODIFY"
+        elif action == "MERGE":
+            action = "MODIFY"
+        elif action == "CLEAR":
+            action = "REJECT"
         cases = item.get("cases", [])
         if (
             comparison_id and action in {"ACCEPT", "MODIFY", "REJECT"}
@@ -2761,6 +2767,10 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
                 ][:12]
             if item.get("replace_all") is True:
                 normalized_comparison["replace_all"] = True
+            elif str(item.get("action") or "").upper() == "REPLACE":
+                normalized_comparison["replace_all"] = True
+            if str(item.get("action") or "").upper() == "MERGE":
+                normalized_comparison["merge_with_existing"] = True
             semantic_key = str(item.get("semantic_key") or "").strip()[:180]
             if semantic_key:
                 normalized_comparison["semantic_key"] = semantic_key
@@ -3246,6 +3256,23 @@ def _apply_comparison_updates(
                     )
             continue
         item = by_id.get(str(update.get("comparison_id") or ""))
+        if (
+            item is None
+            and action == "MODIFY"
+            and update.get("replace_all") is True
+        ):
+            editable = [
+                candidate
+                for candidate in comparisons
+                if isinstance(candidate, dict)
+                and candidate.get("adoption_status") != "REJECTED"
+            ]
+            if len(editable) == 1:
+                # The semantic service identified an explicit whole-group
+                # replacement but used a generic collection target instead of
+                # the catalog id. A single live group is unambiguous state
+                # context, so bind it without examining student keywords.
+                item = editable[0]
         if item is None:
             continue
         before = deepcopy(item)
@@ -3559,6 +3586,76 @@ def apply_semantic_design_updates(
         )
     )
     emvr_update = updates.get("emvr_design_update", {})
+    emvr_touched_fields: set[str] = set()
+    emvr_cleared_fields: set[str] = set()
+    if (
+        session.interaction_state is InteractionState.EMVR_DIRECT
+        and isinstance(emvr_update, dict)
+    ):
+        for item in emvr_update.get("field_updates", []):
+            if not isinstance(item, dict):
+                continue
+            field_id = str(item.get("field_id") or "")
+            operation = str(item.get("operation") or "").upper()
+            if field_id not in EMVR_EDITABLE_FIELDS:
+                continue
+            if operation == "CLEAR":
+                emvr_cleared_fields.add(field_id)
+            elif operation in {"REPLACE", "MERGE"} and item.get("value") not in (
+                None,
+                "",
+                [],
+                {},
+            ):
+                emvr_touched_fields.add(field_id)
+
+    def emvr_fields_for_pending(field: str) -> set[str]:
+        canonical = FACET_TO_DESIGN_FIELD.get(field, field)
+        candidates = set(_EMVR_FIELDS_BY_CANONICAL_FIELD.get(canonical, ()))
+        candidates.update(_EMVR_FIELDS_BY_PENDING_SUBJECT.get(field, ()))
+        if field in EMVR_EDITABLE_FIELDS:
+            candidates.add(field)
+        return candidates
+
+    # EMVR updates are committed just after this shared dialogue-state pass.
+    # Include their validated, field-level write set when deciding whether the
+    # visible open question has been answered.  Previously an answer could be
+    # saved into the EMVR report while its old pending question stayed active,
+    # causing the next turn to repeat that question in any EMVR stage.
+    merged_emvr = (
+        merge_emvr_structured_requirements(
+            session.design_context.get("emvr_design", {})
+        )
+        if session.interaction_state is InteractionState.EMVR_DIRECT
+        else {}
+    )
+    emvr_touched_pending_fields: set[str] = set()
+    emvr_pending_fields_complete = False
+    if pending_fields and session.interaction_state is InteractionState.EMVR_DIRECT:
+        pending_emvr_candidates = {
+            field: emvr_fields_for_pending(field) for field in pending_fields
+        }
+        emvr_touched_pending_fields = {
+            field
+            for field, candidates in pending_emvr_candidates.items()
+            if candidates & emvr_touched_fields
+        }
+        emvr_pending_fields_complete = bool(
+            emvr_touched_pending_fields
+            and all(
+                any(
+                    (
+                        field_id in emvr_touched_fields
+                        or (
+                            field_id not in emvr_cleared_fields
+                            and merged_emvr.get(field_id) not in (None, "", [], {})
+                        )
+                    )
+                    for field_id in candidates
+                )
+                for candidates in pending_emvr_candidates.values()
+            )
+        )
     emvr_revision_present = bool(
         session.interaction_state is InteractionState.EMVR_DIRECT
         and isinstance(emvr_update, dict)
@@ -3582,6 +3679,7 @@ def apply_semantic_design_updates(
         and (
             updates.get("pending_answer_status") == "CLEAR"
             or (touched_pending_fields and pending_fields_complete)
+            or emvr_pending_fields_complete
             # A review/modify prompt has been answered once any validated
             # revision is committed.  Keeping the old review pending after a
             # cross-field or comparison edit caused the next short reply to
@@ -3813,9 +3911,9 @@ def clarification_output(
                 and candidate_saved
             ):
                 message = (
-                    "上一轮提供的设计描述已经保留，无需重新录入。"
-                    "如果它就是当前设计项的最终表述，请确认沿用；"
-                    "如需修订，只补充缺失的物理关系或Unity映射即可。"
+                    "你上一轮的设计描述已作为候选内容保留，但这次还没有安全地提交到设计中。"
+                    "可以直接点击“沿用刚才的表述”完成提交；需要调整时，只写出要改的"
+                    "物理关系或Unity映射即可，不必重录整段内容。"
                 )
             elif unbound_candidate:
                 message = (
@@ -3904,8 +4002,9 @@ def clarification_output(
                 )
             if emvr_mode:
                 message = (
-                    "现有设计草稿和你刚补充的内容都已保留，无需重新表述。"
-                    "请确认是否将这项修订并入当前EMVR设计；如有遗漏，直接指出对应的物理模型或Unity设计层即可。"
+                    "这项修订已作为候选内容保留，但尚未覆盖当前EMVR设计。"
+                    "请使用页面上的确认操作提交它；如果需要继续修改，直接指出对应的"
+                    "物理模型或Unity设计项即可。"
                 )
             else:
                 message = (

@@ -30,6 +30,7 @@ from .dialogue_acts import (
     DESIGN_ACT_FIELDS,
     DIALOGUE_ACT_TYPES,
     STAGE_ACT_FIELDS,
+    normalize_dialogue_acts,
 )
 from .emvr_design import (
     EMVR_EDITABLE_FIELDS,
@@ -579,7 +580,15 @@ def _dialogue_act_writes_state(act: Any) -> bool:
         return bool(
             isinstance(content, dict)
             and str(content.get("action") or "").upper()
-            in {"ACCEPT", "MODIFY", "REJECT", "CREATE"}
+            in {
+                "ACCEPT",
+                "MODIFY",
+                "REJECT",
+                "CREATE",
+                "MERGE",
+                "REPLACE",
+                "CLEAR",
+            }
         )
     if act_type == "REQUEST_NEW_TOPIC":
         return False
@@ -609,7 +618,15 @@ def _dialogue_act_writes_state(act: Any) -> bool:
     valid_comparison_update = any(
         isinstance(update, dict)
         and str(update.get("action") or "").upper()
-        in {"ACCEPT", "MODIFY", "REJECT", "CREATE"}
+        in {
+            "ACCEPT",
+            "MODIFY",
+            "REJECT",
+            "CREATE",
+            "MERGE",
+            "REPLACE",
+            "CLEAR",
+        }
         for update in content.get("comparison_updates", [])
         if isinstance(content.get("comparison_updates"), list)
     )
@@ -682,6 +699,36 @@ def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
         for island in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", remaining)
         if island
     ]
+    # Source offsets are trace metadata produced by the model and can be a
+    # little narrower than the content it successfully bound. Do not report a
+    # sentence as unresolved when it is already present in an executable
+    # state's structured content. This checks semantic coverage for every
+    # writable field without inspecting domain or command keywords.
+    def flatten_content(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [part for item in value for part in flatten_content(item)]
+        if isinstance(value, dict):
+            return [part for item in value.values() for part in flatten_content(item)]
+        return []
+
+    written_fragments = [
+        re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", part)
+        for act in acts
+        if _dialogue_act_writes_state(act)
+        for part in flatten_content(act.get("content"))
+        if re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", part)
+    ]
+    uncovered_islands = [
+        island
+        for island in uncovered_islands
+        if not any(
+            re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", island) in fragment
+            for fragment in written_fragments
+        )
+    ]
+    substantive = "".join(uncovered_islands)
     longest_island = max((len(item) for item in uncovered_islands), default=0)
     if len(substantive) < 14 or longest_island < 14:
         return ""
@@ -2076,6 +2123,72 @@ class OpenAIStageGenerator:
         response = self.transport.create(compact_payload)
         return _parse_compact_intent_response(response)
 
+    def _recover_emvr_open_answer(
+        self,
+        intent_input: str,
+        pending_action: dict[str, Any],
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+        """Recover a concrete EMVR answer with a narrow field-only contract.
+
+        The ordinary turn planner must understand questions, corrections,
+        version controls and navigation in addition to design edits.  When all
+        of those richer passes fail on an EMVR open question, retrying the same
+        broad contract tends to reproduce the same ambiguity.  This final
+        recovery pass has one job: separate every concrete laboratory detail
+        into its physical EMVR role without treating the currently requested
+        field as an exclusive input slot.
+        """
+
+        subject = str(pending_action.get("subject") or "").strip()
+        answer_fields = (
+            [
+                str(field).strip()
+                for field in pending_action.get("answer_fields", [])
+                if str(field).strip()
+            ]
+            if isinstance(pending_action.get("answer_fields"), list)
+            else []
+        )
+        focus_payload = {
+            "model": self.model,
+            "instructions": (
+                "你只负责恢复EMVR实验设计开放问题的学生回答，不回答学生。"
+                f"当前问题的主要字段是{json.dumps(answer_fields or [subject], ensure_ascii=False)}，"
+                "但它不是排他的输入槽：同一句中出现的实验对象、操作方式、主动变化量、"
+                "比较情形、观察量、学习目标或其他明确设计内容都必须分别保留。"
+                "把回答当前问题的内容输出为ANSWER_PENDING_QUESTION；额外的明确内容输出为"
+                "MODIFY_EMVR_FIELD。target只能使用下列EMVR规范字段："
+                f"{json.dumps(sorted(EMVR_EDITABLE_FIELDS), ensure_ascii=False)}。"
+                "research_object只写物理对象；required_behaviors只写学生动作或系统行为；"
+                "changed_quantities只写主动改变的输入；comparison_cases只写需要比较的情形；"
+                "observed_quantities只写可观察响应；learning_objectives只写完成实验后应形成的"
+                "理解或能力。不得把整段话复制到多个字段，也不得因为学生一次回答了多项内容"
+                "就要求拆开重说。每项content只保留对应的纯设计内容，列表字段可用一条简洁"
+                "字符串表示一个完整条目。学生只是在提问、索取参考或控制流程时，分别使用"
+                "ASK_COURSE_QUESTION、REQUEST_REFERENCE或CONTROL；确实无法归类的最小片段才用"
+                "UNRESOLVED。所有动作都必须带最小source_text；只返回action-only结构。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": intent_input}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_emvr_open_answer_recovery",
+                    "schema": _compact_intent_response_schema(),
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": max(self.intent_max_output_tokens, 1800),
+            "store": False,
+        }
+        response = self.transport.create(focus_payload)
+        return _parse_compact_intent_response(response)
+
     def _verify_scene_batch_request(
         self,
         session: DesignSession,
@@ -2366,6 +2479,9 @@ class OpenAIStageGenerator:
                 "comparison_updates还应为比较组返回semantic_key，并在case_semantic_keys中用"
                 "{显示表述:稳定物理含义标识}标记各case；跨轮语义相同但措辞不同的比较组或case"
                 "必须复用同一semantic_key，不能作为新内容追加。"
+                "PENDING比较只是课程建议，不属于学生已确认的设计。学生明确接受当前展示的"
+                "某组建议时，必须为该comparison_id生成MODIFY_COMPARISON/ACCEPT动作；"
+                "只返回CONTROL/ADVANCE或笼统确认不能让程序自动采纳任何PENDING比较。"
                 "quality_assessment（根据提交后的完整设计含义检查一致性、因果链、概念可行性、"
                 "边界情形、课程依据和多方案差异；issues逐项包含category、status、severity、fields、"
                 "finding、suggestion、student_question；causal_chain包含cause、response、mechanism、"
@@ -2976,10 +3092,17 @@ class OpenAIStageGenerator:
         )
         if (
             not has_executable_dialogue_acts
+            and isinstance(pending_action, dict)
+            and (
+                repaired_intent == "UNCLEAR"
+                or bool(pending_action.get("answer_fields"))
+            )
             and not explicitly_unanswered
             and pending_type in OPEN_QUESTION_PENDING_TYPES
-            and isinstance(pending_action, dict)
-            and pending_action.get("answer_fields")
+            and (
+                pending_action.get("answer_fields")
+                or required_pending_facet_id(pending_action) is not None
+            )
         ):
             # A syntactically valid rich response can still omit the only
             # executable part. Use the same compact semantic pass before any
@@ -2994,6 +3117,67 @@ class OpenAIStageGenerator:
                 and any(
                     isinstance(item, dict)
                     and str(item.get("type") or "").upper() in DIALOGUE_ACT_TYPES
+                    and str(item.get("type") or "").upper() != "UNRESOLVED"
+                    for item in raw_dialogue_acts
+                )
+            )
+            has_state_writing_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    _dialogue_act_writes_state(item)
+                    for item in raw_dialogue_acts
+                )
+            )
+            repaired_intent = str(raw.get("intent") or "UNCLEAR")
+        emvr_candidate_followup = bool(
+            isinstance(pending_action, dict)
+            and str(pending_action.get("candidate_answer") or "").strip()
+            and repaired_intent
+            in {"ACCEPT_PREVIOUS_PROPOSAL", "ADVANCE_STAGE"}
+        )
+        normalized_emvr_acts, _ = normalize_dialogue_acts(
+            raw_dialogue_acts,
+            pending_action=pending_action,
+        )
+        has_valid_emvr_state_write = any(
+            _dialogue_act_writes_state(item)
+            for item in normalized_emvr_acts
+        )
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and pending_type == "ANSWER_EMVR_STAGE_QUESTION"
+            and isinstance(pending_action, dict)
+            and bool(pending_action.get("answer_fields"))
+            and not has_valid_emvr_state_write
+            and (
+                repaired_intent
+                in {
+                    "UNCLEAR",
+                    "ANSWER_CURRENT_QUESTION",
+                    "MODIFY_PREVIOUS_PROPOSAL",
+                }
+                or emvr_candidate_followup
+            )
+        ):
+            # EMVR students often answer one narrow prompt with a complete
+            # object–operation–variable–observation description.  If the
+            # general task planner still cannot produce a writable act, use a
+            # field-only semantic pass instead of asking the student to split
+            # and repeat the same valid answer.  Guided mode never enters this
+            # branch.
+            raw, resolved_value, semantic_updates = (
+                self._recover_emvr_open_answer(
+                    intent_input,
+                    pending_action,
+                )
+            )
+            raw_dialogue_acts = raw.get("dialogue_acts", [])
+            has_executable_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    isinstance(item, dict)
+                    and str(item.get("type") or "").upper()
+                    in DIALOGUE_ACT_TYPES
                     and str(item.get("type") or "").upper() != "UNRESOLVED"
                     for item in raw_dialogue_acts
                 )

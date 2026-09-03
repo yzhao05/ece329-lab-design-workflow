@@ -114,6 +114,37 @@ def _act_identity(act_type: str, target: str, operation: str, content: Any) -> s
     return "act_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
+def _normalize_comparison_contract(
+    value: Any,
+    *,
+    operation: str = "",
+) -> dict[str, Any] | None:
+    """Normalize comparison edits into the state-machine contract.
+
+    Ordinary field edits use ``MERGE/REPLACE/CLEAR`` while comparison edits
+    use ``MODIFY/REJECT``.  A semantic model may preserve the ordinary edit
+    verb after correctly identifying the comparison target.  Treat that as a
+    schema dialect instead of discarding the student's explicit revision.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    normalized = deepcopy(value)
+    action = str(normalized.get("action") or operation or "").upper()
+    if action == "REPLACE":
+        action = "MODIFY"
+        normalized["replace_all"] = True
+    elif action == "MERGE":
+        action = "MODIFY"
+        normalized["merge_with_existing"] = True
+    elif action == "CLEAR":
+        action = "REJECT"
+    if action not in {"ACCEPT", "MODIFY", "REJECT", "CREATE"}:
+        return None
+    normalized["action"] = action
+    return normalized
+
+
 def normalize_dialogue_acts(
     raw: Any,
     *,
@@ -208,7 +239,11 @@ def normalize_dialogue_acts(
                 unresolved.append({"content": "", "reason": f"{target}缺少修改内容"})
                 continue
         elif act_type == "MODIFY_COMPARISON":
-            if not isinstance(content, dict):
+            content = _normalize_comparison_contract(
+                content,
+                operation=operation,
+            )
+            if content is None:
                 unresolved.append(
                     {"content": _text(content), "reason": "基础比较修改缺少结构"}
                 )
@@ -499,7 +534,12 @@ def compile_dialogue_acts(
                 }
             )
         elif act_type == "MODIFY_COMPARISON" and isinstance(content, dict):
-            comparison_updates.append(deepcopy(content))
+            normalized_comparison = _normalize_comparison_contract(
+                content,
+                operation=operation,
+            )
+            if normalized_comparison is not None:
+                comparison_updates.append(normalized_comparison)
         elif act_type == "ASK_COURSE_QUESTION":
             questions.append(_text(content))
         elif act_type == "CORRECT_ASSISTANT":
@@ -576,7 +616,9 @@ def compile_dialogue_acts(
                 ):
                     if not isinstance(update, dict):
                         continue
-                    normalized = deepcopy(update)
+                    normalized = _normalize_comparison_contract(update)
+                    if normalized is None:
+                        continue
                     normalized.setdefault(
                         "update_id",
                         f"{act_id}:correction:comparison:{index}",

@@ -2821,8 +2821,9 @@ class WorkflowEngineTests(unittest.TestCase):
                 },
             },
         )
-        accepted_comparison = self.engine.get_design(first["design_id"])["design_context"]["idea"]["standard_comparisons"][0]
-        self.assertEqual(accepted_comparison["adoption_status"], "ACCEPTED")
+        pending_comparison = self.engine.get_design(first["design_id"])["design_context"]["idea"]["standard_comparisons"][0]
+        self.assertEqual(pending_comparison["adoption_status"], "PENDING")
+        self.assertNotIn("同种电荷、异种电荷", accepted["assistant_message"])
         self.assertEqual(accepted["current_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
 
     def test_raw_text_does_not_mutate_course_comparison_proposals(self) -> None:

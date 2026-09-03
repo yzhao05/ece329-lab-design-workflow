@@ -27,6 +27,7 @@ from ece329_workflow.engine import (
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.generator import guided_stage_entry_output
 from ece329_workflow.emvr_design import (
+    EMVR_EDITABLE_FIELDS,
     apply_emvr_field_updates,
     merge_emvr_structured_requirements,
     normalize_emvr_design_update,
@@ -283,7 +284,7 @@ class DialogueStateTests(unittest.TestCase):
                     "operation": "REPLACE",
                     "content": {
                         "comparison_id": "boundary_cases",
-                        "action": "MODIFY",
+                        "action": "REPLACE",
                         "cases": ["完整包围场源", "部分包围场源", "不包围场源"],
                         "replace_all": True,
                     },
@@ -779,7 +780,53 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn("这是目前整理出的实验想法", output.assistant_message)
         self.assertIn("学习目标：解释极性和距离", output.assistant_message)
         self.assertIn("基础比较：", output.assistant_message)
-        self.assertIn("同种电荷、异种电荷", output.assistant_message)
+        self.assertIn("基础比较：暂未明确", output.assistant_message)
+        self.assertNotIn("同种电荷、异种电荷", output.assistant_message)
+
+    def test_comparison_replace_dialect_commits_explicit_guided_revision(self) -> None:
+        message = "基础比较这一项改成规则边界、尖角边界、窄缝边界"
+        replacement = ["规则边界", "尖角边界", "窄缝边界"]
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_COMPARISON",
+                        "target": "baseline_comparisons",
+                        "operation": "REPLACE",
+                        "content": {
+                            "comparison_id": "electrostatic_material_class_pair",
+                            "action": "REPLACE",
+                            "cases": replacement,
+                        },
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = idea_facet_session("design_guided_comparison_replace_dialect")
+        set_baseline_comparisons(
+            session,
+            [
+                {
+                    "comparison_id": "electrostatic_material_class_pair",
+                    "title": "材料类别",
+                    "recommended_cases": ["导体情形", "介质情形"],
+                    "cases": ["导体情形", "介质情形"],
+                    "adoption_status": "PENDING",
+                }
+            ],
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": message})
+
+        comparisons = result["stage_payload"]["design_state"][
+            "baseline_comparisons"
+        ]
+        self.assertEqual(comparisons[0]["cases"], replacement)
+        self.assertEqual(comparisons[0]["adoption_status"], "MODIFIED")
+        self.assertIn("规则边界、尖角边界、窄缝边界", result["assistant_message"])
+        self.assertNotIn("electrostatic_material_class_pair", result["assistant_message"])
 
     def test_rejected_model_comparison_creation_is_not_acknowledged_as_saved(self) -> None:
         session = idea_facet_session("design_rejected_comparison_ack")
@@ -2509,7 +2556,7 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(result["stage_payload"].get("exploration_scenes"), [])
         self.assertEqual(result["stage_payload"].get("alternative_ideas"), [])
         self.assertTrue(result["stage_payload"]["scene_replay_avoided"])
-        self.assertIn("不会再换一组三幅图景", result["assistant_message"])
+        self.assertIn("三幅图景不会再次展示", result["assistant_message"])
         self.assertEqual(
             result["stage_payload"]["clarification_choices"][0]["label"],
             "沿用这个研究重点",
@@ -3673,7 +3720,7 @@ class DialogueStateTests(unittest.TestCase):
                 "comparison_updates": [
                     {
                         "comparison_id": "path_cases",
-                        "action": "MODIFY",
+                        "action": "REPLACE",
                         "cases": new_cases,
                         "replace_all": True,
                         "semantic_key": "probe_path_geometry_cases",
@@ -6159,6 +6206,65 @@ class DialogueStateTests(unittest.TestCase):
             resolved["semantic_updates"]["pending_answer_status"],
             "CLEAR",
         )
+
+    def test_emvr_field_answer_closes_matching_open_question_across_all_fields_and_stages(self) -> None:
+        """Every EMVR field path consumes its matching prompt in every stage family."""
+
+        stages = list(Stage)
+        for field_index, field in enumerate(sorted(EMVR_EDITABLE_FIELDS)):
+            stage_index = field_index % len(stages)
+            stage = stages[stage_index]
+            with self.subTest(stage=stage.value, field=field):
+                session = DesignSession(
+                    design_id=f"emvr_pending_{stage.value}_{field}",
+                    interaction_state=InteractionState.EMVR_DIRECT,
+                    current_stage_index=stage_index,
+                    design_context={"emvr_design": {}},
+                )
+                pending = save_pending_action(
+                    session,
+                    stage,
+                    StepOutput(
+                        assistant_message="请说明这个阶段需要的对象。",
+                        stage_payload={
+                            "pending_action": {
+                                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                                "interaction_state": InteractionState.EMVR_DIRECT.value,
+                                "subject": field,
+                                "answer_fields": [field],
+                            }
+                        },
+                        student_task="请补充当前EMVR设计项。",
+                    ),
+                )
+                answer = f"{field}的已确认设计内容"
+                resolved = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                        target=field,
+                        confidence=0.99,
+                        source="SEMANTIC_EMVR_FIELD_RECOVERY",
+                        dialogue_acts=[
+                            {
+                                "type": "MODIFY_EMVR_FIELD",
+                                "target": field,
+                                "operation": "REPLACE",
+                                "content": answer,
+                                "confidence": 0.99,
+                            }
+                        ],
+                        actions_authoritative=True,
+                    ),
+                    pending,
+                )
+
+                apply_resolved_intent(session, resolved, pending, answer)
+
+                self.assertIsNone(current_pending_action(session))
+                self.assertEqual(
+                    resolved["semantic_updates"]["pending_answer_status"],
+                    "CLEAR",
+                )
 
     def test_clarification_language_matches_interaction_mode(self) -> None:
         pending = {

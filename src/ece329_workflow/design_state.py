@@ -706,6 +706,11 @@ def _format_comparisons(comparisons: Any) -> str:
     groups = _normalized_comparison_groups(comparisons)
     rendered: list[str] = []
     for group in groups:
+        # Course-catalog suggestions remain available to the semantic parser,
+        # but they are not part of the student's canonical design until the
+        # student accepts or modifies them.
+        if group.get("adoption_status") == "PENDING":
+            continue
         cases = group.get("cases") or group.get("recommended_cases") or []
         if not cases or group.get("adoption_status") == "REJECTED":
             continue
