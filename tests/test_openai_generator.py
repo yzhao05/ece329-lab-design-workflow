@@ -1501,6 +1501,270 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             ["ACCEPT"],
         )
 
+    def test_unbound_guided_answer_confirmation_is_reparsed_into_field_action(self) -> None:
+        candidate = "比较导体和介质在同样外加电场下的场线弯曲与空间分布"
+        transport = FakeTransport(
+            outputs=[
+                {
+                    "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+                    "target": "research_question",
+                    "resolved_value_json": None,
+                    "semantic_updates_json": None,
+                    "dialogue_acts_json": json.dumps(
+                        [
+                            {
+                                "type": "CONTROL",
+                                "target": "ACCEPT",
+                                "operation": "MERGE",
+                                "content": None,
+                                "confidence": 0.98,
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.98,
+                },
+                {
+                    "intent": "ANSWER_CURRENT_QUESTION",
+                    "target": "research_question",
+                    "resolved_value_json": json.dumps(candidate, ensure_ascii=False),
+                    "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+                    "dialogue_acts_json": json.dumps(
+                        [
+                            {
+                                "type": "ANSWER_PENDING_QUESTION",
+                                "target": "research_question",
+                                "operation": "REPLACE",
+                                "content": candidate,
+                                "confidence": 0.99,
+                            }
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.99,
+                },
+            ]
+        )
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "research_question",
+            "proposal": {"facet_id": "research_question"},
+            "question": "你想比较什么条件，并观察什么现象？",
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            "沿用刚才的回答",
+            pending,
+            {"idea_development": {"active_facet_id": "research_question"}},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(result["dialogue_acts"][0]["target"], "research_question")
+        reparsed = json.loads(
+            transport.requests[1]["input"][0]["content"][0]["text"]
+        )
+        self.assertEqual(reparsed["user_message"], candidate)
+        self.assertEqual(
+            reparsed["pending_action"]["candidate_followup_intent"],
+            "ACCEPT_PREVIOUS_PROPOSAL",
+        )
+
+    def test_unbound_emvr_candidate_is_split_before_advance(self) -> None:
+        candidate = (
+            "实验对象是两个带电球；手柄拖动其中一个球改变距离；"
+            "观察两球之间电场线的弯曲和重排。"
+        )
+        advance = {
+            "intent": "ADVANCE_STAGE",
+            "target": "IDEA_BRAINSTORMING",
+            "resolved_value_json": None,
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "MERGE",
+                        "content": None,
+                        "confidence": 0.98,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": True,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        parsed = {
+            **advance,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "MODIFY_EMVR_FIELD",
+                        "target": "research_object",
+                        "operation": "REPLACE",
+                        "content": "两个带电球",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_EMVR_FIELD",
+                        "target": "required_behaviors",
+                        "operation": "REPLACE",
+                        "content": "用手柄拖动其中一个带电球改变两球距离",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_EMVR_FIELD",
+                        "target": "observed_quantities",
+                        "operation": "REPLACE",
+                        "content": "两球之间电场线的弯曲和重排",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "MERGE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                ],
+                ensure_ascii=False,
+            ),
+            "confidence": 0.99,
+        }
+        transport = FakeTransport(outputs=[advance, parsed])
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "IDEA_BRAINSTORMING",
+            "answer_fields": [
+                "research_object",
+                "interactions",
+                "observed_quantities",
+            ],
+            "question": "请说明对象、操作和观察现象。",
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+            "allowed_intents": [
+                "ANSWER_CURRENT_QUESTION",
+                "ADVANCE_STAGE",
+                "UNCLEAR",
+            ],
+        }
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            "继续进入下一部分",
+            pending,
+            {"emvr_design": {"experiment_brief": "静电场VR实验"}},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertTrue(result["advance_requested"])
+        self.assertEqual(
+            [item["target"] for item in result["dialogue_acts"][:-1]],
+            ["research_object", "required_behaviors", "observed_quantities"],
+        )
+        reparsed = json.loads(
+            transport.requests[1]["input"][0]["content"][0]["text"]
+        )
+        self.assertEqual(reparsed["user_message"], candidate)
+        self.assertEqual(
+            reparsed["pending_action"]["candidate_followup_intent"],
+            "ADVANCE_STAGE",
+        )
+
+    def test_unbound_emvr_draft_revision_is_committed_before_confirmation_advance(self) -> None:
+        candidate = "把主要变化量改为两球间距，其他条件保持不变"
+        control_only = {
+            "intent": "ADVANCE_STAGE",
+            "target": "VARIABLES_AND_CONDITIONS",
+            "resolved_value_json": None,
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "MERGE",
+                        "content": None,
+                        "confidence": 0.97,
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": True,
+            "preserve_current_design": True,
+            "confidence": 0.97,
+        }
+        repaired = {
+            **control_only,
+            "intent": "MODIFY_PREVIOUS_PROPOSAL",
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "MODIFY_EMVR_FIELD",
+                        "target": "changed_quantities",
+                        "operation": "REPLACE",
+                        "content": ["两球间距"],
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "MERGE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                ],
+                ensure_ascii=False,
+            ),
+            "confidence": 0.99,
+        }
+        transport = FakeTransport(outputs=[control_only, repaired])
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "VARIABLES_AND_CONDITIONS",
+            "proposal": {"changed_quantities": ["相对方向"]},
+            "candidate_answer": candidate,
+            "candidate_resolution": "MODIFY_PREVIOUS_PROPOSAL",
+            "candidate_binding_authorized": False,
+            "allowed_intents": [
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "ADVANCE_STAGE",
+                "UNCLEAR",
+            ],
+        }
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            "继续",
+            pending,
+            {"emvr_design": {"changed_quantities": ["相对方向"]}},
+        )
+
+        self.assertEqual(len(transport.requests), 2)
+        self.assertEqual(result["dialogue_acts"][0]["target"], "changed_quantities")
+        self.assertTrue(result["advance_requested"])
+
     def test_intent_resolver_repairs_omitted_later_stage_answer_status(self) -> None:
         base = {
             "intent": "ANSWER_CURRENT_QUESTION",

@@ -2779,6 +2779,10 @@ class OpenAIStageGenerator:
                 for item in raw_dialogue_acts
             )
         )
+        has_state_writing_dialogue_acts = bool(
+            isinstance(raw_dialogue_acts, list)
+            and any(_dialogue_act_writes_state(item) for item in raw_dialogue_acts)
+        )
         pending_type = (
             str(pending_action.get("type") or "")
             if isinstance(pending_action, dict)
@@ -2815,6 +2819,16 @@ class OpenAIStageGenerator:
             and isinstance(pending_action, dict)
             and not str(pending_action.get("candidate_answer") or "").strip()
         )
+        unbound_pending_candidate_followup = bool(
+            raw_intent
+            in {"ACCEPT_PREVIOUS_PROPOSAL", "ADVANCE_STAGE"}
+            and pending_type
+            in {*OPEN_QUESTION_PENDING_TYPES, *CONFIRMATION_PENDING_TYPES}
+            and isinstance(pending_action, dict)
+            and str(pending_action.get("candidate_answer") or "").strip()
+            and pending_action.get("candidate_binding_authorized") is not True
+            and not has_state_writing_dialogue_acts
+        )
         answer_status_conflict = pending_question_answer_needs_review(
             raw_intent,
             semantic_updates,
@@ -2834,6 +2848,7 @@ class OpenAIStageGenerator:
             or unresolved_stage_entry_response
             or confirmed_candidate_modification
             or unbacked_open_question_acceptance
+            or unbound_pending_candidate_followup
             or missing_authoritative_actions
             or (answer_status_conflict and not has_executable_dialogue_acts)
             or (not has_executable_dialogue_acts and pending_question_decision_missing(
@@ -2844,9 +2859,13 @@ class OpenAIStageGenerator:
         ):
             required_facet = required_pending_facet_id(pending_action)
             repair_payload = deepcopy(payload)
-            if confirmed_candidate_modification and isinstance(pending_action, dict):
+            if (
+                confirmed_candidate_modification
+                or unbound_pending_candidate_followup
+            ) and isinstance(pending_action, dict):
                 candidate_pending = deepcopy(pending_action)
                 candidate_pending["candidate_confirmation_received"] = True
+                candidate_pending["candidate_followup_intent"] = raw_intent
                 repair_payload["input"][0]["content"][0]["text"] = (
                     serialize_intent_input(
                         session,
@@ -2897,7 +2916,11 @@ class OpenAIStageGenerator:
                         )
                     ) + (
                         "如果pending_action中已有candidate_answer，而学生是在确认、沿用或指认"
-                        "上一句为开放问题的当前回答，应返回ACCEPT_PREVIOUS_PROPOSAL。"
+                        "上一句为开放问题的当前回答，不得只返回ACCEPT_PREVIOUS_PROPOSAL；"
+                        "应重新读取candidate_answer，把其中每个可确定内容拆成字段级"
+                        "ANSWER_PENDING_QUESTION或其他对应动作。只有这些动作可以写入设计。"
+                        "如果candidate_followup_intent为ADVANCE_STAGE，还要在字段动作之外返回"
+                        "CONTROL/ADVANCE；先提交候选内容，再推进，不能只返回控制动作。"
                     ) + (
                         "所有将写入设计的内容都必须出现在dialogue_acts_json的字段级动作中；"
                         "不能只返回外层resolved_value_json、facet_updates、design_updates或"
@@ -2932,6 +2955,10 @@ class OpenAIStageGenerator:
                 and str(item.get("type") or "").upper() != "UNRESOLVED"
                 for item in raw_dialogue_acts
             )
+        )
+        has_state_writing_dialogue_acts = bool(
+            isinstance(raw_dialogue_acts, list)
+            and any(_dialogue_act_writes_state(item) for item in raw_dialogue_acts)
         )
         repaired_intent = str(raw.get("intent") or "UNCLEAR")
         required_facet_after_repair = required_pending_facet_id(pending_action)
@@ -2971,8 +2998,53 @@ class OpenAIStageGenerator:
                     for item in raw_dialogue_acts
                 )
             )
+            has_state_writing_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    _dialogue_act_writes_state(item)
+                    for item in raw_dialogue_acts
+                )
+            )
             repaired_intent = str(raw.get("intent") or "UNCLEAR")
-        if has_executable_dialogue_acts:
+        unbound_candidate_without_field_acts = bool(
+            pending_type
+            in {*OPEN_QUESTION_PENDING_TYPES, *CONFIRMATION_PENDING_TYPES}
+            and isinstance(pending_action, dict)
+            and str(pending_action.get("candidate_answer") or "").strip()
+            and pending_action.get("candidate_binding_authorized") is not True
+            and not has_state_writing_dialogue_acts
+            and repaired_intent
+            in {"ACCEPT_PREVIOUS_PROPOSAL", "ADVANCE_STAGE"}
+        )
+        if unbound_candidate_without_field_acts:
+            # A control decision cannot silently discard an earlier candidate.
+            # The repair pass must decompose that candidate into field actions;
+            # otherwise keep it unresolved without copying it into a field.
+            candidate_text = str(
+                pending_action.get("candidate_answer") or ""
+            ).strip()
+            unresolved_act = {
+                "type": "UNRESOLVED",
+                "target": "",
+                "operation": "MERGE",
+                "content": candidate_text,
+                "source_text": candidate_text,
+                "semantic_key": "unresolved_open_candidate_followup",
+                "confidence": 0.7,
+            }
+            raw["intent"] = "UNCLEAR"
+            raw["target"] = str(pending_action.get("subject") or "")
+            raw["resolved_value_json"] = None
+            raw["dialogue_acts"] = [unresolved_act]
+            raw["dialogue_acts_json"] = json.dumps(
+                [unresolved_act],
+                ensure_ascii=False,
+            )
+            raw["advance_requested"] = False
+            raw["confidence"] = max(float(raw.get("confidence") or 0.0), 0.72)
+            resolved_value = None
+            semantic_updates = {}
+        elif has_executable_dialogue_acts:
             # Field-level acts are validated independently downstream.  The
             # compatibility intent may be UNCLEAR without invalidating clear
             # acts from the same turn.

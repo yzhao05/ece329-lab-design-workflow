@@ -77,8 +77,46 @@ class WebFrontendContractTests(unittest.TestCase):
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260901-builder-handoff",
+            "assets/app.js?v=20260903-session-isolation",
             self.index_html,
+        )
+
+    def test_new_design_invalidates_inflight_responses_in_both_modes(self) -> None:
+        self.assertIn("let designGeneration = 0;", self.app_js)
+        self.assertIn("const activeRequestControllers = new Set();", self.app_js)
+        self.assertIn("activeRequestControllers.add(controller);", self.app_js)
+        self.assertIn("activeRequestControllers.delete(controller);", self.app_js)
+        self.assertIn("const requestGeneration = designGeneration;", self.app_js)
+        self.assertGreaterEqual(
+            self.app_js.count("requestGeneration !== designGeneration"),
+            8,
+        )
+        self.assertIn("designGeneration += 1;", self.app_js)
+        self.assertIn(
+            "for (const controller of activeRequestControllers) controller.abort();",
+            self.app_js,
+        )
+        self.assertIn("activeRequestControllers.clear();", self.app_js)
+        self.assertIn("function invalidateDesignRequests()", self.app_js)
+        self.assertRegex(
+            self.app_js,
+            r"function clearApiSession\(\)[\s\S]{0,180}invalidateDesignRequests\(\)",
+        )
+        self.assertRegex(
+            self.app_js,
+            r"function resetDesign\(\)[\s\S]{0,520}invalidateDesignRequests\(\)",
+        )
+        self.assertIn(
+            'throw new DOMException("Design session changed", "AbortError");',
+            self.app_js,
+        )
+        self.assertRegex(
+            self.app_js,
+            r"async function sendVersionAction[\s\S]{0,900}requestGeneration !== designGeneration",
+        )
+        self.assertRegex(
+            self.app_js,
+            r"async function ensureDesignAccessToken[\s\S]{0,700}requestGeneration !== designGeneration",
         )
 
     def test_emvr_task_report_and_pdf_download_are_visible(self) -> None:

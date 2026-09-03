@@ -320,7 +320,11 @@ def recoverable_guided_pending_field(
 ) -> str | None:
     """Return one canonical guided field named by an open-question contract."""
 
-    if not isinstance(pending_action, dict):
+    if (
+        not isinstance(pending_action, dict)
+        or pending_action.get("interaction_state")
+        == InteractionState.EMVR_DIRECT.value
+    ):
         return None
     pending_type = str(pending_action.get("type") or "")
     if pending_type == "ANSWER_IDEA_FACET":
@@ -848,27 +852,49 @@ def recover_repeated_pending_answer(
     pending_action: dict[str, Any] | None,
     user_message: str,
 ) -> dict[str, Any] | None:
-    """Bind a repeated substantive answer to the exact open question.
+    """Bind a retained substantive answer to the exact open question.
 
     A semantic outage may leave the first answer as ``candidate_answer``.
-    When the student then repeats essentially the same answer, that repetition
-    is itself strong contextual confirmation.  Recover it as one structured
-    pending-answer act instead of replaying the question again.  This compares
-    the two complete utterances; it does not maintain a vocabulary of answer
-    phrases and it never guesses a field when no open question exists.
+    Repeating essentially the same answer, or returning a semantically parsed
+    ACCEPT/ADVANCE decision on an exact guided single-field question, supplies
+    enough contextual evidence to recover one structured pending-answer act.
+    This does not maintain a vocabulary of answer phrases and never guesses a
+    field when no exact open-question contract exists.
     """
 
     if (
         not isinstance(resolved, dict)
-        or resolved.get("intent") != UserIntent.UNCLEAR.value
         or not isinstance(pending_action, dict)
         or pending_action.get("type") not in OPEN_QUESTION_PENDING_TYPES
-        or pending_action.get("candidate_binding_authorized") is not True
     ):
+        return None
+    resolved_kind = str(resolved.get("intent") or "")
+    repeat_recovery = resolved_kind == UserIntent.UNCLEAR.value
+    contextual_followup = resolved_kind in {
+        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+        UserIntent.ADVANCE_STAGE.value,
+    }
+    if not repeat_recovery and not contextual_followup:
         return None
     candidate = str(pending_action.get("candidate_answer") or "").strip()
     current = user_message.strip()
     if not candidate or not current:
+        return None
+    candidate_is_authorized = (
+        pending_action.get("candidate_binding_authorized") is True
+    )
+    guided_single_field_recovery = bool(
+        pending_action.get("type")
+        in {"ANSWER_IDEA_FACET", "ANSWER_STAGE_QUESTION"}
+        and pending_action.get("interaction_state")
+        != InteractionState.EMVR_DIRECT.value
+    )
+    if not candidate_is_authorized and not guided_single_field_recovery:
+        # EMVR answers often contain several Builder-facing roles in one
+        # paragraph.  Repetition alone cannot prove that the whole paragraph
+        # belongs in one narrow field; those turns must be decomposed by the
+        # semantic action parser. Guided single-field prompts can recover from
+        # an outage by comparing the complete repeated answer below.
         return None
 
     def comparable(value: str) -> str:
@@ -878,20 +904,28 @@ def recover_repeated_pending_answer(
             value,
         ).casefold()
 
-    left = comparable(candidate)
-    right = comparable(current)
-    if min(len(left), len(right)) < 8:
-        return None
-    similarity = (
-        1.0
-        if left in right or right in left
-        else SequenceMatcher(None, left, right, autojunk=False).ratio()
-    )
-    if similarity < 0.82:
-        return None
+    if repeat_recovery:
+        left = comparable(candidate)
+        right = comparable(current)
+        if min(len(left), len(right)) < 8:
+            return None
+        similarity = (
+            1.0
+            if left in right or right in left
+            else SequenceMatcher(None, left, right, autojunk=False).ratio()
+        )
+        if similarity < 0.82:
+            return None
+    else:
+        # ACCEPT/ADVANCE is supplied by the contextual semantic resolver, not
+        # inferred from words here.  On an exact guided single-field question
+        # it authorizes the already retained candidate; the control utterance
+        # itself must never become field content.
+        similarity = max(float(resolved.get("confidence") or 0.0), 0.9)
 
     subject = str(pending_action.get("subject") or "").strip()
-    if not subject:
+    exact_field = recoverable_pending_field(pending_action)
+    if not subject or exact_field != subject:
         return None
     act = {
         "type": "ANSWER_PENDING_QUESTION",
@@ -900,14 +934,27 @@ def recover_repeated_pending_answer(
         "content": candidate,
         "confidence": max(0.9, similarity),
     }
+    acts = [act]
+    advance_requested = resolved_kind == UserIntent.ADVANCE_STAGE.value
+    if advance_requested:
+        acts.append(
+            {
+                "type": "CONTROL",
+                "target": "ADVANCE",
+                "operation": "MERGE",
+                "content": None,
+                "confidence": max(0.9, similarity),
+            }
+        )
     return resolved_intent(
         UserIntent.ANSWER_CURRENT_QUESTION,
         target=subject,
         resolved_value=candidate,
         confidence=max(0.9, similarity),
-        source="SEMANTIC_CONTEXTUAL_REPEATED_ANSWER",
-        dialogue_acts=[act],
+        source="SEMANTIC_CONTEXTUAL_PENDING_RECOVERY",
+        dialogue_acts=acts,
         actions_authoritative=True,
+        advance_requested=advance_requested,
     )
 
 
@@ -971,6 +1018,17 @@ def hydrate_pending_action_from_history(
             *OPEN_QUESTION_PENDING_TYPES,
             *CONFIRMATION_PENDING_TYPES,
         }:
+            current["interaction_state"] = session.interaction_state.value
+            if (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and current.get("type") == "ANSWER_STAGE_QUESTION"
+            ):
+                current["type"] = "ANSWER_EMVR_STAGE_QUESTION"
+            elif (
+                session.interaction_state is InteractionState.GUIDED_DESIGN
+                and current.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+            ):
+                current["type"] = "ANSWER_STAGE_QUESTION"
             if not current.get("answer_fields"):
                 current["answer_fields"] = (
                     _confirmation_answer_fields(
@@ -1498,7 +1556,11 @@ def save_pending_action(
     ):
         raw.update(
             {
-                "type": "ANSWER_STAGE_QUESTION",
+                "type": (
+                    "ANSWER_EMVR_STAGE_QUESTION"
+                    if session.interaction_state is InteractionState.EMVR_DIRECT
+                    else "ANSWER_STAGE_QUESTION"
+                ),
                 "subject": stage.value,
                 "proposal": deepcopy(proposal) if proposal is not None else {"stage": stage.value},
                 "question": question,
@@ -1518,16 +1580,21 @@ def save_pending_action(
     if raw.get("type") in {
         *OPEN_QUESTION_PENDING_TYPES,
         *CONFIRMATION_PENDING_TYPES,
-    } and not raw.get("answer_fields"):
-        raw["answer_fields"] = (
-            _confirmation_answer_fields(stage, session.interaction_state)
-            if raw.get("type") in CONFIRMATION_PENDING_TYPES
-            else _pending_answer_fields(
-                stage,
-                session.interaction_state,
-                str(raw.get("subject") or ""),
+    }:
+        # The mode belongs to the state-machine edge, not to model output.
+        # Persist it deterministically so reloads and recovery paths cannot
+        # mistake an EMVR question for a guided single-field prompt.
+        raw["interaction_state"] = session.interaction_state.value
+        if not raw.get("answer_fields"):
+            raw["answer_fields"] = (
+                _confirmation_answer_fields(stage, session.interaction_state)
+                if raw.get("type") in CONFIRMATION_PENDING_TYPES
+                else _pending_answer_fields(
+                    stage,
+                    session.interaction_state,
+                    str(raw.get("subject") or ""),
+                )
             )
-        )
     if not question and proposal is None:
         dialogue_state(session).pop("pending_action", None)
         set_pending_action_snapshot(session, None)
@@ -3670,13 +3737,14 @@ def clarification_output(
             if unbound_candidate:
                 message = (
                     (
-                        "我把你这几次补充都保留在本轮待处理中，但还没有写入设计，以免归错栏目。"
-                        "请把要修改的栏目和最终表述放在一起再发一次；一句话可以同时修改多项。"
+                        "我仍保留着你刚才的回答，但目前还不能确定其中每一部分分别对应哪项设计内容，"
+                        "所以没有改动现有设计。请直接给出这一问的最终表述；如果还包含其他调整，"
+                        "也可以在同一句中分别说明。"
                     )
                     if repeat_count > 2
                     else (
-                        "我保留了你刚才的补充，但还没有把它写进这一项，以免归错位置。"
-                        "请直接重试这项修改；如果一句话里改了多处，也可以一起说明。"
+                        "我收到了你的回答，但暂时没能把它准确对应到当前问题，因此没有改动现有设计。"
+                        "请直接重述这一问的答案；如果同一句还要调整其他内容，也可以分别写出来。"
                     )
                 )
             elif candidate_saved:
@@ -3752,13 +3820,14 @@ def clarification_output(
             elif unbound_candidate:
                 message = (
                     (
-                        "我保留了你连续补充的内容，但仍没有自动写入设计，以免把多个要求混进一个栏目。"
-                        "请把每个要调整的栏目及其最终表述写在同一条消息里，我会分别处理。"
+                        "我仍保留着上一轮内容，但其中有多项设计要求尚未准确对应，"
+                        "所以没有改动现有方案。请把各项要求分别说明，我会逐项整理。"
                     )
                     if repeat_count > 2
                     else (
-                        "我保留了你刚才的设计补充，但没有把它自动塞进当前栏目，以免改错。"
-                        "请直接重试这项修改；你可以在同一句里列出多个需要调整的部分。"
+                        "我收到了这段设计说明，但还没有可靠地区分其中各项内容，"
+                        "所以没有改动现有方案。请重新表述；一条消息可以包含多项要求，"
+                        "只要分别说明即可。"
                     )
                 )
             elif repeat_count > 2:

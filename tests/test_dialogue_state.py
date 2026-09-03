@@ -12,6 +12,7 @@ from ece329_workflow.dialogue_state import (
     deterministic_intent,
     fallback_intent,
     hydrate_pending_action_from_history,
+    recover_repeated_pending_answer,
     record_pending_clarification,
     STAGE_ONE_DIRECTION_CANDIDATE,
     resolved_intent,
@@ -1947,7 +1948,7 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(output.assistant_message, assistant)
         self.assertNotIn("repeated_question_avoided", output.stage_payload)
 
-    def test_repeated_unparsed_candidate_never_autofills_a_facet(self) -> None:
+    def test_repeated_unparsed_answer_recovers_the_exact_pending_facet(self) -> None:
         class AlwaysUnclearGenerator(RuleBasedStageGenerator):
             def resolve_intent(self, session, user_message, pending_action, carried_context):
                 return resolved_intent(
@@ -1964,7 +1965,7 @@ class DialogueStateTests(unittest.TestCase):
 
         first = engine.process_turn(session.design_id, {"message": answer})
         self.assertTrue(first["stage_payload"]["clarification_required"])
-        self.assertIn("保留", first["assistant_message"])
+        self.assertIn("收到了你的回答", first["assistant_message"])
 
         second = engine.process_turn(
             session.design_id,
@@ -1974,9 +1975,51 @@ class DialogueStateTests(unittest.TestCase):
         facet = second["stage_payload"]["idea_development_status"][
             "facets_by_id"
         ]["research_question"]
-        self.assertEqual(facet["status"], "MISSING")
-        self.assertEqual(facet["evidence"], "")
-        self.assertIn("没有写入", second["assistant_message"])
+        self.assertEqual(facet["status"], "CLEAR")
+        self.assertEqual(facet["evidence"], answer)
+        self.assertNotIn("没有写入", second["assistant_message"])
+        self.assertEqual(
+            current_pending_action(engine.store.get(session.design_id))["subject"],
+            "learning_objective",
+        )
+
+    def test_contextual_advance_commits_retained_guided_answer_before_moving_on(self) -> None:
+        session = idea_facet_session("design_retained_answer_advance")
+        pending = current_pending_action(session)
+        assert pending is not None
+        answer = "比较导体与介质在相同外加电场下的场线弯曲和空间分布"
+        retained = record_pending_clarification(session, answer)
+        assert retained is not None
+        self.assertFalse(retained["candidate_binding_authorized"])
+
+        recovered = recover_repeated_pending_answer(
+            resolved_intent(
+                UserIntent.ADVANCE_STAGE,
+                confidence=0.97,
+                dialogue_acts=[
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "MERGE",
+                        "content": None,
+                        "confidence": 0.97,
+                    }
+                ],
+                actions_authoritative=True,
+                advance_requested=True,
+            ),
+            retained,
+            "继续往下整理",
+        )
+
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered["resolved_value"], answer)
+        self.assertTrue(recovered["advance_requested"])
+        self.assertEqual(
+            [item["type"] for item in recovered["dialogue_acts"]],
+            ["ANSWER_PENDING_QUESTION", "CONTROL"],
+        )
 
     def test_unparsed_pending_candidate_has_no_direct_confirmation_action(self) -> None:
         session = idea_facet_session("design_pending_candidate_ui_action")
@@ -1988,7 +2031,132 @@ class DialogueStateTests(unittest.TestCase):
         choices = output.stage_payload["clarification_choices"]
         self.assertEqual(choices, [])
         self.assertFalse(pending["candidate_binding_authorized"])
-        self.assertIn("没有把它写进这一项", output.assistant_message)
+        self.assertIn("没有改动现有设计", output.assistant_message)
+
+    def test_retained_candidate_recovery_applies_to_later_guided_single_field(self) -> None:
+        candidate = "建立基准状态，逐步改变距离，记录场线后比较两种材料条件"
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "interaction_state": InteractionState.GUIDED_DESIGN.value,
+            "subject": "procedure_steps",
+            "answer_fields": ["procedure_steps"],
+            "question": "你认为实验需要哪些关键环节？",
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+        }
+
+        recovered = recover_repeated_pending_answer(
+            resolved_intent(
+                UserIntent.ADVANCE_STAGE,
+                confidence=0.96,
+                advance_requested=True,
+            ),
+            pending,
+            "继续后面的内容",
+        )
+
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered["dialogue_acts"][0]["target"], "procedure_steps")
+        self.assertEqual(recovered["dialogue_acts"][0]["content"], candidate)
+
+    def test_retained_emvr_candidate_requires_semantic_field_split(self) -> None:
+        candidate = "拖动两个带电球改变距离，并观察场线弯曲和重排"
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "answer_fields": ["research_object", "interactions", "observations"],
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+        }
+
+        recovered = recover_repeated_pending_answer(
+            resolved_intent(
+                UserIntent.ADVANCE_STAGE,
+                confidence=0.96,
+                advance_requested=True,
+            ),
+            pending,
+            "继续后面的内容",
+        )
+
+        self.assertIsNone(recovered)
+
+    def test_pending_action_mode_is_owned_by_state_machine_in_both_modes(self) -> None:
+        for mode, expected_type in (
+            (InteractionState.GUIDED_DESIGN, "ANSWER_STAGE_QUESTION"),
+            (InteractionState.EMVR_DIRECT, "ANSWER_EMVR_STAGE_QUESTION"),
+        ):
+            with self.subTest(mode=mode.value):
+                session = DesignSession(
+                    design_id=f"design_pending_mode_{mode.value}",
+                    interaction_state=mode,
+                    current_stage_index=7,
+                )
+                output = StepOutput(
+                    assistant_message="请说明准备改变和观察哪些量。",
+                    stage_payload={},
+                    student_task="请说明准备改变和观察哪些量。",
+                )
+
+                saved = save_pending_action(
+                    session,
+                    Stage.VARIABLES_AND_CONDITIONS,
+                    output,
+                )
+
+                self.assertIsNotNone(saved)
+                assert saved is not None
+                self.assertEqual(saved["type"], expected_type)
+                self.assertEqual(saved["interaction_state"], mode.value)
+
+    def test_legacy_emvr_marker_blocks_guided_candidate_recovery(self) -> None:
+        candidate = "改变距离并观察场线变化"
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "procedure_steps",
+            "answer_fields": ["procedure_steps"],
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+        }
+
+        recovered = recover_repeated_pending_answer(
+            resolved_intent(UserIntent.UNCLEAR, confidence=0.96),
+            pending,
+            candidate,
+        )
+
+        self.assertIsNone(recovered)
+
+    def test_reload_migrates_legacy_pending_type_to_current_mode(self) -> None:
+        session = DesignSession(
+            design_id="design_legacy_emvr_pending_mode",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=7,
+            model_context={
+                "dialogue_state": {
+                    "pending_action": {
+                        "type": "ANSWER_STAGE_QUESTION",
+                        "subject": "procedure_steps",
+                        "answer_fields": ["procedure_steps"],
+                        "question": "请说明实验流程。",
+                        "allowed_intents": ["ANSWER_CURRENT_QUESTION", "UNCLEAR"],
+                    }
+                }
+            },
+        )
+
+        hydrated = hydrate_pending_action_from_history(session)
+
+        self.assertIsNotNone(hydrated)
+        assert hydrated is not None
+        self.assertEqual(hydrated["type"], "ANSWER_EMVR_STAGE_QUESTION")
+        self.assertEqual(
+            hydrated["interaction_state"],
+            InteractionState.EMVR_DIRECT.value,
+        )
 
     def test_pending_confirmation_action_applies_to_every_open_question_type(self) -> None:
         for pending_type, interaction_state in (

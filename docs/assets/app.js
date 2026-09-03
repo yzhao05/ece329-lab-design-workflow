@@ -266,6 +266,8 @@ let typingMessageId = null;
 let toastTimer = null;
 let connectionState = apiBase() ? "checking" : "demo";
 let replayingPendingRequest = false;
+let designGeneration = 0;
+const activeRequestControllers = new Set();
 
 function initialState() {
   return {
@@ -336,12 +338,20 @@ function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
+function invalidateDesignRequests() {
+  designGeneration += 1;
+  for (const controller of activeRequestControllers) controller.abort();
+  activeRequestControllers.clear();
+  typingMessageId = null;
+}
+
 function apiBase() {
   return String(CONFIG.API_BASE_URL || "").trim().replace(/\/$/, "");
 }
 
 async function apiRequest(path, options = {}) {
   const controller = new AbortController();
+  activeRequestControllers.add(controller);
   const timeout = window.setTimeout(
     () => controller.abort(),
     Number(CONFIG.REQUEST_TIMEOUT_MS) || 70000,
@@ -366,6 +376,7 @@ async function apiRequest(path, options = {}) {
     return payload;
   } finally {
     window.clearTimeout(timeout);
+    activeRequestControllers.delete(controller);
   }
 }
 
@@ -940,6 +951,7 @@ async function downloadGuidedSummary() {
 
 async function sendVersionAction(versionRequest, message) {
   if (!state.designId || state.sessionKind !== "api" || dom.sendButton.disabled) return;
+  const requestGeneration = designGeneration;
   state.pendingRequest = {
     turnId: crypto.randomUUID(),
     message,
@@ -951,11 +963,16 @@ async function sendVersionAction(versionRequest, message) {
   showTyping();
   try {
     const response = await sendToApi(message, null);
+    if (requestGeneration !== designGeneration) {
+      hideTyping();
+      return;
+    }
     response._runtime_source = "api";
     hideTyping();
     applyResponse(response, message);
   } catch (error) {
     hideTyping();
+    if (requestGeneration !== designGeneration) return;
     console.warn("Unable to apply version action", error);
     addMessage(
       "assistant",
@@ -1004,6 +1021,7 @@ async function handleSubmit(event) {
   event.preventDefault();
   const message = dom.chatInput.value.trim();
   if (!message || dom.sendButton.disabled) return;
+  const requestGeneration = designGeneration;
 
   const isPendingReplay = replayingPendingRequest && Boolean(state.pendingRequest);
   replayingPendingRequest = false;
@@ -1055,6 +1073,10 @@ async function handleSubmit(event) {
     } else {
       throw new ApiError("Backend is not ready", 0, "backend_unavailable");
     }
+    if (requestGeneration !== designGeneration) {
+      hideTyping();
+      return;
+    }
     if (
       isSummaryContribution
       && response.request_rejected !== true
@@ -1067,6 +1089,7 @@ async function handleSubmit(event) {
     applyResponse(response, message);
   } catch (error) {
     hideTyping();
+    if (requestGeneration !== designGeneration) return;
     if (error instanceof ApiError && ["session_not_found", "access_denied"].includes(error.code)) {
       const hadDesign = Boolean(state.designId);
       clearApiSession();
@@ -1144,6 +1167,7 @@ async function sendToApi(message, uiAction = null) {
 }
 
 async function createApiDesign(message) {
+  const requestGeneration = designGeneration;
   const idempotencyKey = state.pendingRequest?.turnId || crypto.randomUUID();
   const request = () => apiRequest("/v1/designs", {
       method: "POST",
@@ -1153,6 +1177,7 @@ async function createApiDesign(message) {
   try {
     return await request();
   } catch (error) {
+    if (requestGeneration !== designGeneration) throw error;
     if (!(error instanceof ApiError) || error.code !== "access_denied") throw error;
     const accessCode = window.prompt("该网站需要输入课程访问码。请输入老师提供的访问码。", "");
     if (!accessCode) throw error;
@@ -1168,6 +1193,7 @@ function courseAccessHeaders() {
 
 function clearApiSession() {
   const retainedMessages = state.messages;
+  invalidateDesignRequests();
   state = { ...initialState(), messages: retainedMessages };
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
   localStorage.removeItem(DESIGN_RESUME_KEY);
@@ -1177,6 +1203,7 @@ function clearApiSession() {
 async function ensureDesignAccessToken() {
   const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
   if (token || !state.designId) return token;
+  const requestGeneration = designGeneration;
   const resumeToken = localStorage.getItem(DESIGN_RESUME_KEY) || "";
   if (!resumeToken) return "";
   const restored = await apiRequest(
@@ -1186,12 +1213,17 @@ async function ensureDesignAccessToken() {
       body: JSON.stringify({ resume_token: resumeToken }),
     },
   );
+  if (requestGeneration !== designGeneration) return "";
   applyDesignSnapshot(restored);
   return sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
 }
 
 async function authorizedDesignApiRequest(path, options = {}) {
+  const requestGeneration = designGeneration;
   let token = await ensureDesignAccessToken();
+  if (requestGeneration !== designGeneration) {
+    throw new DOMException("Design session changed", "AbortError");
+  }
   if (!token) {
     throw new ApiError("Missing design access token", 401, "access_denied");
   }
@@ -1205,6 +1237,7 @@ async function authorizedDesignApiRequest(path, options = {}) {
   try {
     return await request();
   } catch (error) {
+    if (requestGeneration !== designGeneration) throw error;
     if (!(error instanceof ApiError) || error.code !== "access_denied") throw error;
     // Another tab may have rotated this tab's short-lived access token. The
     // shared resume credential remains the source for a one-time recovery.
@@ -1216,7 +1249,11 @@ async function authorizedDesignApiRequest(path, options = {}) {
 }
 
 async function authorizedDesignDownload(path) {
+  const requestGeneration = designGeneration;
   let token = await ensureDesignAccessToken();
+  if (requestGeneration !== designGeneration) {
+    throw new DOMException("Design session changed", "AbortError");
+  }
   if (!token) {
     throw new ApiError("Missing design access token", 401, "access_denied");
   }
@@ -1225,6 +1262,7 @@ async function authorizedDesignDownload(path) {
   });
   let response = await request();
   if (response.status !== 401) return response;
+  if (requestGeneration !== designGeneration) return response;
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
   token = await ensureDesignAccessToken();
   if (!token) return response;
@@ -1234,12 +1272,16 @@ async function authorizedDesignDownload(path) {
 
 async function reloadApiDesignState() {
   if (!state.designId) return;
+  const requestGeneration = designGeneration;
+  const designId = state.designId;
   try {
-    const design = await authorizedDesignApiRequest(`/v1/designs/${encodeURIComponent(state.designId)}`, {
+    const design = await authorizedDesignApiRequest(`/v1/designs/${encodeURIComponent(designId)}`, {
       method: "GET",
     });
+    if (requestGeneration !== designGeneration) return;
     applyDesignSnapshot(design);
   } catch (error) {
+    if (requestGeneration !== designGeneration) return;
     console.warn("Unable to refresh design state", error);
   }
 }
@@ -2239,17 +2281,22 @@ function resetDesign() {
   if (!confirmed) return;
   const designId = state.designId;
   const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
-  if (apiBase() && designId && token && state.sessionKind === "api") {
+  const shouldDeleteApiDesign = Boolean(
+    apiBase() && designId && token && state.sessionKind === "api"
+  );
+  invalidateDesignRequests();
+  state = initialState();
+  sessionStorage.removeItem(DESIGN_TOKEN_KEY);
+  localStorage.removeItem(DESIGN_RESUME_KEY);
+  saveState();
+  setBusy(false);
+  render();
+  if (shouldDeleteApiDesign) {
     void apiRequest(`/v1/designs/${encodeURIComponent(designId)}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     }).catch((error) => console.warn("Unable to delete backend design", error));
   }
-  state = initialState();
-  sessionStorage.removeItem(DESIGN_TOKEN_KEY);
-  localStorage.removeItem(DESIGN_RESUME_KEY);
-  saveState();
-  render();
   dom.chatInput.focus();
   showToast("已创建新的本地设计会话");
 }
