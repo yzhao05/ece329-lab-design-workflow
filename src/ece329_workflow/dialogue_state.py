@@ -675,6 +675,13 @@ CONFIRMATION_PENDING_TYPES = frozenset(
     }
 )
 
+# A retained scene selection is safe to confirm as the Stage 1 direction, but
+# it is not safe to copy verbatim into whichever canonical field happened to be
+# pending when response generation tried to replay the A/B/C scenes.  Keeping a
+# distinct purpose lets the state machine complete that conversation contract
+# without granting an implicit field-write permission.
+STAGE_ONE_DIRECTION_CANDIDATE = "STAGE_ONE_DIRECTION"
+
 
 class ContextIntentResolver(Protocol):
     def resolve_intent(
@@ -771,6 +778,67 @@ def record_pending_clarification(
                 pending["candidate_resolution"] = (
                     UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
                 )
+    return deepcopy(pending)
+
+
+def record_scene_direction_confirmation(
+    session: DesignSession,
+    candidate_answer: str,
+) -> dict[str, Any] | None:
+    """Retain a Stage 1 direction candidate for an explicit confirmation turn.
+
+    This is deliberately separate from exact-field recovery.  Confirmation
+    authorizes the state machine to lock the selected direction only; it never
+    authorizes copying the complete utterance into a research-object, learning-
+    objective, or other design field.
+    """
+
+    candidate = candidate_answer.strip()
+    if not candidate:
+        return current_pending_action(session)
+    state = dialogue_state(session)
+    pending = state.get("pending_action")
+    if not isinstance(pending, dict):
+        from .idea_development import canonical_idea_pending_action
+
+        pending = canonical_idea_pending_action(session)
+    if not isinstance(pending, dict):
+        pending = {
+            "action_id": f"action_{session.revision}_{uuid.uuid4().hex[:8]}",
+            "type": "ANSWER_STAGE_QUESTION",
+            "stage": Stage.IDEA_BRAINSTORMING.value,
+            "subject": "stage_one_direction",
+            "proposal": {},
+            "question": "是否沿用刚才说明的研究重点？",
+            "allowed_intents": list(ALL_INTENTS),
+            "status": "PENDING",
+            "created_at_revision": session.revision,
+            "repeat_count": 1,
+            "advance_on_accept": False,
+        }
+    else:
+        pending = deepcopy(pending)
+        try:
+            repeat_count = int(pending.get("repeat_count", 1))
+        except (TypeError, ValueError):
+            repeat_count = 1
+        pending["repeat_count"] = max(1, repeat_count + 1)
+    turns = pending.get("candidate_turns", [])
+    turns = (
+        [str(item).strip()[:2000] for item in turns if str(item).strip()]
+        if isinstance(turns, list)
+        else []
+    )
+    if candidate[:2000] not in turns:
+        turns.append(candidate[:2000])
+    pending["candidate_turns"] = turns[-4:]
+    pending["candidate_answer"] = candidate[:2000]
+    pending["candidate_binding_authorized"] = True
+    pending["candidate_purpose"] = STAGE_ONE_DIRECTION_CANDIDATE
+    pending["candidate_resolution"] = UserIntent.ANSWER_CURRENT_QUESTION.value
+    pending["status"] = "PENDING"
+    state["pending_action"] = deepcopy(pending)
+    set_pending_action_snapshot(session, pending)
     return deepcopy(pending)
 
 
@@ -903,7 +971,10 @@ def _migrate_legacy_idea_facet_pending(
 ) -> dict[str, Any]:
     """Bind old generic Stage 1 pending data to the facet already in progress."""
 
-    if session.current_stage != Stage.IDEA_BRAINSTORMING:
+    if (
+        session.current_stage != Stage.IDEA_BRAINSTORMING
+        or pending.get("candidate_purpose") == STAGE_ONE_DIRECTION_CANDIDATE
+    ):
         return pending
     from .idea_development import canonical_idea_pending_action
 
@@ -1346,6 +1417,9 @@ def _normalize_pending_action(
         UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
     }:
         normalized["candidate_resolution"] = candidate_resolution
+    candidate_purpose = str(raw.get("candidate_purpose") or "").strip()
+    if candidate_purpose == STAGE_ONE_DIRECTION_CANDIDATE:
+        normalized["candidate_purpose"] = candidate_purpose
     interaction_state = str(raw.get("interaction_state") or "").strip()
     if interaction_state in {item.value for item in InteractionState}:
         normalized["interaction_state"] = interaction_state
@@ -1820,6 +1894,26 @@ def validate_resolved_intent(
     ] if isinstance(raw.get("unresolved_content"), list) else []
     actions_authoritative = raw.get("actions_authoritative") is True
     raw_acts_supplied = isinstance(raw.get("dialogue_acts"), list)
+    stage_one_direction_control_acceptance = bool(
+        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("candidate_purpose")
+        == STAGE_ONE_DIRECTION_CANDIDATE
+        and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
+    )
+    exact_field_candidate_control_acceptance = bool(
+        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("type") in OPEN_QUESTION_PENDING_TYPES
+        and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
+        and recoverable_pending_field(pending_action) is not None
+    )
+    authorized_candidate_control_acceptance = bool(
+        stage_one_direction_control_acceptance
+        or exact_field_candidate_control_acceptance
+    )
     compiled_acts = compile_dialogue_acts(
         dialogue_acts,
         pending_action=pending_action,
@@ -2037,7 +2131,11 @@ def validate_resolved_intent(
             "semantic_updates": merged_updates,
             "source": "SEMANTIC_MULTI_ACT",
         }
-    elif raw_acts_supplied and (unresolved_acts or actions_authoritative):
+    elif (
+        raw_acts_supplied
+        and (unresolved_acts or actions_authoritative)
+        and not authorized_candidate_control_acceptance
+    ):
         # The action array is the authoritative semantic result.  If every
         # proposed action is invalid—or the model returned no executable
         # action—do not execute a contradictory legacy outer intent or copy
@@ -2120,6 +2218,57 @@ def validate_resolved_intent(
     )
     source = str(raw.get("source") or "SEMANTIC")
     resolved_value = raw.get("resolved_value")
+    normalized_controls = set(
+        str(item)
+        for item in semantic_updates.get("control_actions", [])
+        if str(item)
+    )
+    accepts_saved_candidate = bool(
+        intent != UserIntent.UNCLEAR.value
+        and (
+            intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+            or "ACCEPT" in normalized_controls
+        )
+    )
+    confirms_stage_one_direction = bool(
+        accepts_saved_candidate
+        and isinstance(pending_action, dict)
+        and pending_action.get("candidate_purpose")
+        == STAGE_ONE_DIRECTION_CANDIDATE
+        and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
+    )
+    recovered_candidate_field = recoverable_pending_field(pending_action)
+    confirms_open_question_candidate = bool(
+        accepts_saved_candidate
+        and isinstance(pending_action, dict)
+        and pending_action.get("type") in OPEN_QUESTION_PENDING_TYPES
+        and pending_action.get("candidate_purpose")
+        != STAGE_ONE_DIRECTION_CANDIDATE
+        and str(pending_action.get("candidate_answer") or "").strip()
+        and pending_action.get("candidate_binding_authorized") is True
+        and (
+            intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+            or recovered_candidate_field is not None
+        )
+    )
+    if confirms_stage_one_direction:
+        candidate_answer = str(pending_action["candidate_answer"]).strip()
+        resolved_value = candidate_answer
+        source = "CONFIRMED_STAGE_ONE_DIRECTION"
+        controls = semantic_updates.get("control_actions", [])
+        controls = list(controls) if isinstance(controls, list) else []
+        if "ACCEPT" not in controls:
+            controls.append("ACCEPT")
+        semantic_updates.update(
+            {
+                "stage_one_scene_response": "SELECT_OR_DEVELOP",
+                "stage_one_direction_detail": candidate_answer,
+                "no_direction": False,
+                "pending_answer_status": "CLEAR",
+                "control_actions": controls,
+            }
+        )
     if (
         intent == UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
         and is_stage_confirmation
@@ -2132,18 +2281,12 @@ def validate_resolved_intent(
     ):
         resolved_value = str(pending_action["candidate_answer"]).strip()
         source = "CONFIRMED_PENDING_MODIFICATION"
-    if (
-        intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
-        and isinstance(pending_action, dict)
-        and pending_action.get("type")
-        in OPEN_QUESTION_PENDING_TYPES
-        and str(pending_action.get("candidate_answer") or "").strip()
-        and pending_action.get("candidate_binding_authorized") is True
-    ):
+    if confirms_open_question_candidate:
         candidate_answer = str(pending_action["candidate_answer"]).strip()
-        intent = UserIntent.ANSWER_CURRENT_QUESTION.value
-        resolved_value = candidate_answer
-        source = "CONFIRMED_PENDING_ANSWER"
+        if intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value:
+            intent = UserIntent.ANSWER_CURRENT_QUESTION.value
+            resolved_value = candidate_answer
+            source = "CONFIRMED_PENDING_ANSWER"
         required_facet = required_pending_facet_id(pending_action)
         if required_facet is not None:
             semantic_updates["facet_updates"] = [
@@ -2151,7 +2294,7 @@ def validate_resolved_intent(
             ]
         else:
             semantic_updates["pending_answer_status"] = "CLEAR"
-        recovered_field = recoverable_pending_field(pending_action)
+        recovered_field = recovered_candidate_field
         if recovered_field and not any(
             isinstance(act, dict)
             and act.get("type") == "ANSWER_PENDING_QUESTION"
@@ -2233,6 +2376,7 @@ def validate_resolved_intent(
                 if existing_fields:
                     existing_emvr["field_updates"] = existing_fields
                 semantic_updates["emvr_design_update"] = existing_emvr
+        task_plan = build_turn_task_plan(dialogue_acts, unresolved_acts)
     if (
         source.startswith("SEMANTIC")
         and intent

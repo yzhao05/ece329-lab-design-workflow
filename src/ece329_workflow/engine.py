@@ -23,6 +23,7 @@ from .dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     record_pending_clarification,
+    record_scene_direction_confirmation,
     recoverable_pending_field,
     recover_repeated_pending_answer,
     required_pending_facet_id,
@@ -838,7 +839,7 @@ def _prevent_unrequested_scene_replay(
         candidate = str(turn_intent.get("resolved_value") or "").strip()
     if not candidate:
         candidate = unresolved_direction or student_message.strip()
-    retained_pending = record_pending_clarification(
+    retained_pending = record_scene_direction_confirmation(
         session,
         candidate,
     ) or pending_action
@@ -927,6 +928,21 @@ def _prevent_unrequested_scene_replay(
         output.assistant_message = (
             "我已经保留你刚才对现有方向的选择、补充或纠正，不会再换一组三幅图景。"
             "为了避免替你改错方向，请确认沿用刚才说明的研究重点；如果还想补充，直接接着描述即可。"
+        )
+        action_id = (
+            str(retained_pending.get("action_id") or "")
+            if isinstance(retained_pending, dict)
+            else ""
+        )
+        output.stage_payload["clarification_choices"] = (
+            [
+                {
+                    "option_id": f"pending_accept::{action_id}",
+                    "label": "沿用这个研究重点",
+                }
+            ]
+            if action_id
+            else []
         )
     output.student_task = None
     if isinstance(retained_pending, dict):

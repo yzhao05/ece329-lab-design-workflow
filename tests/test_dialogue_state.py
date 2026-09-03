@@ -13,6 +13,7 @@ from ece329_workflow.dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     record_pending_clarification,
+    STAGE_ONE_DIRECTION_CANDIDATE,
     resolved_intent,
     save_pending_action,
     validate_resolved_intent,
@@ -2294,9 +2295,19 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(result["stage_payload"].get("alternative_ideas"), [])
         self.assertTrue(result["stage_payload"]["scene_replay_avoided"])
         self.assertIn("不会再换一组三幅图景", result["assistant_message"])
+        self.assertEqual(
+            result["stage_payload"]["clarification_choices"][0]["label"],
+            "沿用这个研究重点",
+        )
         stored = engine.store.get(first["design_id"])
         pending = current_pending_action(stored)
         self.assertEqual(pending.get("candidate_answer"), selection)
+        self.assertTrue(pending.get("candidate_binding_authorized"))
+        self.assertEqual(
+            pending.get("candidate_purpose"),
+            STAGE_ONE_DIRECTION_CANDIDATE,
+        )
+        before_confirmation = design_state_snapshot(stored)
 
         generator.intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
         generator.semantic_updates = {}
@@ -2309,7 +2320,168 @@ class DialogueStateTests(unittest.TestCase):
         self.assertTrue(accepted["stage_payload"]["direction_locked"])
         self.assertIn("已经按你的确认沿用", accepted["assistant_message"])
         self.assertNotIn("请确认沿用", accepted["assistant_message"])
-        self.assertIsNone(current_pending_action(engine.store.get(first["design_id"])))
+        confirmed_session = engine.store.get(first["design_id"])
+        self.assertIsNone(current_pending_action(confirmed_session))
+        after_confirmation = design_state_snapshot(confirmed_session)
+        # Confirming the direction is a dialogue-state transition. It must not
+        # copy the complete scene-selection utterance into the facet that was
+        # awaiting input when the response guard intervened.
+        self.assertEqual(
+            after_confirmation["learning_objective"],
+            before_confirmation["learning_objective"],
+        )
+        self.assertNotEqual(after_confirmation["learning_objective"], selection)
+
+    def test_authoritative_control_only_scene_confirmation_closes_candidate(self) -> None:
+        """The Responses schema may encode a confirmation with no field acts."""
+
+        candidate = "比较导体和介质在相同外加电场中的场线分布与弯曲"
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "direction_outline",
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": True,
+            "candidate_purpose": STAGE_ONE_DIRECTION_CANDIDATE,
+            "allowed_intents": [
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+
+        accepted = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+
+        self.assertEqual(
+            accepted["intent"], UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        )
+        self.assertEqual(accepted["source"], "CONFIRMED_STAGE_ONE_DIRECTION")
+        self.assertEqual(
+            accepted["semantic_updates"]["stage_one_scene_response"],
+            "SELECT_OR_DEVELOP",
+        )
+        self.assertEqual(
+            accepted["semantic_updates"]["stage_one_direction_detail"],
+            candidate,
+        )
+
+    def test_low_confidence_scene_confirmation_cannot_lock_direction(self) -> None:
+        candidate = "比较导体和介质在相同外加电场中的场线分布"
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "direction_outline",
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": True,
+            "candidate_purpose": STAGE_ONE_DIRECTION_CANDIDATE,
+            "allowed_intents": [
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+
+        unresolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                confidence=0.31,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+
+        self.assertEqual(unresolved["intent"], UserIntent.UNCLEAR.value)
+        self.assertNotEqual(
+            unresolved["semantic_updates"].get("stage_one_scene_response"),
+            "SELECT_OR_DEVELOP",
+        )
+
+    def test_candidate_acceptance_and_parallel_edit_are_both_committed(self) -> None:
+        """A control act may confirm one exact field beside another field edit."""
+
+        session = DesignSession(
+            design_id="emvr_confirm_and_edit",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            design_context={"emvr_design": {}},
+        )
+        candidate = "学生在VR中拖动两个带电物体改变距离，并观察电场线变化"
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "experiment_brief",
+            "answer_fields": ["experiment_brief"],
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": True,
+            "allowed_intents": [
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        resolved = validate_resolved_intent(
+            resolved_intent(
+                UserIntent.UNCLEAR,
+                confidence=0.98,
+                source="SEMANTIC_MODEL",
+                dialogue_acts=[
+                    {
+                        "type": "CONTROL",
+                        "target": "ACCEPT",
+                        "operation": "EXECUTE",
+                        "content": None,
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "MODIFY_EMVR_FIELD",
+                        "target": "research_object",
+                        "operation": "REPLACE",
+                        "content": "两个带电物体",
+                        "confidence": 0.99,
+                    },
+                ],
+                actions_authoritative=True,
+            ),
+            pending,
+        )
+
+        projected_fields = {
+            str(item.get("field_id") or "")
+            for item in resolved["semantic_updates"]["emvr_design_update"][
+                "field_updates"
+            ]
+            if isinstance(item, dict)
+        }
+        self.assertEqual(
+            projected_fields,
+            {"experiment_brief", "research_object"},
+        )
+        self.assertEqual(
+            resolved["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
+        apply_resolved_intent(
+            session,
+            resolved,
+            pending,
+            user_message="沿用上一条，同时把研究对象写成两个带电物体",
+        )
+        apply_emvr_field_updates(
+            session.design_context["emvr_design"],
+            resolved["semantic_updates"]["emvr_design_update"],
+        )
+        requirements = merge_emvr_structured_requirements(
+            session.design_context["emvr_design"]
+        )
+        self.assertEqual(requirements["experiment_brief"], candidate)
+        self.assertEqual(requirements["research_object"], "两个带电物体")
 
     def test_idea_gap_pending_action_names_the_exact_active_facet(self) -> None:
         session = idea_facet_session("design_facet_pending")
@@ -3384,6 +3556,8 @@ class DialogueStateTests(unittest.TestCase):
                     UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
                     confidence=0.99,
                     source="SEMANTIC_TEST",
+                    dialogue_acts=[],
+                    actions_authoritative=True,
                 ),
                 resolved_intent(
                     UserIntent.UNCLEAR,
@@ -3499,11 +3673,24 @@ class DialogueStateTests(unittest.TestCase):
             )
         )
 
-        engine.process_turn(design_id, {"message": "保留这部分并继续"})
+        recovered_output = engine.process_turn(
+            design_id,
+            {"message": "保留这部分并继续"},
+        )
         recovered = engine.store.get(design_id)
         self.assertEqual(
             recovered.design_context["emvr_design"]["experiment_brief"],
             first_brief,
+        )
+        self.assertNotIn(
+            "上一轮提供的设计描述已经保留",
+            recovered_output["assistant_message"],
+        )
+        self.assertTrue(str(recovered_output.get("student_task") or "").strip())
+        next_pending = current_pending_action(recovered)
+        self.assertEqual(next_pending["subject"], "research_object")
+        self.assertFalse(
+            str(next_pending.get("candidate_answer") or "").strip()
         )
 
         requested = engine.process_turn(design_id, {"message": "建立新的实验方向"})
@@ -4055,7 +4242,9 @@ class DialogueStateTests(unittest.TestCase):
 
         pending = {
             "type": "ANSWER_EMVR_STAGE_QUESTION",
-            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "experiment_brief",
+            "answer_fields": ["experiment_brief"],
             "candidate_answer": (
                 "在VR中拖动两个带电物体改变距离，观察导体与介质附近的电场线变化"
             ),
@@ -4072,6 +4261,8 @@ class DialogueStateTests(unittest.TestCase):
                 UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
                 confidence=0.98,
                 source="SEMANTIC_TEST",
+                dialogue_acts=[],
+                actions_authoritative=True,
             ),
             pending,
         )
@@ -4155,6 +4346,8 @@ class DialogueStateTests(unittest.TestCase):
                         UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
                         confidence=0.99,
                         source="SEMANTIC_TEST",
+                        dialogue_acts=[],
+                        actions_authoritative=True,
                     ),
                     pending,
                 )

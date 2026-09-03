@@ -17,6 +17,7 @@ from .dialogue_state import (
     ALL_INTENTS,
     CONFIRMATION_PENDING_TYPES,
     OPEN_QUESTION_PENDING_TYPES,
+    STAGE_ONE_DIRECTION_CANDIDATE,
     degraded_context_intent,
     pending_question_answer_needs_review,
     pending_question_decision_missing,
@@ -2802,6 +2803,8 @@ class OpenAIStageGenerator:
             raw_intent == "ACCEPT_PREVIOUS_PROPOSAL"
             and isinstance(pending_action, dict)
             and pending_action.get("type") in CONFIRMATION_PENDING_TYPES
+            and pending_action.get("candidate_purpose")
+            != STAGE_ONE_DIRECTION_CANDIDATE
             and pending_action.get("candidate_resolution")
             == "MODIFY_PREVIOUS_PROPOSAL"
             and str(pending_action.get("candidate_answer") or "").strip()
@@ -3134,6 +3137,11 @@ class OpenAIStageGenerator:
             and session.current_stage is Stage.IDEA_BRAINSTORMING
             and carried_context.get("latest_exploration_scenes")
             and topic_lock.get("locked") is not True
+            and (
+                not isinstance(pending_action, dict)
+                or pending_action.get("candidate_purpose")
+                != STAGE_ONE_DIRECTION_CANDIDATE
+            )
             and semantic_updates.get("stage_one_scene_response")
             != "SELECT_OR_DEVELOP"
         )
