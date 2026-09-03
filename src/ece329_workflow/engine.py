@@ -1564,8 +1564,18 @@ def _prepare_emvr_stage_output(
         )
         if observations:
             output.stage_payload["target_phenomenon"] = "；".join(observations)
+        else:
+            # A broad experiment brief is not an observation.  Do not let a
+            # model or rule fallback echo it into the target-phenomenon slot;
+            # that field remains visibly absent until the student actually
+            # defines an observable response.
+            output.stage_payload.pop("target_phenomenon", None)
         if interactions:
             output.stage_payload["possible_vr_interactions"] = interactions
+        else:
+            # Generic VR affordances are useful as reference examples, but
+            # they are not committed interactions chosen for this lab.
+            output.stage_payload.pop("possible_vr_interactions", None)
 
     section = stage_report_section(
         stage,
@@ -3518,16 +3528,18 @@ class WorkflowEngine:
                         for item in clarification_updates.get("facet_updates", [])
                     )
                 )
+                recoverable_field = recoverable_pending_field(pending_action)
                 recoverable_exact_field = bool(
-                    isinstance(pending_action, dict)
-                    and recoverable_pending_field(pending_action)
-                    and (
-                        pending_action.get("interaction_state")
-                        == InteractionState.EMVR_DIRECT.value
-                        or str(turn_intent.get("source") or "").startswith(
-                            "SEMANTIC_SERVICE_FALLBACK"
-                        )
-                    )
+                    # The complete EMVR brief is intentionally a free-form
+                    # statement, so retaining the whole answer in that one
+                    # authoritative field is safe. Other prompts name a
+                    # narrower field: a long answer may also contain actions,
+                    # variables and observations, and must be semantically
+                    # split rather than copied wholesale into that field.
+                    recoverable_field == "experiment_brief"
+                    and isinstance(pending_action, dict)
+                    and pending_action.get("interaction_state")
+                    == InteractionState.EMVR_DIRECT.value
                 )
                 if not recoverable_exact_field and isinstance(
                     clarification_updates, dict

@@ -1485,13 +1485,9 @@ class RuleBasedStageGenerator:
                     "target_phenomenon": (
                         "；".join(saved_observations)
                         if saved_observations
-                        else latest_stage_input or topics[0]
+                        else None
                     ),
-                    "possible_vr_interactions": saved_interactions or [
-                        "抓取、移动或旋转具有明确物理意义的实验对象",
-                        "通过带单位和适用范围的控件调整主要参数",
-                        "在固定观察位置或移动探测器后读取理论反馈",
-                    ],
+                    "possible_vr_interactions": saved_interactions,
                     "design_scope": "概念设计与Unity VR模拟规划，不包含真实实验实施",
                     "course_references": _course_references(idea),
                     "supplemental_references": KNOWLEDGE.supplemental_concept_references(

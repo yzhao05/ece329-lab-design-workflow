@@ -744,10 +744,11 @@ def record_pending_clarification(
             candidate_turns.append(normalized_candidate[:2000])
         pending["candidate_turns"] = candidate_turns[-4:]
         if allow_exact_field_binding is None:
-            # Preserve the established EMVR recovery behavior for direct
-            # callers. Guided binding is enabled only when the engine knows
-            # the semantic service itself failed, not merely because the model
-            # judged an ordinary answer unclear.
+            # Preserve the low-level compatibility contract for direct/offline
+            # callers. The production engine always supplies this flag: it
+            # opts in only for the free-form experiment brief and explicitly
+            # opts out for every narrow field, where semantic actions are
+            # required before any write.
             allow_exact_field_binding = (
                 session.interaction_state is InteractionState.EMVR_DIRECT
             )

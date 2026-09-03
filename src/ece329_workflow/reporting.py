@@ -268,8 +268,30 @@ def stage_report_section(
     visualization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     items: list[dict[str, str]] = []
+    stage_one_brief = (
+        _plain(payload.get("normalized_idea"))
+        if stage is Stage.IDEA_BRAINSTORMING
+        else ""
+    )
     for field in _REPORT_FIELDS.get(stage, ()):
         if field not in payload:
+            continue
+        if (
+            stage is Stage.IDEA_BRAINSTORMING
+            and field == "original_idea"
+            and _plain(payload.get(field)) == stage_one_brief
+        ):
+            # The raw idea and authoritative brief are often initially
+            # identical. Show it once as the design starting point instead of
+            # implying that two independently completed fields exist.
+            continue
+        if (
+            stage is Stage.IDEA_BRAINSTORMING
+            and field == "target_phenomenon"
+            and _plain(payload.get(field)) == stage_one_brief
+        ):
+            # A repeated brief is not evidence that the observable phenomenon
+            # has been specified.
             continue
         if field == "unity_objects" and isinstance(payload.get("object_inventory"), list):
             continue

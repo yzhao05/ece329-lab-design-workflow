@@ -424,16 +424,91 @@ def apply_emvr_field_updates(
     previous_objective_values = _objective_values(field_state)
     raw_edits = structured_update.get("field_updates", [])
     edits = raw_edits if isinstance(raw_edits, list) else []
+    # Reject a common malformed projection in which the model copies one
+    # broad experiment sentence into every physical role.  An authoritative
+    # brief may contain the complete thought, but it does not by itself prove
+    # that the research object, operation, variable and observation have each
+    # been separated.  This compares structured values, not student wording.
+    role_fields = {
+        "research_object",
+        "course_relationship",
+        "research_question",
+        "learning_objectives",
+        "conceptual_objective",
+        "calculation_objective",
+        "analysis_objective",
+        "vr_interaction_objective",
+        "observation_objective",
+        "changed_quantities",
+        "observed_quantities",
+        "required_behaviors",
+        "object_constraints",
+    }
+
+    def value_signature(value: Any) -> str:
+        if isinstance(value, list) and len(value) == 1:
+            return value_signature(value[0])
+        if isinstance(value, str):
+            return " ".join(value.split()).casefold()
+        return repr(value)
+
+    brief_signatures = {
+        value_signature(item.get("value"))
+        for item in edits
+        if isinstance(item, dict)
+        and str(item.get("field_id") or "") == "experiment_brief"
+        and str(item.get("operation") or "").upper() != "CLEAR"
+        and item.get("value") not in (None, "", [], {})
+    }
+    existing_brief = _nonempty_field_value(
+        "experiment_brief",
+        field_state.get("experiment_brief"),
+    )
+    if existing_brief is not None:
+        brief_signatures.add(value_signature(existing_brief))
+    cloned_role_fields = {
+        str(item.get("field_id") or "")
+        for item in edits
+        if isinstance(item, dict)
+        and str(item.get("field_id") or "") in role_fields
+        and value_signature(item.get("value")) in brief_signatures
+    }
+    if cloned_role_fields:
+        edits = [
+            item
+            for item in edits
+            if not (
+                isinstance(item, dict)
+                and str(item.get("field_id") or "") in cloned_role_fields
+                and value_signature(item.get("value")) in brief_signatures
+            )
+        ]
     # Snapshot fields keep older clients compatible on ordinary answer turns.
     # Once explicit edits exist, however, only those targeted operations may
     # mutate field_state.  A model-provided stale snapshot must not overwrite
     # an unrelated field that the student did not ask to change.
     touched_fields: set[str] = set()
     if not edits:
+        snapshot_brief = _nonempty_field_value(
+            "experiment_brief",
+            structured_update.get("experiment_brief"),
+        )
+        snapshot_brief_signature = (
+            value_signature(snapshot_brief) if snapshot_brief is not None else ""
+        )
+        if not snapshot_brief_signature and existing_brief is not None:
+            snapshot_brief_signature = value_signature(existing_brief)
         for field_id in EMVR_EDITABLE_FIELDS:
             if field_id not in structured_update:
                 continue
             value = _nonempty_field_value(field_id, structured_update.get(field_id))
+            if (
+                field_id in role_fields
+                and snapshot_brief_signature
+                and value is not None
+                and value_signature(value) == snapshot_brief_signature
+            ):
+                continue
             if value is not None:
                 field_state[field_id] = deepcopy(value)
                 touched_fields.add(field_id)

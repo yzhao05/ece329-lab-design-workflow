@@ -29,6 +29,7 @@ from ece329_workflow.emvr_design import (
     EMVR_THEORY_RELATIONS,
     EMVR_THEORY_RELATION_IDS,
     apply_emvr_field_updates,
+    emvr_stage_one_readiness,
     merge_emvr_structured_requirements,
     normalize_emvr_design_update,
 )
@@ -111,6 +112,42 @@ BUILDER_REQUIREMENT_ANSWERS = {
     ),
 }
 
+EMVR_STAGE_ONE_FIELD_ANSWERS = {
+    "research_object": "实验中的主要电磁源、边界对象和目标观察区域",
+    "changed_quantities": "学生在VR中调节当前研究问题指定的主要参数",
+    "required_behaviors": "学生操作实验对象并改变具有物理意义的条件",
+    "observed_quantities": "记录目标场量的数值响应与空间分布变化",
+}
+
+
+def emvr_stage_one_dialogue_acts(
+    *,
+    experiment_brief: str,
+    research_object: str,
+    operation: str,
+    changed_quantity: str,
+    observation: str,
+) -> list[dict]:
+    """Model a successful semantic decomposition of one complete EMVR brief."""
+
+    values = {
+        "experiment_brief": experiment_brief,
+        "research_object": research_object,
+        "required_behaviors": [operation],
+        "changed_quantities": [changed_quantity],
+        "observed_quantities": [observation],
+    }
+    return [
+        {
+            "type": "MODIFY_EMVR_FIELD",
+            "target": field,
+            "operation": "REPLACE",
+            "content": value,
+            "confidence": 0.99,
+        }
+        for field, value in values.items()
+    ]
+
 
 class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
     """Test double that resolves conversational intent from pending state, not wording."""
@@ -162,18 +199,11 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
                     dialogue_acts = [
                         {
                             "type": "MODIFY_EMVR_FIELD",
-                            "target": field,
+                            "target": "experiment_brief",
                             "operation": "REPLACE",
-                            "content": value,
+                            "content": user_message,
                             "confidence": 0.99,
                         }
-                        for field, value in (
-                            ("experiment_brief", user_message),
-                            ("research_object", user_message),
-                            ("required_behaviors", [user_message]),
-                            ("changed_quantities", [user_message]),
-                            ("observed_quantities", [user_message]),
-                        )
                     ]
                 else:
                     dialogue_acts = [
@@ -252,9 +282,15 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
             apply_emvr_field_updates(emvr_design, update)
             engine.store.save(session)
         requirement = result.get("stage_payload", {}).get("builder_requirement_field")
+        pending = current_pending_action(engine.store.get(result["design_id"]))
+        pending_subject = (
+            str(pending.get("subject") or "") if isinstance(pending, dict) else ""
+        )
         message = (
             BUILDER_REQUIREMENT_ANSWERS[requirement]
             if requirement
+            else EMVR_STAGE_ONE_FIELD_ANSWERS[pending_subject]
+            if pending_subject in EMVR_STAGE_ONE_FIELD_ANSWERS
             else EMVR_STAGE_ANSWERS.get(
                 result["current_stage"], "保留当前设计并继续整理"
             )
@@ -571,6 +607,228 @@ class WorkflowEngineTests(unittest.TestCase):
             current_pending_action(stored)["candidate_answer"],
             "我想做一个静电场实验",
         )
+
+    def test_broad_emvr_brief_is_not_copied_into_unanswered_roles(self) -> None:
+        engine = WorkflowEngine(generator=ContextAwareEMVRGenerator())
+        created = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        result = engine.process_turn(
+            created["design_id"],
+            {"message": "我想做一个静电场实验"},
+        )
+        stored = engine.store.get(created["design_id"])
+        requirements = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+        visible_items = result["stage_payload"]["emvr_report_section"]["items"]
+
+        self.assertEqual(requirements["experiment_brief"], "我想做一个静电场实验")
+        self.assertFalse(str(requirements.get("research_object") or "").strip())
+        self.assertEqual(requirements.get("observed_quantities", []), [])
+        self.assertEqual(requirements.get("required_behaviors", []), [])
+        self.assertNotIn("target_phenomenon", result["stage_payload"])
+        self.assertNotIn("possible_vr_interactions", result["stage_payload"])
+        self.assertEqual(
+            visible_items,
+            [{"label": "设计起点", "value": "我想做一个静电场实验"}],
+        )
+        self.assertEqual(current_pending_action(stored)["subject"], "research_object")
+
+    def test_emvr_long_followup_fills_each_role_once_and_can_advance(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        created = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        first = engine.process_turn(
+            created["design_id"],
+            {"message": "我想做一个静电场实验"},
+        )
+        self.assertEqual(
+            current_pending_action(engine.store.get(created["design_id"]))["subject"],
+            "research_object",
+        )
+
+        detail = (
+            "研究两个点电荷；学生用手柄拖拽其中一个电荷，改变两者距离和相对方向，"
+            "分别比较同种与异种电荷，并观察电场线的合并、扭曲和重排。"
+        )
+        generator.next_dialogue_acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "research_object",
+                "operation": "REPLACE",
+                "content": "两个点电荷及其周围空间",
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "required_behaviors",
+                "operation": "REPLACE",
+                "content": ["学生用手柄拖拽其中一个点电荷"],
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "changed_quantities",
+                "operation": "REPLACE",
+                "content": ["两点电荷的距离", "两点电荷的相对方向"],
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "comparison_cases",
+                "operation": "REPLACE",
+                "content": ["同种电荷", "异种电荷"],
+                "confidence": 0.99,
+            },
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "observed_quantities",
+                "operation": "REPLACE",
+                "content": ["电场线的合并、扭曲和重排"],
+                "confidence": 0.99,
+            },
+        ]
+        drafted = engine.process_turn(
+            created["design_id"],
+            {"message": detail},
+        )
+        stored = engine.store.get(created["design_id"])
+        requirements = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+
+        self.assertTrue(
+            emvr_stage_one_readiness(stored.design_context["emvr_design"])["ready"]
+        )
+        self.assertEqual(requirements["research_object"], "两个点电荷及其周围空间")
+        self.assertEqual(
+            requirements["required_behaviors"],
+            ["学生用手柄拖拽其中一个点电荷"],
+        )
+        self.assertEqual(
+            requirements["observed_quantities"],
+            ["电场线的合并、扭曲和重排"],
+        )
+        self.assertNotEqual(requirements["research_object"], detail)
+
+        advanced = engine.process_turn(
+            created["design_id"],
+            {"message": "确认这份设计并继续"},
+        )
+        self.assertEqual(
+            advanced["current_stage"],
+            Stage.COURSE_MAPPING_AND_DIRECTION.value,
+        )
+
+    def test_emvr_rejects_role_clones_of_a_broad_brief(self) -> None:
+        broad = "我想做一个静电场实验"
+        emvr_design: dict = {}
+
+        apply_emvr_field_updates(
+            emvr_design,
+            {
+                "field_updates": [
+                    {
+                        "field_id": "experiment_brief",
+                        "operation": "REPLACE",
+                        "value": broad,
+                    },
+                    {
+                        "field_id": "research_object",
+                        "operation": "REPLACE",
+                        "value": broad,
+                    },
+                    {
+                        "field_id": "observed_quantities",
+                        "operation": "REPLACE",
+                        "value": [broad],
+                    },
+                    {
+                        "field_id": "required_behaviors",
+                        "operation": "REPLACE",
+                        "value": [broad],
+                    },
+                ]
+            },
+        )
+        requirements = merge_emvr_structured_requirements(emvr_design)
+
+        self.assertEqual(requirements["experiment_brief"], broad)
+        self.assertFalse(str(requirements.get("research_object") or "").strip())
+        self.assertEqual(requirements.get("observed_quantities", []), [])
+        self.assertEqual(requirements.get("required_behaviors", []), [])
+        self.assertNotIn("rejected_field_projections", emvr_design)
+
+    def test_emvr_rejects_a_later_role_clone_of_the_saved_brief(self) -> None:
+        broad = "我想做一个静电场实验"
+        emvr_design = {
+            "field_state": {"experiment_brief": broad},
+        }
+
+        apply_emvr_field_updates(
+            emvr_design,
+            {
+                "field_updates": [
+                    {
+                        "field_id": "research_object",
+                        "operation": "REPLACE",
+                        "value": broad,
+                    },
+                    {
+                        "field_id": "observed_quantities",
+                        "operation": "REPLACE",
+                        "value": [broad],
+                    },
+                ]
+            },
+        )
+        requirements = merge_emvr_structured_requirements(emvr_design)
+
+        self.assertEqual(requirements["experiment_brief"], broad)
+        self.assertFalse(str(requirements.get("research_object") or "").strip())
+        self.assertEqual(requirements.get("observed_quantities", []), [])
+
+    def test_failed_emvr_multirole_answer_cannot_fill_the_narrow_pending_field(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        created = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        engine.process_turn(
+            created["design_id"],
+            {"message": "我想做一个静电场实验"},
+        )
+        long_answer = (
+            "学生操作两个点电荷，通过手柄拖拽改变距离和相对方向，"
+            "并观察电场线的合并、扭曲和重排。"
+        )
+        generator.next_intent = UserIntent.UNCLEAR
+        unclear = engine.process_turn(
+            created["design_id"],
+            {"message": long_answer},
+        )
+        pending = current_pending_action(engine.store.get(created["design_id"]))
+
+        self.assertTrue(unclear["stage_payload"]["clarification_required"])
+        self.assertFalse(pending["candidate_binding_authorized"])
+
+        generator.next_intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL
+        engine.process_turn(
+            created["design_id"],
+            {"message": "沿用刚才的表述"},
+        )
+        requirements = merge_emvr_structured_requirements(
+            engine.store.get(created["design_id"]).design_context["emvr_design"]
+        )
+        self.assertFalse(str(requirements.get("research_object") or "").strip())
+        self.assertEqual(requirements.get("observed_quantities", []), [])
+        self.assertEqual(requirements.get("required_behaviors", []), [])
 
     def test_low_confidence_control_turn_cannot_replace_bound_emvr_candidate(self) -> None:
         class LowConfidenceControlGenerator(RuleBasedStageGenerator):
@@ -1204,6 +1462,13 @@ class WorkflowEngineTests(unittest.TestCase):
         brief = (
             "在VR中让两个带电物体从远到近移动，比较两种电荷配置下中间区域的电场线变化。"
         )
+        generator.next_dialogue_acts = emvr_stage_one_dialogue_acts(
+            experiment_brief=brief,
+            research_object="两个带电物体及其中间区域的静电场",
+            operation="学生使用手柄拖动两个带电物体",
+            changed_quantity="两个带电物体之间的距离",
+            observation="两种电荷配置下中间区域的电场线变化",
+        )
         result = engine.process_turn(result["design_id"], {"message": brief})
         supplement = "增加可移动探测器读取中间平面的局部场强，并保留原有比较。"
         generator.next_intent = UserIntent.MODIFY_PREVIOUS_PROPOSAL
@@ -1309,7 +1574,8 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn(Stage.CONCEPTUAL_PROCEDURE.value, stage_inputs)
 
     def test_emvr2_conversation_is_interactive_contextual_and_produces_pdf(self) -> None:
-        engine = WorkflowEngine(generator=ContextAwareEMVRGenerator())
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
         result = engine.create_design(
             "进入EMVR模式",
             interaction_state=InteractionState.EMVR_DIRECT,
@@ -1321,6 +1587,13 @@ class WorkflowEngineTests(unittest.TestCase):
         brief = (
             "我想在VR里观察带电物体周围的电场线分布，并比较导体和介质在同样外加电场下的差异。"
             "学生可以用手柄拖动物体，改变位置和距离，实时观察场线变化。"
+        )
+        generator.next_dialogue_acts = emvr_stage_one_dialogue_acts(
+            experiment_brief=brief,
+            research_object="外加静电场中的导体与介质",
+            operation="学生使用手柄拖动导体和介质对象",
+            changed_quantity="对象位置与相互距离",
+            observation="导体与介质周围电场线的空间分布差异",
         )
         result = engine.process_turn(result["design_id"], {"message": brief})
         self.assertEqual(result["current_stage"], Stage.IDEA_BRAINSTORMING.value)
@@ -1419,6 +1692,13 @@ class WorkflowEngineTests(unittest.TestCase):
         brief = (
             "在VR中观察两个带电物体周围的电场线，比较导体与介质在外加静电场中的"
             "场线弯曲，并通过拖拽改变物体位置和距离。"
+        )
+        generator.next_dialogue_acts = emvr_stage_one_dialogue_acts(
+            experiment_brief=brief,
+            research_object="外加静电场中的两个带电物体、导体与介质",
+            operation="学生使用手柄拖动实验对象",
+            changed_quantity="实验对象的位置与相互距离",
+            observation="导体与介质界面附近的电场线弯曲与分布",
         )
         result = engine.process_turn(result["design_id"], {"message": brief})
         self.assertEqual(result["stage_payload"]["original_idea"], brief)

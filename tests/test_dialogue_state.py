@@ -2094,6 +2094,53 @@ class DialogueStateTests(unittest.TestCase):
         stored = engine.store.get(result["design_id"])
         self.assertEqual(stored.design_context["idea"]["core_phenomenon"], idea)
 
+    def test_long_scene_response_is_committed_without_a_second_confirmation(self) -> None:
+        """A contextual answer after A/B/C is a direction, not another scene request."""
+
+        class BareContextualAnswerGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ANSWER_CURRENT_QUESTION,
+                    target=str(pending_action.get("subject") or "")
+                    if pending_action
+                    else None,
+                    resolved_value=user_message,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={},
+                )
+
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design("我想做一个有关静电场的实验")
+        self.assertEqual(len(first["stage_payload"]["exploration_scenes"]), 3)
+        engine.generator = BareContextualAnswerGenerator()
+
+        response = (
+            "我对导体与介质在同样外加电场中的差异感兴趣，想比较它们周围"
+            "电场线的分布和弯曲，并观察材料边界怎样改变局部场。"
+        )
+        result = engine.process_turn(first["design_id"], {"message": response})
+        stored = engine.store.get(first["design_id"])
+
+        self.assertEqual(result["stage_payload"].get("exploration_scenes"), [])
+        self.assertTrue(result["stage_payload"].get("direction_locked"))
+        self.assertNotIn("请确认沿用", result["assistant_message"])
+        self.assertIn(
+            response,
+            {
+                str(stored.design_context["idea"].get("core_phenomenon") or ""),
+                str(stored.design_context["idea"].get("current_focus") or ""),
+                str(design_state_snapshot(stored).get("research_object") or ""),
+            },
+        )
+        self.assertEqual(current_pending_action(stored)["subject"], "research_question")
+
     def test_later_stage_partial_answers_accumulate_without_overwriting(self) -> None:
         class IncrementalStageGenerator(ScriptedSemanticGenerator):
             def __init__(self) -> None:
@@ -4458,8 +4505,8 @@ class DialogueStateTests(unittest.TestCase):
         )
         self.assertEqual(resolved["source"], "CONFIRMED_PENDING_ANSWER")
 
-    def test_emvr_parse_failure_confirmation_commits_any_exact_pending_field(self) -> None:
-        """Later EMVR fields recover like the Stage-1 brief without raw autofill."""
+    def test_emvr_parse_failure_does_not_bind_a_narrow_pending_field_by_default(self) -> None:
+        """A failed parser cannot copy a whole mixed answer into a narrow field."""
 
         cases = (
             (
@@ -4509,17 +4556,25 @@ class DialogueStateTests(unittest.TestCase):
                 candidate_text = (
                     answer if isinstance(answer, str) else "；".join(answer)
                 )
-                pending = record_pending_clarification(session, candidate_text)
+                pending = record_pending_clarification(
+                    session,
+                    candidate_text,
+                    allow_exact_field_binding=False,
+                )
                 assert pending is not None
-                self.assertTrue(pending["candidate_binding_authorized"])
+                self.assertFalse(pending["candidate_binding_authorized"])
                 if field == "parameter_specifications":
                     candidate_text = "距离 0.1–1.5 m，步长 0.05 m"
                     pending = record_pending_clarification(
                         session,
                         candidate_text,
+                        allow_exact_field_binding=False,
                     )
                     assert pending is not None
-                    self.assertEqual(pending["candidate_answer"], candidate_text)
+                    self.assertEqual(
+                        pending["candidate_answer"],
+                        "距离 0.2–2.0 m，步长 0.1 m",
+                    )
 
                 resolved = validate_resolved_intent(
                     resolved_intent(
@@ -4531,15 +4586,10 @@ class DialogueStateTests(unittest.TestCase):
                     ),
                     pending,
                 )
-                if field in {"parameter_specifications", "research_question"}:
-                    projected_fields = {
-                        str(item.get("field_id") or "")
-                        for item in resolved["semantic_updates"][
-                            "emvr_design_update"
-                        ]["field_updates"]
-                        if isinstance(item, dict)
-                    }
-                    self.assertIn(field, projected_fields)
+                self.assertEqual(
+                    resolved["intent"],
+                    UserIntent.UNCLEAR.value,
+                )
                 apply_resolved_intent(
                     session,
                     resolved,
@@ -4548,11 +4598,13 @@ class DialogueStateTests(unittest.TestCase):
                 )
 
                 if state_kind == "stage":
-                    stored = stage_design_state_snapshot(session)[field]
-                    self.assertEqual(stored, candidate_text)
+                    self.assertFalse(
+                        str(stage_design_state_snapshot(session).get(field) or "").strip()
+                    )
                 else:
-                    stored = design_state_snapshot(session)[field]
-                    self.assertEqual(stored, candidate_text)
+                    self.assertFalse(
+                        str(design_state_snapshot(session).get(field) or "").strip()
+                    )
 
     def test_confirmation_question_recovers_a_substantive_revision_by_context(self) -> None:
         supplement = (
