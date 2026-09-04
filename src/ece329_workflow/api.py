@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import re
+import uuid
 from copy import deepcopy
 from http import HTTPStatus
 from threading import RLock
@@ -12,8 +14,21 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
 from .engine import WorkflowEngine
-from .models import DesignAccessDenied, SessionNotFound, StageCompletionError, WorkflowError
-from .openai_generator import ModelServiceError
+from .models import (
+    DesignAccessDenied,
+    SessionConflict,
+    SessionNotFound,
+    StageCompletionError,
+    WorkflowError,
+)
+from .openai_generator import (
+    ModelConfigurationError,
+    ModelConnectionError,
+    ModelHTTPError,
+    ModelOutputError,
+    ModelServiceError,
+    ModelTimeoutError,
+)
 from .security import APISettings, FixedWindowRateLimiter
 
 
@@ -22,6 +37,7 @@ JsonHeaders = [
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
 ]
+LOGGER = logging.getLogger(__name__)
 
 
 class RequestTooLarge(ValueError):
@@ -52,6 +68,7 @@ class WorkflowAPI:
     ) -> Iterable[bytes]:
         method = environ.get("REQUEST_METHOD", "GET").upper()
         path = environ.get("PATH_INFO", "/")
+        diagnostic_id = uuid.uuid4().hex[:12]
         origin = str(environ.get("HTTP_ORIGIN", "")).strip().rstrip("/")
         cors_start_response = self._cors_start_response(start_response, origin)
         if not self.settings.allows_origin(origin):
@@ -89,6 +106,10 @@ class WorkflowAPI:
                 try:
                     storage_readiness = self.engine.readiness_info()
                 except Exception:
+                    LOGGER.exception(
+                        "Storage readiness failed diagnostic_id=%s",
+                        diagnostic_id,
+                    )
                     return self._respond(
                         start_response,
                         HTTPStatus.SERVICE_UNAVAILABLE,
@@ -96,6 +117,8 @@ class WorkflowAPI:
                             "status": "not_ready",
                             "service": "ece329-lab-design-workflow",
                             "error": "storage_unavailable",
+                            "diagnostic_id": diagnostic_id,
+                            "retryable": True,
                         },
                     )
                 return self._respond(
@@ -312,9 +335,94 @@ class WorkflowAPI:
         except (ValueError, UnicodeDecodeError, StageCompletionError) as exc:
             return self._respond(start_response, HTTPStatus.BAD_REQUEST, {"error": "invalid_request", "detail": str(exc)})
         except ModelServiceError as exc:
-            return self._respond(start_response, HTTPStatus.BAD_GATEWAY, {"error": "model_service_error", "detail": str(exc)})
+            status, payload = self._model_error_response(exc, diagnostic_id)
+            LOGGER.warning(
+                "Model request failed diagnostic_id=%s code=%s phase=%s upstream_status=%s",
+                diagnostic_id,
+                payload["error"],
+                payload.get("phase"),
+                payload.get("upstream_status"),
+            )
+            return self._respond(start_response, status, payload)
+        except SessionConflict as exc:
+            return self._respond(
+                start_response,
+                HTTPStatus.CONFLICT,
+                {"error": "session_conflict", "detail": str(exc), "retryable": True},
+            )
         except WorkflowError as exc:
             return self._respond(start_response, HTTPStatus.CONFLICT, {"error": "workflow_error", "detail": str(exc)})
+        except Exception:
+            LOGGER.exception(
+                "Unhandled workflow request failure diagnostic_id=%s method=%s path=%s",
+                diagnostic_id,
+                method,
+                path,
+            )
+            return self._respond(
+                start_response,
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {
+                    "error": "internal_error",
+                    "detail": "The workflow service encountered an internal error.",
+                    "diagnostic_id": diagnostic_id,
+                    "retryable": False,
+                },
+            )
+
+    @staticmethod
+    def _model_error_response(
+        exc: ModelServiceError,
+        diagnostic_id: str,
+    ) -> tuple[HTTPStatus, dict[str, Any]]:
+        """Map model failures to stable, student-safe diagnostic categories."""
+
+        code = str(getattr(exc, "diagnostic_code", "model_service_error"))
+        status = HTTPStatus.BAD_GATEWAY
+        detail = "The model service could not complete this turn."
+        retryable = True
+        if isinstance(exc, ModelOutputError):
+            code = "model_output_invalid"
+            detail = "The model response did not pass the workflow structure checks."
+        elif isinstance(exc, ModelConfigurationError):
+            code = "model_configuration_error"
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+            detail = "The model service is not configured correctly."
+            retryable = False
+        elif isinstance(exc, ModelTimeoutError):
+            code = "model_timeout"
+            status = HTTPStatus.GATEWAY_TIMEOUT
+            detail = "The model service did not respond before the backend timeout."
+        elif isinstance(exc, ModelConnectionError):
+            code = "model_connection_error"
+            detail = "The backend could not connect to the model service."
+        elif isinstance(exc, ModelHTTPError):
+            code = exc.diagnostic_code
+            if exc.status_code == 429:
+                status = HTTPStatus.SERVICE_UNAVAILABLE
+                detail = "The model service is temporarily rate limited."
+            elif exc.status_code in {408, 504}:
+                status = HTTPStatus.GATEWAY_TIMEOUT
+                detail = "The model service timed out."
+            elif 500 <= exc.status_code <= 599:
+                detail = "The upstream model service returned a temporary server error."
+            else:
+                detail = "The model service rejected the backend request."
+                retryable = False
+        payload: dict[str, Any] = {
+            "error": code,
+            "detail": detail,
+            "diagnostic_id": diagnostic_id,
+            "retryable": retryable,
+        }
+        phase = str(getattr(exc, "phase", "") or "").strip()
+        if phase:
+            payload["phase"] = phase
+        if isinstance(exc, ModelHTTPError):
+            payload["upstream_status"] = exc.status_code
+            if exc.error_code:
+                payload["upstream_error_code"] = exc.error_code
+        return status, payload
 
     def _read_json(self, environ: dict[str, Any]) -> dict[str, Any]:
         raw_length = environ.get("CONTENT_LENGTH") or "0"

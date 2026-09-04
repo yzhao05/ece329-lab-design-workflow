@@ -25,6 +25,23 @@ from ece329_workflow.turn_planning import (
 
 
 class TurnPlanningTests(unittest.TestCase):
+    def test_emvr_formula_actions_are_executable_state_tasks(self) -> None:
+        plan = build_turn_task_plan(
+            [
+                {
+                    "act_id": "formula-topic",
+                    "type": "SET_EMVR_TOPIC",
+                    "target": "emvr_formula_topic",
+                    "operation": "EXECUTE",
+                    "content": {"topic_description": "静电场实验"},
+                }
+            ]
+        )
+
+        self.assertEqual(plan["tasks"][0]["execution_phase"], "COMMIT_DESIGN")
+        self.assertEqual(plan["tasks"][0]["status"], "READY")
+        self.assertFalse(plan["has_unresolved_work"])
+
     def test_emvr_builder_fields_feed_quality_and_stage_context(self) -> None:
         session = DesignSession(
             design_id="emvr_unified_context",

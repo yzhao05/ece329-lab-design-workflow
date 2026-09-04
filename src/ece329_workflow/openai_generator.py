@@ -38,7 +38,13 @@ from .emvr_design import (
     candidate_formulas_for_emvr_context,
 )
 from .emvr_formula_flow import (
+    EMVR_DETAIL_DESIGN,
     EMVR_FORMULA_ACTION_TYPES,
+    EXPERIMENT_DIRECTION_REVIEW,
+    EXPERIMENT_METHODS_PRESENTED,
+    FORMULA_CANDIDATES_PRESENTED,
+    FORMULA_COMPOSITION_REVIEW,
+    TOPIC_RECEIVED,
     normalize_formula_flow_action,
 )
 from .design_state import seen_scene_signatures
@@ -95,6 +101,7 @@ EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.COURSE_MAPPING_AND_DIRECTION: (
         "course_references",
         "selected_direction",
+        "course_relationship",
         "vr_suitability",
     ),
     Stage.LEARNING_OBJECTIVES: (
@@ -109,6 +116,7 @@ EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
         "observable_quantity_in_vr",
     ),
     Stage.THEORETICAL_FRAMEWORK: (
+        "physical_mechanism",
         "core_equations",
         "formula_support_map",
         "theory_selection_status",
@@ -239,13 +247,32 @@ LOGGER = logging.getLogger(__name__)
 class ModelServiceError(WorkflowError):
     """A safe-to-report model transport or response error."""
 
+    diagnostic_code = "model_service_error"
+
+    def __init__(self, message: str, *, phase: str | None = None) -> None:
+        super().__init__(message)
+        self.phase = phase
+
+    def mark_phase(self, phase: str) -> "ModelServiceError":
+        if not self.phase:
+            self.phase = phase
+        return self
+
 
 class ModelConfigurationError(ModelServiceError):
-    pass
+    diagnostic_code = "model_configuration_error"
 
 
 class ModelOutputError(ModelServiceError):
-    pass
+    diagnostic_code = "model_output_invalid"
+
+
+class ModelTimeoutError(ModelServiceError):
+    diagnostic_code = "model_timeout"
+
+
+class ModelConnectionError(ModelServiceError):
+    diagnostic_code = "model_connection_error"
 
 
 class ModelHTTPError(ModelServiceError):
@@ -253,6 +280,16 @@ class ModelHTTPError(ModelServiceError):
         super().__init__(f"OpenAI Responses API returned HTTP {status_code}")
         self.status_code = status_code
         self.error_code = error_code
+
+    @property
+    def diagnostic_code(self) -> str:
+        if self.status_code == 429:
+            return "model_rate_limited"
+        if self.status_code in {408, 504}:
+            return "model_timeout"
+        if 500 <= self.status_code <= 599:
+            return "model_upstream_error"
+        return "model_request_rejected"
 
 
 class ResponsesTransport(Protocol):
@@ -295,8 +332,14 @@ class OpenAIResponsesHTTPTransport:
             except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
                 pass
             raise ModelHTTPError(exc.code, error_code) from exc
-        except (URLError, TimeoutError, socket.timeout) as exc:
-            raise ModelServiceError("OpenAI Responses API is temporarily unavailable") from exc
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise ModelTimeoutError("OpenAI Responses API timed out") from exc
+            raise ModelConnectionError(
+                "Unable to connect to the OpenAI Responses API"
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise ModelTimeoutError("OpenAI Responses API timed out") from exc
         except json.JSONDecodeError as exc:
             raise ModelOutputError("OpenAI Responses API returned invalid JSON") from exc
         if not isinstance(result, dict):
@@ -2248,6 +2291,87 @@ class OpenAIStageGenerator:
         response = self.transport.create(focus_payload)
         return _parse_compact_intent_response(response)
 
+    def _recover_emvr_formula_phase(
+        self,
+        intent_input: str,
+        phase: str,
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+        """Recover the one action that can move the active formula phase.
+
+        The general task planner can return a valid envelope while omitting
+        the formula-flow action entirely.  That used to make a clear broad
+        topic such as ``a static-electric-field experiment`` replay the entry
+        prompt forever.  This retry is still semantic: it receives the full
+        pending action, formula catalog, saved flow state and student turn,
+        but its output vocabulary is narrowed to the action allowed by the
+        current deterministic phase.
+        """
+
+        required_by_phase = {
+            TOPIC_RECEIVED: "SET_EMVR_TOPIC",
+            FORMULA_CANDIDATES_PRESENTED: "SELECT_EMVR_FORMULAS",
+            FORMULA_COMPOSITION_REVIEW: "SET_EMVR_FORMULA_COMPOSITION",
+            EXPERIMENT_METHODS_PRESENTED: "SELECT_EMVR_EXPERIMENT_METHODS",
+            EXPERIMENT_DIRECTION_REVIEW: "REVISE_EMVR_DIRECTION或LOCK_EMVR_DIRECTION",
+        }
+        required_action = required_by_phase.get(phase)
+        if not required_action:
+            raise ModelOutputError("The EMVR formula phase has no recovery action")
+        payload = {
+            "model": self.model,
+            "instructions": (
+                "你只负责判断当前EMVR公式入口这一小步，不回答学生，也不写普通设计字段。"
+                f"当前阶段是{phase}，允许推进的动作是{required_action}。"
+                "必须结合输入中的user_message、previous_question、pending_action、"
+                "emvr_formula_flow、公式档案和实验方法候选理解整句话，不能按关键词匹配。"
+                "学生给出宽泛或具体课程主题时也属于有效主题；不要因为没有同时给出对象、变量、"
+                "观察量和公式而拒绝SET_EMVR_TOPIC。选择、组合、修改或确认必须只引用当前状态中"
+                "真实存在的稳定ID。若学生在方向审阅中同时修改多个部分，分别写进brief_updates；"
+                "若明确认可当前草稿则使用LOCK_EMVR_DIRECTION。"
+                "content必须是符合该公式流程动作契约的JSON对象字符串。source_text逐字复制支持"
+                "该动作的最小学生原文。只有整句在当前步骤确实没有可执行含义时才返回UNRESOLVED。"
+                "只返回action-only结构。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": intent_input}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_emvr_formula_phase_recovery",
+                    "schema": _compact_intent_response_schema(),
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": max(self.intent_max_output_tokens, 1800),
+            "store": False,
+        }
+        response = self.transport.create(payload)
+        raw, resolved_value, semantic_updates = _parse_compact_intent_response(
+            response
+        )
+        normalized, _ = normalize_dialogue_acts(
+            raw.get("dialogue_acts", []),
+            pending_action=None,
+        )
+        allowed = (
+            {"REVISE_EMVR_DIRECTION", "LOCK_EMVR_DIRECTION"}
+            if phase == EXPERIMENT_DIRECTION_REVIEW
+            else {required_action}
+        )
+        if not any(
+            str(act.get("type") or "").upper() in allowed
+            for act in normalized
+        ):
+            raise ModelOutputError(
+                "The focused EMVR formula recovery omitted the phase action"
+            )
+        return raw, resolved_value, semantic_updates
+
     def _recover_guided_design_turn(
         self,
         intent_input: str,
@@ -2318,6 +2442,270 @@ class OpenAIStageGenerator:
         }
         response = self.transport.create(payload)
         return _parse_compact_intent_response(response)
+
+    def _recover_pending_reference_decision(
+        self,
+        intent_input: str,
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+        """Resolve acceptance/advance of a visible reference semantically.
+
+        This pass is used only when a pending action contains a concrete
+        reference proposal and the broad planner produced no executable act.
+        It prevents short or sentence-level confirmations from being stored
+        as procedure content, while still leaving substantive modifications
+        to the ordinary multi-action parser.
+        """
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["ACCEPT", "ADVANCE", "OTHER"],
+                },
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["decision", "confidence"],
+            "additionalProperties": False,
+        }
+        payload = {
+            "model": self.model,
+            "instructions": (
+                "只判断学生是否接受当前页面已经展示的参考草稿并继续，不回答学生。"
+                "必须结合previous_question、pending_action.proposal和完整user_message判断语义，"
+                "不能按关键词匹配。ACCEPT表示认可并沿用草稿；ADVANCE表示认可当前内容且要求进入"
+                "后续部分；OTHER包括提出实质修改、提出问题、索取另一份参考或含义不清。"
+                "学生说明草稿能够完成比较并要求继续，应判为ADVANCE；这类会话控制不能写入实验字段。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": intent_input}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_pending_reference_decision",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": 500,
+            "store": False,
+        }
+        response = self.transport.create(payload)
+        try:
+            decision = json.loads(_extract_output_text(response))
+        except (json.JSONDecodeError, ModelOutputError) as exc:
+            raise ModelOutputError(
+                "Pending reference decision response was invalid"
+            ) from exc
+        decision_name = str(decision.get("decision") or "OTHER").upper()
+        try:
+            confidence = float(decision.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if decision_name not in {"ACCEPT", "ADVANCE"} or confidence < 0.75:
+            raise ModelOutputError("Pending reference was not accepted")
+        act = {
+            "type": "CONTROL",
+            # A visible reference must be accepted before it can be advanced.
+            # Keeping this as ACCEPT lets the state machine materialize the
+            # proposal; ``advance_requested`` below then performs exactly one
+            # transition without treating the control text as field content.
+            "target": "ACCEPT",
+            "operation": "EXECUTE",
+            "content": None,
+            "source_text": "",
+            "confidence": confidence,
+        }
+        raw = {
+            "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+            "target": "",
+            "resolved_value_json": None,
+            "advance_requested": True,
+            "preserve_current_design": True,
+            "confidence": confidence,
+            "dialogue_acts": [act],
+            "dialogue_acts_json": json.dumps([act], ensure_ascii=False),
+        }
+        return raw, None, {"control_actions": [act["target"]]}
+
+    def _recover_pending_comparison_decisions(
+        self,
+        intent_input: str,
+        user_message: str,
+        pending_comparisons: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Recover explicit treatment of suggested comparison cases.
+
+        Stage-one replies often answer a facet and adopt a visible comparison
+        in the same sentence.  A broad parser can preserve the facet while
+        omitting the comparison action, leaving the summary to claim that the
+        cases are still undefined.  This focused semantic review never writes
+        a design field itself: it may only bind the student's meaning to one
+        of the stable comparison IDs already present in state.
+        """
+
+        candidates = [
+            {
+                "comparison_id": str(item.get("comparison_id") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "recommended_cases": [
+                    str(case).strip()
+                    for case in item.get("recommended_cases", [])
+                    if str(case).strip()
+                ],
+            }
+            for item in pending_comparisons
+            if isinstance(item, dict)
+            and str(item.get("comparison_id") or "").strip()
+            and str(item.get("adoption_status") or "PENDING").upper() == "PENDING"
+        ]
+        if not candidates:
+            return []
+        try:
+            structured_turn_context: Any = json.loads(intent_input)
+        except json.JSONDecodeError:
+            # The production caller supplies serialized JSON. Keep direct
+            # callers safe without guessing a design field from malformed
+            # text.
+            structured_turn_context = {"serialized_context": intent_input}
+        schema = {
+            "type": "object",
+            "properties": {
+                "decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "comparison_id": {"type": "string"},
+                            "decision": {
+                                "type": "string",
+                                "enum": ["ACCEPT", "MODIFY", "REJECT", "UNRELATED"],
+                            },
+                            "cases": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 8,
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
+                        },
+                        "required": [
+                            "comparison_id",
+                            "decision",
+                            "cases",
+                            "confidence",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    "maxItems": 6,
+                }
+            },
+            "required": ["decisions"],
+            "additionalProperties": False,
+        }
+        payload = {
+            "model": self.model,
+            "instructions": (
+                "你只判断学生本轮是否明确采用、修改或拒绝页面中尚待确认的基础比较，"
+                "不回答学生，也不判断其他设计字段。必须结合完整user_message、上一问题和"
+                "候选比较的稳定ID理解语义，不能按关键词匹配。学生只是在讨论某个物理现象"
+                "而没有把它作为实验对照时返回UNRELATED；学生明确把候选情形写进研究问题、"
+                "实验结构或比较方案时，应视为采用。ACCEPT只允许沿用该ID已有的recommended_cases；"
+                "MODIFY的cases只保留学生明确表达的最终比较情形；不得创造新的物理条件。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": json.dumps(
+                                {
+                                    "turn_context": structured_turn_context,
+                                    "pending_comparisons": candidates,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_pending_comparison_decisions",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": 900,
+            "store": False,
+        }
+        response = self.transport.create(payload)
+        try:
+            result = json.loads(_extract_output_text(response))
+        except (json.JSONDecodeError, ModelOutputError) as exc:
+            raise ModelOutputError(
+                "Pending comparison decision response was invalid"
+            ) from exc
+        candidates_by_id = {item["comparison_id"]: item for item in candidates}
+        acts: list[dict[str, Any]] = []
+        for decision in result.get("decisions", []):
+            if not isinstance(decision, dict):
+                continue
+            comparison_id = str(decision.get("comparison_id") or "").strip()
+            candidate = candidates_by_id.get(comparison_id)
+            decision_name = str(decision.get("decision") or "UNRELATED").upper()
+            try:
+                confidence = float(decision.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if candidate is None or confidence < 0.82:
+                continue
+            if decision_name == "ACCEPT":
+                cases = list(candidate["recommended_cases"])
+            elif decision_name == "MODIFY":
+                cases = list(
+                    dict.fromkeys(
+                        str(case).strip()
+                        for case in decision.get("cases", [])
+                        if str(case).strip()
+                    )
+                )
+                if not cases:
+                    continue
+            elif decision_name == "REJECT":
+                cases = []
+            else:
+                continue
+            acts.append(
+                {
+                    "type": "MODIFY_COMPARISON",
+                    "target": comparison_id,
+                    "operation": "REPLACE",
+                    "content": {
+                        "comparison_id": comparison_id,
+                        "action": decision_name,
+                        "cases": cases,
+                        "replace_all": decision_name == "MODIFY",
+                    },
+                    "source_text": user_message,
+                    "source_start": 0,
+                    "source_end": len(user_message),
+                    "semantic_key": f"comparison:{comparison_id}",
+                    "confidence": confidence,
+                }
+            )
+        return acts
 
     def _verify_scene_batch_request(
         self,
@@ -2424,6 +2812,23 @@ class OpenAIStageGenerator:
         }
 
     def resolve_intent(
+        self,
+        session: DesignSession,
+        user_message: str,
+        pending_action: dict[str, Any] | None,
+        carried_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return self._resolve_intent_impl(
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            )
+        except ModelServiceError as exc:
+            raise exc.mark_phase("intent_analysis")
+
+    def _resolve_intent_impl(
         self,
         session: DesignSession,
         user_message: str,
@@ -3343,6 +3748,155 @@ class OpenAIStageGenerator:
             for item in normalized_emvr_acts
             if isinstance(item, dict)
         )
+        formula_flow_context = carried_context.get("emvr_formula_flow", {})
+        formula_flow_context = (
+            formula_flow_context
+            if isinstance(formula_flow_context, dict)
+            else {}
+        )
+        formula_phase = str(formula_flow_context.get("phase") or "")
+        required_formula_actions = {
+            TOPIC_RECEIVED: {"SET_EMVR_TOPIC"},
+            FORMULA_CANDIDATES_PRESENTED: {"SELECT_EMVR_FORMULAS"},
+            FORMULA_COMPOSITION_REVIEW: {"SET_EMVR_FORMULA_COMPOSITION"},
+            EXPERIMENT_METHODS_PRESENTED: {"SELECT_EMVR_EXPERIMENT_METHODS"},
+            EXPERIMENT_DIRECTION_REVIEW: {
+                "REVISE_EMVR_DIRECTION",
+                "LOCK_EMVR_DIRECTION",
+            },
+        }.get(formula_phase, set())
+        has_phase_formula_action = any(
+            str(item.get("type") or "").upper() in required_formula_actions
+            for item in normalized_emvr_acts
+            if isinstance(item, dict)
+        )
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and formula_phase != EMVR_DETAIL_DESIGN
+            and required_formula_actions
+            and not has_phase_formula_action
+            and not has_routable_nonwrite_act
+        ):
+            previous_result = (raw, resolved_value, semantic_updates)
+            try:
+                raw, resolved_value, semantic_updates = (
+                    self._recover_emvr_formula_phase(intent_input, formula_phase)
+                )
+            except ModelOutputError:
+                raw, resolved_value, semantic_updates = previous_result
+            except ModelServiceError:
+                # This action is the only transition accepted by the active
+                # formula phase.  Hiding an outage here would turn it into an
+                # ordinary UNCLEAR result and replay the same entry prompt.
+                # Let the fallback layer expose a retryable service failure
+                # while the formula state keeps the student's turn intact.
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise
+            raw_dialogue_acts = raw.get("dialogue_acts", [])
+            has_executable_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    isinstance(item, dict)
+                    and str(item.get("type") or "").upper()
+                    in DIALOGUE_ACT_TYPES
+                    and str(item.get("type") or "").upper() != "UNRESOLVED"
+                    for item in raw_dialogue_acts
+                )
+            )
+            has_state_writing_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    _dialogue_act_writes_state(item)
+                    for item in raw_dialogue_acts
+                )
+            )
+            repaired_intent = str(raw.get("intent") or "UNCLEAR")
+        pending_comparisons = carried_context.get("baseline_comparisons", [])
+        pending_comparisons = (
+            pending_comparisons if isinstance(pending_comparisons, list) else []
+        )
+        has_comparison_action = any(
+            isinstance(item, dict)
+            and str(item.get("type") or "").upper() == "MODIFY_COMPARISON"
+            for item in raw_dialogue_acts
+        )
+        if (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and has_state_writing_dialogue_acts
+            and not has_comparison_action
+            and any(
+                isinstance(item, dict)
+                and str(item.get("adoption_status") or "PENDING").upper()
+                == "PENDING"
+                for item in pending_comparisons
+            )
+        ):
+            try:
+                comparison_acts = self._recover_pending_comparison_decisions(
+                    intent_input,
+                    user_message,
+                    pending_comparisons,
+                )
+            except (ModelOutputError, ModelServiceError):
+                comparison_acts = []
+            if comparison_acts:
+                raw_dialogue_acts = [*raw_dialogue_acts, *comparison_acts]
+                raw["dialogue_acts"] = raw_dialogue_acts
+                raw["dialogue_acts_json"] = json.dumps(
+                    raw_dialogue_acts,
+                    ensure_ascii=False,
+                )
+                has_executable_dialogue_acts = True
+                has_state_writing_dialogue_acts = True
+        pending_proposal = (
+            pending_action.get("proposal", {})
+            if isinstance(pending_action, dict)
+            and isinstance(pending_action.get("proposal"), dict)
+            else {}
+        )
+        has_confirmable_reference = bool(
+            isinstance(pending_action, dict)
+            and (
+                pending_action.get("advance_on_accept") is True
+                or pending_proposal.get("reference_draft")
+            )
+        )
+        if (
+            has_confirmable_reference
+            and not has_executable_dialogue_acts
+            and repaired_intent in {
+                "UNCLEAR",
+                "ANSWER_CURRENT_QUESTION",
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "ADVANCE_STAGE",
+            }
+        ):
+            previous_result = (raw, resolved_value, semantic_updates)
+            try:
+                raw, resolved_value, semantic_updates = (
+                    self._recover_pending_reference_decision(intent_input)
+                )
+            except (ModelOutputError, ModelServiceError):
+                raw, resolved_value, semantic_updates = previous_result
+            raw_dialogue_acts = raw.get("dialogue_acts", [])
+            has_executable_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    isinstance(item, dict)
+                    and str(item.get("type") or "").upper()
+                    in DIALOGUE_ACT_TYPES
+                    and str(item.get("type") or "").upper() != "UNRESOLVED"
+                    for item in raw_dialogue_acts
+                )
+            )
+            has_state_writing_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(_dialogue_act_writes_state(item) for item in raw_dialogue_acts)
+            )
+            repaired_intent = str(raw.get("intent") or "UNCLEAR")
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and session.current_stage is Stage.IDEA_BRAINSTORMING
@@ -3786,6 +4340,16 @@ class OpenAIStageGenerator:
         return validated
 
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
+        try:
+            return self._generate_impl(session, user_message)
+        except ModelServiceError as exc:
+            raise exc.mark_phase("response_generation")
+
+    def _generate_impl(
+        self,
+        session: DesignSession,
+        user_message: str,
+    ) -> StepOutput:
         if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
             return RuleBasedStageGenerator().generate(session, user_message)
         packet = build_prompt_packet(

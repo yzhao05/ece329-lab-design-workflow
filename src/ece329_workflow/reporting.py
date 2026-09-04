@@ -47,6 +47,7 @@ _FIELD_LABELS = {
     "primary_topic": "主要课程主题",
     "secondary_topics": "相关课程主题",
     "selected_direction": "设计方向",
+    "course_relationship": "课程关系",
     "selection_reason": "采用理由",
     "vr_suitability": "适合VR的原因",
     "lab_title": "实验名称",
@@ -59,6 +60,7 @@ _FIELD_LABELS = {
     "main_research_question": "研究问题",
     "adjustable_quantity_in_vr": "VR中可调内容",
     "observable_quantity_in_vr": "VR中可观察内容",
+    "comparison_cases": "比较情形",
     "physical_mechanism": "物理机制",
     "core_equations": "核心公式",
     "formula_support_map": "理论关系与研究内容的对应",
@@ -155,6 +157,7 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "primary_topic",
         "secondary_topics",
         "selected_direction",
+        "course_relationship",
         "selection_reason",
         "vr_suitability",
     ),
@@ -169,6 +172,7 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "main_research_question",
         "adjustable_quantity_in_vr",
         "observable_quantity_in_vr",
+        "comparison_cases",
     ),
     Stage.THEORETICAL_FRAMEWORK: (
         "physical_mechanism",
@@ -258,7 +262,15 @@ def _plain(value: Any, *, depth: int = 0) -> str:
     if isinstance(value, bool):
         return "是" if value else "否"
     if isinstance(value, (str, int, float)):
-        return str(value).strip()
+        text = str(value).strip()
+        return {
+            "high_if_aligned": "高（与学习目标一致时）",
+            "high_if_spatial": "高（空间观察确有必要时）",
+            "context_dependent": "取决于具体设计",
+            "NEEDS_ATTENTION": "仍需完善",
+            "PASS": "通过",
+            "READY": "已具备条件",
+        }.get(text, text)
     if depth >= 2:
         return ""
     if isinstance(value, list):
@@ -674,16 +686,51 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
         original = session.design_context.get("idea", {})
         brief = original.get("current_summary") or original.get("original", "") \
             if isinstance(original, dict) else ""
-    quality = evaluate_design_quality(session, final_review=True)
+    # The task report is rebuilt after every EMVR turn.  Running a final
+    # completeness review while the design is still in progress would persist
+    # future-stage omissions into the next prompt and could steer the
+    # conversation backwards.  Only the completed workflow receives the full
+    # final review.
+    quality = evaluate_design_quality(
+        session,
+        final_review=(session.status is WorkflowStatus.COMPLETE),
+    )
     quality_public = public_quality_review(quality, max_issues=8)
+    causal = quality_public.get("causal_chain", {})
+    causal = causal if isinstance(causal, dict) else {}
+    causal_text = "；".join(
+        part
+        for part in (
+            f"改变：{_plain(causal.get('cause'))}" if _plain(causal.get("cause")) else "",
+            f"观察：{_plain(causal.get('response'))}" if _plain(causal.get("response")) else "",
+            f"依据：{_plain(causal.get('mechanism'))}" if _plain(causal.get("mechanism")) else "",
+            f"比较：{_plain(causal.get('comparison'))}" if _plain(causal.get("comparison")) else "",
+            f"能否回答研究问题：{_plain(causal.get('answerability'))}" if _plain(causal.get("answerability")) else "",
+        )
+        if part
+    )
+    feasibility = quality_public.get("feasibility", {})
+    feasibility = feasibility if isinstance(feasibility, dict) else {}
+    feasibility_labels = (
+        ("independent_variable_can_change", "自变量可调整"),
+        ("observation_can_be_recorded", "观察量可记录"),
+        ("comparison_is_defined", "基准或比较条件已定义"),
+        ("controls_are_defined", "控制条件已定义"),
+        ("procedure_can_test_hypothesis", "流程能够检验假设"),
+        ("course_link_is_defined", "课程关系已明确"),
+    )
+    feasibility_text = "；".join(
+        f"{label}：{'是' if feasibility.get(field) else '否'}"
+        for field, label in feasibility_labels
+    )
     quality_items: list[dict[str, str]] = [
         {
             "label": "因果链",
-            "value": _plain(quality_public.get("causal_chain")),
+            "value": causal_text,
         },
         {
             "label": "概念可行性",
-            "value": _plain(quality_public.get("feasibility")),
+            "value": feasibility_text,
         },
     ]
     for index, issue in enumerate(quality_public.get("issues", []), start=1):
@@ -702,17 +749,43 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
                 }
             )
     if quality_public.get("boundary_cases"):
+        boundary_text = "；".join(
+            "：".join(
+                part
+                for part in (
+                    _plain(item.get("case")),
+                    _plain(item.get("relevance")),
+                )
+                if part
+            )
+            for item in quality_public.get("boundary_cases", [])
+            if isinstance(item, dict)
+        )
         quality_items.append(
             {
                 "label": "边界情形",
-                "value": _plain(quality_public.get("boundary_cases")),
+                "value": boundary_text,
             }
         )
     if quality_public.get("traceability"):
+        traceability_text = "；".join(
+            " — ".join(
+                part
+                for part in (
+                    f"{_plain(item.get('design_field_label'))}：{_plain(item.get('course_item'))}",
+                    _plain(item.get("purpose")),
+                )
+                if part
+            )
+            for item in quality_public.get("traceability", [])
+            if isinstance(item, dict)
+            and _plain(item.get("design_field_label"))
+            and _plain(item.get("course_item"))
+        )
         quality_items.append(
             {
                 "label": "课程关系与设计来源",
-                "value": _plain(quality_public.get("traceability")),
+                "value": traceability_text,
             }
         )
     if session.status is WorkflowStatus.COMPLETE:
@@ -878,6 +951,167 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
     return buffer.getvalue()
 
 
+def emvr_stage_completeness_issues(
+    session: DesignSession,
+    stage: Stage,
+) -> list[dict[str, str]]:
+    """List omissions owned by one EMVR stage before it may advance.
+
+    The final PDF validator used to discover some early-stage omissions only
+    after the workflow reached its last step.  At that point the student no
+    longer had a contextual question to answer, which could produce a retry
+    loop.  These checks keep every Builder-facing requirement with the stage
+    that creates it.
+    """
+
+    payload = effective_emvr_stage_payload(session, stage)
+    issues: list[dict[str, str]] = []
+
+    def require(field: str, label: str, question: str) -> None:
+        if not _plain(payload.get(field)):
+            issues.append({"field": field, "label": label, "question": question})
+
+    if stage is Stage.IDEA_BRAINSTORMING:
+        emvr = session.design_context.get("emvr_design", {})
+        emvr = emvr if isinstance(emvr, dict) else {}
+        formula_flow = emvr.get("formula_flow")
+        if isinstance(formula_flow, dict):
+            brief = effective_experiment_brief(session)
+            if (
+                formula_flow.get("phase") != EMVR_DETAIL_DESIGN
+                or formula_flow.get("direction_locked") is not True
+            ):
+                issues.append({
+                    "field": "experiment_brief",
+                    "label": "已锁定的公式驱动实验方向",
+                    "question": "请先确认公式、实验方法和最终实验方向，再继续细化设计。",
+                })
+            for field, label, question in (
+                ("topic", "实验主题", "请明确这个实验最终研究的物理主题。"),
+                ("primary_formula_ids", "主要公式", "请确认真正用于计算或解释本实验的主要公式。"),
+                ("selected_experiment_method_ids", "实验方法", "请确认采用哪一种公式驱动的实验方法。"),
+                ("objects", "研究对象", "请明确学生要操作或比较的物理对象。"),
+                ("operations", "核心操作", "请明确学生在实验中的核心操作。"),
+                ("changed_quantities", "变化量", "请明确实验主动改变的物理量。"),
+                ("observed_quantities", "观察量", "请明确实验需要观察或记录的物理响应。"),
+                ("boundary_conditions", "公式适用边界", "请明确所选公式成立所需的边界或近似条件。"),
+            ):
+                if not _plain(brief.get(field)):
+                    issues.append({"field": field, "label": label, "question": question})
+        return issues
+
+    if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
+        require("lab_title", "实验名称", "请为实验确定一个简洁名称。")
+        require("lab_id", "Builder实验ID", "请确定符合格式要求的 Builder 实验ID。")
+        require("selected_direction", "设计方向", "请确认本实验最终采用的设计方向。")
+        require("course_relationship", "课程关系", "请说明相关 ECE329 概念具体支持实验中的哪部分。")
+    elif stage is Stage.LEARNING_OBJECTIVES:
+        for field, label in (
+            ("conceptual_objective", "概念目标"),
+            ("calculation_objective", "计算目标"),
+            ("analysis_objective", "分析目标"),
+            ("vr_interaction_objective", "交互目标"),
+        ):
+            require(field, label, f"请补充能够由本实验检验的{label}。")
+    elif stage is Stage.RESEARCH_QUESTION:
+        require("main_research_question", "研究问题", "请明确改变什么、观察什么，以及比较关系。")
+        require("adjustable_quantity_in_vr", "VR中可调内容", "请明确学生在VR中实际改变的物理量。")
+        require("observable_quantity_in_vr", "VR中可观察内容", "请明确用于回答研究问题的观察量。")
+    elif stage is Stage.THEORETICAL_FRAMEWORK:
+        require("physical_mechanism", "物理机制", "请说明所选公式如何把变化量连接到观察量。")
+        require("core_equations", "理论关系", "请确认真正参与当前实验计算或解释的公式。")
+        require("formula_support_map", "公式与设计内容的对应", "请说明每条公式具体支持哪个变化量、观察量或边界条件。")
+        require("simulation_inputs", "理论计算输入", "请明确公式计算所需的输入量。")
+        require("calculated_outputs", "理论计算输出", "请明确公式实际计算并显示的输出量。")
+    elif stage is Stage.HYPOTHESIS:
+        require("research_hypothesis", "研究假设", "请给出与研究问题对应的方向性假设。")
+        require("expected_trend", "预期趋势", "请说明主要参数变化时预期出现的可观察趋势。")
+        require("limiting_cases", "边界情形", "请至少说明基准、极限或模型失效情形。")
+    elif stage is Stage.CONCEPTUAL_OR_VR_SETUP:
+        for field, label, question in (
+            ("desktop_interaction_plan", "桌面鼠标操作与VR映射", "请说明鼠标怎样操作哪个对象，并写清对应的VR操作。"),
+            ("room_spatial_requirements", "房间空间与相对摆放", "请说明站位、对象、面板和观察空间的相对安排。"),
+            ("hidden_object_lifecycle", "初始隐藏与触发后状态", "请说明隐藏对象、触发方式和出现后状态；没有则明确写“无”。"),
+            ("interactions", "交互与反馈", "请明确每项学生操作及其可见反馈。"),
+            ("physics_layer", "物理计算层", "请明确交互输入、理论输出和更新规则。"),
+            ("visualization_layer", "可视化层", "请明确各视觉元素对应的物理量。"),
+            ("measurement_interface", "数据显示", "请明确学生能够读取和记录哪些结果。"),
+        ):
+            require(field, label, question)
+        inventory = payload.get("object_inventory")
+        required_object_fields = {
+            "object_name", "category", "purpose", "student_interaction",
+            "physics_or_data_state", "visual_feedback", "required",
+        }
+        if not isinstance(inventory, list) or len(inventory) < 5 or any(
+            not isinstance(item, dict)
+            or any(item.get(field) in (None, "", [], {}) for field in required_object_fields)
+            for item in (inventory if isinstance(inventory, list) else [])
+        ):
+            issues.append({
+                "field": "object_inventory",
+                "label": "完整Unity物体清单",
+                "question": "请补全至少五类必要对象，并为每个对象说明用途、交互、状态和可见反馈。",
+            })
+    elif stage is Stage.VARIABLES_AND_CONDITIONS:
+        for field, label, question in (
+            ("independent_variable", "自变量", "请明确主要自变量及其Unity控制方式。"),
+            ("dependent_variable", "观察量", "请明确与研究问题对应的观察量。"),
+            ("controlled_variables", "控制条件", "请明确公平比较时保持不变的条件。"),
+            ("reference_condition", "基准条件", "请明确用于比较和重置的基准状态。"),
+            ("parameter_specifications", "参数范围、单位与步长", "请给出所有主要自变量的范围、单位和步长或离散选项。"),
+        ):
+            require(field, label, question)
+    elif stage is Stage.CONCEPTUAL_PROCEDURE:
+        steps = payload.get("procedure_steps")
+        if not isinstance(steps, list) or len(steps) < 5 or any(not _plain(item) for item in steps):
+            issues.append({
+                "field": "procedure_steps",
+                "label": "完整实验流程",
+                "question": "请补全从基准、操作、观察、记录、比较到解释的有序实验流程。",
+            })
+        require("comparison_logic", "比较逻辑", "请说明各次比较如何只改变目标条件并保持其余条件一致。")
+    elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        require("trend_annotation", "趋势标注", "请说明理论趋势在界面上如何标注。")
+        require("unity_update_event", "Unity更新触发", "请说明哪项操作会触发理论结果与可视化刷新。")
+        stored = session.stage_outputs.get(stage.value, {})
+        visual = stored.get("visualization") if isinstance(stored, dict) else None
+        if not _plain(payload.get("student_visualization_requirements")) and not isinstance(visual, dict):
+            issues.append({
+                "field": "visualization_requirements",
+                "label": "显示内容",
+                "question": "请明确需要保留的数值、曲线或空间可视化。",
+            })
+    elif stage is Stage.RESULT_INTERPRETATION:
+        for field, label, question in (
+            ("expected_results", "Lab特有预期结果", "请说明各主要比较情形下应出现的具体结果。"),
+            ("acceptance_criteria", "Lab特有通过条件", "请明确学生必须完成的操作和可观察通过标准。"),
+            ("report_questions", "实验报告问题", "请给出直接检验研究问题与理论解释的报告问题。"),
+            ("if_prediction_supported", "符合预期时的解释", "请说明结果符合预期时能够支持什么结论。"),
+            ("if_opposite_trend", "趋势相反时的解释", "请说明趋势相反时需要检查什么。"),
+            ("if_no_clear_change", "变化不明显时的解释", "请说明变化不明显时如何区分物理结果与显示问题。"),
+        ):
+            require(field, label, question)
+    elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
+        for field, label, question in (
+            ("limitations", "设计局限", "请明确模型假设、适用边界和可视化不能代表的内容。"),
+            ("conceptual_feasibility", "概念可行性", "请核对变量能否独立改变、结果能否观察并回答研究问题。"),
+            ("teaching_value", "教学价值", "请说明这套实验如何支持已确认的学习目标。"),
+            ("vr_added_value", "VR附加价值", "请说明空间观察或交互相较平面展示增加了什么学习价值。"),
+        ):
+            require(field, label, question)
+    elif stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+        require("proposal_sections", "最终报告结构", "请完成最终报告结构汇总。")
+    return issues
+
+
+def validate_emvr_stage_completeness(session: DesignSession, stage: Stage) -> None:
+    issues = emvr_stage_completeness_issues(session, stage)
+    if issues:
+        labels = "、".join(dict.fromkeys(item["label"] for item in issues))
+        raise ValueError(f"本阶段仍需明确：{labels}")
+
+
 def validate_emvr_report_completeness(session: DesignSession) -> None:
     if session.interaction_state is not InteractionState.EMVR_DIRECT:
         raise ValueError("EMVR report validation requires an EMVR design")
@@ -890,126 +1124,11 @@ def validate_emvr_report_completeness(session: DesignSession) -> None:
     validate_builder_requirements(session)
     evaluate_design_quality(session, final_review=True)
 
-    def payload(stage: Stage) -> dict[str, Any]:
-        return effective_emvr_stage_payload(session, stage)
-
-    missing_sections: list[str] = []
-
-    emvr = session.design_context.get("emvr_design", {})
-    emvr = emvr if isinstance(emvr, dict) else {}
-    formula_flow = emvr.get("formula_flow")
-    if isinstance(formula_flow, dict):
-        brief = effective_experiment_brief(session)
-        if (
-            formula_flow.get("phase") != EMVR_DETAIL_DESIGN
-            or formula_flow.get("direction_locked") is not True
-        ):
-            missing_sections.append("已锁定的公式驱动实验方向")
-        required_brief_fields = {
-            "topic": "实验主题",
-            "primary_formula_ids": "主要公式",
-            "selected_experiment_method_ids": "实验方法",
-            "objects": "研究对象",
-            "operations": "核心操作",
-            "changed_quantities": "变化量",
-            "observed_quantities": "观察量",
-            "boundary_conditions": "公式适用边界",
-        }
-        for field, label in required_brief_fields.items():
-            if not _plain(brief.get(field)):
-                missing_sections.append(label)
-
-    research = payload(Stage.RESEARCH_QUESTION)
-    if not _plain(research.get("main_research_question")):
-        missing_sections.append("研究问题")
-
-    objectives = payload(Stage.LEARNING_OBJECTIVES)
-    required_objectives = (
-        "conceptual_objective",
-        "calculation_objective",
-        "analysis_objective",
-        "vr_interaction_objective",
-    )
-    if any(not _plain(objectives.get(key)) for key in required_objectives):
-        missing_sections.append("学习目标")
-
-    theory = payload(Stage.THEORETICAL_FRAMEWORK)
-    if not _plain(theory.get("physical_mechanism")):
-        missing_sections.append("物理机制")
-    if not _plain(theory.get("core_equations")):
-        missing_sections.append("理论关系")
-    if not _plain(theory.get("formula_support_map")):
-        missing_sections.append("理论关系与观察内容的对应")
-
-    hypothesis = payload(Stage.HYPOTHESIS)
-    if not _plain(hypothesis.get("research_hypothesis")):
-        missing_sections.append("研究假设")
-    if not _plain(hypothesis.get("expected_trend")):
-        missing_sections.append("预期趋势")
-
-    variables = payload(Stage.VARIABLES_AND_CONDITIONS)
-    if not _plain(variables.get("independent_variable")):
-        missing_sections.append("自变量")
-    if not _plain(variables.get("dependent_variable")):
-        missing_sections.append("观察量")
-    if not _plain(variables.get("controlled_variables")):
-        missing_sections.append("控制条件")
-
-    setup = payload(Stage.CONCEPTUAL_OR_VR_SETUP)
-    inventory = setup.get("object_inventory")
-    required_object_fields = {
-        "object_name",
-        "category",
-        "purpose",
-        "student_interaction",
-        "physics_or_data_state",
-        "visual_feedback",
-        "required",
-    }
-    if not isinstance(inventory, list) or len(inventory) < 5:
-        missing_sections.append("完整Unity物体清单")
-    elif any(
-        not isinstance(item, dict)
-        or any(key not in item or item.get(key) in (None, "") for key in required_object_fields)
-        for item in inventory
-    ):
-        missing_sections.append("Unity物体的用途、交互、物理状态和可见反馈")
-
-    procedure = payload(Stage.CONCEPTUAL_PROCEDURE).get("procedure_steps")
-    if (
-        not isinstance(procedure, list)
-        or len(procedure) < 5
-        or any(not isinstance(step, str) or not step.strip() for step in procedure)
-    ):
-        missing_sections.append("完整实验流程")
-
-    visualization = payload(Stage.EXPECTED_DATA_VISUALIZATION)
-    stored_visualization = session.stage_outputs.get(
-        Stage.EXPECTED_DATA_VISUALIZATION.value, {}
-    )
-    visual_plan = (
-        stored_visualization.get("visualization")
-        if isinstance(stored_visualization, dict)
-        else None
-    )
-    if not (
-        _plain(visualization.get("student_visualization_requirements"))
-        or _plain(visualization.get("trend_annotation"))
-        or _plain(visual_plan)
-    ):
-        missing_sections.append("可视化方式")
-
-    interpretation = payload(Stage.RESULT_INTERPRETATION)
-    if not _plain(interpretation.get("if_prediction_supported")):
-        missing_sections.append("符合预期时的解释")
-    if not _plain(interpretation.get("if_opposite_trend")):
-        missing_sections.append("相反趋势的解释")
-    if not _plain(interpretation.get("if_no_clear_change")):
-        missing_sections.append("变化不明显时的解释")
-
-    limitations = payload(Stage.DESIGN_VALUE_AND_LIMITATIONS)
-    if not _plain(limitations.get("limitations")):
-        missing_sections.append("设计局限")
+    missing_sections = [
+        issue["label"]
+        for stage in Stage
+        for issue in emvr_stage_completeness_issues(session, stage)
+    ]
 
     if missing_sections:
         raise ValueError(

@@ -6,6 +6,7 @@ from typing import Any
 from .design_state import design_state_snapshot
 from .dialogue_acts import stage_design_state_snapshot
 from .emvr_design import merge_emvr_structured_requirements
+from .emvr_formula_flow import EMVR_FORMULA_ACTION_TYPES
 from .models import DesignSession, InteractionState, Stage
 
 
@@ -18,6 +19,10 @@ STATE_ACT_TYPES = frozenset(
         "MODIFY_COMPARISON",
         "NEW_TOPIC_CONTENT",
         "NEW_TOPIC",
+        # These actions write the EMVR formula-onboarding state rather than
+        # the ordinary design fields.  They are nevertheless executable state
+        # transitions and must never be downgraded to a clarification task.
+        *EMVR_FORMULA_ACTION_TYPES,
     }
 )
 SERVICE_ACT_TYPES = frozenset(

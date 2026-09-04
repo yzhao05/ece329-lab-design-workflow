@@ -21,6 +21,7 @@ from ece329_workflow.dialogue_state import (
 )
 from ece329_workflow.engine import (
     WorkflowEngine,
+    _reconcile_guided_stage_readiness,
     _guided_stage_should_auto_advance,
     _remove_repeated_guided_question,
 )
@@ -3552,6 +3553,12 @@ class DialogueStateTests(unittest.TestCase):
         session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value][
             "stage_payload"
         ]["awaiting_user_design_input"] = True
+        session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value][
+            "stage_payload"
+        ]["reference_condition"] = {
+            "purpose": "建立远距离基准",
+            "unity_action": "Reset/Reference preset",
+        }
         engine.store.save(session)
 
         result = engine.process_turn(
@@ -6954,6 +6961,133 @@ class DialogueStateTests(unittest.TestCase):
                             emvr_update
                             and emvr_update.get("comparison_cases")
                         )
+
+    def test_complete_variable_state_overrides_a_generated_extra_gap(self) -> None:
+        session = DesignSession(
+            design_id="variable-readiness-from-state",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "independent_variable",
+                    "operation": "REPLACE",
+                    "value": "两个电荷之间的距离",
+                },
+                {
+                    "field": "observations",
+                    "operation": "REPLACE",
+                    "value": "场线的弯曲、连接与弱场区",
+                },
+                {
+                    "field": "controlled_conditions",
+                    "operation": "REPLACE",
+                    "value": "电荷量、每组极性配置和环境保持不变",
+                },
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
+        output = StepOutput(
+            assistant_message="还需要再描述怎样推进距离。",
+            stage_payload={
+                "stage_readiness": {
+                    "ready_for_confirmation": False,
+                    "remaining_gaps": ["实验推进方式"],
+                }
+            },
+        )
+
+        _reconcile_guided_stage_readiness(
+            session,
+            Stage.VARIABLES_AND_CONDITIONS,
+            output,
+        )
+
+        self.assertEqual(
+            output.stage_payload["stage_readiness"],
+            {
+                "ready_for_confirmation": True,
+                "remaining_gaps": [],
+                "source": "COMMITTED_DESIGN_STATE",
+            },
+        )
+
+    def test_accepting_visible_procedure_reference_commits_it_before_advancing(self) -> None:
+        class AcceptReferenceGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                    advance_requested=True,
+                )
+
+        engine = WorkflowEngine(generator=AcceptReferenceGenerator())
+        session = DesignSession(
+            design_id="accept-procedure-reference",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.CONCEPTUAL_PROCEDURE),
+            design_context={
+                "idea": {"main_direction": "比较两种电荷配置随距离变化的场线"},
+            },
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "independent_variable",
+                    "operation": "REPLACE",
+                    "value": "两个电荷之间的距离",
+                },
+                {
+                    "field": "observations",
+                    "operation": "REPLACE",
+                    "value": "场线弯曲与连接形态",
+                },
+                {
+                    "field": "controlled_conditions",
+                    "operation": "REPLACE",
+                    "value": "电荷量与环境",
+                },
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
+        entry = guided_stage_entry_output(session)
+        reference = list(entry.stage_payload["reference_draft"])
+        save_pending_action(session, Stage.CONCEPTUAL_PROCEDURE, entry)
+        session.stage_outputs[Stage.CONCEPTUAL_PROCEDURE.value] = {
+            "revision": 1,
+            **entry.to_dict(),
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "这套流程能完成比较，按它继续后面的内容。"},
+        )
+
+        stored = engine.store.get(session.design_id)
+        stored_procedure = str(
+            stage_design_state_snapshot(stored)["procedure_steps"]
+        )
+        for step in reference:
+            self.assertIn(step, stored_procedure)
+        self.assertNotIn(
+            "这套流程能完成比较",
+            stored_procedure,
+        )
+        self.assertEqual(
+            result["current_stage"],
+            Stage.EXPECTED_DATA_VISUALIZATION.value,
+        )
 
 
 if __name__ == "__main__":

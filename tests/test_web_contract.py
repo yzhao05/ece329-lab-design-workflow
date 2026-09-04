@@ -159,7 +159,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('advanceQuickAction("保留这部分并继续")', self.app_js)
         self.assertRegex(
             self.app_js,
-            r"error instanceof ApiError && error\.status === 409[\s\S]{0,260}turnId: crypto\.randomUUID\(\)",
+            r"error instanceof ApiError && error\.code === \"session_conflict\"[\s\S]{0,320}turnId: crypto\.randomUUID\(\)",
         )
 
     def test_live_dialogue_eval_forces_the_real_openai_generator(self) -> None:
@@ -275,7 +275,12 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("自动同时纳入", self.app_js)
 
     def test_failed_api_request_preserves_real_session(self) -> None:
-        self.assertIn("当前设计已保留，请稍后重试", self.app_js)
+        self.assertIn("function requestFailurePresentation(error)", self.app_js)
+        self.assertIn("浏览器等待超时", self.app_js)
+        self.assertIn("模型输出未通过校验", self.app_js)
+        self.assertIn("后端到模型连接失败", self.app_js)
+        self.assertIn("设计存储异常", self.app_js)
+        self.assertIn("诊断编号", self.app_js)
         self.assertIn("await reloadApiDesignState()", self.app_js)
         self.assertNotIn("已自动切换为本地演示回答", self.app_js)
 
@@ -312,7 +317,8 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertRegex(self.styles_css, r"\.composer\s*\{\s*grid-row:\s*5;")
 
     def test_browser_timeout_exceeds_backend_model_timeout(self) -> None:
-        self.assertIn("REQUEST_TIMEOUT_MS: 70000", self.config_js)
+        self.assertIn("REQUEST_TIMEOUT_MS: 180000", self.config_js)
+        self.assertIn('timedOut ? "client_timeout" : "request_aborted"', self.app_js)
 
     def test_visualization_response_is_saved_and_points_are_normalized(self) -> None:
         self.assertIn("state.visualization = response.visualization", self.app_js)

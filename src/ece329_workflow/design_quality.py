@@ -278,6 +278,81 @@ def _required_fields_for_stage(stage: Stage, *, final_review: bool) -> tuple[str
     return stage_requirements.get(stage, ())
 
 
+def _emvr_stage_output_projection(session: DesignSession) -> dict[str, Any]:
+    """Project confirmed EMVR report artifacts into the quality vocabulary.
+
+    Student-authored field state remains authoritative.  Generated stage
+    artifacts are nevertheless confirmed design content after their stage is
+    accepted, and the final quality panel must not call those fields missing
+    merely because they use Builder-facing names.
+    """
+
+    def payload(stage: Stage) -> dict[str, Any]:
+        stored = session.stage_outputs.get(stage.value, {})
+        value = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
+        return value if isinstance(value, dict) else {}
+
+    objectives = payload(Stage.LEARNING_OBJECTIVES)
+    variables = payload(Stage.VARIABLES_AND_CONDITIONS)
+    result = payload(Stage.RESULT_INTERPRETATION)
+    visualization = payload(Stage.EXPECTED_DATA_VISUALIZATION)
+    stored_visualization = session.stage_outputs.get(
+        Stage.EXPECTED_DATA_VISUALIZATION.value, {}
+    )
+    visual_object = (
+        stored_visualization.get("visualization")
+        if isinstance(stored_visualization, dict)
+        else None
+    )
+    return {
+        "course_relationship": payload(Stage.COURSE_MAPPING_AND_DIRECTION).get(
+            "course_relationship"
+        ),
+        "learning_objective": [
+            objectives.get(field)
+            for field in (
+                "conceptual_objective",
+                "calculation_objective",
+                "analysis_objective",
+                "vr_interaction_objective",
+                "observation_objective",
+            )
+            if objectives.get(field)
+        ],
+        "research_question": payload(Stage.RESEARCH_QUESTION).get(
+            "main_research_question"
+        ),
+        "theoretical_framework": payload(Stage.THEORETICAL_FRAMEWORK).get(
+            "physical_mechanism"
+        ),
+        "hypothesis": payload(Stage.HYPOTHESIS).get("research_hypothesis"),
+        "expected_phenomenon": payload(Stage.HYPOTHESIS).get("expected_trend"),
+        "independent_variable": variables.get("independent_variable"),
+        "observations": variables.get("dependent_variable"),
+        "controlled_conditions": variables.get("controlled_variables"),
+        "procedure_steps": payload(Stage.CONCEPTUAL_PROCEDURE).get(
+            "procedure_steps"
+        ),
+        "visualization_plan": (
+            visualization.get("student_visualization_requirements")
+            or visualization.get("trend_annotation")
+            or visual_object
+        ),
+        "result_interpretation": [
+            result.get(field)
+            for field in (
+                "if_prediction_supported",
+                "if_opposite_trend",
+                "if_no_clear_change",
+            )
+            if result.get(field)
+        ],
+        "limitations": payload(Stage.DESIGN_VALUE_AND_LIMITATIONS).get(
+            "limitations"
+        ),
+    }
+
+
 def _provenance_trace(session: DesignSession) -> list[dict[str, Any]]:
     state = ensure_design_state(session)
     design_values = design_state_snapshot(session)
@@ -339,6 +414,17 @@ def evaluate_design_quality(
     # values it used previously.  This prevents a saved EMVR variable or
     # observation from being reported as missing at a later stage.
     snapshot = workflow_design_snapshot(session)
+    if session.interaction_state is InteractionState.EMVR_DIRECT:
+        stage_projection = _emvr_stage_output_projection(session)
+        snapshot = {
+            **snapshot,
+            **{
+                field: deepcopy(value)
+                for field, value in stage_projection.items()
+                if value not in (None, "", [], {})
+                and snapshot.get(field) in (None, "", [], {})
+            },
+        }
     semantic = normalize_quality_assessment(semantic_assessment)
     issues: list[dict[str, Any]] = []
 
@@ -434,7 +520,7 @@ def evaluate_design_quality(
                 "你希望用什么显示方式让不同条件下的结果可以直接比较？",
             )
         )
-    if question and not comparison_text and final_review:
+    if question and not comparison_text and not controls and final_review:
         issues.append(
             _local_issue(
                 "FEASIBILITY",

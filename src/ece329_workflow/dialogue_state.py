@@ -2152,6 +2152,7 @@ def validate_resolved_intent(
                 "comparison_updates",
             )
         )
+        formula_state_acts = bool(compiled_acts.get("emvr_formula_actions"))
         stage_one_direction_content = bool(
             merged_updates.get("selected_option_ids")
             or str(merged_updates.get("stage_one_direction_detail") or "").strip()
@@ -2161,7 +2162,9 @@ def validate_resolved_intent(
         stage_one_scene_response = str(
             merged_updates.get("stage_one_scene_response") or "NONE"
         )
-        authoritative_state_acts = bool(actions_authoritative and state_acts)
+        authoritative_state_acts = bool(
+            actions_authoritative and (state_acts or formula_state_acts)
+        )
         if {"SET_EMVR_MODE", "SET_GUIDED_MODE"} & controls:
             intent = UserIntent.SET_INTERACTION_STATE.value
         elif {"REQUEST_NEW_TOPIC", "NEW_TOPIC_CONTENT"} & controls:

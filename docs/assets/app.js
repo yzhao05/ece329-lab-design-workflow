@@ -1,6 +1,6 @@
 "use strict";
 
-const CONFIG = window.ECE329_CONFIG || { API_BASE_URL: "", REQUEST_TIMEOUT_MS: 70000 };
+const CONFIG = window.ECE329_CONFIG || { API_BASE_URL: "", REQUEST_TIMEOUT_MS: 180000 };
 const STORAGE_KEY = "ece329-lab-studio-session-v1";
 const DESIGN_TOKEN_KEY = "ece329-design-access-token-v1";
 const DESIGN_RESUME_KEY = "ece329-design-resume-key-v1";
@@ -10,11 +10,12 @@ const PREVIOUS_INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们会从
 const INITIAL_GREETING = "欢迎来到 ECE329 Lab Studio。我们先了解你的想法，再一起把它发展成清晰的实验方向，不急着写完整方案。\n\n请先用自己的话说说：你目前对哪个ECE329现象或概念有兴趣？如果还没有具体思路，也可以直接告诉我，我会先带你浏览课上所学内容的大致方向。";
 
 class ApiError extends Error {
-  constructor(message, status = 0, code = "request_failed") {
+  constructor(message, status = 0, code = "request_failed", details = {}) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.details = details && typeof details === "object" ? details : {};
   }
 }
 
@@ -265,6 +266,7 @@ let state = loadState();
 let typingMessageId = null;
 let toastTimer = null;
 let connectionState = apiBase() ? "checking" : "demo";
+let lastConnectionError = null;
 let replayingPendingRequest = false;
 let designGeneration = 0;
 const activeRequestControllers = new Set();
@@ -352,9 +354,14 @@ function apiBase() {
 async function apiRequest(path, options = {}) {
   const controller = new AbortController();
   activeRequestControllers.add(controller);
+  const timeoutMs = Number(CONFIG.REQUEST_TIMEOUT_MS) || 180000;
+  let timedOut = false;
   const timeout = window.setTimeout(
-    () => controller.abort(),
-    Number(CONFIG.REQUEST_TIMEOUT_MS) || 70000,
+    () => {
+      timedOut = true;
+      controller.abort();
+    },
+    timeoutMs,
   );
   try {
     const response = await fetch(`${apiBase()}${path}`, {
@@ -371,26 +378,214 @@ async function apiRequest(path, options = {}) {
         payload.detail || payload.error || `HTTP ${response.status}`,
         response.status,
         payload.error || "request_failed",
+        payload,
       );
     }
     return payload;
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (error?.name === "AbortError") {
+      throw new ApiError(
+        timedOut ? "Browser request timeout" : "Request was aborted",
+        0,
+        timedOut ? "client_timeout" : "request_aborted",
+        { timeout_ms: timeoutMs },
+      );
+    }
+    if (error instanceof TypeError) {
+      throw new ApiError(
+        "Browser could not reach the workflow backend",
+        0,
+        "network_error",
+      );
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
     activeRequestControllers.delete(controller);
   }
 }
 
+function requestFailurePresentation(error) {
+  const apiError = error instanceof ApiError ? error : null;
+  const code = apiError?.code || "unknown_client_error";
+  const status = Number(apiError?.status || 0);
+  const diagnosticId = String(apiError?.details?.diagnostic_id || "").trim();
+  const suffix = diagnosticId ? `（诊断编号：${diagnosticId}）` : "";
+  const phase = String(apiError?.details?.phase || "").trim();
+  const phaseLabel = {
+    intent_analysis: "理解本轮意图",
+    response_generation: "生成正式回复",
+  }[phase] || "";
+  const phaseSuffix = phaseLabel ? `（发生在：${phaseLabel}）` : "";
+  const timeoutSeconds = Math.round(Number(apiError?.details?.timeout_ms || 0) / 1000);
+  const presentations = {
+    client_timeout: {
+      message: `本轮处理已超过浏览器等待时间${timeoutSeconds ? `（约${timeoutSeconds}秒）` : ""}，页面已停止等待。后端可能仍在处理；请先稍等片刻，再重新发送刚才的回答。`,
+      tag: "浏览器等待超时",
+      badge: "课程服务响应较慢",
+      notice: "这不是课程内容错误；通常是本轮模型调用链较长或服务响应较慢。",
+      toast: "浏览器等待超时，设计已保留",
+    },
+    network_error: {
+      message: "浏览器没有连接到课程服务。请检查当前网络、后端地址和跨域配置，然后重新发送刚才的回答。",
+      tag: "网络连接失败",
+      badge: "无法连接课程服务",
+      notice: "请求没有获得 HTTP 响应，可能与网络、DNS、后端地址或 CORS 有关。",
+      toast: "浏览器未连接到后端",
+    },
+    request_aborted: {
+      message: "本轮请求已被页面中止，当前设计没有改变。请重新发送刚才的回答。",
+      tag: "请求已中止",
+      badge: "请求已中止",
+      notice: "页面切换设计或取消了尚未完成的请求。",
+      toast: "请求已中止",
+    },
+    model_timeout: {
+      message: `课程服务已收到请求，但模型没有在后端规定时间内完成本轮处理${phaseSuffix}。当前设计已保留，可以直接重试。${suffix}`,
+      tag: "模型响应超时",
+      badge: "模型响应超时",
+      notice: "后端连接正常；失败发生在模型等待阶段，可在 Render 日志中按诊断编号定位。",
+      toast: "模型响应超时",
+    },
+    model_rate_limited: {
+      message: `课程服务已收到请求，但模型接口当前限流。请稍等后重新发送，当前设计和进度已保留。${suffix}`,
+      tag: "模型接口限流",
+      badge: "模型接口繁忙",
+      notice: "后端连接正常；上游模型接口暂时限制了请求频率。",
+      toast: "模型接口限流",
+    },
+    model_output_invalid: {
+      message: `模型已经返回内容，但返回结果没有通过工作流的结构或课程范围检查${phaseSuffix}，因此没有写入设计。请重新发送本轮回答；若反复出现，请用诊断编号检查 Render 日志。${suffix}`,
+      tag: "模型输出未通过校验",
+      badge: "回答格式校验失败",
+      notice: "这通常与结构化 JSON、字段约束或输出截断有关，不代表浏览器断网。",
+      toast: "模型输出未通过校验",
+    },
+    model_request_rejected: {
+      message: `后端请求模型时被上游接口拒绝。当前设计未改变；请检查模型名称、参数和 API 配置。${suffix}`,
+      tag: "模型请求被拒绝",
+      badge: "模型请求配置异常",
+      notice: "后端连接正常，但上游模型接口未接受本次请求。",
+      toast: "模型请求被拒绝",
+    },
+    model_configuration_error: {
+      message: `课程服务的模型配置不完整或无效，本轮无法继续。请由管理员检查 Render 环境变量。${suffix}`,
+      tag: "后端配置错误",
+      badge: "模型尚未正确配置",
+      notice: "请检查 API 密钥、模型名称、推理等级和输出预算等后端配置。",
+      toast: "模型配置错误",
+    },
+    model_connection_error: {
+      message: `课程后端无法连接模型服务。当前设计已保留，请稍后重试。${suffix}`,
+      tag: "后端到模型连接失败",
+      badge: "模型连接失败",
+      notice: "浏览器与课程后端已连接；故障发生在后端访问模型服务时。",
+      toast: "后端无法连接模型服务",
+    },
+    model_upstream_error: {
+      message: `模型服务返回了临时服务器错误。当前设计已保留，请稍后重试。${suffix}`,
+      tag: "模型服务异常",
+      badge: "模型服务暂时异常",
+      notice: "课程后端已收到请求，上游模型服务返回了 5xx 错误。",
+      toast: "上游模型服务异常",
+    },
+    invalid_request: {
+      message: `课程服务收到了请求，但本轮请求格式或工作流状态没有通过检查。当前设计未改变。${suffix}`,
+      tag: "请求校验失败",
+      badge: "本轮请求无效",
+      notice: "这不是网络问题；请刷新当前设计状态后重试。",
+      toast: "请求未通过工作流校验",
+    },
+    invalid_json: {
+      message: `课程服务无法解析本轮请求的数据格式。当前设计未改变。${suffix}`,
+      tag: "请求格式错误",
+      badge: "请求格式错误",
+      notice: "后端已收到请求，但请求正文不是有效的数据格式。",
+      toast: "请求格式错误",
+    },
+    request_too_large: {
+      message: `本轮输入超过课程服务允许的长度，请精简后重新发送。当前设计未改变。${suffix}`,
+      tag: "输入过长",
+      badge: "输入超过限制",
+      notice: "后端已收到请求；请缩短本轮输入，而不需要重新开始设计。",
+      toast: "本轮输入过长",
+    },
+    storage_unavailable: {
+      message: `课程服务暂时无法读取或保存设计记录。为避免内容丢失，本轮没有继续处理。${suffix}`,
+      tag: "设计存储异常",
+      badge: "设计存储暂时不可用",
+      notice: "请稍后重试；管理员可用诊断编号检查 Render 存储日志。",
+      toast: "设计存储异常",
+    },
+    internal_error: {
+      message: `课程服务内部出现未预期错误，本轮设计没有更新。请记录诊断编号并联系管理员。${suffix}`,
+      tag: "后端内部错误",
+      badge: "课程服务内部错误",
+      notice: "后端已收到请求，但工作流执行失败；可在 Render 日志中按诊断编号定位。",
+      toast: "后端内部错误",
+    },
+    origin_not_allowed: {
+      message: "课程后端拒绝了当前网页来源。请检查 Render 中允许的 GitHub Pages 域名配置。",
+      tag: "跨域配置错误",
+      badge: "网页来源未获授权",
+      notice: "浏览器已连接后端，但当前 Origin 不在后端允许列表中。",
+      toast: "请检查后端 CORS 配置",
+    },
+    route_not_found: {
+      message: "课程服务中没有找到当前接口。请检查网页配置的后端地址以及前后端版本是否一致。",
+      tag: "接口地址错误",
+      badge: "前后端接口不匹配",
+      notice: "后端可以访问，但请求路径不存在。",
+      toast: "接口地址不存在",
+    },
+    workflow_error: {
+      message: `工作流拒绝了本轮状态操作，当前设计没有改变。请刷新设计状态后重试。${suffix}`,
+      tag: "工作流状态冲突",
+      badge: "工作流状态异常",
+      notice: "后端已收到请求，但该操作与当前设计状态不兼容。",
+      toast: "工作流状态异常",
+    },
+    backend_unavailable: {
+      message: "课程服务目前没有通过就绪检查。请稍后重试，并查看 Render 的 /ready 与服务日志。",
+      tag: "后端尚未就绪",
+      badge: "课程服务尚未就绪",
+      notice: "后端地址已配置，但服务当前未达到可处理请求的状态。",
+      toast: "课程服务尚未就绪",
+    },
+  };
+  if (presentations[code]) return presentations[code];
+  if (status === 504) return presentations.model_timeout;
+  if (status === 502 || status === 503) return {
+    message: `课程后端已收到请求，但依赖服务暂时不可用。当前设计已保留，请稍后重试。${suffix}`,
+    tag: `服务异常 · HTTP ${status}`,
+    badge: "依赖服务暂时异常",
+    notice: "这不是浏览器断网；请结合 HTTP 状态和 Render 日志进一步定位。",
+    toast: `服务异常（HTTP ${status}）`,
+  };
+  return {
+    message: `本轮请求没有完成，当前设计已保留。错误类型：${code}${status ? `，HTTP ${status}` : ""}。${suffix}`,
+    tag: "请求失败",
+    badge: "本轮请求未完成",
+    notice: "请记录错误类型和诊断编号后查看浏览器 Network 与 Render 日志。",
+    toast: "本轮请求未完成",
+  };
+}
+
 async function checkConnection() {
   if (!apiBase()) {
     setConnectionState("demo", "本地示例 · 课程服务未连接");
+    lastConnectionError = null;
     dom.offlineNotice.hidden = false;
     return;
   }
   try {
     await apiRequest("/ready", { method: "GET" });
+    lastConnectionError = null;
     setConnectionState("online", "课程服务已连接");
     dom.offlineNotice.hidden = true;
   } catch (error) {
+    lastConnectionError = error;
     setConnectionState("error", "课程服务连接失败");
     dom.offlineNotice.hidden = false;
     dom.offlineNotice.querySelector("strong").textContent = "离线模式";
@@ -1071,7 +1266,11 @@ async function handleSubmit(event) {
       await wait(420);
       response = createDemoResponse(message, uiAction);
     } else {
-      throw new ApiError("Backend is not ready", 0, "backend_unavailable");
+      throw lastConnectionError || new ApiError(
+        "Backend is not ready",
+        0,
+        "backend_unavailable",
+      );
     }
     if (requestGeneration !== designGeneration) {
       hideTyping();
@@ -1113,7 +1312,7 @@ async function handleSubmit(event) {
       state.quickActions = [pendingRequestRetryAction()];
       return;
     }
-    if (error instanceof ApiError && error.status === 409) {
+    if (error instanceof ApiError && error.code === "session_conflict") {
       await reloadApiDesignState();
       // A conflicting idempotency key must never be reused for the next attempt.
       state.pendingRequest = {
@@ -1132,18 +1331,19 @@ async function handleSubmit(event) {
       state.quickActions = [pendingRequestRetryAction()];
       return;
     }
-    setConnectionState("error", "课程服务暂时不可用");
+    const failure = requestFailurePresentation(error);
+    setConnectionState("error", failure.badge);
     dom.offlineNotice.hidden = false;
-    dom.offlineNotice.querySelector("strong").textContent = "连接暂时中断";
-    dom.offlineNotice.querySelector("span").textContent = "当前设计仍会保留；恢复连接后可以重新发送本轮内容。";
+    dom.offlineNotice.querySelector("strong").textContent = failure.badge;
+    dom.offlineNotice.querySelector("span").textContent = failure.notice;
     addMessage(
       "assistant",
-      "课程服务暂时无法完成本轮请求。当前设计已保留，请稍后重试。",
-      ["连接失败"],
+      failure.message,
+      [failure.tag],
       { meta: "ECE329 Agent" },
     );
     state.quickActions = [pendingRequestRetryAction()];
-    showToast("请求失败，当前设计已保留");
+    showToast(failure.toast);
   } finally {
     setBusy(false);
     render();

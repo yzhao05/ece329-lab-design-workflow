@@ -378,6 +378,31 @@ class LectureKnowledgeBase:
             )
         return scenes
 
+    def _scene_matches_formula_domain(
+        self,
+        point: dict[str, Any],
+        course_domain: str,
+    ) -> bool:
+        """Require a scene's formula binding to agree with its topic block."""
+
+        normalized_domain = str(course_domain or "").strip().casefold()
+        if not normalized_domain:
+            return True
+        if str(point.get("course_block") or "") != normalized_domain:
+            return False
+        scene_id = str(point.get("catalog_scene_id") or "")
+        profile_ids = self._formula_profile_ids_by_scene_id.get(scene_id, [])
+        if not profile_ids:
+            return True
+        return any(
+            str(
+                self._formula_profile_by_id.get(profile_id, {}).get("course_block")
+                or ""
+            )
+            == normalized_domain
+            for profile_id in profile_ids
+        )
+
     def _relevant_exploration_points(
         self,
         text: str,
@@ -391,6 +416,7 @@ class LectureKnowledgeBase:
             "electromagnetics",
         }:
             normalized_domain = ""
+
         lecture_matches = self.match_concepts(text, limit=len(self.lectures))
         supplemental_matches = self.match_supplemental_concepts(
             text,
@@ -401,7 +427,7 @@ class LectureKnowledgeBase:
                 point
                 for point in self.exploration_points
                 if not normalized_domain
-                or point.get("course_block") == normalized_domain
+                or self._scene_matches_formula_domain(point, normalized_domain)
             ]
 
         lecture_ids = {str(item["id"]) for item in lecture_matches}
@@ -420,13 +446,13 @@ class LectureKnowledgeBase:
             matched = [
                 point
                 for point in matched
-                if point.get("course_block") == normalized_domain
+                if self._scene_matches_formula_domain(point, normalized_domain)
             ]
             if not matched:
                 matched = [
                     point
                     for point in self.exploration_points
-                    if point.get("course_block") == normalized_domain
+                    if self._scene_matches_formula_domain(point, normalized_domain)
                 ]
         return matched
 
@@ -474,7 +500,7 @@ class LectureKnowledgeBase:
                 and str(point["option_id"]) not in known_ids
                 and (
                     not normalized_domain
-                    or point.get("course_block") == normalized_domain
+                    or self._scene_matches_formula_domain(point, normalized_domain)
                 )
             )
         if len(remaining) < limit:

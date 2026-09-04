@@ -98,8 +98,10 @@ from .prompts import build_prompt_packet
 from .openai_generator import generator_from_environment
 from .reporting import (
     build_emvr_task_report,
+    emvr_stage_completeness_issues,
     render_emvr_report_pdf,
     stage_report_section,
+    validate_emvr_stage_completeness,
     validate_emvr_report_completeness,
 )
 from .builder_input import build_builder_gate1_input, render_builder_gate1_input_pdf
@@ -1207,6 +1209,68 @@ def _guided_stage_should_auto_advance(
     return True
 
 
+def _reconcile_guided_stage_readiness(
+    session: DesignSession,
+    stage: Stage,
+    output: StepOutput,
+) -> None:
+    """Derive completion from committed fields, not generated prose.
+
+    A response generator may suggest another conversational prompt even after
+    every field owned by a stage has been committed.  If that free-form prompt
+    becomes the next pending action, a process description can be routed back
+    into variable fields and overwrite them.  Canonical state is the source of
+    truth: once every required field exists, later wording cannot invent a new
+    gap in that stage.
+    """
+
+    if session.interaction_state is not InteractionState.GUIDED_DESIGN:
+        return
+    required = {
+        Stage.VARIABLES_AND_CONDITIONS: (
+            "independent_variable",
+            "observations",
+            "controlled_conditions",
+        ),
+        Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+        Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_plan",),
+        Stage.RESULT_INTERPRETATION: ("result_interpretation",),
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
+    }.get(stage, ())
+    if not required:
+        return
+    structured = stage_design_state_snapshot(session)
+    if not all(structured.get(field) for field in required):
+        return
+    if stage is Stage.EXPECTED_DATA_VISUALIZATION and not (
+        isinstance(output.visualization, dict)
+        or isinstance(
+            session.stage_outputs.get(stage.value, {}).get("visualization"),
+            dict,
+        )
+    ):
+        return
+    declared_readiness = output.stage_payload.get("stage_readiness")
+    generator_claimed_gap = not (
+        isinstance(declared_readiness, dict)
+        and declared_readiness.get("ready_for_confirmation") is True
+        and declared_readiness.get("remaining_gaps") == []
+    )
+    output.stage_payload["stage_readiness"] = {
+        "ready_for_confirmation": True,
+        "remaining_gaps": [],
+        "source": "COMMITTED_DESIGN_STATE",
+    }
+    if generator_claimed_gap:
+        # Do not carry a now-invalid "one more thing is missing" question
+        # into the next stage.  The actual field changes are shown separately
+        # by the turn planner, so this acknowledgement remains accurate and
+        # concise.
+        output.assistant_message = "你刚补充的内容已经把这一环节需要的信息补齐。"
+        output.student_task = None
+        output.stage_payload["stale_generated_gap_removed"] = True
+
+
 def _deep_merge(target: dict[str, Any], patch: dict[str, Any]) -> None:
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -1769,6 +1833,52 @@ def _prepare_emvr_stage_output(
             UserIntent.UNCLEAR.value,
         ],
     }
+
+
+def _prepare_emvr_completion_repair(
+    session: DesignSession,
+    stage: Stage,
+    output: StepOutput,
+) -> None:
+    """Keep a failed EMVR completion attempt actionable and stage-local."""
+
+    issues = emvr_stage_completeness_issues(session, stage)
+    if not issues:
+        return
+    issue = issues[0]
+    question = str(issue["question"])
+    output.assistant_message = (
+        f"{output.assistant_message.rstrip()}\n\n"
+        f"进入下一部分前，还需要补齐{issue['label']}。前面已经确认的内容保持不变。"
+    )
+    output.student_task = question
+    output.stage_payload["awaiting_user_design_input"] = True
+    output.stage_payload["completion_repair"] = {
+        "field": issue["field"],
+        "label": issue["label"],
+    }
+    output.stage_payload["pending_action"] = {
+        "type": "ANSWER_EMVR_STAGE_QUESTION",
+        "interaction_state": InteractionState.EMVR_DIRECT.value,
+        "subject": stage.value,
+        # Some report fields (for example the object inventory or a formula
+        # support map) are model-built structured artifacts rather than one
+        # directly editable scalar.  The semantic resolver receives the
+        # explicit gap below and may emit all required field-level actions.
+        "answer_fields": [],
+        "required_report_field": issue["field"],
+        "question": question,
+        "advance_on_accept": False,
+        "allowed_intents": [
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            UserIntent.REQUEST_MORE_EXAMPLES.value,
+            UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+            UserIntent.UNCLEAR.value,
+        ],
+    }
+    state = dialogue_state(session)
+    state["pending_action"] = deepcopy(output.stage_payload["pending_action"])
 
 
 def _project_committed_stage_fields(
@@ -2908,6 +3018,38 @@ class WorkflowEngine:
                 if isinstance(stored_output, dict)
                 else {}
             )
+            if session.current_stage is Stage.CONCEPTUAL_PROCEDURE:
+                accepted_steps = stored_payload.get("reference_draft")
+                if isinstance(accepted_steps, list) and any(
+                    str(item).strip() for item in accepted_steps
+                ):
+                    # The student is accepting a concrete, context-derived
+                    # reference shown on the page. Materialize that proposal
+                    # as the procedure field before advancing; never save the
+                    # control utterance itself as a flow step.
+                    acceptance_act = {
+                        "type": "ANSWER_PENDING_QUESTION",
+                        "target": "procedure_steps",
+                        "operation": "REPLACE",
+                        "content": deepcopy(accepted_steps),
+                        "source_text": message,
+                        "confidence": 1.0,
+                    }
+                    revised = deepcopy(turn_intent)
+                    revised["dialogue_acts"] = [
+                        *(
+                            revised.get("dialogue_acts", [])
+                            if isinstance(revised.get("dialogue_acts"), list)
+                            else []
+                        ),
+                        acceptance_act,
+                    ]
+                    revised["actions_authoritative"] = True
+                    revised["advance_requested"] = True
+                    turn_intent = validate_resolved_intent(
+                        revised,
+                        pending_action,
+                    )
             compatibility_output = StepOutput(
                 assistant_message="",
                 stage_payload=(
@@ -3795,6 +3937,7 @@ class WorkflowEngine:
             finally:
                 session.turn_context = {}
             _project_committed_stage_fields(session, handled_stage, output)
+            _reconcile_guided_stage_readiness(session, handled_stage, output)
             if session.interaction_state is InteractionState.EMVR_DIRECT:
                 _prepare_emvr_stage_output(session, handled_stage, output)
                 # If the student tried to continue from an unanswered EMVR
@@ -4094,7 +4237,10 @@ class WorkflowEngine:
         should_complete = (
             (
                 (request.complete_stage or explicit_transition_intent)
-                and not pre_transition_attempted
+                and (
+                    not pre_transition_attempted
+                    or transitioned_from_stage is None
+                )
             )
             or (
                 session.interaction_state is InteractionState.EMVR_DIRECT
@@ -4120,6 +4266,22 @@ class WorkflowEngine:
                 self._advance(session, handled_stage)
             except StageCompletionError as exc:
                 completion_error = str(exc)
+                if session.interaction_state is InteractionState.EMVR_DIRECT:
+                    _prepare_emvr_completion_repair(
+                        session,
+                        handled_stage,
+                        output,
+                    )
+                    # Completion is validated after the normal artifact was
+                    # persisted.  Keep storage and history aligned with the
+                    # actionable repair prompt returned to the browser.
+                    repaired_output = output.to_dict()
+                    session.stage_outputs[handled_stage.value] = {
+                        "revision": session.revision,
+                        **repaired_output,
+                    }
+                    if session.history:
+                        session.history[-1]["output"] = repaired_output
 
         dialogue_state(session)["last_task_plan"] = finalize_turn_task_plan(
             turn_intent.get("task_plan"),
@@ -4751,6 +4913,10 @@ class WorkflowEngine:
                 raise StageCompletionError(
                     "请先结合当前VR实验回答这一问；如果暂时不确定，也可以让我先给一版专业参考。"
                 )
+            try:
+                validate_emvr_stage_completeness(session, stage)
+            except ValueError as exc:
+                raise StageCompletionError(str(exc)) from exc
             if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
                 try:
                     validate_builder_requirements(session)

@@ -17,6 +17,13 @@ from ece329_workflow.models import (
     SessionConflict,
     SessionNotFound,
 )
+from ece329_workflow.openai_generator import (
+    ModelConfigurationError,
+    ModelConnectionError,
+    ModelHTTPError,
+    ModelOutputError,
+    ModelTimeoutError,
+)
 from ece329_workflow.security import APISettings, FixedWindowRateLimiter
 from ece329_workflow.store import InMemorySessionStore, SQLiteSessionStore
 from tools.configure_pages_api import configure_api_url, normalize_https_url
@@ -484,6 +491,49 @@ class APISecurityTests(unittest.TestCase):
         self.assertTrue(status.startswith("503"))
         self.assertEqual(payload["error"], "storage_unavailable")
         self.assertNotIn("private storage", json.dumps(payload))
+
+    def test_model_failures_have_stable_diagnostic_categories(self) -> None:
+        cases = (
+            (ModelTimeoutError("secret"), "504", "model_timeout", True),
+            (ModelConnectionError("secret"), "502", "model_connection_error", True),
+            (ModelOutputError("secret"), "502", "model_output_invalid", True),
+            (
+                ModelConfigurationError("secret"),
+                "503",
+                "model_configuration_error",
+                False,
+            ),
+            (ModelHTTPError(429, "rate_limit"), "503", "model_rate_limited", True),
+            (ModelHTTPError(500), "502", "model_upstream_error", True),
+            (ModelHTTPError(400), "502", "model_request_rejected", False),
+        )
+        for error, expected_status, expected_code, retryable in cases:
+            error.mark_phase("intent_analysis")
+            status, payload = WorkflowAPI._model_error_response(error, "diag123")
+            self.assertEqual(str(status.value), expected_status)
+            self.assertEqual(payload["error"], expected_code)
+            self.assertEqual(payload["retryable"], retryable)
+            self.assertEqual(payload["phase"], "intent_analysis")
+            self.assertEqual(payload["diagnostic_id"], "diag123")
+            self.assertNotIn("secret", json.dumps(payload))
+
+    def test_unhandled_backend_error_returns_safe_diagnostic_id(self) -> None:
+        class BrokenEngine:
+            def create_design(self, idea, interaction_state):
+                raise RuntimeError("private backend details")
+
+        api = WorkflowAPI(engine=BrokenEngine(), settings=APISettings())
+        status, _, payload = call_api(
+            api,
+            "POST",
+            "/v1/designs",
+            {"idea": "研究静电场"},
+        )
+
+        self.assertTrue(status.startswith("500"))
+        self.assertEqual(payload["error"], "internal_error")
+        self.assertTrue(payload["diagnostic_id"])
+        self.assertNotIn("private backend details", json.dumps(payload))
 
     def test_malformed_request_types_return_400(self) -> None:
         api = self.make_api(APISettings())

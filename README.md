@@ -182,7 +182,7 @@ python -m ece329_workflow --host 127.0.0.1 --port 8080
 - `OPENAI_MAX_OUTPUT_TOKENS`：单轮最大输出，默认2400；
 - `OPENAI_STAGE_ONE_MAX_OUTPUT_TOKENS`：引导模式阶段1的最大输出，默认3200，用于生成多幅有细节、可组合的课程内物理图景；
 - `OPENAI_FINAL_MAX_OUTPUT_TOKENS`：EMVR最终设计包的最大输出，默认5000；
-- `ECE329_OPENAI_FALLBACK`：默认 `true`。设为 `false` 后，模型失败会返回HTTP 502；
+- `ECE329_OPENAI_FALLBACK`：默认 `true`。设为 `false` 后，模型失败会按原因返回HTTP 502、503或504，并附带稳定错误码与诊断编号；
 - `ECE329_OPENAI_STATEFUL`：代码在未配置时仍采用隐私优先的 `false`；学生网站的 Render 部署建议明确设置为 `true`。正式课程回答会保存并续接该设计会话自己的 `previous_response_id`，请求使用 `store=true`；意图分类始终无状态，系统指令仍会在每轮重新发送，本地 `design_state` 仍是最终事实来源；
 - `ECE329_GENERATOR=rule`：强制使用本地规则生成器；
 - `ECE329_GENERATOR=openai`：强制要求密钥，缺少密钥时后端拒绝启动。

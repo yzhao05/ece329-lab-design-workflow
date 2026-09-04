@@ -5,5 +5,5 @@
  */
 window.ECE329_CONFIG = Object.freeze({
   API_BASE_URL: "",
-  REQUEST_TIMEOUT_MS: 70000,
+  REQUEST_TIMEOUT_MS: 180000,
 });

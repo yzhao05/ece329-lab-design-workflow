@@ -80,6 +80,16 @@ the automatic one-time retry. `fallback_calls` and `last_fallback_reason` show
 whether students are currently receiving the course-built-in fallback. These
 fields contain no API key or student message text.
 
+Failed requests also return a stable, student-safe error code. The web page
+shows different messages for browser timeout, browser-to-backend connection
+failure, model timeout, model rate limiting, invalid structured model output,
+model configuration, workflow validation, storage readiness, and unexpected
+backend errors. Backend failures include a `diagnostic_id`; search that value
+in the Render logs to find the matching server-side event without exposing a
+student message or secret in the response. `phase=intent_analysis` means the
+failure happened while interpreting the turn, while
+`phase=response_generation` means it happened while composing the reply.
+
 ## 3. Connect GitHub Pages without editing config.js
 
 In the GitHub repository:

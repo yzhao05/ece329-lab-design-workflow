@@ -312,11 +312,13 @@ def build_gap_output(
 ) -> StepOutput:
     development = session.design_context.get("idea_development", {})
     status = public_idea_development_status(development)
-    clarified_titles = [
-        status["facets_by_id"][facet_id]["title"]
-        for facet_id in development.get("last_clarified_facet_ids", [])
-        if facet_id in status["facets_by_id"]
-    ]
+    clarified_titles = list(
+        dict.fromkeys(
+            status["facets_by_id"][facet_id]["title"]
+            for facet_id in development.get("last_clarified_facet_ids", [])
+            if facet_id in status["facets_by_id"]
+        )
+    )
     repeated_facet_count = _pending_facet_repeat_count(session, status)
     comparison_update = _comparison_update_summary(session, acknowledged_message)
     if clarified_titles:

@@ -285,7 +285,8 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             "primary_formulas": _as_list(
                 idea.get("primary_formulas") or theory.get("core_equations")
             ),
-            "supporting_formulas": _as_list(idea.get("supporting_formulas")),
+            "supporting_formulas": _as_list(idea.get("supporting_formulas"))
+            or ["none (no supporting formula is required for this design)"],
             "composition_strategy": _text(
                 experiment_brief.get("formula_composition_strategy")
             ),

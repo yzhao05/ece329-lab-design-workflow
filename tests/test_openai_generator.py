@@ -113,6 +113,149 @@ def retrieved_brainstorm_options(
 
 
 class OpenAIStageGeneratorTests(unittest.TestCase):
+    def test_emvr_formula_topic_uses_phase_specific_semantic_recovery(self) -> None:
+        message = "我想做一个静电场实验"
+        topic_analysis = {
+            "course_domain": "electrostatics",
+            "topic_description": "静电场实验",
+            "mentioned_objects": [],
+            "changed_quantities": [],
+            "observed_quantities": [],
+            "explicit_formula_ids": [],
+            "specificity": "BROAD",
+            "profile_evidence": [],
+            "confidence": 0.98,
+        }
+
+        class PhaseAwareTransport:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, Any]] = []
+
+            def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+                self.requests.append(deepcopy(payload))
+                schema_name = payload["text"]["format"]["name"]
+                if schema_name == "ece329_emvr_formula_phase_recovery":
+                    output = {
+                        "actions": [
+                            {
+                                "type": "SET_EMVR_TOPIC",
+                                "target": "emvr_formula_topic",
+                                "operation": "EXECUTE",
+                                "content": json.dumps(
+                                    topic_analysis,
+                                    ensure_ascii=False,
+                                ),
+                                "source_text": message,
+                                "source_start": 0,
+                                "source_end": len(message),
+                                "semantic_key": "broad_electrostatics_topic",
+                                "confidence": 0.98,
+                            }
+                        ]
+                    }
+                elif schema_name in {
+                    "ece329_compact_dialogue_acts",
+                    "ece329_guided_design_turn_recovery",
+                }:
+                    output = {"actions": []}
+                else:
+                    output = {
+                        "intent": "UNCLEAR",
+                        "target": "emvr_formula_topic",
+                        "resolved_value_json": None,
+                        "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+                        "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+                        "advance_requested": False,
+                        "preserve_current_design": True,
+                        "confidence": 0.76,
+                    }
+                return {
+                    "id": f"resp_{len(self.requests)}",
+                    "output_text": json.dumps(output, ensure_ascii=False),
+                }
+
+        transport = PhaseAwareTransport()
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            {
+                "type": "ANSWER_EMVR_FORMULA_TOPIC",
+                "subject": "emvr_formula_topic",
+                "question": "你想研究哪个ECE329主题，或想验证哪条公式？",
+            },
+            {
+                "emvr_formula_flow": {"phase": "TOPIC_RECEIVED"},
+                "formula_design_profiles": KNOWLEDGE.formula_design_profiles,
+            },
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["emvr_formula_actions"][0]["type"],
+            "SET_EMVR_TOPIC",
+        )
+        self.assertIn(
+            "ece329_emvr_formula_phase_recovery",
+            [request["text"]["format"]["name"] for request in transport.requests],
+        )
+
+    def test_pending_comparison_is_semantically_committed_with_a_facet_answer(self) -> None:
+        transport = FakeTransport(
+            {
+                "decisions": [
+                    {
+                        "comparison_id": "polarity_cases",
+                        "decision": "ACCEPT",
+                        "cases": [],
+                        "confidence": 0.97,
+                    }
+                ]
+            }
+        )
+        generator = OpenAIStageGenerator(transport=transport)
+        acts = generator._recover_pending_comparison_decisions(
+            json.dumps(
+                {
+                    "user_message": "比较同种和异种电荷靠近时场线的差异",
+                    "previous_question": "你想比较什么条件？",
+                },
+                ensure_ascii=False,
+            ),
+            "比较同种和异种电荷靠近时场线的差异",
+            [
+                {
+                    "comparison_id": "polarity_cases",
+                    "title": "电荷极性关系",
+                    "recommended_cases": ["同种电荷", "异种电荷"],
+                    "adoption_status": "PENDING",
+                }
+            ],
+        )
+
+        self.assertEqual(len(acts), 1)
+        self.assertEqual(acts[0]["type"], "MODIFY_COMPARISON")
+        self.assertEqual(acts[0]["content"]["cases"], ["同种电荷", "异种电荷"])
+
+    def test_broad_electrostatic_scenes_exclude_adjacent_force_law(self) -> None:
+        options = KNOWLEDGE.brainstorm_options(
+            "我想做一个静电场实验",
+            limit=20,
+            seed_key="static-domain-regression",
+            course_domain="electrostatics",
+        )
+        profile_ids = {
+            profile_id
+            for option in options
+            for profile_id in KNOWLEDGE._formula_profile_ids_by_scene_id.get(
+                str(option.get("catalog_scene_id") or ""),
+                [],
+            )
+        }
+
+        self.assertNotIn("FD01_VECTOR_LORENTZ", profile_ids)
+
     def test_coverage_audit_ignores_only_short_discourse_wrapper(self) -> None:
         message = "我想要的设计方向是：比较两个点电荷靠近时中间区域的电场线变化"
         start = message.index("比较")

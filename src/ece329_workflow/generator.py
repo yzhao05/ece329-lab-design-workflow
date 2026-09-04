@@ -278,10 +278,10 @@ def _contextual_reference_steps(
         ]
     if stage is Stage.CONCEPTUAL_PROCEDURE:
         return [
-            f"建立基准状态{f'（保持：{controls}）' if controls else ''}",
-            f"逐步改变{variable or '前面确定的变化主轴'}",
-            f"用一致方式记录{observations or '目标现象'}",
-            f"完成{comparisons or '已经保留的基础情形'}并排比较",
+            f"建立基准状态；保持以下控制条件：{controls or '其余影响比较的条件'}",
+            f"主动改变量的推进方式：{variable or '前面确定的变化主轴'}",
+            f"每个状态下的记录内容：{observations or '目标现象'}",
+            f"分别完成并比较：{comparisons or '已经保留的基础情形'}",
             "结合ECE329课上所学关系解释差异",
         ]
     return list(_GUIDED_STAGE_REFERENCE_STEPS.get(stage, ()))
@@ -402,6 +402,10 @@ def guided_stage_entry_output(
                     "reference_draft": reference_steps,
                 },
                 "question": question,
+                "advance_on_accept": bool(
+                    reference_steps
+                    and session.current_stage is Stage.CONCEPTUAL_PROCEDURE
+                ),
                 "allowed_intents": [
                     "ANSWER_CURRENT_QUESTION",
                     "ACCEPT_PREVIOUS_PROPOSAL",
@@ -819,13 +823,25 @@ def _course_relationships_for_selected_relations(
         focus = str(relation.get("focus") or "").strip().rstrip("？?")
         scene_id = str(relation.get("catalog_scene_id") or "").strip()
         linked = KNOWLEDGE.formula_links_for_scene(scene_id) if scene_id else None
+        relation_domain = str(relation.get("course_block") or "").strip()
+        linked_profiles = (
+            linked.get("formula_design_profiles", [])
+            if isinstance(linked, dict)
+            else []
+        )
+        domain_profiles = [
+            profile
+            for profile in linked_profiles
+            if isinstance(profile, dict)
+            and (
+                not relation_domain
+                or str(profile.get("course_block") or "").strip()
+                == relation_domain
+            )
+        ]
         profile_titles = [
             str(profile.get("title_zh") or "").strip()
-            for profile in (
-                linked.get("formula_design_profiles", [])
-                if isinstance(linked, dict)
-                else []
-            )
+            for profile in domain_profiles
             if isinstance(profile, dict) and str(profile.get("title_zh") or "").strip()
         ]
         if profile_titles:
@@ -1728,7 +1744,9 @@ class RuleBasedStageGenerator:
             )
             course_relationship = str(
                 structured_requirements.get("course_relationship") or ""
-            ).strip()
+            ).strip() or (
+                f"以{topics[0]}中的课程关系解释已确认变化量与观察量之间的联系"
+            )
             return StepOutput(
                 assistant_message="已选择兼顾ECE329相关性、理论可解释性和VR交互价值的实验方向。",
                 stage_payload={
@@ -1884,12 +1902,25 @@ class RuleBasedStageGenerator:
                 or latest_stage_input
                 or "学生尚未给出具体方向性假设"
             )
+            changed_text = "、".join(
+                str(item).strip()
+                for item in structured_requirements.get("changed_quantities", [])
+                if str(item).strip()
+            ) or "主要参数"
+            observed_text = "、".join(
+                str(item).strip()
+                for item in structured_requirements.get("observed_quantities", [])
+                if str(item).strip()
+            ) or "目标响应"
             return StepOutput(
                 assistant_message="这个假设已经对应到你调整参数后能够立即观察的VR反馈。",
                 stage_payload={
                     "research_hypothesis": hypothesis,
                     "null_hypothesis": "在设计范围内，主要自变量变化不会造成可分辨响应。",
-                    "expected_trend": hypothesis,
+                    "expected_trend": (
+                        f"当{changed_text}变化时，{observed_text}应呈现假设所述的方向性响应；"
+                        "具体方向以已确认假设为准。"
+                    ),
                     "limiting_cases": ["基准条件", "参数下限", "参数上限或模型失效边界"],
                     "vr_feedback_for_trend": ["数值更新", "曲线更新", "空间视觉编码更新"],
                 },
@@ -2047,7 +2078,10 @@ class RuleBasedStageGenerator:
             return StepOutput(
                 assistant_message="已从课程、模型、教学和VR附加价值四个方面评价设计。",
                 stage_payload={
-                    "conceptual_feasibility": {"rating": "待参数确定后复核", "reasoning": "使用课程解析模型时原则上可实现"},
+                    "conceptual_feasibility": {
+                        "rating": "可行",
+                        "reasoning": "前序阶段已明确参数范围、观察量、控制条件和实验流程，可按课程模型进行实现与验收。",
+                    },
                     "limitations": ["理想化边界条件", "忽略部分损耗或边缘效应", "视觉缩放不等于真实尺度", "VR结果来自模型而非实测"],
                     "teaching_value": {"rating": "high_if_aligned", "learning_contribution": "让不可见场量、空间分布和参数关系可观察"},
                     "innovation": {"rating": "context_dependent", "innovative_elements": ["空间探测", "实时参数—理论反馈", "多条件叠加比较"]},

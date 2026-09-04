@@ -59,7 +59,10 @@ from ece329_workflow.models import (
     StageCompletionError,
     StepOutput,
 )
-from ece329_workflow.reporting import stage_report_section
+from ece329_workflow.reporting import (
+    emvr_stage_completeness_issues,
+    stage_report_section,
+)
 from ece329_workflow.stages import public_stage_catalog, stage_title
 
 
@@ -1270,7 +1273,10 @@ class WorkflowEngineTests(unittest.TestCase):
             Stage.VARIABLES_AND_CONDITIONS.value,
         )
         self.assertIn("建立基准状态", result["assistant_message"])
-        self.assertIn("改变两个源之间的距离", result["assistant_message"])
+        self.assertIn(
+            "主动改变量的推进方式：两个源之间的距离",
+            result["assistant_message"],
+        )
         self.assertEqual(len(result["stage_payload"]["reference_draft"]), 5)
 
     def test_short_reply_resolves_previous_guided_choice_instead_of_resetting(self) -> None:
@@ -1705,6 +1711,7 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(result["stage_payload"]["awaiting_user_design_input"])
         self.assertNotIn("图景", result["assistant_message"])
         self.assertIn("实验主题", result["assistant_message"])
+        self.assertFalse(result["task_report"]["quality_review"]["final_review"])
 
         brief = (
             "我想在VR里观察带电物体周围的电场线分布，并比较导体和介质在同样外加电场下的差异。"
@@ -1818,7 +1825,32 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertIn("主要公式", labels)
         self.assertIn("采用的实验方法", labels)
         self.assertIn("公式适用边界", labels)
+        course_section = next(
+            section
+            for section in report["sections"]
+            if section["stage_id"] == Stage.COURSE_MAPPING_AND_DIRECTION.value
+        )
+        self.assertIn(
+            "课程关系",
+            {item["label"] for item in course_section["items"]},
+        )
+        quality_section = next(
+            section
+            for section in report["sections"]
+            if section["stage_id"] == "FINAL_QUALITY_REVIEW"
+        )
+        visible_quality_text = json.dumps(quality_section, ensure_ascii=False)
+        self.assertNotIn("independent_variable_can_change", visible_quality_text)
+        self.assertNotIn("design_field", visible_quality_text)
+        self.assertNotIn("source_type", visible_quality_text)
         builder = build_builder_gate1_input(engine.store.get(result["design_id"]))
+        completed_session = engine.store.get(result["design_id"])
+        for stage in Stage:
+            self.assertEqual(
+                emvr_stage_completeness_issues(completed_session, stage),
+                [],
+                stage.value,
+            )
         formula_contract = builder["formula_driven_experiment"]
         for field in (
             "topic",
@@ -1833,6 +1865,11 @@ class WorkflowEngineTests(unittest.TestCase):
             "boundary_conditions",
         ):
             self.assertTrue(formula_contract[field], field)
+        self.assertTrue(formula_contract["supporting_formulas"])
+        self.assertNotIn(
+            "unresolved",
+            json.dumps(builder, ensure_ascii=False).casefold(),
+        )
         self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
         self.assertTrue(
             engine.render_builder_input_pdf(result["design_id"]).startswith(b"%PDF")
@@ -2047,7 +2084,8 @@ class WorkflowEngineTests(unittest.TestCase):
         ]
         result = engine.process_turn(result["design_id"], {"message": hypothesis})
         self.assertEqual(result["stage_payload"]["research_hypothesis"], hypothesis)
-        self.assertEqual(result["stage_payload"]["expected_trend"], hypothesis)
+        self.assertNotEqual(result["stage_payload"]["expected_trend"], hypothesis)
+        self.assertIn(hypothesis, result["stage_payload"]["expected_trend"])
         self.assertNotRegex(json.dumps(result["stage_payload"], ensure_ascii=False), r"阶段\s*\d+")
 
         result = engine.process_turn(result["design_id"], {"message": "假设保留并继续"})
