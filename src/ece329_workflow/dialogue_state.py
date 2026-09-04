@@ -789,6 +789,8 @@ def record_pending_clarification(
 def record_scene_direction_confirmation(
     session: DesignSession,
     candidate_answer: str,
+    *,
+    candidate_design_updates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Retain a Stage 1 direction candidate for an explicit confirmation turn.
 
@@ -841,6 +843,27 @@ def record_scene_direction_confirmation(
     pending["candidate_binding_authorized"] = True
     pending["candidate_purpose"] = STAGE_ONE_DIRECTION_CANDIDATE
     pending["candidate_resolution"] = UserIntent.ANSWER_CURRENT_QUESTION.value
+    safe_updates = [
+        {
+            "field": str(item.get("field") or ""),
+            "operation": str(item.get("operation") or "REPLACE").upper(),
+            "value": deepcopy(item.get("value")),
+            "provenance": "CONFIRMED_SCENE_DIRECTION",
+        }
+        for item in candidate_design_updates or []
+        if isinstance(item, dict)
+        and str(item.get("field") or "")
+        in {"research_object", "course_relationship"}
+        and str(item.get("operation") or "REPLACE").upper()
+        in {"MERGE", "REPLACE"}
+        and item.get("value") not in (None, "", [], {})
+    ]
+    if safe_updates:
+        # A direction confirmation may need two turns after a degraded or
+        # incomplete semantic parse.  Retain the already resolved scene
+        # binding with the candidate so the confirmation commits the selected
+        # course relation rather than falling back to the broad opening topic.
+        pending["candidate_design_updates"] = safe_updates
     pending["status"] = "PENDING"
     state["pending_action"] = deepcopy(pending)
     set_pending_action_snapshot(session, pending)
@@ -1538,6 +1561,18 @@ def _normalize_pending_action(
     candidate_purpose = str(raw.get("candidate_purpose") or "").strip()
     if candidate_purpose == STAGE_ONE_DIRECTION_CANDIDATE:
         normalized["candidate_purpose"] = candidate_purpose
+        candidate_design_updates = raw.get("candidate_design_updates")
+        if isinstance(candidate_design_updates, list):
+            normalized["candidate_design_updates"] = [
+                deepcopy(item)
+                for item in candidate_design_updates
+                if isinstance(item, dict)
+                and str(item.get("field") or "")
+                in {"research_object", "course_relationship"}
+                and str(item.get("operation") or "REPLACE").upper()
+                in {"MERGE", "REPLACE"}
+                and item.get("value") not in (None, "", [], {})
+            ][:2]
     interaction_state = str(raw.get("interaction_state") or "").strip()
     if interaction_state in {item.value for item in InteractionState}:
         normalized["interaction_state"] = interaction_state
@@ -3192,6 +3227,34 @@ def _apply_comparison_updates(
         for item in comparisons
         if isinstance(item, dict) and str(item.get("semantic_key") or "").strip()
     }
+    # A student may promote cases that were already stated in a confirmed
+    # research question or conceptual structure. Those canonical fields are
+    # valid evidence alongside the current utterance; a model still cannot
+    # invent a case that appears in neither source.
+    canonical = design_state_snapshot(session)
+    canonical_evidence = _normalized_evidence_text(
+        " ".join(
+            str(canonical.get(field) or "")
+            for field in (
+                "research_object",
+                "research_question",
+                "conceptual_structure",
+                "hypothesis",
+                "expected_phenomenon",
+            )
+        )
+    )
+
+    def case_has_evidence(case: str, message_evidence: str) -> bool:
+        identity = _normalized_evidence_text(case)
+        return bool(
+            identity
+            and (
+                (message_evidence and identity in message_evidence)
+                or (canonical_evidence and identity in canonical_evidence)
+            )
+        )
+
     for update in updates:
         if not isinstance(update, dict):
             continue
@@ -3212,8 +3275,7 @@ def _apply_comparison_updates(
                 dict.fromkeys(
                     case
                     for case in candidate_cases
-                    if message_evidence
-                    and _normalized_evidence_text(case) in message_evidence
+                    if case_has_evidence(case, message_evidence)
                 )
             )
             if not supported_cases:
@@ -3340,8 +3402,7 @@ def _apply_comparison_updates(
                     dict.fromkeys(
                         case
                         for case in candidate_cases
-                        if message_evidence
-                        and _normalized_evidence_text(case) in message_evidence
+                        if case_has_evidence(case, message_evidence)
                     )
                 )
                 if supported_cases:
@@ -3453,7 +3514,7 @@ def _apply_comparison_updates(
         raw_new_cases = update.get("new_cases", [])
         for raw_case in raw_new_cases if isinstance(raw_new_cases, list) else []:
             case = str(raw_case).strip()
-            if case and _normalized_evidence_text(case) in message_evidence:
+            if case and case_has_evidence(case, message_evidence):
                 supported_new_cases.append(case)
         cases = []
         if isinstance(raw_cases, list):
@@ -3463,8 +3524,7 @@ def _apply_comparison_updates(
                     continue
                 supported_by_state = case in recommended or case in current_cases
                 supported_by_student = bool(
-                    message_evidence
-                    and _normalized_evidence_text(case) in message_evidence
+                    case_has_evidence(case, message_evidence)
                 )
                 if supported_by_state or supported_by_student:
                     cases.append(case)
@@ -3920,6 +3980,25 @@ def apply_resolved_intent(
     if isinstance(log, list):
         log.append(deepcopy(resolved))
         del log[:-40]
+    direction_candidate_accepted = bool(
+        isinstance(pending_action, dict)
+        and pending_action.get("candidate_purpose")
+        == STAGE_ONE_DIRECTION_CANDIDATE
+        and pending_action.get("candidate_binding_authorized") is True
+        and (
+            intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+            or "ACCEPT" in control_actions
+        )
+    )
+    if direction_candidate_accepted:
+        candidate_updates = pending_action.get("candidate_design_updates", [])
+        if isinstance(candidate_updates, list) and candidate_updates:
+            apply_design_updates(
+                session,
+                candidate_updates,
+                pending_action=pending_action,
+                provenance="CONFIRMED_SCENE_DIRECTION",
+            )
     apply_semantic_design_updates(
         session,
         resolved,

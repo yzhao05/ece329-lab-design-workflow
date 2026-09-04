@@ -132,6 +132,8 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("response.builder_input_ready === true", self.app_js)
         self.assertIn("response.builder_input_url", self.app_js)
         self.assertIn("response.builder_handoff_status", self.app_js)
+        self.assertIn("state.reportReady && state.builderInputReady", self.app_js)
+        self.assertIn("学生报告已完成，Builder交接仍需检查", self.app_js)
         self.assertIn("Builder交接", self.app_js)
 
     def test_quality_review_versions_and_guided_export_are_visible(self) -> None:

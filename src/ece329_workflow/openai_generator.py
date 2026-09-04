@@ -2564,8 +2564,6 @@ class OpenAIStageGenerator:
             and str(item.get("comparison_id") or "").strip()
             and str(item.get("adoption_status") or "PENDING").upper() == "PENDING"
         ]
-        if not candidates:
-            return []
         try:
             structured_turn_context: Any = json.loads(intent_input)
         except json.JSONDecodeError:
@@ -2584,8 +2582,15 @@ class OpenAIStageGenerator:
                             "comparison_id": {"type": "string"},
                             "decision": {
                                 "type": "string",
-                                "enum": ["ACCEPT", "MODIFY", "REJECT", "UNRELATED"],
+                                "enum": [
+                                    "ACCEPT",
+                                    "MODIFY",
+                                    "REJECT",
+                                    "CREATE",
+                                    "UNRELATED",
+                                ],
                             },
+                            "title": {"type": "string"},
                             "cases": {
                                 "type": "array",
                                 "items": {"type": "string"},
@@ -2600,6 +2605,7 @@ class OpenAIStageGenerator:
                         "required": [
                             "comparison_id",
                             "decision",
+                            "title",
                             "cases",
                             "confidence",
                         ],
@@ -2620,6 +2626,10 @@ class OpenAIStageGenerator:
                 "而没有把它作为实验对照时返回UNRELATED；学生明确把候选情形写进研究问题、"
                 "实验结构或比较方案时，应视为采用。ACCEPT只允许沿用该ID已有的recommended_cases；"
                 "MODIFY的cases只保留学生明确表达的最终比较情形；不得创造新的物理条件。"
+                "如果当前没有待确认比较，但学生明确列出了要作为基础比较的多个case，或明确要求"
+                "把已确认设计中已有的参照情形恢复为基础比较，返回CREATE，comparison_id留空，"
+                "title给出简短物理名称，cases逐项列出。CREATE中的每个case必须能在本轮原话或"
+                "已确认design_state中找到依据；不得把研究对象、观察量或会话说明当作case。"
             ),
             "input": [
                 {
@@ -2657,6 +2667,10 @@ class OpenAIStageGenerator:
             raise ModelOutputError(
                 "Pending comparison decision response was invalid"
             ) from exc
+        if not isinstance(result, dict):
+            raise ModelOutputError(
+                "Pending comparison decision response was not an object"
+            )
         candidates_by_id = {item["comparison_id"]: item for item in candidates}
         acts: list[dict[str, Any]] = []
         for decision in result.get("decisions", []):
@@ -2669,6 +2683,32 @@ class OpenAIStageGenerator:
                 confidence = float(decision.get("confidence", 0.0))
             except (TypeError, ValueError):
                 confidence = 0.0
+            if decision_name == "CREATE" and confidence >= 0.82:
+                cases = list(
+                    dict.fromkeys(
+                        str(case).strip()
+                        for case in decision.get("cases", [])
+                        if str(case).strip()
+                    )
+                )
+                if len(cases) < 2:
+                    continue
+                acts.append(
+                    {
+                        "type": "MODIFY_COMPARISON",
+                        "target": "baseline_comparisons",
+                        "operation": "MERGE",
+                        "content": {
+                            "action": "CREATE",
+                            "title": str(decision.get("title") or "").strip(),
+                            "new_cases": cases,
+                        },
+                        "source_text": user_message,
+                        "semantic_key": "",
+                        "confidence": confidence,
+                    }
+                )
+                continue
             if candidate is None or confidence < 0.82:
                 continue
             if decision_name == "ACCEPT":
@@ -3755,6 +3795,41 @@ class OpenAIStageGenerator:
             else {}
         )
         formula_phase = str(formula_flow_context.get("phase") or "")
+        # ``NEW_TOPIC_CONTENT`` is a valid global action once a design exists,
+        # but at the formula-first entry there is no confirmed topic to
+        # replace yet. A broad first idea is therefore often (and reasonably)
+        # described by the general planner as new-topic content. During later
+        # formula onboarding phases the same generic label is also insufficient
+        # unless the semantic result separately confirms an explicit topic
+        # change. Otherwise the content must pass through the phase-specific
+        # analyser so the formula state receives its required normalized
+        # action. Treating the generic label as already routable used to make
+        # the formula state reject it and replay the same question forever.
+        formula_phase_bypass_types = {
+            "ASK_COURSE_QUESTION",
+            "REQUEST_REFERENCE",
+            "REQUEST_SUMMARY",
+            "REQUEST_QUALITY_REVIEW",
+            "COMPARE_OPTIONS",
+            "VERSION_CONTROL",
+            "CONTROL",
+            "REQUEST_NEW_TOPIC",
+        }
+        has_formula_phase_bypass_act = any(
+            str(item.get("type") or "").upper() in formula_phase_bypass_types
+            for item in normalized_emvr_acts
+            if isinstance(item, dict)
+        )
+        has_explicit_formula_topic_change = bool(
+            formula_phase != TOPIC_RECEIVED
+            and semantic_updates.get("topic_change_explicit") is True
+            and any(
+                str(item.get("type") or "").upper()
+                in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}
+                for item in normalized_emvr_acts
+                if isinstance(item, dict)
+            )
+        )
         required_formula_actions = {
             TOPIC_RECEIVED: {"SET_EMVR_TOPIC"},
             FORMULA_CANDIDATES_PRESENTED: {"SELECT_EMVR_FORMULAS"},
@@ -3776,7 +3851,8 @@ class OpenAIStageGenerator:
             and formula_phase != EMVR_DETAIL_DESIGN
             and required_formula_actions
             and not has_phase_formula_action
-            and not has_routable_nonwrite_act
+            and not has_formula_phase_bypass_act
+            and not has_explicit_formula_topic_change
         ):
             previous_result = (raw, resolved_value, semantic_updates)
             try:
@@ -3784,7 +3860,13 @@ class OpenAIStageGenerator:
                     self._recover_emvr_formula_phase(intent_input, formula_phase)
                 )
             except ModelOutputError:
-                raw, resolved_value, semantic_updates = previous_result
+                # Returning the general action here is not a safe fallback:
+                # the active formula phase cannot execute it, so the next
+                # response would simply repeat the same prompt.  Surface the
+                # rejected semantic result through the existing degraded
+                # service path, which preserves the turn for a retry without
+                # pretending that the topic was processed.
+                raise
             except ModelServiceError:
                 # This action is the only transition accepted by the active
                 # formula phase.  Hiding an outage here would turn it into an
@@ -3822,17 +3904,27 @@ class OpenAIStageGenerator:
             and str(item.get("type") or "").upper() == "MODIFY_COMPARISON"
             for item in raw_dialogue_acts
         )
+        comparison_review_relevant = bool(
+            has_state_writing_dialogue_acts
+            and (
+                any(
+                    isinstance(item, dict)
+                    and str(item.get("adoption_status") or "PENDING").upper()
+                    == "PENDING"
+                    for item in pending_comparisons
+                )
+                or (
+                    isinstance(pending_action, dict)
+                    and str(pending_action.get("subject") or "")
+                    in {"conceptual_structure", "baseline_comparisons"}
+                )
+            )
+        )
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and session.current_stage is Stage.IDEA_BRAINSTORMING
-            and has_state_writing_dialogue_acts
             and not has_comparison_action
-            and any(
-                isinstance(item, dict)
-                and str(item.get("adoption_status") or "PENDING").upper()
-                == "PENDING"
-                for item in pending_comparisons
-            )
+            and comparison_review_relevant
         ):
             try:
                 comparison_acts = self._recover_pending_comparison_decisions(

@@ -17,6 +17,7 @@ from ece329_workflow.dialogue_state import (
     current_pending_action,
     resolved_intent,
     save_pending_action,
+    validate_resolved_intent,
 )
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import RuleBasedStageGenerator, build_exploration_scenes
@@ -45,6 +46,78 @@ class ComparisonSummarySemanticGenerator(RuleBasedStageGenerator):
 
 
 class CanonicalDesignStateTests(unittest.TestCase):
+    def test_field_heading_typo_is_not_duplicated_in_theory_value(self) -> None:
+        session = DesignSession(
+            design_id="theory_heading_cleanup",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "theoretical_framework",
+                    "operation": "REPLACE",
+                    "value": "**论依据是高斯定理**：闭合曲面总通量由面内净电荷决定。",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            design_state_snapshot(session)["theoretical_framework"],
+            "高斯定理：闭合曲面总通量由面内净电荷决定。",
+        )
+
+    def test_comparison_cases_can_be_promoted_from_confirmed_structure(self) -> None:
+        session = DesignSession(
+            design_id="comparison_from_confirmed_structure",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        cases = [
+            "曲面完全包住场源",
+            "曲面部分包住场源",
+            "曲面未包住场源",
+        ]
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "conceptual_structure",
+                    "operation": "REPLACE",
+                    "value": f"参照情形包括{'\u3001'.join(cases)}。",
+                }
+            ],
+        )
+        act = {
+            "type": "MODIFY_COMPARISON",
+            "target": "baseline_comparisons",
+            "operation": "MERGE",
+            "content": {
+                "action": "CREATE",
+                "title": "闭合曲面与场源的位置关系",
+                "new_cases": cases,
+            },
+            "confidence": 0.99,
+        }
+        raw = resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            dialogue_acts=[act],
+            actions_authoritative=True,
+        )
+        validated = validate_resolved_intent(raw, None)
+
+        apply_resolved_intent(
+            session,
+            validated,
+            None,
+            "请把前面的参照情形恢复为基础比较。",
+        )
+
+        self.assertEqual(
+            design_state_snapshot(session)["baseline_comparisons"][0]["cases"],
+            cases,
+        )
+
     def test_unconfirmed_legacy_creation_message_is_not_a_research_object(self) -> None:
         raw_request = "请先帮助我浏览课程里的实验方向"
         session = DesignSession(

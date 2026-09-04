@@ -186,7 +186,13 @@ def build_stage_one_turn_context(
         "magnetism",
         "electromagnetics",
     }:
-        semantic_course_domain = ""
+        # Keep a broad but clearly course-grounded first turn inside one
+        # course block even when the semantic service omits its optional
+        # domain field.  The fallback is derived from the ranked knowledge
+        # catalog, not from a second set of conversational keywords.
+        semantic_course_domain = str(
+            KNOWLEDGE.course_domain_for_text(text) or ""
+        ).casefold()
     semantic_option_ids = (
         semantic_updates.get("selected_option_ids", [])
         if isinstance(semantic_updates, dict)

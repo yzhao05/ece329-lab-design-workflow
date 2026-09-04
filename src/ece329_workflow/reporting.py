@@ -29,7 +29,10 @@ from .dialogue_acts import stage_design_state_snapshot
 from .emvr_design import EMVR_THEORY_RELATIONS, merge_emvr_structured_requirements
 from .emvr_formula_flow import EMVR_DETAIL_DESIGN, formula_support_map_for_selection
 from .knowledge_base import KNOWLEDGE
-from .builder_requirements import validate_builder_requirements
+from .builder_requirements import (
+    is_resolved_design_value,
+    validate_builder_requirements,
+)
 
 
 _FIELD_LABELS = {
@@ -681,7 +684,14 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
         if section["items"]:
             sections.append(section)
     idea = session.design_context.get("emvr_design", {})
-    brief = idea.get("brief", "") if isinstance(idea, dict) else ""
+    effective_brief = effective_experiment_brief(session)
+    brief = str(
+        effective_brief.get("summary")
+        or effective_brief.get("topic")
+        or ""
+    ).strip()
+    if not brief:
+        brief = idea.get("brief", "") if isinstance(idea, dict) else ""
     if not brief:
         original = session.design_context.get("idea", {})
         brief = original.get("current_summary") or original.get("original", "") \
@@ -968,7 +978,7 @@ def emvr_stage_completeness_issues(
     issues: list[dict[str, str]] = []
 
     def require(field: str, label: str, question: str) -> None:
-        if not _plain(payload.get(field)):
+        if not is_resolved_design_value(payload.get(field)):
             issues.append({"field": field, "label": label, "question": question})
 
     if stage is Stage.IDEA_BRAINSTORMING:
@@ -996,7 +1006,7 @@ def emvr_stage_completeness_issues(
                 ("observed_quantities", "观察量", "请明确实验需要观察或记录的物理响应。"),
                 ("boundary_conditions", "公式适用边界", "请明确所选公式成立所需的边界或近似条件。"),
             ):
-                if not _plain(brief.get(field)):
+                if not is_resolved_design_value(brief.get(field)):
                     issues.append({"field": field, "label": label, "question": question})
         return issues
 
@@ -1122,7 +1132,7 @@ def validate_emvr_report_completeness(session: DesignSession) -> None:
     # completed session cannot expose a superficially complete PDF with empty
     # requirement rows.
     validate_builder_requirements(session)
-    evaluate_design_quality(session, final_review=True)
+    quality_review = evaluate_design_quality(session, final_review=True)
 
     missing_sections = [
         issue["label"]
@@ -1133,4 +1143,20 @@ def validate_emvr_report_completeness(session: DesignSession) -> None:
     if missing_sections:
         raise ValueError(
             "EMVR报告仍缺少：" + "、".join(dict.fromkeys(missing_sections))
+        )
+    major_quality_issues = [
+        issue
+        for issue in quality_review.get("issues", [])
+        if isinstance(issue, dict)
+        and str(issue.get("severity") or "").upper() == "MAJOR"
+    ]
+    if major_quality_issues:
+        findings = [
+            _plain(issue.get("finding"))
+            for issue in major_quality_issues
+            if _plain(issue.get("finding"))
+        ]
+        raise ValueError(
+            "EMVR报告仍存在需要先解决的设计一致性问题："
+            + "；".join(dict.fromkeys(findings))
         )

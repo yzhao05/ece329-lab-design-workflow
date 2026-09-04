@@ -180,6 +180,77 @@ class LectureKnowledgeBase:
         scored.sort(key=lambda item: (-item[0], item[1]["supplemental_concept_id"]))
         return [item for _, item in scored[:limit]]
 
+    def course_domain_for_text(self, text: str) -> str | None:
+        """Return the course block of the strongest catalog-grounded match.
+
+        The online semantic analyser normally supplies ``course_domain``.  A
+        missing field must not make a clearly course-grounded topic fall back
+        to a three-block scene lottery, though.  This fallback reuses the
+        ranked lecture/supplemental knowledge index and its stable metadata;
+        it does not maintain a second topic-word routing table in code.
+        """
+
+        normalized = text.casefold()
+        ranked_lectures: list[tuple[int, int, dict[str, Any]]] = []
+        for lecture in self.lectures:
+            matched_terms = [
+                str(term).casefold()
+                for term in [*lecture.get("keywords", []), *lecture.get("concepts", [])]
+                if self._term_matches(str(term).casefold(), normalized)
+            ]
+            if not matched_terms:
+                continue
+            # Prefer a specific catalog phrase over a generic field word.  In
+            # particular, a phrase such as "electromagnetic induction" must
+            # outrank the generic "magnetic field" entry in the foundations
+            # lecture even though both are legitimate matches.
+            specificity = max(
+                len(re.sub(r"[\s\-_]+", "", term))
+                for term in matched_terms
+            )
+            ranked_lectures.append(
+                (specificity, -int(lecture["lecture"]), lecture)
+            )
+        if ranked_lectures:
+            ranked_lectures.sort(reverse=True, key=lambda item: (item[0], item[1]))
+            top_specificity = ranked_lectures[0][0]
+            top_blocks = {
+                self._course_block_for_lecture(int(item[2]["lecture"]))
+                for item in ranked_lectures
+                if item[0] == top_specificity
+            }
+            if len(top_blocks) == 1:
+                return next(iter(top_blocks))
+            # A short boundary term can legitimately occur in more than one
+            # course block (for example, a material interface in statics and
+            # a reflecting interface for waves).  Let the supplemental
+            # concept's full lecture scope break that catalog tie instead of
+            # silently preferring the earliest lecture.
+            supplemental_matches = self.match_supplemental_concepts(text, limit=1)
+            if supplemental_matches:
+                scope_ids = [
+                    str(item)
+                    for item in supplemental_matches[0].get(
+                        "course_scope_concept_ids", []
+                    )
+                    if str(item).strip()
+                ]
+                if scope_ids:
+                    return self._course_block_for_scope(scope_ids)
+            return None
+        supplemental_matches = self.match_supplemental_concepts(text, limit=1)
+        if supplemental_matches:
+            scope_ids = [
+                str(item)
+                for item in supplemental_matches[0].get(
+                    "course_scope_concept_ids", []
+                )
+                if str(item).strip()
+            ]
+            if scope_ids:
+                return self._course_block_for_scope(scope_ids)
+        return None
+
     def supplemental_concept_references(
         self,
         text: str,

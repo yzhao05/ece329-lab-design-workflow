@@ -52,6 +52,17 @@ class BuilderRequirementTests(unittest.TestCase):
         missing = {item["field"] for item in missing_builder_requirements(session)}
         self.assertEqual(missing, {"lab_id", "parameter_specifications"})
 
+    def test_placeholder_text_cannot_complete_final_artifact_fields(self) -> None:
+        session = self._session()
+        values = dict(VALID_VALUES)
+        values["lab_title"] = "待确认"
+        values["expected_results"] = "暂未明确，之后补充"
+        session.design_context["stage_design_state"] = values
+
+        missing = {item["field"] for item in missing_builder_requirements(session)}
+
+        self.assertEqual(missing, {"lab_title", "expected_results"})
+
     def test_earlier_requirement_is_recovered_after_mode_switch(self) -> None:
         session = self._session()
         requirement = next_due_builder_requirement(

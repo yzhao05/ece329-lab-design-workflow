@@ -12,6 +12,7 @@ from threading import RLock
 from typing import Any
 
 from .dialogue_state import (
+    STAGE_ONE_DIRECTION_CANDIDATE,
     UserIntent,
     accept_pending_comparisons_on_advance,
     apply_resolved_intent,
@@ -622,9 +623,9 @@ def _self_correction_notice(
             else f"我重新核对了{labels}，这次没有实际变化，所以不会只口头说“已经修改”。"
         )
     return (
-        "我已经核对了你指出的问题。这轮还没有形成可提交的具体修改，"
-        "所以不会假装已经改好，也不会把反馈文字写进实验内容。"
-        "请直接给出需要调整那一项的最终表述，我会只更新对应内容。"
+        "我明白你是在纠正当前整理结果，不过这次还不能确定要替换成什么。"
+        "已经确认的内容都保留着。请只补充需要调整的那一项；如果答案在前面"
+        "已经说过，也可以让我按前面的内容恢复。"
         if interaction_state is InteractionState.GUIDED_DESIGN
         else "已核对该项反馈；本轮没有形成可提交的具体调整，因此现有设计保持不变。"
     )
@@ -929,9 +930,59 @@ def _prevent_unrequested_scene_replay(
         candidate = str(turn_intent.get("resolved_value") or "").strip()
     if not candidate:
         candidate = unresolved_direction or student_message.strip()
-    retained_pending = record_scene_direction_confirmation(
-        session,
-        candidate,
+    accepting_retained_direction = bool(
+        (
+            turn_intent.get("intent")
+            == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+            or "ACCEPT" in controls
+        )
+        and isinstance(pending_action, dict)
+        and pending_action.get("candidate_purpose")
+        == STAGE_ONE_DIRECTION_CANDIDATE
+    )
+    candidate_updates: list[dict[str, Any]] = []
+    selected_option_ids = (
+        updates.get("selected_option_ids", [])
+        if isinstance(updates, dict)
+        and isinstance(updates.get("selected_option_ids"), list)
+        else []
+    )
+    selected_relations = [
+        option
+        for option in latest_stage_one_options(session.history)
+        if str(option.get("option_id") or "")
+        in {str(option_id) for option_id in selected_option_ids}
+    ]
+    selected_relationships = _course_relationships_for_selected_relations(
+        selected_relations
+    )
+    if candidate and not accepting_retained_direction:
+        candidate_updates.append(
+            {
+                "field": "research_object",
+                "operation": "REPLACE",
+                "value": candidate,
+            }
+        )
+    if selected_relationships and not accepting_retained_direction:
+        candidate_updates.append(
+            {
+                "field": "course_relationship",
+                "operation": "REPLACE",
+                "value": selected_relationships,
+            }
+        )
+    # A short acceptance turn carries no new direction content. Reuse the
+    # candidate and its stable scene binding instead of overwriting them with
+    # the control utterance itself.
+    retained_pending = (
+        deepcopy(pending_action)
+        if accepting_retained_direction
+        else record_scene_direction_confirmation(
+            session,
+            candidate,
+            candidate_design_updates=candidate_updates,
+        )
     ) or pending_action
     output.stage_payload["alternative_ideas"] = []
     output.stage_payload["exploration_scenes"] = []
@@ -975,6 +1026,22 @@ def _prevent_unrequested_scene_replay(
             else ""
         )
         candidate = str(candidate_value or "").strip()
+        retained_updates = (
+            retained_pending.get("candidate_design_updates", [])
+            if isinstance(retained_pending, dict)
+            and isinstance(
+                retained_pending.get("candidate_design_updates"), list
+            )
+            else []
+        )
+        if retained_updates:
+            apply_design_updates(
+                session,
+                retained_updates,
+                pending_action=retained_pending,
+                provenance="CONFIRMED_SCENE_DIRECTION",
+            )
+            sync_design_state_to_legacy(session)
         canonical_design = design_state_snapshot(session)
         canonical_direction_parts = [
             str(canonical_design.get(field) or "").strip()
@@ -4921,6 +4988,12 @@ class WorkflowEngine:
                 try:
                     validate_builder_requirements(session)
                     validate_emvr_report_completeness(session)
+                    # Completion means both promised artifacts can actually
+                    # be constructed, not merely that their nine headline
+                    # intake fields are non-empty. This catches disconnected
+                    # formula, object, interaction, visualization, and
+                    # acceptance mappings before the session becomes final.
+                    build_builder_gate1_input(session)
                 except ValueError as exc:
                     raise StageCompletionError(str(exc)) from exc
             return

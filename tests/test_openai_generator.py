@@ -10,6 +10,7 @@ from ece329_workflow.dialogue_state import serialize_intent_input
 from ece329_workflow.generator import RuleBasedStageGenerator, build_exploration_scenes
 from ece329_workflow.guardrails import build_stage_one_turn_context
 from ece329_workflow.knowledge_base import KNOWLEDGE
+from ece329_workflow.emvr_formula_flow import handle_emvr_formula_turn
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.store import InMemorySessionStore
 from ece329_workflow.openai_generator import (
@@ -201,6 +202,108 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             [request["text"]["format"]["name"] for request in transport.requests],
         )
 
+    def test_emvr_formula_topic_recovers_from_generic_new_topic_content(self) -> None:
+        message = "我想做一个静电场实验"
+        topic_analysis = {
+            "course_domain": "electrostatics",
+            "topic_description": "静电场实验",
+            "mentioned_objects": [],
+            "changed_quantities": [],
+            "observed_quantities": [],
+            "explicit_formula_ids": [],
+            "specificity": "BROAD",
+            "profile_evidence": [],
+            "confidence": 0.98,
+        }
+
+        class GenericTopicTransport:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, Any]] = []
+
+            def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+                self.requests.append(deepcopy(payload))
+                schema_name = payload["text"]["format"]["name"]
+                if schema_name == "ece329_emvr_formula_phase_recovery":
+                    output = {
+                        "actions": [
+                            {
+                                "type": "SET_EMVR_TOPIC",
+                                "target": "emvr_formula_topic",
+                                "operation": "EXECUTE",
+                                "content": json.dumps(topic_analysis, ensure_ascii=False),
+                                "source_text": message,
+                                "source_start": 0,
+                                "source_end": len(message),
+                                "semantic_key": "broad_electrostatics_topic",
+                                "confidence": 0.98,
+                            }
+                        ]
+                    }
+                else:
+                    generic_act = {
+                        "type": "NEW_TOPIC_CONTENT",
+                        "target": "new_topic",
+                        "operation": "EXECUTE",
+                        "content": message,
+                        "source_text": message,
+                        "source_start": 0,
+                        "source_end": len(message),
+                        "semantic_key": "new_electrostatics_topic",
+                        "confidence": 0.96,
+                    }
+                    output = {
+                        "intent": "NEW_TOPIC",
+                        "target": "new_topic",
+                        "resolved_value_json": json.dumps(message, ensure_ascii=False),
+                        "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+                        "dialogue_acts_json": json.dumps([generic_act], ensure_ascii=False),
+                        "advance_requested": False,
+                        "preserve_current_design": True,
+                        "confidence": 0.96,
+                    }
+                return {
+                    "id": f"resp_{len(self.requests)}",
+                    "output_text": json.dumps(output, ensure_ascii=False),
+                }
+
+        transport = GenericTopicTransport()
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            {
+                "type": "ANSWER_EMVR_FORMULA_TOPIC",
+                "subject": "emvr_formula_topic",
+                "question": "你想研究哪个ECE329主题，或想验证哪条公式？",
+            },
+            {
+                "emvr_formula_flow": {"phase": "TOPIC_RECEIVED"},
+                "formula_design_profiles": KNOWLEDGE.formula_design_profiles,
+            },
+        )
+
+        self.assertEqual(result["intent"], "ANSWER_CURRENT_QUESTION")
+        self.assertEqual(
+            result["semantic_updates"]["emvr_formula_actions"][0]["type"],
+            "SET_EMVR_TOPIC",
+        )
+        self.assertNotIn(
+            "NEW_TOPIC_CONTENT",
+            [act["type"] for act in result["dialogue_acts"]],
+        )
+        self.assertIn(
+            "ece329_emvr_formula_phase_recovery",
+            [request["text"]["format"]["name"] for request in transport.requests],
+        )
+        output, completed = handle_emvr_formula_turn(session, message, result)
+        self.assertFalse(completed)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            "FORMULA_CANDIDATES_PRESENTED",
+        )
+        self.assertTrue(output.stage_payload["formula_cards"])
+
     def test_pending_comparison_is_semantically_committed_with_a_facet_answer(self) -> None:
         transport = FakeTransport(
             {
@@ -237,6 +340,71 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(len(acts), 1)
         self.assertEqual(acts[0]["type"], "MODIFY_COMPARISON")
         self.assertEqual(acts[0]["content"]["cases"], ["同种电荷", "异种电荷"])
+
+    def test_comparison_recovery_can_create_cases_already_confirmed_in_structure(self) -> None:
+        transport = FakeTransport(
+            {
+                "decisions": [
+                    {
+                        "comparison_id": "",
+                        "decision": "CREATE",
+                        "title": "闭合曲面与场源的位置关系",
+                        "cases": [
+                            "曲面完全包住场源",
+                            "曲面部分包住场源",
+                            "曲面未包住场源",
+                        ],
+                        "confidence": 0.97,
+                    }
+                ]
+            }
+        )
+        generator = OpenAIStageGenerator(transport=transport)
+
+        acts = generator._recover_pending_comparison_decisions(
+            json.dumps(
+                {
+                    "user_message": "请把我在实验结构里说过的参照情形恢复为基础比较",
+                    "design_state": {
+                        "conceptual_structure": (
+                            "参照情形包括曲面完全包住场源、"
+                            "曲面部分包住场源、曲面未包住场源"
+                        )
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            "请把我在实验结构里说过的参照情形恢复为基础比较",
+            [],
+        )
+
+        self.assertEqual(len(acts), 1)
+        self.assertEqual(acts[0]["content"]["action"], "CREATE")
+        self.assertEqual(len(acts[0]["content"]["new_cases"]), 3)
+
+    def test_missing_semantic_domain_uses_ranked_course_catalog_domain(self) -> None:
+        context = build_stage_one_turn_context(
+            "我想做一个静电场实验",
+            options=[],
+            idea_context={},
+            semantic_updates={"course_scope_status": "COURSE_CONTENT"},
+        )
+        options = KNOWLEDGE.brainstorm_options(
+            "我想做一个静电场实验",
+            limit=3,
+            seed_key="trail38-domain-fallback",
+            course_domain=context["course_domain"],
+        )
+
+        self.assertEqual(context["course_domain"], "electrostatics")
+        self.assertEqual(
+            {option["course_block"] for option in options},
+            {"electrostatics"},
+        )
+        self.assertEqual(
+            KNOWLEDGE.course_domain_for_text("电磁波在介质边界发生反射"),
+            "electromagnetics",
+        )
 
     def test_broad_electrostatic_scenes_exclude_adjacent_force_law(self) -> None:
         options = KNOWLEDGE.brainstorm_options(

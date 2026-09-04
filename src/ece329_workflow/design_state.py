@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
+from difflib import SequenceMatcher
 from typing import Any
 
 from .models import DesignSession
@@ -33,6 +35,17 @@ DESIGN_FIELD_TO_FACET = {
     value: key for key, value in FACET_TO_DESIGN_FIELD.items()
 }
 
+_DESIGN_FIELD_LABELS = {
+    "research_object": "研究对象",
+    "course_relationship": "课程关系",
+    "learning_objective": "学习目标",
+    "research_question": "研究问题",
+    "theoretical_framework": "理论依据",
+    "hypothesis": "假设",
+    "expected_phenomenon": "预期现象",
+    "conceptual_structure": "概念实验结构",
+}
+
 
 def _text(value: Any) -> str:
     if isinstance(value, str):
@@ -46,6 +59,50 @@ def _text(value: Any) -> str:
             item for item in (_text(child) for child in value.values()) if item
         )
     return str(value).strip() if value is not None else ""
+
+
+def _strip_repeated_field_heading(field: str, value: str) -> str:
+    """Remove a student-authored display heading from one field value.
+
+    Field content is rendered with its own heading later.  Keeping a copied
+    ``**heading is value**: explanation`` shell produces duplicated labels and
+    also preserves harmless heading typos.  This normalizer is target-aware:
+    it only strips a leading label when that label is sufficiently similar to
+    the field being written, and it preserves the actual design statement.
+    """
+
+    label = _DESIGN_FIELD_LABELS.get(field)
+    text = value.strip()
+    if not label or not text:
+        return text
+    exact = re.match(
+        rf"^(?:\*\*)?{re.escape(label)}(?:\*\*)?\s*[：:]\s*(.+)$",
+        text,
+        re.DOTALL,
+    )
+    if exact:
+        return exact.group(1).strip()
+    bold = re.match(r"^\*\*([^*]{2,100})\*\*\s*[：:]?\s*(.*)$", text, re.DOTALL)
+    if not bold:
+        return text
+    heading_and_value = bold.group(1).strip()
+    remainder = bold.group(2).strip()
+    split = re.match(r"^(.{2,16}?)(?:是|为)\s*(.+)$", heading_and_value, re.DOTALL)
+    if not split:
+        return text
+    candidate_label = re.sub(r"[\s：:]+", "", split.group(1))
+    similarity = SequenceMatcher(
+        None,
+        candidate_label,
+        label,
+        autojunk=False,
+    ).ratio()
+    if similarity < 0.72:
+        return text
+    content = split.group(2).strip()
+    if remainder:
+        return f"{content}：{remainder}"
+    return content
 
 
 def _normalized(value: str) -> str:
@@ -397,7 +454,10 @@ def apply_design_updates(
             "CLEAR",
         }:
             continue
-        value = "" if operation == "CLEAR" else _text(raw.get("value"))[:4000]
+        value = "" if operation == "CLEAR" else _strip_repeated_field_heading(
+            field,
+            _text(raw.get("value")),
+        )[:4000]
         if operation != "CLEAR" and not value:
             continue
         update_id = str(raw.get("update_id") or "").strip() or _update_identity(

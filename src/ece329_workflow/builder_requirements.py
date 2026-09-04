@@ -8,6 +8,13 @@ from .models import STAGE_SEQUENCE, DesignSession, InteractionState, Stage
 
 
 LAB_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+_UNRESOLVED_VALUE = re.compile(
+    r"^(?:暂未(?:明确|确定|填写)|尚未(?:明确|确定|填写)|"
+    r"待(?:补充|确定|确认|完善)|之后再(?:决定|确定)|"
+    r"稍后再?(?:补充|确定)|tbd|todo|unresolved)"
+    r"(?:[，,。；;：:\s].*)?$",
+    flags=re.IGNORECASE,
+)
 
 
 BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
@@ -107,6 +114,27 @@ def _text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def is_resolved_design_value(value: Any) -> bool:
+    """Return whether a final artifact value contains confirmed content.
+
+    This is an export-integrity check, not conversational intent routing.
+    Explicitly optional answers such as ``无`` remain valid, while temporary
+    placeholders cannot make a Builder requirement or PDF appear complete.
+    """
+
+    if isinstance(value, list):
+        return bool(value) and all(is_resolved_design_value(item) for item in value)
+    if isinstance(value, dict):
+        substantive = [
+            item for item in value.values() if item not in (None, "", [], {})
+        ]
+        return bool(substantive) and all(
+            is_resolved_design_value(item) for item in substantive
+        )
+    text = _text(value)
+    return bool(text) and _UNRESOLVED_VALUE.fullmatch(text) is None
+
+
 def builder_requirement_values(session: DesignSession) -> dict[str, str]:
     stage_state = session.design_context.get("stage_design_state", {})
     stage_state = stage_state if isinstance(stage_state, dict) else {}
@@ -124,7 +152,7 @@ def builder_requirement_values(session: DesignSession) -> dict[str, str]:
 
 
 def _field_valid(field: str, value: str) -> bool:
-    if not value:
+    if not is_resolved_design_value(value):
         return False
     if field == "lab_id":
         return LAB_ID_PATTERN.fullmatch(value) is not None

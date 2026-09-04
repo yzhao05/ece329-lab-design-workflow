@@ -17,6 +17,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from .builder_requirements import (
     LAB_ID_PATTERN,
     builder_requirement_values,
+    is_resolved_design_value,
     validate_builder_requirements,
 )
 from .models import DesignSession, InteractionState, Stage
@@ -486,6 +487,7 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     required_sections = {
         "document",
         "identity",
+        "source_material",
         "formula_driven_experiment",
         "design_definition",
         "learning_goals",
@@ -493,14 +495,27 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         "physics",
         "objects",
         "interaction_modes",
+        "visualization",
         "environment",
+        "presets",
+        "reuse_requirements",
+        "scene",
         "initial_and_action_states",
         "acceptance_and_evidence",
+        "builder_runtime_constraints",
+        "handoff_notes",
     }
     missing_sections = sorted(required_sections - set(payload))
     if missing_sections:
         raise ValueError(
             "Builder Gate 1 input is missing sections: " + ", ".join(missing_sections)
+        )
+    empty_sections = sorted(
+        section for section in required_sections if payload.get(section) in (None, "", [], {})
+    )
+    if empty_sections:
+        raise ValueError(
+            "Builder Gate 1 input contains empty sections: " + ", ".join(empty_sections)
         )
     formula_design = payload.get("formula_driven_experiment", {})
     if not isinstance(formula_design, dict):
@@ -612,7 +627,7 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         elif isinstance(value, list):
             for index, item in enumerate(value):
                 scan(item, f"{path}[{index}]")
-        elif "unresolved" in str(value or "").casefold():
+        elif value not in (None, "") and not is_resolved_design_value(value):
             unresolved_paths.append(path)
 
     scan(payload, "")
@@ -639,6 +654,43 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     ]
     if not object_ids or len(object_ids) != len(set(object_ids)):
         raise ValueError("Builder Gate 1 object IDs must be present and unique")
+
+    required_contract_rows = {
+        "interaction_modes": (
+            "interaction_modes.desktop_mouse",
+            "interaction_modes.xr_actions",
+            "interaction_modes.mouse_to_vr_mapping",
+        ),
+        "visualization": (
+            "visualization.requirements",
+            "visualization.update_event",
+            "visualization.layer",
+        ),
+        "environment": ("environment.room_placement_and_adaptation",),
+        "initial_and_action_states": (
+            "initial_and_action_states.authored_initial_state",
+            "initial_and_action_states.hidden_templates_or_loaders",
+            "initial_and_action_states.first_required_action",
+            "initial_and_action_states.expected_visible_after_action",
+        ),
+        "acceptance_and_evidence": (
+            "acceptance.core_flow",
+            "acceptance.result_interpretation",
+            "acceptance.pass_criteria",
+            "acceptance.report_questions",
+        ),
+    }
+    missing_contract_rows = [
+        f"{section}.{key}"
+        for section, keys in required_contract_rows.items()
+        for key in keys
+        if not row_value(section, key)
+    ]
+    if missing_contract_rows:
+        raise ValueError(
+            "Builder Gate 1 operational contract is incomplete: "
+            + ", ".join(missing_contract_rows)
+        )
 
 
 def _paragraph_text(value: Any) -> str:

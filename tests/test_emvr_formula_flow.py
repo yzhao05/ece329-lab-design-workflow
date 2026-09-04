@@ -21,6 +21,7 @@ from ece329_workflow.emvr_design import apply_emvr_field_updates
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.reporting import (
+    build_emvr_task_report,
     effective_emvr_stage_payload,
     effective_experiment_brief,
 )
@@ -352,6 +353,11 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             {
                 "field_updates": [
                     {
+                        "field_id": "experiment_brief",
+                        "operation": "REPLACE",
+                        "value": "比较电荷距离变化对中间平面电场强度的影响",
+                    },
+                    {
                         "field_id": "changed_quantities",
                         "operation": "REPLACE",
                         "value": ["两个电荷之间的距离"],
@@ -367,7 +373,12 @@ class EmvrFormulaFlowTests(unittest.TestCase):
 
         brief = effective_experiment_brief(session)
         report_view = effective_emvr_stage_payload(session, Stage.IDEA_BRAINSTORMING)
+        report = build_emvr_task_report(session)
         support_map = formula_support_map_for_selection(session)
+        self.assertEqual(
+            report["idea"],
+            "比较电荷距离变化对中间平面电场强度的影响",
+        )
         self.assertEqual(brief["changed_quantities"], ["两个电荷之间的距离"])
         self.assertEqual(brief["observed_quantities"], ["中间平面的电场强度"])
         self.assertEqual(report_view["target_phenomenon"], ["中间平面的电场强度"])

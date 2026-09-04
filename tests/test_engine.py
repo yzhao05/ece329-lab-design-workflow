@@ -9,7 +9,10 @@ from pathlib import Path
 from threading import Lock
 
 from ece329_workflow.api import WorkflowAPI
-from ece329_workflow.builder_input import build_builder_gate1_input
+from ece329_workflow.builder_input import (
+    build_builder_gate1_input,
+    validate_builder_gate1_input,
+)
 from ece329_workflow.dialogue_state import (
     UserIntent,
     current_pending_action,
@@ -1870,6 +1873,10 @@ class WorkflowEngineTests(unittest.TestCase):
             "unresolved",
             json.dumps(builder, ensure_ascii=False).casefold(),
         )
+        disconnected_builder = json.loads(json.dumps(builder, ensure_ascii=False))
+        disconnected_builder.pop("visualization")
+        with self.assertRaisesRegex(ValueError, "missing sections: visualization"):
+            validate_builder_gate1_input(disconnected_builder)
         self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
         self.assertTrue(
             engine.render_builder_input_pdf(result["design_id"]).startswith(b"%PDF")

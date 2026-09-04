@@ -14,6 +14,7 @@ from ece329_workflow.dialogue_state import (
     hydrate_pending_action_from_history,
     recover_repeated_pending_answer,
     record_pending_clarification,
+    record_scene_direction_confirmation,
     STAGE_ONE_DIRECTION_CANDIDATE,
     resolved_intent,
     save_pending_action,
@@ -211,6 +212,45 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_confirmed_scene_candidate_commits_its_resolved_course_binding(self) -> None:
+        session = DesignSession(
+            design_id="confirmed_scene_binding",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        record_scene_direction_confirmation(
+            session,
+            "比较不同闭合曲面上的局部场与总通量",
+            candidate_design_updates=[
+                {
+                    "field": "research_object",
+                    "operation": "REPLACE",
+                    "value": "比较不同闭合曲面上的局部场与总通量",
+                },
+                {
+                    "field": "course_relationship",
+                    "operation": "REPLACE",
+                    "value": ["高斯定律、通量与对称源"],
+                },
+            ],
+        )
+        pending = current_pending_action(session)
+        accepted = resolved_intent(
+            UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+            target="stage_one_direction",
+            confidence=0.99,
+        )
+
+        apply_resolved_intent(
+            session,
+            accepted,
+            pending,
+            "沿用这个研究重点",
+        )
+
+        snapshot = design_state_snapshot(session)
+        self.assertIn("闭合曲面", snapshot["research_object"])
+        self.assertIn("高斯定律", snapshot["course_relationship"])
+
     def test_guided_service_failure_candidate_can_rebind_to_exact_open_field(self) -> None:
         session = idea_facet_session("design_guided_retry_binding")
         pending = current_pending_action(session)

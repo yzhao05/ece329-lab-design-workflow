@@ -880,8 +880,10 @@ function renderTaskReport() {
   if (!emvr || !report) return;
 
   const handoff = state.builderHandoffStatus;
-  dom.taskReportStatus.textContent = state.reportReady
+  dom.taskReportStatus.textContent = state.reportReady && state.builderInputReady
     ? "设计与Builder交接已完整"
+    : state.reportReady
+      ? "学生报告已完成，Builder交接仍需检查"
     : handoff && Number.isFinite(handoff.completed) && Number.isFinite(handoff.required)
       ? `Builder交接 ${handoff.completed}/${handoff.required}`
       : "整理中";
