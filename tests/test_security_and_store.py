@@ -292,6 +292,54 @@ class APISecurityTests(unittest.TestCase):
         self.assertTrue(captured["status"].startswith("400"))
         self.assertEqual(overlong_payload["error"], "invalid_request")
 
+    def test_formula_design_profiles_are_available_from_knowledge_api(self) -> None:
+        api = self.make_api(APISettings())
+
+        status, _, payload = call_api(
+            api,
+            "GET",
+            "/v1/knowledge/formula-design-profiles",
+        )
+
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(len(payload["formula_design_profiles"]), 32)
+        first = payload["formula_design_profiles"][0]
+        self.assertTrue(first["primary_formulas"])
+        self.assertTrue(first["supported_variations"])
+        self.assertTrue(first["supported_observations"])
+        self.assertTrue(first["boundary_conditions"])
+        self.assertTrue(first["applicable_experiment_pattern_ids"])
+
+    def test_experiment_design_patterns_are_available_from_knowledge_api(self) -> None:
+        api = self.make_api(APISettings())
+
+        status, _, payload = call_api(
+            api,
+            "GET",
+            "/v1/knowledge/experiment-design-patterns",
+        )
+
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(len(payload["experiment_design_patterns"]), 15)
+        first = payload["experiment_design_patterns"][0]
+        self.assertTrue(first["required_capabilities"])
+        self.assertTrue(first["scene_requirements"])
+
+    def test_scene_formula_links_are_available_from_knowledge_api(self) -> None:
+        api = self.make_api(APISettings())
+
+        status, _, payload = call_api(
+            api,
+            "GET",
+            "/v1/knowledge/scene-formula-links",
+        )
+
+        self.assertTrue(status.startswith("200"))
+        self.assertEqual(len(payload["scene_formula_links"]), 138)
+        first = payload["scene_formula_links"][0]
+        self.assertTrue(first["profile_ids"])
+        self.assertTrue(first["primary_formulas"])
+
     def test_empty_and_overlong_student_messages_are_rejected(self) -> None:
         api = self.make_api(APISettings(max_text_chars=12))
 

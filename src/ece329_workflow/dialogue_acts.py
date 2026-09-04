@@ -8,6 +8,10 @@ from typing import Any
 from .design_state import FACET_TO_DESIGN_FIELD
 from .builder_requirements import BUILDER_REQUIREMENT_FIELDS
 from .emvr_design import EMVR_EDITABLE_FIELDS
+from .emvr_formula_flow import (
+    EMVR_FORMULA_ACTION_TYPES,
+    normalize_formula_flow_action,
+)
 from .models import DesignSession, Stage
 
 
@@ -31,6 +35,9 @@ DIALOGUE_ACT_TYPES = frozenset(
         "REQUEST_NEW_TOPIC",
         "NEW_TOPIC_CONTENT",
         "NEW_TOPIC",
+        # EMVR-only formula-first onboarding. These actions update the
+        # candidate/selection state; they never write ordinary design fields.
+        *EMVR_FORMULA_ACTION_TYPES,
         "UNRESOLVED",
     }
 )
@@ -285,6 +292,14 @@ def normalize_dialogue_acts(
             target = "REQUEST_NEW_TOPIC"
             content = None
             operation = "EXECUTE"
+        elif act_type in EMVR_FORMULA_ACTION_TYPES:
+            content = normalize_formula_flow_action(act_type, content)
+            if content is None:
+                unresolved.append(
+                    {"content": _text(item.get("content")), "reason": "EMVR公式入口动作缺少有效结构"}
+                )
+                continue
+            operation = "EXECUTE"
         elif act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
             if not _text(content):
                 unresolved.append({"content": "", "reason": "新实验方向缺少具体内容"})
@@ -374,6 +389,7 @@ def compile_dialogue_acts(
     option_comparison_requests: list[Any] = []
     version_requests: list[dict[str, Any]] = []
     controls: list[str] = []
+    emvr_formula_actions: list[dict[str, Any]] = []
     unresolved: list[str] = []
     answered_pending = False
     for act in acts:
@@ -649,6 +665,14 @@ def compile_dialogue_acts(
             controls.append(target)
         elif act_type == "REQUEST_NEW_TOPIC":
             controls.append("REQUEST_NEW_TOPIC")
+        elif act_type in EMVR_FORMULA_ACTION_TYPES:
+            emvr_formula_actions.append(
+                {
+                    "type": act_type,
+                    "content": deepcopy(content),
+                    "act_id": act_id,
+                }
+            )
         elif act_type == "REQUEST_REFERENCE":
             controls.append("REQUEST_REFERENCE")
         elif act_type == "REQUEST_SUMMARY":
@@ -670,6 +694,7 @@ def compile_dialogue_acts(
         "option_comparison_requests": option_comparison_requests,
         "version_requests": version_requests,
         "control_actions": list(dict.fromkeys(controls)),
+        "emvr_formula_actions": emvr_formula_actions,
         "unresolved_content": list(dict.fromkeys(item for item in unresolved if item)),
         "answered_pending": answered_pending,
     }

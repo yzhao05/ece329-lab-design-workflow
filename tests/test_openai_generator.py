@@ -207,6 +207,23 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(len(formulas), 1)
         self.assertNotIn(formulas[0].get("id"), {"ohm_law_density", "charge_relaxation"})
 
+    def test_prompt_packet_exposes_formula_design_profiles_as_known_knowledge(self) -> None:
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        packet = build_prompt_packet(
+            session,
+            "比较多个点电荷靠近时的电场线变化",
+        )
+        retrieval = json.loads(packet["serialized_context"])["knowledge_retrieval"]
+
+        self.assertTrue(retrieval["formula_design_profiles"])
+        profile = retrieval["formula_design_profiles"][0]
+        self.assertIn("primary_formulas", profile)
+        self.assertIn("supporting_formulas", profile)
+        self.assertIn("supported_variations", profile)
+        self.assertIn("supported_observations", profile)
+        self.assertIn("boundary_conditions", profile)
+
     def test_coverage_audit_ignores_separate_field_wrappers_in_compound_answer(self) -> None:
         question = "两个带电物体靠近时，场线如何随距离和电荷类型变化"
         changed = "距离和电荷类型"
@@ -2051,6 +2068,101 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(result["dialogue_acts"][0]["content"], answer)
         self.assertEqual(len(transport.requests), 3)
 
+    def test_guided_field_recovery_splits_answer_and_comparison_after_invalid_compact_act(self) -> None:
+        answer = (
+            "我希望解释闭合面形状变化时总通量为何不变；同时把基础比较改成"
+            "曲面完全包住场源、部分包住场源、未包住场源"
+        )
+        unclear = {
+            "intent": "UNCLEAR",
+            "target": "learning_objective",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps([], ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.8,
+        }
+        invalid_compact = {
+            "actions": [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "unknown_guided_field",
+                    "operation": "REPLACE",
+                    "content": answer,
+                    "source_text": answer,
+                    "source_start": 0,
+                    "source_end": len(answer),
+                    "semantic_key": "invalid_whole_turn_binding",
+                    "confidence": 0.99,
+                }
+            ]
+        }
+        recovered = {
+            "actions": [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "learning_objective",
+                    "operation": "REPLACE",
+                    "content": "解释闭合面形状变化时总通量为何不变",
+                    "source_text": "我希望解释闭合面形状变化时总通量为何不变",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "gauss_flux_learning_objective",
+                    "confidence": 0.99,
+                },
+                {
+                    "type": "MODIFY_COMPARISON",
+                    "target": "baseline_comparisons",
+                    "operation": "REPLACE",
+                    "content": json.dumps(
+                        {
+                            "comparison_id": "baseline_comparisons",
+                            "action": "MODIFY",
+                            "cases": [
+                                "曲面完全包住场源",
+                                "部分包住场源",
+                                "未包住场源",
+                            ],
+                            "replace_all": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "source_text": "基础比较改成曲面完全包住场源、部分包住场源、未包住场源",
+                    "source_start": -1,
+                    "source_end": -1,
+                    "semantic_key": "gaussian_surface_enclosure_cases",
+                    "confidence": 0.99,
+                },
+            ]
+        }
+        pending = {
+            "type": "ANSWER_IDEA_FACET",
+            "subject": "learning_objective",
+            "answer_fields": ["learning_objective"],
+            "question": "完成实验后希望能够解释或判断什么？",
+        }
+        transport = FakeTransport(
+            outputs=[unclear, unclear, invalid_compact, recovered]
+        )
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            guided_session(),
+            answer,
+            pending,
+            {"research_direction": "闭合面形状与电通量"},
+        )
+
+        self.assertEqual(len(transport.requests), 4)
+        self.assertEqual(
+            transport.requests[-1]["text"]["format"]["name"],
+            "ece329_guided_design_turn_recovery",
+        )
+        self.assertEqual(
+            {act["type"] for act in result["dialogue_acts"]},
+            {"ANSWER_PENDING_QUESTION", "MODIFY_COMPARISON"},
+        )
+
     def test_emvr_long_open_answer_uses_field_only_recovery(self) -> None:
         answer = (
             "学生用手柄拖拽两个点电荷来改变距离和相对位置。比较同种电荷和异种电荷"
@@ -2418,15 +2530,13 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             output.stage_payload["stage_readiness"]["ready_for_confirmation"]
         )
 
-    def test_emvr_stage_one_uses_direct_design_contract(self) -> None:
+    def test_emvr_stage_one_prompt_uses_formula_first_contract(self) -> None:
         transport = FakeTransport(
             valid_output(
                 stage_payload_json=json.dumps(
                     {
-                        "original_idea": "在EMVR中探索传输线驻波",
-                        "target_phenomenon": "传输线驻波",
-                        "possible_vr_interactions": ["调整负载阻抗"],
-                        "design_scope": "Unity VR模拟实验设计",
+                        "emvr_formula_phase": "FORMULA_CANDIDATES_PRESENTED",
+                        "formula_cards": [],
                     },
                     ensure_ascii=False,
                 )
@@ -2440,9 +2550,16 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             "请使用EMVR设计传输线驻波实验",
         )
 
-        self.assertEqual(output.stage_payload["target_phenomenon"], "传输线驻波")
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            "FORMULA_CANDIDATES_PRESENTED",
+        )
         request_text = transport.requests[0]["input"][0]["content"][0]["text"]
-        self.assertIn("possible_vr_interactions", request_text)
+        self.assertIn("formula_cards", request_text)
+        self.assertIn("coverage_matrix", request_text)
+        self.assertIn("experiment_methods", request_text)
+        self.assertIn("不能从固定图景库抽取", request_text)
+        self.assertIn("不得填充普通EMVR对象、变量、流程", request_text)
         self.assertNotIn("alternative_ideas数组", request_text)
 
     def test_stateful_generator_chains_response_id_and_resends_instructions(self) -> None:

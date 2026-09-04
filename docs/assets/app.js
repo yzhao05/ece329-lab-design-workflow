@@ -2175,6 +2175,30 @@ function composeAssistantText(response) {
 function deriveQuickActions(response) {
   if (response.quick_actions) return response.quick_actions;
   if (response.workflow_status === "complete" || response.status === "complete") return [];
+  const formulaCards = response.stage_payload?.formula_cards;
+  if (Array.isArray(formulaCards) && formulaCards.length) {
+    return formulaCards
+      .map((card) => ({ option_id: card.option_id || null, label: card.title }))
+      .filter((item) => item.option_id && item.label)
+      .slice(0, 4);
+  }
+  const compositionOptions = response.stage_payload?.composition_options;
+  if (Array.isArray(compositionOptions) && compositionOptions.length) {
+    return compositionOptions.filter((item) => item?.option_id && item?.label);
+  }
+  const experimentMethods = response.stage_payload?.experiment_methods;
+  if (Array.isArray(experimentMethods) && experimentMethods.length) {
+    return experimentMethods
+      .map((method, index) => ({
+        option_id: method.option_id || null,
+        label: `方法${index + 1}｜${method.title || "实验方案"}`,
+      }))
+      .filter((item) => item.option_id && item.label)
+      .slice(0, 15);
+  }
+  if (response.current_stage && response.handled_stage && response.current_stage !== response.handled_stage) {
+    return [`开始${currentWorkspaceTitle(state.stageIndex)}`];
+  }
   const clarificationChoices = response.stage_payload?.clarification_choices;
   if (Array.isArray(clarificationChoices) && clarificationChoices.length) {
     return clarificationChoices;
@@ -2184,10 +2208,6 @@ function deriveQuickActions(response) {
     return [advanceQuickAction("保留这部分并继续")];
   }
   if (response.stage_payload?.awaiting_student_description === true) return [];
-
-  if (response.current_stage && response.handled_stage && response.current_stage !== response.handled_stage) {
-    return [`继续${currentWorkspaceTitle(state.stageIndex)}`];
-  }
 
   if (state.stageIndex === 0) {
     const development = response.stage_payload?.idea_development_status;

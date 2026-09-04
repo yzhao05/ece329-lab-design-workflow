@@ -14,6 +14,15 @@ class LectureKnowledgeBase:
         self.manifest = json.loads(root.joinpath("source_manifest.json").read_text(encoding="utf-8"))
         self.concept_data = json.loads(root.joinpath("concepts.json").read_text(encoding="utf-8"))
         self.formula_data = json.loads(root.joinpath("formulas.json").read_text(encoding="utf-8"))
+        self.formula_design_data = json.loads(
+            root.joinpath("formula_design_profiles.json").read_text(encoding="utf-8")
+        )
+        self.scene_formula_data = json.loads(
+            root.joinpath("scene_formula_links.json").read_text(encoding="utf-8")
+        )
+        self.experiment_pattern_data = json.loads(
+            root.joinpath("experiment_design_patterns.json").read_text(encoding="utf-8")
+        )
         self.supplemental_data = json.loads(
             root.joinpath("supplemental_sources.json").read_text(encoding="utf-8")
         )
@@ -26,6 +35,21 @@ class LectureKnowledgeBase:
             [],
         )
         self.formulas: list[dict[str, Any]] = self.formula_data["formulas"]
+        self.formula_design_profiles: list[dict[str, Any]] = self.formula_design_data[
+            "profiles"
+        ]
+        self.profile_scene_links: list[dict[str, Any]] = self.scene_formula_data[
+            "profile_scene_links"
+        ]
+        self.scene_formula_roles: dict[str, dict[str, Any]] = (
+            self.scene_formula_data["scene_formula_roles"]
+        )
+        self.experiment_design_patterns: list[dict[str, Any]] = (
+            self.experiment_pattern_data["patterns"]
+        )
+        self.formula_profile_pattern_links: list[dict[str, Any]] = (
+            self.experiment_pattern_data["profile_applicability"]
+        )
         self.supplemental_sources: list[dict[str, Any]] = self.supplemental_data["sources"]
         self.supplemental_concepts: list[dict[str, Any]] = self.supplemental_data["concepts"]
         self.scene_templates: list[dict[str, Any]] = self.scene_template_data["templates"]
@@ -33,6 +57,21 @@ class LectureKnowledgeBase:
             "generic_frames"
         ]
         self._lecture_by_id = {item["id"]: item for item in self.lectures}
+        self._formula_by_id = {item["id"]: item for item in self.formulas}
+        self._formula_profile_by_id = {
+            item["profile_id"]: item for item in self.formula_design_profiles
+        }
+        self._experiment_pattern_by_id = {
+            item["pattern_id"]: item for item in self.experiment_design_patterns
+        }
+        self._pattern_ids_by_formula_profile = {
+            str(item.get("profile_id") or ""): [
+                str(pattern_id)
+                for pattern_id in item.get("pattern_ids", [])
+                if str(pattern_id).strip()
+            ]
+            for item in self.formula_profile_pattern_links
+        }
         self._supplemental_source_by_id = {
             item["source_id"]: item for item in self.supplemental_sources
         }
@@ -40,6 +79,10 @@ class LectureKnowledgeBase:
             item["supplemental_concept_id"]: item for item in self.supplemental_concepts
         }
         self.exploration_points = self._build_exploration_points()
+        self._exploration_by_scene_id = {
+            item["catalog_scene_id"]: item for item in self.exploration_points
+        }
+        self._formula_profile_ids_by_scene_id = self._build_scene_formula_index()
 
     @property
     def source_reference(self) -> dict[str, Any]:
@@ -226,14 +269,140 @@ class LectureKnowledgeBase:
     def exploration_scene_catalog(self) -> list[dict[str, Any]]:
         return [dict(point) for point in self.exploration_points]
 
-    def _relevant_exploration_points(self, text: str) -> list[dict[str, Any]]:
+    def _build_scene_formula_index(self) -> dict[str, list[str]]:
+        """Build the many-to-many index without changing exploration scenes."""
+
+        index: dict[str, list[str]] = {}
+        for link in self.profile_scene_links:
+            profile_id = str(link.get("profile_id") or "")
+            for raw_scene_id in link.get("scene_ids", []):
+                scene_id = str(raw_scene_id)
+                profile_ids = index.setdefault(scene_id, [])
+                if profile_id and profile_id not in profile_ids:
+                    profile_ids.append(profile_id)
+        return index
+
+    def formula_links_for_scene(self, scene_id: str) -> dict[str, Any] | None:
+        """Return canonical formula roles for one internal exploration scene."""
+
+        normalized_scene_id = str(scene_id).strip()
+        scene = self._exploration_by_scene_id.get(normalized_scene_id)
+        if not scene:
+            return None
+        profile_ids = self._formula_profile_ids_by_scene_id.get(
+            normalized_scene_id,
+            [],
+        )
+        profiles = [
+            self._materialize_formula_design_profile(
+                self._formula_profile_by_id[profile_id]
+            )
+            for profile_id in profile_ids
+            if profile_id in self._formula_profile_by_id
+        ]
+        role_definition = self.scene_formula_roles.get(normalized_scene_id, {})
+        primary_ids = list(
+            dict.fromkeys(
+                str(formula_id)
+                for formula_id in role_definition.get("primary_formula_ids", [])
+            )
+        )
+        supporting_ids = [
+            formula_id
+            for formula_id in dict.fromkeys(
+                str(formula_id)
+                for formula_id in role_definition.get(
+                    "supporting_formula_ids", []
+                )
+            )
+            if formula_id not in primary_ids
+        ]
+        return {
+            "scene_id": normalized_scene_id,
+            "option_id": scene.get("option_id"),
+            "direction": scene.get("direction"),
+            "focus": scene.get("focus"),
+            "profile_ids": list(profile_ids),
+            "primary_formula_ids": primary_ids,
+            "supporting_formula_ids": supporting_ids,
+            "primary_formulas": [
+                dict(self._formula_by_id[formula_id])
+                for formula_id in primary_ids
+                if formula_id in self._formula_by_id
+            ],
+            "supporting_formulas": [
+                dict(self._formula_by_id[formula_id])
+                for formula_id in supporting_ids
+                if formula_id in self._formula_by_id
+            ],
+            "formula_design_profiles": profiles,
+        }
+
+    def formula_links_for_scenes(
+        self,
+        scene_ids: list[str] | set[str] | tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        return [
+            link
+            for scene_id in dict.fromkeys(str(item) for item in scene_ids)
+            if (link := self.formula_links_for_scene(scene_id)) is not None
+        ]
+
+    def scenes_for_formula(self, formula_id: str) -> list[dict[str, Any]]:
+        """Return every linked scene, supporting the formula-to-many direction."""
+
+        normalized_formula_id = str(formula_id).strip()
+        if normalized_formula_id not in self._formula_by_id:
+            return []
+        scenes: list[dict[str, Any]] = []
+        for scene_id, scene in self._exploration_by_scene_id.items():
+            link = self.formula_links_for_scene(scene_id)
+            if not link:
+                continue
+            primary_ids = link.get("primary_formula_ids", [])
+            supporting_ids = link.get("supporting_formula_ids", [])
+            if normalized_formula_id not in {*primary_ids, *supporting_ids}:
+                continue
+            scenes.append(
+                {
+                    "scene_id": scene_id,
+                    "option_id": scene.get("option_id"),
+                    "direction": scene.get("direction"),
+                    "focus": scene.get("focus"),
+                    "formula_role": (
+                        "PRIMARY"
+                        if normalized_formula_id in primary_ids
+                        else "SUPPORTING"
+                    ),
+                }
+            )
+        return scenes
+
+    def _relevant_exploration_points(
+        self,
+        text: str,
+        *,
+        course_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_domain = str(course_domain or "").strip().casefold()
+        if normalized_domain not in {
+            "electrostatics",
+            "magnetism",
+            "electromagnetics",
+        }:
+            normalized_domain = ""
         lecture_matches = self.match_concepts(text, limit=len(self.lectures))
         supplemental_matches = self.match_supplemental_concepts(
             text,
             limit=len(self.supplemental_concepts),
         )
         if not lecture_matches and not supplemental_matches:
-            return list(self.exploration_points)
+            return [
+                point
+                for point in self.exploration_points
+                if not normalized_domain
+                or point.get("course_block") == normalized_domain
+            ]
 
         lecture_ids = {str(item["id"]) for item in lecture_matches}
         supplemental_ids = {
@@ -241,12 +410,25 @@ class LectureKnowledgeBase:
         }
         for concept in supplemental_matches:
             lecture_ids.update(str(item) for item in concept["course_scope_concept_ids"])
-        return [
+        matched = [
             point
             for point in self.exploration_points
             if str(point.get("concept_id") or "") in lecture_ids
             or str(point.get("supplemental_concept_id") or "") in supplemental_ids
         ]
+        if normalized_domain:
+            matched = [
+                point
+                for point in matched
+                if point.get("course_block") == normalized_domain
+            ]
+            if not matched:
+                matched = [
+                    point
+                    for point in self.exploration_points
+                    if point.get("course_block") == normalized_domain
+                ]
+        return matched
 
     @staticmethod
     def _sample_seed(seed_key: str, excluded_count: int) -> int:
@@ -262,13 +444,24 @@ class LectureKnowledgeBase:
         *,
         exclude_option_ids: set[str] | None = None,
         seed_key: str = "",
+        course_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         """Sample unique, course-grounded points while avoiding previously shown ones."""
 
         if limit <= 0:
             return []
         excluded = {str(item) for item in (exclude_option_ids or set()) if str(item)}
-        relevant = self._relevant_exploration_points(text)
+        normalized_domain = str(course_domain or "").strip().casefold()
+        if normalized_domain not in {
+            "electrostatics",
+            "magnetism",
+            "electromagnetics",
+        }:
+            normalized_domain = ""
+        relevant = self._relevant_exploration_points(
+            text,
+            course_domain=normalized_domain or None,
+        )
         remaining = [
             point for point in relevant if str(point["option_id"]) not in excluded
         ]
@@ -279,12 +472,19 @@ class LectureKnowledgeBase:
                 for point in self.exploration_points
                 if str(point["option_id"]) not in excluded
                 and str(point["option_id"]) not in known_ids
+                and (
+                    not normalized_domain
+                    or point.get("course_block") == normalized_domain
+                )
             )
         if len(remaining) < limit:
             remaining = list(relevant or self.exploration_points)
 
         rng = random.Random(self._sample_seed(seed_key, len(excluded)))
-        no_specific_match = len(relevant) == len(self.exploration_points)
+        no_specific_match = (
+            not normalized_domain
+            and len(relevant) == len(self.exploration_points)
+        )
         if no_specific_match and limit == 3:
             sampled: list[dict[str, Any]] = []
             for block in ("electrostatics", "magnetism", "electromagnetics"):
@@ -522,6 +722,153 @@ class LectureKnowledgeBase:
                 return matches[:limit]
         return []
 
+    def _materialize_formula_design_profile(
+        self,
+        profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve stable IDs to canonical formula records with lecture provenance."""
+
+        primary_ids = [str(item) for item in profile.get("primary_formula_ids", [])]
+        supporting_ids = [
+            str(item) for item in profile.get("supporting_formula_ids", [])
+        ]
+        return {
+            **dict(profile),
+            "applicable_experiment_pattern_ids": list(
+                self._pattern_ids_by_formula_profile.get(
+                    str(profile.get("profile_id") or ""),
+                    [],
+                )
+            ),
+            "primary_formulas": [
+                dict(self._formula_by_id[formula_id])
+                for formula_id in primary_ids
+                if formula_id in self._formula_by_id
+            ],
+            "supporting_formulas": [
+                dict(self._formula_by_id[formula_id])
+                for formula_id in supporting_ids
+                if formula_id in self._formula_by_id
+            ],
+        }
+
+    def design_profiles_for_formula_ids(
+        self,
+        formula_ids: list[str] | set[str] | tuple[str, ...],
+        limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        """Return design profiles connected to an already selected formula set."""
+
+        selected = {str(item) for item in formula_ids if str(item).strip()}
+        if not selected or limit <= 0:
+            return []
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        for order, profile in enumerate(self.formula_design_profiles):
+            primary_ids = set(profile.get("primary_formula_ids", []))
+            supporting_ids = set(profile.get("supporting_formula_ids", []))
+            primary_matches = len(selected.intersection(primary_ids))
+            supporting_matches = len(selected.intersection(supporting_ids))
+            if primary_matches or supporting_matches:
+                ranked.append(
+                    (primary_matches * 10 + supporting_matches, -order, profile)
+                )
+        ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        return [
+            self._materialize_formula_design_profile(profile)
+            for _, _, profile in ranked[:limit]
+        ]
+
+    def formula_design_references(
+        self,
+        text: str,
+        limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        """Retrieve formula-to-design mappings through course concept links.
+
+        The lookup reuses the established lecture concept matcher. It does not
+        infer design roles from isolated keywords or persist any formula choice.
+        """
+
+        if limit <= 0:
+            return []
+        ranked_concept_ids = [
+            str(item.get("id") or "")
+            for item in self.match_concepts(text, limit=8)
+            if str(item.get("id") or "")
+        ]
+        if not ranked_concept_ids:
+            for supplemental in self.match_supplemental_concepts(text, limit=2):
+                ranked_concept_ids.extend(
+                    str(item)
+                    for item in supplemental.get("course_scope_concept_ids", [])
+                    if str(item).strip()
+                )
+        if not ranked_concept_ids:
+            return []
+
+        concept_rank = {
+            concept_id: index
+            for index, concept_id in enumerate(dict.fromkeys(ranked_concept_ids))
+        }
+        block_rank = {
+            self._course_block_for_lecture(
+                int(self._lecture_by_id[concept_id]["lecture"])
+            ): index
+            for index, concept_id in enumerate(dict.fromkeys(ranked_concept_ids))
+            if concept_id in self._lecture_by_id
+        }
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        for order, profile in enumerate(self.formula_design_profiles):
+            primary_ids = profile.get("primary_formula_ids", [])
+            supporting_ids = profile.get("supporting_formula_ids", [])
+            primary_concepts = {
+                str(concept_id)
+                for formula_id in primary_ids
+                for concept_id in self._formula_by_id.get(formula_id, {}).get(
+                    "concept_ids", []
+                )
+            }
+            supporting_concepts = {
+                str(concept_id)
+                for formula_id in supporting_ids
+                for concept_id in self._formula_by_id.get(formula_id, {}).get(
+                    "concept_ids", []
+                )
+            }
+            matched_primary = primary_concepts.intersection(concept_rank)
+            matched_supporting = supporting_concepts.intersection(concept_rank)
+            if not matched_primary and not matched_supporting:
+                continue
+            best_rank = min(
+                concept_rank[item]
+                for item in matched_primary.union(matched_supporting)
+            )
+            score = (
+                len(matched_primary) * 20
+                + len(matched_supporting) * 4
+                + max(0, 10 - best_rank)
+            )
+            profile_block = str(profile.get("course_block") or "")
+            if profile_block in block_rank:
+                score += max(20, 50 - block_rank[profile_block] * 5)
+            ranked.append((score, -order, profile))
+        matched_profile_ids = {str(item[2].get("profile_id") or "") for item in ranked}
+        # A broad course concept (for example "静电场") may match only an
+        # overview lecture. Fill the candidate set from the same established
+        # course block so the knowledge layer exposes usable formula families
+        # instead of unrelated equations from a neighboring topic.
+        for order, profile in enumerate(self.formula_design_profiles):
+            profile_id = str(profile.get("profile_id") or "")
+            profile_block = str(profile.get("course_block") or "")
+            if profile_id in matched_profile_ids or profile_block not in block_rank:
+                continue
+            ranked.append((max(10, 40 - block_rank[profile_block] * 5), -order, profile))
+        ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        return [
+            self._materialize_formula_design_profile(profile)
+            for _, _, profile in ranked[:limit]
+        ]
+
     def public_concepts(self) -> list[dict[str, Any]]:
         return self.lectures
 
@@ -531,9 +878,46 @@ class LectureKnowledgeBase:
     def public_formulas(self) -> list[dict[str, Any]]:
         return self.formulas
 
+    def public_formula_design_profiles(self) -> list[dict[str, Any]]:
+        return [
+            self._materialize_formula_design_profile(profile)
+            for profile in self.formula_design_profiles
+        ]
+
+    def public_experiment_design_patterns(self) -> list[dict[str, Any]]:
+        return [dict(pattern) for pattern in self.experiment_design_patterns]
+
+    def experiment_patterns_for_profiles(
+        self,
+        profile_ids: list[str] | set[str] | tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        selected = {str(item) for item in profile_ids if str(item).strip()}
+        applicable = {
+            pattern_id
+            for profile_id in selected
+            for pattern_id in self._pattern_ids_by_formula_profile.get(profile_id, [])
+        }
+        return [
+            dict(pattern)
+            for pattern in self.experiment_design_patterns
+            if pattern.get("pattern_id") in applicable
+        ]
+
+    def public_scene_formula_links(self) -> list[dict[str, Any]]:
+        return self.formula_links_for_scenes(
+            [item["catalog_scene_id"] for item in self.exploration_points]
+        )
+
     def search(self, text: str) -> dict[str, Any]:
         concepts = self.concept_references(text, limit=5)
         supplemental = self.supplemental_concept_references(text, limit=5)
+        brainstorm_options = self.brainstorm_options(text, limit=3)
+        formula_profiles = self.formula_design_references(text, limit=6)
+        relevant_pattern_ids = {
+            str(pattern_id)
+            for profile in formula_profiles
+            for pattern_id in profile.get("applicable_experiment_pattern_ids", [])
+        }
         return {
             "query": text,
             "source": self.source_reference,
@@ -542,7 +926,20 @@ class LectureKnowledgeBase:
             "concepts": concepts,
             "supplemental_concepts": supplemental,
             "formulas": self.formula_references(text, limit=12),
-            "brainstorm_options": self.brainstorm_options(text, limit=3),
+            "formula_design_profiles": formula_profiles,
+            "experiment_design_patterns": [
+                dict(pattern)
+                for pattern in self.experiment_design_patterns
+                if pattern.get("pattern_id") in relevant_pattern_ids
+            ],
+            "brainstorm_options": brainstorm_options,
+            "scene_formula_links": self.formula_links_for_scenes(
+                [
+                    str(item.get("catalog_scene_id") or "")
+                    for item in brainstorm_options
+                    if str(item.get("catalog_scene_id") or "")
+                ]
+            ),
             "baseline_comparison_suggestions": self.standard_comparison_suggestions(
                 text,
                 limit=1,
@@ -565,6 +962,210 @@ class LectureKnowledgeBase:
             for page in formula["pages"]:
                 if not 1 <= page <= self.manifest["page_count"]:
                     errors.append(f"formula {formula_id} has invalid page: {page}")
+        if self.formula_design_data.get("source_id") != self.manifest.get("source_id"):
+            errors.append("formula design profile source does not match the lecture manifest")
+        profile_ids: set[str] = set()
+        covered_formula_ids: set[str] = set()
+        valid_course_blocks = {"electrostatics", "magnetism", "electromagnetics"}
+        for profile in self.formula_design_profiles:
+            profile_id = profile.get("profile_id")
+            if not isinstance(profile_id, str) or not profile_id:
+                errors.append("formula design profile has an invalid id")
+                continue
+            if profile_id in profile_ids:
+                errors.append(f"duplicate formula design profile id: {profile_id}")
+            profile_ids.add(profile_id)
+            if profile.get("course_block") not in valid_course_blocks:
+                errors.append(f"formula design profile {profile_id} has invalid course block")
+            primary_ids = profile.get("primary_formula_ids")
+            supporting_ids = profile.get("supporting_formula_ids")
+            if not isinstance(primary_ids, list) or not primary_ids:
+                errors.append(f"formula design profile {profile_id} has no primary formulas")
+                primary_ids = []
+            if not isinstance(supporting_ids, list):
+                errors.append(f"formula design profile {profile_id} has invalid supporting formulas")
+                supporting_ids = []
+            referenced_ids = {str(item) for item in [*primary_ids, *supporting_ids]}
+            unknown_formula_ids = referenced_ids - formula_ids
+            if unknown_formula_ids:
+                errors.append(
+                    f"formula design profile {profile_id} has unknown formula ids: "
+                    f"{sorted(unknown_formula_ids)}"
+                )
+            duplicated_roles = set(primary_ids).intersection(supporting_ids)
+            if duplicated_roles:
+                errors.append(
+                    f"formula design profile {profile_id} assigns formulas to both roles: "
+                    f"{sorted(duplicated_roles)}"
+                )
+            covered_formula_ids.update(referenced_ids.intersection(formula_ids))
+            for field in (
+                "supported_variations",
+                "supported_observations",
+                "boundary_conditions",
+            ):
+                values = profile.get(field)
+                if (
+                    not isinstance(values, list)
+                    or not values
+                    or any(not isinstance(item, dict) or not item for item in values)
+                ):
+                    errors.append(
+                        f"formula design profile {profile_id} has invalid {field}"
+                    )
+        pattern_ids: set[str] = set()
+        for pattern in self.experiment_design_patterns:
+            pattern_id = str(pattern.get("pattern_id") or "")
+            if not pattern_id:
+                errors.append("experiment design pattern has an invalid id")
+                continue
+            if pattern_id in pattern_ids:
+                errors.append(f"duplicate experiment design pattern id: {pattern_id}")
+            pattern_ids.add(pattern_id)
+            for field in ("title_zh", "design_logic", "required_capabilities", "scene_requirements", "method_template"):
+                value = pattern.get(field)
+                if value in (None, "", [], {}):
+                    errors.append(f"experiment design pattern {pattern_id} has invalid {field}")
+        linked_pattern_profiles: set[str] = set()
+        for link in self.formula_profile_pattern_links:
+            profile_id = str(link.get("profile_id") or "")
+            if profile_id not in profile_ids:
+                errors.append(f"experiment pattern link has unknown formula profile: {profile_id}")
+            if profile_id in linked_pattern_profiles:
+                errors.append(f"duplicate experiment pattern profile link: {profile_id}")
+            linked_pattern_profiles.add(profile_id)
+            linked_ids = link.get("pattern_ids")
+            if not isinstance(linked_ids, list) or not linked_ids:
+                errors.append(f"formula design profile {profile_id} has no experiment patterns")
+                continue
+            unknown_patterns = {str(item) for item in linked_ids} - pattern_ids
+            if unknown_patterns:
+                errors.append(
+                    f"formula design profile {profile_id} has unknown experiment patterns: "
+                    f"{sorted(unknown_patterns)}"
+                )
+        missing_pattern_profiles = profile_ids - linked_pattern_profiles
+        if missing_pattern_profiles:
+            errors.append(
+                "formula design profiles do not declare experiment patterns: "
+                f"{sorted(missing_pattern_profiles)}"
+            )
+        missing_profile_formulas = formula_ids - covered_formula_ids
+        if missing_profile_formulas:
+            errors.append(
+                "formula design profiles do not cover formulas: "
+                f"{sorted(missing_profile_formulas)}"
+            )
+        valid_scene_ids = set(self._exploration_by_scene_id)
+        linked_scene_ids: set[str] = set()
+        linked_profile_ids: set[str] = set()
+        for link in self.profile_scene_links:
+            profile_id = str(link.get("profile_id") or "")
+            if not profile_id or profile_id not in profile_ids:
+                errors.append(
+                    f"scene-formula link has unknown formula profile: {profile_id}"
+                )
+            if profile_id in linked_profile_ids:
+                errors.append(
+                    f"duplicate scene-formula profile link: {profile_id}"
+                )
+            linked_profile_ids.add(profile_id)
+            scene_ids = link.get("scene_ids")
+            if not isinstance(scene_ids, list) or not scene_ids:
+                errors.append(
+                    f"scene-formula profile {profile_id} has no scene ids"
+                )
+                continue
+            normalized_scene_ids = [str(item) for item in scene_ids]
+            if len(normalized_scene_ids) != len(set(normalized_scene_ids)):
+                errors.append(
+                    f"scene-formula profile {profile_id} repeats a scene id"
+                )
+            unknown_scene_ids = set(normalized_scene_ids) - valid_scene_ids
+            if unknown_scene_ids:
+                errors.append(
+                    f"scene-formula profile {profile_id} has unknown scene ids: "
+                    f"{sorted(unknown_scene_ids)}"
+                )
+            linked_scene_ids.update(set(normalized_scene_ids).intersection(valid_scene_ids))
+        missing_scene_links = valid_scene_ids - linked_scene_ids
+        if missing_scene_links:
+            errors.append(
+                "exploration scenes without formula links: "
+                f"{sorted(missing_scene_links)}"
+            )
+        missing_profile_links = profile_ids - linked_profile_ids
+        if missing_profile_links:
+            errors.append(
+                "formula design profiles without scene links: "
+                f"{sorted(missing_profile_links)}"
+            )
+        role_scene_ids = set(self.scene_formula_roles)
+        missing_scene_roles = valid_scene_ids - role_scene_ids
+        unknown_role_scenes = role_scene_ids - valid_scene_ids
+        if missing_scene_roles:
+            errors.append(
+                "exploration scenes without explicit formula roles: "
+                f"{sorted(missing_scene_roles)}"
+            )
+        if unknown_role_scenes:
+            errors.append(
+                "formula roles reference unknown exploration scenes: "
+                f"{sorted(unknown_role_scenes)}"
+            )
+        role_covered_formula_ids: set[str] = set()
+        for scene_id, role_definition in self.scene_formula_roles.items():
+            if not isinstance(role_definition, dict):
+                errors.append(f"scene {scene_id} has invalid formula roles")
+                continue
+            primary_ids = role_definition.get("primary_formula_ids")
+            supporting_ids = role_definition.get("supporting_formula_ids", [])
+            if not isinstance(primary_ids, list) or not primary_ids:
+                errors.append(f"scene {scene_id} has no primary formula")
+                primary_ids = []
+            if not isinstance(supporting_ids, list):
+                errors.append(f"scene {scene_id} has invalid supporting formulas")
+                supporting_ids = []
+            role_formula_ids = {str(item) for item in [*primary_ids, *supporting_ids]}
+            role_covered_formula_ids.update(role_formula_ids.intersection(formula_ids))
+            unknown_formula_ids = role_formula_ids - formula_ids
+            if unknown_formula_ids:
+                errors.append(
+                    f"scene {scene_id} has unknown formula ids: "
+                    f"{sorted(unknown_formula_ids)}"
+                )
+            duplicated_roles = set(primary_ids).intersection(supporting_ids)
+            if duplicated_roles:
+                errors.append(
+                    f"scene {scene_id} assigns formulas to both roles: "
+                    f"{sorted(duplicated_roles)}"
+                )
+            linked_formula_ids = {
+                str(formula_id)
+                for profile_id in self._formula_profile_ids_by_scene_id.get(
+                    scene_id, []
+                )
+                for formula_id in [
+                    *self._formula_profile_by_id.get(profile_id, {}).get(
+                        "primary_formula_ids", []
+                    ),
+                    *self._formula_profile_by_id.get(profile_id, {}).get(
+                        "supporting_formula_ids", []
+                    ),
+                ]
+            }
+            outside_linked_profiles = role_formula_ids - linked_formula_ids
+            if outside_linked_profiles:
+                errors.append(
+                    f"scene {scene_id} uses formulas outside its linked profiles: "
+                    f"{sorted(outside_linked_profiles)}"
+                )
+        formulas_without_scene_roles = formula_ids - role_covered_formula_ids
+        if formulas_without_scene_roles:
+            errors.append(
+                "canonical formulas without an explicit scene role: "
+                f"{sorted(formulas_without_scene_roles)}"
+            )
         for lecture in self.lectures:
             start, end = lecture["pages"]
             if start > end or start < 1 or end > self.manifest["page_count"]:

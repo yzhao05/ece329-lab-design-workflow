@@ -9,6 +9,9 @@
   "extraction_policy": {
     "concepts": "Only concepts explicitly present in the lecture titles, overview, or lecture text are cataloged.",
     "formulas": "Core formulas are curated from the PDF and retain PDF page references; visually ambiguous symbols were checked against rendered pages.",
+    "formula_design_profiles": "Every canonical lecture formula is assigned to at least one reviewed experiment-design profile that separates primary and supporting formulas, supported variations, supported observations, and applicability conditions.",
+    "experiment_design_patterns": "A finite set of 15 reviewed experiment-design paradigms defines how formula-centered EMVR methods may be generated at runtime; every formula profile explicitly declares its applicable paradigms.",
+    "scene_formula_links": "Every internally numbered exploration scene is linked to one or more formula-design profiles through a separate many-to-many index; this index is not used by Guided-mode scene sampling.",
     "runtime_constraint": "These notes define the ECE329 course boundary and the validated formula catalog. Brainstorming may also retrieve from supplemental_sources.json when an entry maps back to course-scope concept IDs. Uncataloged ECE329 claims require a reviewed source update."
   }
 }

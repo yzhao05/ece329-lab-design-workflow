@@ -20,7 +20,11 @@ from .builder_requirements import (
     validate_builder_requirements,
 )
 from .models import DesignSession, InteractionState, Stage
-from .reporting import validate_emvr_report_completeness
+from .reporting import (
+    effective_emvr_stage_payload,
+    effective_experiment_brief,
+    validate_emvr_report_completeness,
+)
 
 
 _LATIN_RUN = re.compile(r"[A-Za-z0-9_./:+()=\-\[\]]+(?:\s+[A-Za-z0-9_./:+()=\-\[\]]+)*")
@@ -28,9 +32,7 @@ _UNRESOLVED = "unresolved — 由 EMVR Builder Gate 1 与用户确认"
 
 
 def _stage_payload(session: DesignSession, stage: Stage) -> dict[str, Any]:
-    stored = session.stage_outputs.get(stage.value, {})
-    payload = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
-    return payload if isinstance(payload, dict) else {}
+    return effective_emvr_stage_payload(session, stage)
 
 
 def _text(value: Any, *, depth: int = 0) -> str:
@@ -154,6 +156,69 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
     procedure = _stage_payload(session, Stage.CONCEPTUAL_PROCEDURE)
     visualization = _stage_payload(session, Stage.EXPECTED_DATA_VISUALIZATION)
     value_limits = _stage_payload(session, Stage.DESIGN_VALUE_AND_LIMITATIONS)
+    experiment_brief = effective_experiment_brief(session)
+    emvr_design = session.design_context.get("emvr_design", {})
+    emvr_design = emvr_design if isinstance(emvr_design, dict) else {}
+    formula_flow = emvr_design.get("formula_flow", {})
+    formula_flow = formula_flow if isinstance(formula_flow, dict) else {}
+    authoritative_formula_brief = emvr_design.get("authoritative_experiment_brief")
+    if not isinstance(authoritative_formula_brief, dict) or not authoritative_formula_brief:
+        # Completed sessions created before formula-first onboarding remain
+        # exportable.  Their already-confirmed stage artifacts are projected
+        # into the same Builder contract and explicitly marked as legacy;
+        # current sessions still use the authoritative formula brief.
+        inventory = setup.get("object_inventory", [])
+        legacy_objects = [
+            str(item.get("object_name") or "").strip()
+            for item in inventory
+            if isinstance(item, dict) and str(item.get("object_name") or "").strip()
+        ] if isinstance(inventory, list) else []
+        experiment_brief = {
+            "topic": _first_value(
+                idea.get("normalized_idea"),
+                research.get("main_research_question"),
+            ),
+            "summary": _first_value(
+                idea.get("normalized_idea"),
+                research.get("main_research_question"),
+            ),
+            "primary_formula_ids": [],
+            "supporting_formula_ids": [],
+            "formula_composition_strategy": "LEGACY_CONFIRMED_STAGE_FLOW",
+            "selected_experiment_method_ids": ["legacy_confirmed_procedure"],
+            "selected_experiment_pattern_ids": ["LEGACY_CONFIRMED_STAGE_FLOW"],
+            "objects": legacy_objects,
+            "operations": _as_list(procedure.get("procedure_steps")),
+            "changed_quantities": _as_list(variables.get("independent_variable")),
+            "observed_quantities": _as_list(variables.get("dependent_variable")),
+            "boundary_conditions": _as_list(value_limits.get("limitations")),
+        }
+    method_by_id = {
+        str(item.get("method_id") or ""): item
+        for item in formula_flow.get("experiment_methods", [])
+        if isinstance(item, dict)
+    }
+    selected_methods = [
+        {
+            "method_id": method_id,
+            "title": _text(method_by_id[method_id].get("title")),
+            "pattern_ids": list(method_by_id[method_id].get("pattern_ids", [])),
+            "description": _text(method_by_id[method_id].get("description")),
+            "process_summary": _text(method_by_id[method_id].get("process_summary")),
+        }
+        for method_id in experiment_brief.get("selected_experiment_method_ids", [])
+        if method_id in method_by_id
+    ]
+    if not selected_methods and experiment_brief.get("selected_experiment_method_ids"):
+        selected_methods = [
+            {
+                "method_id": "legacy_confirmed_procedure",
+                "title": "已确认的完整实验流程",
+                "pattern_ids": ["LEGACY_CONFIRMED_STAGE_FLOW"],
+                "description": "由升级前已经确认的阶段设计投影而来。",
+                "process_summary": _text(procedure.get("procedure_steps")),
+            }
+        ]
 
     title = builder_values["lab_title"]
     lab_id = builder_values["lab_id"]
@@ -214,6 +279,33 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 status="builder-processing-instruction",
             ),
         ],
+        "formula_driven_experiment": {
+            "topic": _text(experiment_brief.get("topic")),
+            "summary": _text(experiment_brief.get("summary")),
+            "primary_formulas": _as_list(
+                idea.get("primary_formulas") or theory.get("core_equations")
+            ),
+            "supporting_formulas": _as_list(idea.get("supporting_formulas")),
+            "composition_strategy": _text(
+                experiment_brief.get("formula_composition_strategy")
+            ),
+            "selected_methods": selected_methods,
+            "selected_pattern_ids": list(
+                experiment_brief.get("selected_experiment_pattern_ids", [])
+            ),
+            "objects": list(experiment_brief.get("objects", [])),
+            "operations": list(experiment_brief.get("operations", [])),
+            "changed_quantities": list(
+                experiment_brief.get("changed_quantities", [])
+            ),
+            "observed_quantities": list(
+                experiment_brief.get("observed_quantities", [])
+            ),
+            "boundary_conditions": list(
+                experiment_brief.get("boundary_conditions", [])
+            ),
+            "status": "confirmed-from-design-session",
+        },
         "design_definition": [
             _field("research_question", research.get("main_research_question")),
             _field("target_phenomenon", idea.get("target_phenomenon")),
@@ -393,6 +485,7 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     required_sections = {
         "document",
         "identity",
+        "formula_driven_experiment",
         "design_definition",
         "learning_goals",
         "student_tasks",
@@ -408,6 +501,107 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         raise ValueError(
             "Builder Gate 1 input is missing sections: " + ", ".join(missing_sections)
         )
+    formula_design = payload.get("formula_driven_experiment", {})
+    if not isinstance(formula_design, dict):
+        raise ValueError("Builder Gate 1 formula-driven experiment must be an object")
+    required_formula_fields = (
+        "topic",
+        "summary",
+        "primary_formulas",
+        "composition_strategy",
+        "selected_methods",
+        "selected_pattern_ids",
+        "objects",
+        "operations",
+        "changed_quantities",
+        "observed_quantities",
+        "boundary_conditions",
+    )
+    missing_formula_fields = [
+        field
+        for field in required_formula_fields
+        if formula_design.get(field) in (None, "", [], {})
+    ]
+    if missing_formula_fields:
+        raise ValueError(
+            "Builder Gate 1 formula-driven experiment is incomplete: "
+            + ", ".join(missing_formula_fields)
+        )
+    selected_methods = formula_design.get("selected_methods", [])
+    required_method_fields = {
+        "method_id",
+        "title",
+        "pattern_ids",
+        "description",
+        "process_summary",
+    }
+    if any(
+        not isinstance(item, dict)
+        or any(item.get(field) in (None, "", [], {}) for field in required_method_fields)
+        for item in selected_methods
+    ):
+        raise ValueError(
+            "Builder Gate 1 selected experiment methods are missing their process contract"
+        )
+    selected_pattern_ids = {
+        str(item)
+        for item in formula_design.get("selected_pattern_ids", [])
+        if str(item).strip()
+    }
+    method_pattern_ids = {
+        str(pattern_id)
+        for method in selected_methods
+        for pattern_id in method.get("pattern_ids", [])
+        if str(pattern_id).strip()
+    }
+    if selected_pattern_ids != method_pattern_ids:
+        raise ValueError(
+            "Builder Gate 1 method and experiment-pattern selections are disconnected"
+        )
+
+    def row_value(section: str, key: str) -> str:
+        rows = payload.get(section, [])
+        return next(
+            (
+                _text(item.get("value"))
+                for item in rows
+                if isinstance(item, dict) and item.get("key") == key
+            ),
+            "",
+        ) if isinstance(rows, list) else ""
+
+    required_design_values = {
+        "research_question": row_value("design_definition", "research_question"),
+        "independent_variable": row_value("design_definition", "independent_variable"),
+        "dependent_variable": row_value("design_definition", "dependent_variable"),
+        "controlled_variables": row_value("design_definition", "controlled_variables"),
+        "research_hypothesis": row_value("design_definition", "research_hypothesis"),
+    }
+    missing_design_values = [
+        field for field, value in required_design_values.items() if not value
+    ]
+    if missing_design_values:
+        raise ValueError(
+            "Builder Gate 1 research definition is incomplete: "
+            + ", ".join(missing_design_values)
+        )
+    if len(payload.get("learning_goals", [])) < 4:
+        raise ValueError("Builder Gate 1 requires the four EMVR learning goals")
+    if len(payload.get("student_tasks", [])) < 5:
+        raise ValueError("Builder Gate 1 requires a complete ordered student flow")
+    physics = payload.get("physics", {})
+    if not isinstance(physics, dict) or any(
+        physics.get(field) in (None, "", [], {})
+        for field in (
+            "mechanism",
+            "formulas",
+            "formula_support_map",
+            "simulation_inputs",
+            "parameter_ranges",
+            "expected_results",
+        )
+    ):
+        raise ValueError("Builder Gate 1 physics contract is incomplete")
     unresolved_paths: list[str] = []
 
     def scan(value: Any, path: str) -> None:
@@ -577,13 +771,24 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
     sections = [
         ("1. Lab identity", data["identity"]),
         ("2. Source material and traceability", data["source_material"]),
-        ("3. Research definition", data["design_definition"]),
         (
-            "4. Learning goals",
+            "3. Formula-driven experiment brief",
+            [
+                _field(
+                    f"formula_driven_experiment.{key}",
+                    value,
+                )
+                for key, value in data["formula_driven_experiment"].items()
+                if key != "status"
+            ],
+        ),
+        ("4. Research definition", data["design_definition"]),
+        (
+            "5. Learning goals",
             [_field(f"learning_goals[{i}]", goal) for i, goal in enumerate(data["learning_goals"], 1)],
         ),
         (
-            "5. Student tasks",
+            "6. Student tasks",
             [
                 _field(
                     f"student_tasks[{task['step_id']}]",
@@ -595,7 +800,7 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
             ],
         ),
         (
-            "6. Physics",
+            "7. Physics",
             [
                 _field("physics.mechanism", data["physics"]["mechanism"]),
                 _field("physics.formulas", data["physics"]["formulas"]),
@@ -608,7 +813,7 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
             ],
         ),
         (
-            "7. Object inventory",
+            "8. Object inventory",
             [
                 _field(
                     f"objects[{obj['object_id']}]",
@@ -618,21 +823,21 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
                 for obj in data["objects"]
             ],
         ),
-        ("8. Presets", data["presets"]),
-        ("9. Interaction modes", data["interaction_modes"]),
-        ("10. Visualization", data["visualization"]),
-        ("11. Environment and Game View", data["environment"]),
-        ("12. Reuse requirements", data["reuse_requirements"]),
-        ("13. Scene", data["scene"]),
-        ("14. Initial and post-action states", data["initial_and_action_states"]),
-        ("15. Acceptance and evidence", data["acceptance_and_evidence"]),
-        ("16. Builder runtime constraints", data["builder_runtime_constraints"]),
+        ("9. Presets", data["presets"]),
+        ("10. Interaction modes", data["interaction_modes"]),
+        ("11. Visualization", data["visualization"]),
+        ("12. Environment and Game View", data["environment"]),
+        ("13. Reuse requirements", data["reuse_requirements"]),
+        ("14. Scene", data["scene"]),
+        ("15. Initial and post-action states", data["initial_and_action_states"]),
+        ("16. Acceptance and evidence", data["acceptance_and_evidence"]),
+        ("17. Builder runtime constraints", data["builder_runtime_constraints"]),
     ]
     for heading, rows in sections:
         story.append(p(heading, heading_style))
         story.append(field_table(rows or [_field(f"{heading}.content", _UNRESOLVED)]))
 
-    story.append(p("17. Handoff instructions", heading_style))
+    story.append(p("18. Handoff instructions", heading_style))
     for note in data["handoff_notes"]:
         story.append(p(f"• {note}"))
 

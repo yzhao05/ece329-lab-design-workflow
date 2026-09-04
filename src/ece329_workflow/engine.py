@@ -33,6 +33,7 @@ from .dialogue_state import (
 )
 from .generator import (
     StageGenerator,
+    _course_relationships_for_selected_relations,
     _guided_reference_output,
     guided_stage_entry_output,
 )
@@ -40,6 +41,13 @@ from .emvr_design import (
     apply_emvr_field_updates,
     emvr_stage_one_readiness,
     merge_emvr_structured_requirements,
+)
+from .emvr_formula_flow import (
+    EMVR_DETAIL_DESIGN,
+    emvr_formula_flow_active,
+    ensure_emvr_formula_flow,
+    handle_emvr_formula_turn,
+    public_formula_flow_state,
 )
 from .dialogue_acts import apply_stage_field_updates, stage_design_state_snapshot
 from .design_state import (
@@ -94,7 +102,7 @@ from .reporting import (
     stage_report_section,
     validate_emvr_report_completeness,
 )
-from .builder_input import render_builder_gate1_input_pdf
+from .builder_input import build_builder_gate1_input, render_builder_gate1_input_pdf
 from .builder_requirements import (
     builder_handoff_status,
     next_due_builder_requirement,
@@ -320,6 +328,37 @@ def _emvr_mode_control_only(text: str) -> bool:
 
     compact = re.sub(r"[\s，,。；;：:！!？?、（）()\-—_]+", "", text).upper()
     return compact in {"EMVR", "进入EMVR模式", "切换到EMVR模式", "使用EMVR模式"}
+
+
+def _emvr_artifact_readiness(session: DesignSession) -> dict[str, Any]:
+    """Validate completed artifact contracts before exposing download links."""
+
+    result: dict[str, Any] = {
+        "report_ready": False,
+        "builder_input_ready": False,
+    }
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or session.status is not WorkflowStatus.COMPLETE
+    ):
+        return result
+    errors: list[str] = []
+    try:
+        validate_emvr_report_completeness(session)
+        result["report_ready"] = True
+    except ValueError as exc:
+        errors.append(str(exc))
+    try:
+        validate_builder_requirements(session)
+        # Build-time validation is stricter than the nine conversational
+        # requirement flags and also checks formula/brief and object links.
+        build_builder_gate1_input(session)
+        result["builder_input_ready"] = True
+    except ValueError as exc:
+        errors.append(str(exc))
+    if errors:
+        result["artifact_validation_errors"] = list(dict.fromkeys(errors))
+    return result
 
 
 def _record_mode_handoff(
@@ -2226,6 +2265,11 @@ class WorkflowEngine:
         self.store = store or store_from_environment()
         self._session_locks = tuple(RLock() for _ in range(64))
 
+    def _emvr_formula_first_enabled(self) -> bool:
+        """Enable the formula flow only with a semantic topic resolver."""
+
+        return bool(getattr(self.generator, "supports_emvr_formula_flow", False))
+
     def _resolve_turn_intent(
         self,
         session: DesignSession,
@@ -2308,6 +2352,57 @@ class WorkflowEngine:
                     "waves, polarization, interfaces, conductors, and transmission lines."
                 ),
             }
+            if (
+                self._emvr_formula_first_enabled()
+                and
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and session.current_stage is Stage.IDEA_BRAINSTORMING
+                and emvr_formula_flow_active(session)
+            ):
+                carried_context["emvr_formula_flow"] = public_formula_flow_state(
+                    session
+                )
+                carried_context["formula_profile_catalog"] = [
+                    {
+                        "profile_id": profile.get("profile_id"),
+                        "title": profile.get("title_zh"),
+                        "course_domain": profile.get("course_block"),
+                        "primary_formula_ids": profile.get("primary_formula_ids", []),
+                        "supporting_formula_ids": profile.get(
+                            "supporting_formula_ids", []
+                        ),
+                        "applicable_experiment_pattern_ids": profile.get(
+                            "applicable_experiment_pattern_ids", []
+                        ),
+                        "supported_variations": [
+                            item.get("quantity")
+                            for item in profile.get("supported_variations", [])
+                            if isinstance(item, dict) and item.get("quantity")
+                        ],
+                        "supported_observations": [
+                            item.get("quantity")
+                            for item in profile.get("supported_observations", [])
+                            if isinstance(item, dict) and item.get("quantity")
+                        ],
+                        "boundary_conditions": [
+                            item.get("condition")
+                            for item in profile.get("boundary_conditions", [])
+                            if isinstance(item, dict) and item.get("condition")
+                        ],
+                    }
+                    for profile in KNOWLEDGE.public_formula_design_profiles()
+                ]
+                carried_context["experiment_pattern_catalog"] = [
+                    {
+                        "pattern_id": pattern.get("pattern_id"),
+                        "title": pattern.get("title_zh"),
+                        "design_logic": pattern.get("design_logic"),
+                        "required_capabilities": pattern.get(
+                            "required_capabilities", []
+                        ),
+                    }
+                    for pattern in KNOWLEDGE.public_experiment_design_patterns()
+                ]
             semantic = resolver(
                 session,
                 message,
@@ -2372,8 +2467,7 @@ class WorkflowEngine:
             stage for stage in session.completed_stages if stage != previous
         ]
 
-    @staticmethod
-    def _reset_for_new_topic(session: DesignSession) -> None:
+    def _reset_for_new_topic(self, session: DesignSession) -> None:
         previous_design = {
             "idea": deepcopy(session.design_context.get("idea", {})),
             "emvr_design": deepcopy(session.design_context.get("emvr_design", {})),
@@ -2393,17 +2487,17 @@ class WorkflowEngine:
                 "awaiting_new_topic": True,
                 "field_state": {},
             }
+            if self._emvr_formula_first_enabled():
+                ensure_emvr_formula_flow(session)
         session.model_context.pop("openai_previous_response_id", None)
         session.model_context.pop("dialogue_state", None)
 
-    @classmethod
-    def _request_new_topic(cls, session: DesignSession) -> None:
+    def _request_new_topic(self, session: DesignSession) -> None:
         """Reset the direction without turning the navigation command into data."""
 
-        cls._reset_for_new_topic(session)
+        self._reset_for_new_topic(session)
 
-    @classmethod
-    def _start_new_topic(cls, session: DesignSession, message: str) -> bool:
+    def _start_new_topic(self, session: DesignSession, message: str) -> bool:
         """Start a supplied topic only when structured content is present."""
 
         content = message.strip()
@@ -2412,15 +2506,17 @@ class WorkflowEngine:
             and _emvr_mode_control_only(content)
         ):
             return False
-        cls._reset_for_new_topic(session)
+        self._reset_for_new_topic(session)
         session.design_context["idea"] = {"original": content}
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             emvr_design = session.design_context["emvr_design"]
             emvr_design["awaiting_new_topic"] = False
-            emvr_design["experiment_brief"] = content
-            emvr_design["brief"] = content
-            emvr_design["current_brief"] = content
-            emvr_design["field_state"] = {"experiment_brief": content}
+            # A topic is only input to formula matching. It is not a complete
+            # experiment brief and must not be copied into several EMVR roles.
+            emvr_design["field_state"] = {}
+            if self._emvr_formula_first_enabled():
+                flow = ensure_emvr_formula_flow(session)
+                flow["topic_seed"] = content
         return True
 
     def create_design(
@@ -2465,6 +2561,11 @@ class WorkflowEngine:
         session.model_context["resume_token_hash"] = hashlib.sha256(
             resume_token.encode("utf-8")
         ).hexdigest()
+        if (
+            state is InteractionState.EMVR_DIRECT
+            and self._emvr_formula_first_enabled()
+        ):
+            ensure_emvr_formula_flow(session)
         self.store.save(session)
         result = self.process_turn(
             session.design_id,
@@ -2508,18 +2609,20 @@ class WorkflowEngine:
                 "next_stage": None,
             }
             if session.interaction_state is InteractionState.EMVR_DIRECT:
+                artifact_status = _emvr_artifact_readiness(session)
                 response.update(
                     {
                         "task_report": build_emvr_task_report(session),
                         "builder_handoff_status": builder_handoff_status(session),
-                        "report_ready": True,
-                        "report_url": f"/v1/designs/{session.design_id}/report.pdf",
-                        "builder_input_ready": True,
-                        "builder_input_url": (
-                            f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
-                        ),
+                        **artifact_status,
                     }
                 )
+                if artifact_status["report_ready"]:
+                    response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+                if artifact_status["builder_input_ready"]:
+                    response["builder_input_url"] = (
+                        f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
+                    )
             response["turn_id"] = request.turn_id
             return response
         if not isinstance(request.message, str):
@@ -2724,6 +2827,24 @@ class WorkflowEngine:
                     previous_interaction_state,
                     requested_interaction_state,
                 )
+                if (
+                    requested_interaction_state is InteractionState.EMVR_DIRECT
+                    and self._emvr_formula_first_enabled()
+                ):
+                    emvr = session.design_context.setdefault("emvr_design", {})
+                    inherited_topic = str(
+                        emvr.get("current_brief")
+                        or emvr.get("experiment_brief")
+                        or ""
+                    ).strip()
+                    flow = ensure_emvr_formula_flow(session)
+                    if inherited_topic:
+                        flow["topic_seed"] = inherited_topic
+                    # A mode handoff carries topic meaning, not a confirmed
+                    # formula-driven experiment brief.
+                    for key in ("current_brief", "experiment_brief", "brief"):
+                        emvr.pop(key, None)
+                    emvr["field_state"] = {}
                 pending_action = None
                 dialogue = session.model_context.get("dialogue_state")
                 if isinstance(dialogue, dict):
@@ -2743,6 +2864,38 @@ class WorkflowEngine:
             # dynamic first stage. The state transition is based on the
             # resolver's structured result, never on wording in the message.
             session.current_stage_index = 0
+        formula_onboarding_output: StepOutput | None = None
+        formula_onboarding_should_complete = False
+        if (
+            self._emvr_formula_first_enabled()
+            and emvr_formula_flow_active(session)
+        ):
+            # Formula-first onboarding owns Stage 1 in EMVR. Ordinary EMVR
+            # field writes are suspended until the student locks the direction,
+            # otherwise a broad topic could again be cloned into object,
+            # variable and procedure fields by the legacy stage path.
+            formula_updates = turn_intent.get("semantic_updates")
+            if not isinstance(formula_updates, dict):
+                formula_updates = {}
+                turn_intent["semantic_updates"] = formula_updates
+            for key in (
+                "emvr_design_update",
+                "emvr_field_updates",
+                "design_updates",
+                "stage_field_updates",
+                "facet_updates",
+                "comparison_updates",
+            ):
+                formula_updates.pop(key, None)
+            formula_onboarding_output, formula_onboarding_should_complete = (
+                handle_emvr_formula_turn(
+                    session,
+                    message,
+                    turn_intent,
+                    selected_option_id=request.selected_option_id,
+                    complete_stage=request.complete_stage,
+                )
+            )
         if (
             turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
             and isinstance(pending_action, dict)
@@ -2921,6 +3074,25 @@ class WorkflowEngine:
         ):
             self._return_to_previous_stage(session)
 
+        if (
+            formula_onboarding_output is None
+            and self._emvr_formula_first_enabled()
+            and emvr_formula_flow_active(session)
+        ):
+            # A NEW_TOPIC_CONTENT action may reset a later EMVR stage back to
+            # Stage 1 after the first onboarding check above. Handle that new
+            # formula flow in the same turn so the topic command cannot fall
+            # through to legacy brief persistence or ordinary stage output.
+            formula_onboarding_output, formula_onboarding_should_complete = (
+                handle_emvr_formula_turn(
+                    session,
+                    message,
+                    turn_intent,
+                    selected_option_id=request.selected_option_id,
+                    complete_stage=request.complete_stage,
+                )
+            )
+
         explicit_transition_intent = bool(
             intent_name == UserIntent.ADVANCE_STAGE.value
             or "ADVANCE" in control_actions
@@ -2933,9 +3105,12 @@ class WorkflowEngine:
                 }
             )
         )
+        if formula_onboarding_output is not None:
+            explicit_transition_intent = formula_onboarding_should_complete
         pre_transition_attempted = bool(
             session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
             and explicit_transition_intent
+            and formula_onboarding_output is None
         )
         final_summary_confirmation_turn = bool(
             session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -3058,19 +3233,20 @@ class WorkflowEngine:
             "pending_action": deepcopy(pending_action),
             "carried_context": build_carried_context(session),
         }
-        _persist_emvr_brief(
-            session,
-            resolved_student_message,
-            content_intent_name,
-            content_stage,
-            turn_intent,
-        )
-        _persist_emvr_stage_input(
-            session,
-            content_stage,
-            resolved_student_message,
-            turn_intent,
-        )
+        if formula_onboarding_output is None:
+            _persist_emvr_brief(
+                session,
+                resolved_student_message,
+                content_intent_name,
+                content_stage,
+                turn_intent,
+            )
+            _persist_emvr_stage_input(
+                session,
+                content_stage,
+                resolved_student_message,
+                turn_intent,
+            )
         _persist_guided_stage_input(
             session,
             content_stage,
@@ -3226,7 +3402,11 @@ class WorkflowEngine:
                 or "REQUEST_REFERENCE" in control_actions
             )
         )
-        if version_only_turn:
+        if formula_onboarding_output is not None:
+            output = formula_onboarding_output
+            session.turn_context = {}
+            completion_error = None
+        elif version_only_turn:
             output = StepOutput(
                 assistant_message="\n\n".join(
                     item for item in (format_version_result(result) for result in version_results) if item
@@ -4010,10 +4190,11 @@ class WorkflowEngine:
         if task_report is not None:
             response["task_report"] = task_report
             response["builder_handoff_status"] = builder_handoff_status(session)
-            response["report_ready"] = session.status is WorkflowStatus.COMPLETE
-            if response["report_ready"]:
+            artifact_status = _emvr_artifact_readiness(session)
+            response.update(artifact_status)
+            if artifact_status["report_ready"]:
                 response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
-                response["builder_input_ready"] = True
+            if artifact_status["builder_input_ready"]:
                 response["builder_input_url"] = (
                     f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
                 )
@@ -4050,10 +4231,11 @@ class WorkflowEngine:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             result["task_report"] = build_emvr_task_report(session)
             result["builder_handoff_status"] = builder_handoff_status(session)
-            result["report_ready"] = session.status is WorkflowStatus.COMPLETE
-            if result["report_ready"]:
+            artifact_status = _emvr_artifact_readiness(session)
+            result.update(artifact_status)
+            if artifact_status["report_ready"]:
                 result["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
-                result["builder_input_ready"] = True
+            if artifact_status["builder_input_ready"]:
                 result["builder_input_url"] = (
                     f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
                 )
@@ -4210,6 +4392,18 @@ class WorkflowEngine:
     @staticmethod
     def list_knowledge_formulas() -> list[dict[str, Any]]:
         return KNOWLEDGE.public_formulas()
+
+    @staticmethod
+    def list_formula_design_profiles() -> list[dict[str, Any]]:
+        return KNOWLEDGE.public_formula_design_profiles()
+
+    @staticmethod
+    def list_experiment_design_patterns() -> list[dict[str, Any]]:
+        return KNOWLEDGE.public_experiment_design_patterns()
+
+    @staticmethod
+    def list_scene_formula_links() -> list[dict[str, Any]]:
+        return KNOWLEDGE.public_scene_formula_links()
 
     @staticmethod
     def search_knowledge(query: str) -> dict[str, Any]:
@@ -4452,6 +4646,53 @@ class WorkflowEngine:
             value = turn_context.get(key)
             if isinstance(value, list):
                 idea[key] = deepcopy(value)
+        selection_changed = bool(
+            turn_context.get("resolved_stage_one_reference")
+            or turn_context.get("resolved_scene_relations")
+        )
+        if selection_changed:
+            selected_relations = turn_context.get("selected_course_relations", [])
+            selected_relations = (
+                [item for item in selected_relations if isinstance(item, dict)]
+                if isinstance(selected_relations, list)
+                else []
+            )
+            course_relationships = _course_relationships_for_selected_relations(
+                selected_relations
+            )
+            direction_summary = str(
+                turn_context.get("direction_summary")
+                or turn_context.get("core_phenomenon")
+                or turn_context.get("selected_focus")
+                or ""
+            ).strip()
+            selection_updates: list[dict[str, Any]] = []
+            if course_relationships:
+                selection_updates.append(
+                    {
+                        "field": "course_relationship",
+                        "operation": "REPLACE",
+                        "value": course_relationships,
+                    }
+                )
+            if direction_summary:
+                selection_updates.append(
+                    {
+                        "field": "research_object",
+                        "operation": "REPLACE",
+                        "value": direction_summary,
+                    }
+                )
+            if selection_updates:
+                apply_design_updates(
+                    session,
+                    selection_updates,
+                    provenance="STUDENT_SCENE_SELECTION",
+                )
+                sync_design_state_to_legacy(session)
+        course_domain = str(turn_context.get("course_domain") or "").strip()
+        if course_domain:
+            idea["course_domain"] = course_domain
         output_comparisons = output.stage_payload.get("standard_comparisons")
         context_comparisons = turn_context.get("standard_comparisons")
         if isinstance(output_comparisons, list):

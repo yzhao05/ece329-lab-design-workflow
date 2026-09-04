@@ -12,6 +12,17 @@ This directory contains compact, deployable reference catalogs. Source PDFs are 
 
 - `concepts.json`: 39 lecture units, keywords, concepts, lecture-grounded brainstorming axes, and an extensible catalog of basic comparison-case bundles. Each bundle carries course concept IDs; conversation code handles adoption and modification generically rather than branching on its topic.
 - `formulas.json`: canonical formulas with IDs, conditions, course concept mappings, and PDF pages.
+- `formula_design_profiles.json`: formula-centered experiment-design profiles. Each
+  profile distinguishes primary and supporting formulas and records supported
+  variations, observations, and boundary conditions; all formula IDs resolve back to
+  `formulas.json`.
+- `scene_formula_links.json`: many-to-many links between all internal exploration
+  scene IDs and formula-design profiles. It is queried independently and is not read
+  by Guided-mode scene sampling or rendering.
+- `experiment_design_patterns.json`: 15 finite experiment-design paradigms and an
+  explicit applicability map for every formula profile. EMVR uses this layer to
+  generate a coverage matrix and runtime experiment methods after formula
+  confirmation; it does not sample the fixed scene catalog.
 - `scene_templates.json`: extensible Stage 1 physical-scene templates selected by catalog keywords, plus topic-independent fallback frames. New course topics are added as data instead of Python conditionals.
 - `source_manifest.json`: identity and extraction policy for the course-scope lecture notes.
 - `supplemental_sources.json`: enabled supplemental sources and multi-source Stage 1 relationship catalog.

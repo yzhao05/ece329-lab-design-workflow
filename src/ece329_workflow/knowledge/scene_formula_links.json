@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "scene_catalog": "materialized exploration catalog ECE329-S001 through ECE329-S138",
+  "formula_profile_source": "formula_design_profiles.json",
+  "description": "图景与公式设计档案的多对多映射。图景展示与抽样逻辑不读取本文件。",
+  "profile_scene_links": [
+    {
+      "profile_id": "FD01_FIELD_FOUNDATIONS",
+      "scene_ids": ["ECE329-S001", "ECE329-S002", "ECE329-S003", "ECE329-S011", "ECE329-S048", "ECE329-S120", "ECE329-S127", "ECE329-S136"]
+    },
+    {
+      "profile_id": "FD02_COULOMB_SUPERPOSITION",
+      "scene_ids": ["ECE329-S004", "ECE329-S007", "ECE329-S118"]
+    },
+    {
+      "profile_id": "FD03_GAUSS_FLUX_SYMMETRY",
+      "scene_ids": ["ECE329-S005", "ECE329-S006", "ECE329-S007", "ECE329-S008", "ECE329-S009", "ECE329-S010", "ECE329-S012", "ECE329-S119"]
+    },
+    {
+      "profile_id": "FD04_ELECTROSTATIC_POTENTIAL",
+      "scene_ids": ["ECE329-S013", "ECE329-S014", "ECE329-S015", "ECE329-S018", "ECE329-S026", "ECE329-S120", "ECE329-S121"]
+    },
+    {
+      "profile_id": "FD05_ELECTROSTATIC_BOUNDARY",
+      "scene_ids": ["ECE329-S016", "ECE329-S017", "ECE329-S022", "ECE329-S025", "ECE329-S026", "ECE329-S027", "ECE329-S057", "ECE329-S121", "ECE329-S122"]
+    },
+    {
+      "profile_id": "FD06_POISSON_LAPLACE",
+      "scene_ids": ["ECE329-S019", "ECE329-S020", "ECE329-S021", "ECE329-S121"]
+    },
+    {
+      "profile_id": "FD07_CONDUCTION_RELAXATION",
+      "scene_ids": ["ECE329-S024", "ECE329-S030", "ECE329-S046", "ECE329-S047", "ECE329-S136", "ECE329-S137"]
+    },
+    {
+      "profile_id": "FD08_DIELECTRIC_POLARIZATION",
+      "scene_ids": ["ECE329-S022", "ECE329-S023", "ECE329-S025", "ECE329-S026", "ECE329-S027", "ECE329-S033", "ECE329-S051", "ECE329-S122"]
+    },
+    {
+      "profile_id": "FD09_CAPACITANCE_ENERGY",
+      "scene_ids": ["ECE329-S028", "ECE329-S029", "ECE329-S030", "ECE329-S122", "ECE329-S123", "ECE329-S126", "ECE329-S136", "ECE329-S138"]
+    },
+    {
+      "profile_id": "FD10_COAXIAL_CAPACITANCE_CONDUCTANCE",
+      "scene_ids": ["ECE329-S029", "ECE329-S030", "ECE329-S123"]
+    },
+    {
+      "profile_id": "FD11_DRUDE_CONDUCTIVITY",
+      "scene_ids": ["ECE329-S031", "ECE329-S032", "ECE329-S064", "ECE329-S065", "ECE329-S066", "ECE329-S067", "ECE329-S068", "ECE329-S069", "ECE329-S137"]
+    },
+    {
+      "profile_id": "FD12_MAGNETIC_SOURCE_FIELD",
+      "scene_ids": ["ECE329-S034", "ECE329-S035", "ECE329-S036", "ECE329-S039", "ECE329-S118", "ECE329-S124"]
+    },
+    {
+      "profile_id": "FD13_CURRENT_SHEET_SOLENOID",
+      "scene_ids": ["ECE329-S037", "ECE329-S038", "ECE329-S039", "ECE329-S051", "ECE329-S124"]
+    },
+    {
+      "profile_id": "FD14_MAGNETIC_VECTOR_POTENTIAL",
+      "scene_ids": ["ECE329-S035", "ECE329-S039", "ECE329-S124"]
+    },
+    {
+      "profile_id": "FD15_FARADAY_INDUCTION",
+      "scene_ids": ["ECE329-S040", "ECE329-S041", "ECE329-S042", "ECE329-S056", "ECE329-S057", "ECE329-S125", "ECE329-S136", "ECE329-S137"]
+    },
+    {
+      "profile_id": "FD16_INDUCTANCE_ENERGY",
+      "scene_ids": ["ECE329-S043", "ECE329-S044", "ECE329-S045", "ECE329-S051", "ECE329-S126", "ECE329-S136", "ECE329-S138"]
+    },
+    {
+      "profile_id": "FD17_CHARGE_CONTINUITY_MAXWELL",
+      "scene_ids": ["ECE329-S046", "ECE329-S047", "ECE329-S048", "ECE329-S056", "ECE329-S057", "ECE329-S127", "ECE329-S136"]
+    },
+    {
+      "profile_id": "FD18_MATERIAL_MAXWELL",
+      "scene_ids": ["ECE329-S048", "ECE329-S049", "ECE329-S050", "ECE329-S051", "ECE329-S052", "ECE329-S056", "ECE329-S057", "ECE329-S122", "ECE329-S127"]
+    },
+    {
+      "profile_id": "FD19_WAVE_PROPAGATION",
+      "scene_ids": ["ECE329-S052", "ECE329-S053", "ECE329-S054", "ECE329-S055", "ECE329-S056", "ECE329-S061", "ECE329-S063", "ECE329-S072", "ECE329-S080", "ECE329-S127", "ECE329-S136"]
+    },
+    {
+      "profile_id": "FD20_POYNTING_POWER",
+      "scene_ids": ["ECE329-S058", "ECE329-S059", "ECE329-S060", "ECE329-S069", "ECE329-S075", "ECE329-S078", "ECE329-S109", "ECE329-S113", "ECE329-S126", "ECE329-S129", "ECE329-S130", "ECE329-S135"]
+    },
+    {
+      "profile_id": "FD21_PHASOR_FIELDS",
+      "scene_ids": ["ECE329-S061", "ECE329-S062", "ECE329-S063", "ECE329-S065", "ECE329-S066", "ECE329-S070", "ECE329-S071", "ECE329-S072", "ECE329-S127", "ECE329-S128", "ECE329-S129"]
+    },
+    {
+      "profile_id": "FD22_CONDUCTING_WAVES",
+      "scene_ids": ["ECE329-S064", "ECE329-S065", "ECE329-S066", "ECE329-S067", "ECE329-S068", "ECE329-S069", "ECE329-S130", "ECE329-S131", "ECE329-S132", "ECE329-S137"]
+    },
+    {
+      "profile_id": "FD23_WAVE_POLARIZATION",
+      "scene_ids": ["ECE329-S070", "ECE329-S071", "ECE329-S072", "ECE329-S128"]
+    },
+    {
+      "profile_id": "FD24_WAVE_INTERFACE",
+      "scene_ids": ["ECE329-S073", "ECE329-S074", "ECE329-S075", "ECE329-S130", "ECE329-S132"]
+    },
+    {
+      "profile_id": "FD25_PEC_STANDING_WAVE",
+      "scene_ids": ["ECE329-S074", "ECE329-S076", "ECE329-S077", "ECE329-S078", "ECE329-S130", "ECE329-S132"]
+    },
+    {
+      "profile_id": "FD26_TL_PROPAGATION",
+      "scene_ids": ["ECE329-S079", "ECE329-S080", "ECE329-S081", "ECE329-S083", "ECE329-S086", "ECE329-S089", "ECE329-S114", "ECE329-S117", "ECE329-S136", "ECE329-S137"]
+    },
+    {
+      "profile_id": "FD27_TL_TRANSIENT_REFLECTION",
+      "scene_ids": ["ECE329-S082", "ECE329-S083", "ECE329-S084", "ECE329-S085", "ECE329-S086", "ECE329-S087", "ECE329-S088", "ECE329-S089", "ECE329-S090", "ECE329-S112", "ECE329-S113", "ECE329-S133"]
+    },
+    {
+      "profile_id": "FD28_TL_RESONANCE_STUBS",
+      "scene_ids": ["ECE329-S091", "ECE329-S092", "ECE329-S093", "ECE329-S094", "ECE329-S095", "ECE329-S096", "ECE329-S097", "ECE329-S111", "ECE329-S134", "ECE329-S138"]
+    },
+    {
+      "profile_id": "FD29_TL_IMPEDANCE_TRANSFORM",
+      "scene_ids": ["ECE329-S097", "ECE329-S098", "ECE329-S099", "ECE329-S100", "ECE329-S103", "ECE329-S105", "ECE329-S110", "ECE329-S135"]
+    },
+    {
+      "profile_id": "FD30_TL_REFLECTION_VSWR_POWER",
+      "scene_ids": ["ECE329-S100", "ECE329-S101", "ECE329-S102", "ECE329-S103", "ECE329-S104", "ECE329-S105", "ECE329-S106", "ECE329-S107", "ECE329-S108", "ECE329-S109", "ECE329-S111", "ECE329-S112", "ECE329-S113", "ECE329-S114", "ECE329-S133", "ECE329-S135"]
+    },
+    {
+      "profile_id": "FD31_TL_QUARTER_WAVE_MATCHING",
+      "scene_ids": ["ECE329-S109", "ECE329-S110", "ECE329-S111", "ECE329-S135"]
+    },
+    {
+      "profile_id": "FD32_LOSSY_TRANSMISSION_LINE",
+      "scene_ids": ["ECE329-S115", "ECE329-S116", "ECE329-S117", "ECE329-S131", "ECE329-S132", "ECE329-S137"]
+    }
+  ],
+  "scene_formula_roles": {
+    "ECE329-S001": {"primary_formula_ids": ["lorentz_force"], "supporting_formula_ids": ["maxwell_free_space"]},
+    "ECE329-S002": {"primary_formula_ids": ["lorentz_force"], "supporting_formula_ids": ["maxwell_free_space"]},
+    "ECE329-S003": {"primary_formula_ids": ["lorentz_force"], "supporting_formula_ids": ["maxwell_free_space"]},
+    "ECE329-S004": {"primary_formula_ids": ["coulomb_point_charge", "electric_field_superposition"]},
+    "ECE329-S005": {"primary_formula_ids": ["gauss_integral"]},
+    "ECE329-S006": {"primary_formula_ids": ["line_charge_field"], "supporting_formula_ids": ["gauss_integral"]},
+    "ECE329-S007": {"primary_formula_ids": ["coulomb_point_charge", "line_charge_field", "sheet_charge_field"], "supporting_formula_ids": ["gauss_integral"]},
+    "ECE329-S008": {"primary_formula_ids": ["gauss_integral", "gauss_differential"], "supporting_formula_ids": ["sheet_charge_field"]},
+    "ECE329-S009": {"primary_formula_ids": ["gauss_differential"], "supporting_formula_ids": ["divergence_definition"]},
+    "ECE329-S010": {"primary_formula_ids": ["divergence_definition"], "supporting_formula_ids": ["gauss_differential"]},
+    "ECE329-S011": {"primary_formula_ids": ["curl_definition"], "supporting_formula_ids": ["maxwell_free_space"]},
+    "ECE329-S012": {"primary_formula_ids": ["gauss_integral", "gauss_differential"], "supporting_formula_ids": ["divergence_definition"]},
+    "ECE329-S013": {"primary_formula_ids": ["electrostatic_potential_gradient"]},
+    "ECE329-S014": {"primary_formula_ids": ["potential_difference"], "supporting_formula_ids": ["stokes_theorem_e"]},
+    "ECE329-S015": {"primary_formula_ids": ["electrostatic_potential_gradient"], "supporting_formula_ids": ["potential_difference"]},
+    "ECE329-S016": {"primary_formula_ids": ["electrostatic_boundary"], "supporting_formula_ids": ["electric_displacement"]},
+    "ECE329-S017": {"primary_formula_ids": ["electrostatic_boundary"]},
+    "ECE329-S018": {"primary_formula_ids": ["stokes_theorem_e"], "supporting_formula_ids": ["potential_difference"]},
+    "ECE329-S019": {"primary_formula_ids": ["laplace_equation"], "supporting_formula_ids": ["electrostatic_potential_gradient"]},
+    "ECE329-S020": {"primary_formula_ids": ["poisson_equation"], "supporting_formula_ids": ["potential_volume_charge"]},
+    "ECE329-S021": {"primary_formula_ids": ["poisson_equation", "laplace_equation"]},
+    "ECE329-S022": {"primary_formula_ids": ["electric_displacement", "linear_dielectric"], "supporting_formula_ids": ["electrostatic_boundary"]},
+    "ECE329-S023": {"primary_formula_ids": ["electric_displacement", "linear_dielectric"]},
+    "ECE329-S024": {"primary_formula_ids": ["charge_relaxation"], "supporting_formula_ids": ["ohm_law_density"]},
+    "ECE329-S025": {"primary_formula_ids": ["electrostatic_boundary", "linear_dielectric"], "supporting_formula_ids": ["electric_displacement"]},
+    "ECE329-S026": {"primary_formula_ids": ["electrostatic_boundary", "electrostatic_potential_gradient"], "supporting_formula_ids": ["linear_dielectric"]},
+    "ECE329-S027": {"primary_formula_ids": ["linear_dielectric"], "supporting_formula_ids": ["electrostatic_boundary"]},
+    "ECE329-S028": {"primary_formula_ids": ["parallel_plate_capacitance"], "supporting_formula_ids": ["capacitance_definition"]},
+    "ECE329-S029": {"primary_formula_ids": ["parallel_plate_capacitance", "coax_capacitance_per_length"], "supporting_formula_ids": ["capacitance_definition"]},
+    "ECE329-S030": {"primary_formula_ids": ["conductance_capacitance_relation"], "supporting_formula_ids": ["capacitance_definition", "ohm_law_density"]},
+    "ECE329-S031": {"primary_formula_ids": ["drude_dc_conductivity"], "supporting_formula_ids": ["ohm_law_density"]},
+    "ECE329-S032": {"primary_formula_ids": ["drude_ac_conductivity"], "supporting_formula_ids": ["ohm_law_density"]},
+    "ECE329-S033": {"primary_formula_ids": ["polarization_current"], "supporting_formula_ids": ["electric_displacement"]},
+    "ECE329-S034": {"primary_formula_ids": ["biot_savart", "ampere_integral"], "supporting_formula_ids": ["ampere_magnetostatic"]},
+    "ECE329-S035": {"primary_formula_ids": ["biot_savart"], "supporting_formula_ids": ["magnetic_vector_potential"]},
+    "ECE329-S036": {"primary_formula_ids": ["ampere_integral"], "supporting_formula_ids": ["ampere_magnetostatic"]},
+    "ECE329-S037": {"primary_formula_ids": ["current_sheet_magnetic_field"], "supporting_formula_ids": ["ampere_integral"]},
+    "ECE329-S038": {"primary_formula_ids": ["long_solenoid_field"], "supporting_formula_ids": ["ampere_integral"]},
+    "ECE329-S039": {"primary_formula_ids": ["biot_savart", "magnetic_vector_potential"], "supporting_formula_ids": ["vector_potential_poisson"]},
+    "ECE329-S040": {"primary_formula_ids": ["faraday_generalized_emf"], "supporting_formula_ids": ["faraday_differential"]},
+    "ECE329-S041": {"primary_formula_ids": ["faraday_generalized_emf"], "supporting_formula_ids": ["lorentz_force"]},
+    "ECE329-S042": {"primary_formula_ids": ["faraday_generalized_emf"]},
+    "ECE329-S043": {"primary_formula_ids": ["inductance_definition", "solenoid_inductance"]},
+    "ECE329-S044": {"primary_formula_ids": ["rl_decay"], "supporting_formula_ids": ["inductance_definition"]},
+    "ECE329-S045": {"primary_formula_ids": ["inductance_definition"], "supporting_formula_ids": ["solenoid_inductance"]},
+    "ECE329-S046": {"primary_formula_ids": ["ampere_maxwell"], "supporting_formula_ids": ["continuity_equation"]},
+    "ECE329-S047": {"primary_formula_ids": ["continuity_equation"]},
+    "ECE329-S048": {"primary_formula_ids": ["maxwell_free_space", "material_maxwell_relations"], "supporting_formula_ids": ["quasi_static_condition"]},
+    "ECE329-S049": {"primary_formula_ids": ["linear_magnetic_medium"], "supporting_formula_ids": ["material_maxwell_relations"]},
+    "ECE329-S050": {"primary_formula_ids": ["material_maxwell_relations", "linear_magnetic_medium"]},
+    "ECE329-S051": {"primary_formula_ids": ["long_solenoid_field", "linear_magnetic_medium"], "supporting_formula_ids": ["solenoid_inductance"]},
+    "ECE329-S052": {"primary_formula_ids": ["wave_speed_impedance"], "supporting_formula_ids": ["wave_equation", "linear_magnetic_medium"]},
+    "ECE329-S053": {"primary_formula_ids": ["tem_traveling_wave"], "supporting_formula_ids": ["wave_speed_impedance"]},
+    "ECE329-S054": {"primary_formula_ids": ["wave_equation", "tem_traveling_wave"]},
+    "ECE329-S055": {"primary_formula_ids": ["tem_traveling_wave"], "supporting_formula_ids": ["wave_frequency_relations"]},
+    "ECE329-S056": {"primary_formula_ids": ["wave_equation", "material_maxwell_relations"], "supporting_formula_ids": ["faraday_differential", "ampere_maxwell"]},
+    "ECE329-S057": {"primary_formula_ids": ["material_maxwell_relations"], "supporting_formula_ids": ["electrostatic_boundary"]},
+    "ECE329-S058": {"primary_formula_ids": ["poynting_vector"]},
+    "ECE329-S059": {"primary_formula_ids": ["average_poynting"], "supporting_formula_ids": ["poynting_vector"]},
+    "ECE329-S060": {"primary_formula_ids": ["poynting_theorem"], "supporting_formula_ids": ["poynting_vector"]},
+    "ECE329-S061": {"primary_formula_ids": ["wave_frequency_relations"], "supporting_formula_ids": ["wave_speed_impedance"]},
+    "ECE329-S062": {"primary_formula_ids": ["phasor_maxwell"], "supporting_formula_ids": ["tem_traveling_wave"]},
+    "ECE329-S063": {"primary_formula_ids": ["phasor_maxwell", "tem_traveling_wave"], "supporting_formula_ids": ["wave_frequency_relations"]},
+    "ECE329-S064": {"primary_formula_ids": ["conducting_medium_gamma_eta"], "supporting_formula_ids": ["damped_wave_phasors"]},
+    "ECE329-S065": {"primary_formula_ids": ["conducting_medium_gamma_eta"], "supporting_formula_ids": ["wave_frequency_relations"]},
+    "ECE329-S066": {"primary_formula_ids": ["damped_wave_phasors", "conducting_medium_gamma_eta"]},
+    "ECE329-S067": {"primary_formula_ids": ["skin_depth"], "supporting_formula_ids": ["good_conductor_approx"]},
+    "ECE329-S068": {"primary_formula_ids": ["skin_depth"], "supporting_formula_ids": ["conducting_medium_gamma_eta"]},
+    "ECE329-S069": {"primary_formula_ids": ["good_conductor_approx", "poynting_theorem"], "supporting_formula_ids": ["skin_depth"]},
+    "ECE329-S070": {"primary_formula_ids": ["circular_polarization"], "supporting_formula_ids": ["tem_traveling_wave"]},
+    "ECE329-S071": {"primary_formula_ids": ["circular_polarization"]},
+    "ECE329-S072": {"primary_formula_ids": ["tem_traveling_wave"], "supporting_formula_ids": ["wave_frequency_relations", "circular_polarization"]},
+    "ECE329-S073": {"primary_formula_ids": ["wave_reflection_transmission"], "supporting_formula_ids": ["wave_speed_impedance"]},
+    "ECE329-S074": {"primary_formula_ids": ["wave_reflection_transmission", "pec_standing_wave"]},
+    "ECE329-S075": {"primary_formula_ids": ["wave_reflection_transmission"], "supporting_formula_ids": ["average_poynting"]},
+    "ECE329-S076": {"primary_formula_ids": ["pec_standing_wave"]},
+    "ECE329-S077": {"primary_formula_ids": ["pec_standing_wave"], "supporting_formula_ids": ["wave_reflection_transmission"]},
+    "ECE329-S078": {"primary_formula_ids": ["poynting_vector"], "supporting_formula_ids": ["pec_standing_wave"]},
+    "ECE329-S079": {"primary_formula_ids": ["tl_speed_impedance"], "supporting_formula_ids": ["telegrapher_lossless"]},
+    "ECE329-S080": {"primary_formula_ids": ["telegrapher_lossless", "tl_dalembert"], "supporting_formula_ids": ["tem_traveling_wave"]},
+    "ECE329-S081": {"primary_formula_ids": ["parallel_plate_tl_parameters", "tl_speed_impedance"]},
+    "ECE329-S082": {"primary_formula_ids": ["tl_load_source_reflection"], "supporting_formula_ids": ["tl_dalembert"]},
+    "ECE329-S083": {"primary_formula_ids": ["tl_dalembert"], "supporting_formula_ids": ["tl_speed_impedance"]},
+    "ECE329-S084": {"primary_formula_ids": ["tl_load_source_reflection"]},
+    "ECE329-S085": {"primary_formula_ids": ["tl_load_source_reflection", "tl_dalembert"]},
+    "ECE329-S086": {"primary_formula_ids": ["tl_dalembert"], "supporting_formula_ids": ["tl_load_source_reflection"]},
+    "ECE329-S087": {"primary_formula_ids": ["tl_load_source_reflection"]},
+    "ECE329-S088": {"primary_formula_ids": ["junction_coefficients"]},
+    "ECE329-S089": {"primary_formula_ids": ["junction_coefficients"], "supporting_formula_ids": ["telegrapher_lossless"]},
+    "ECE329-S090": {"primary_formula_ids": ["junction_coefficients"], "supporting_formula_ids": ["tl_speed_impedance"]},
+    "ECE329-S091": {"primary_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"]},
+    "ECE329-S092": {"primary_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"]},
+    "ECE329-S093": {"primary_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"]},
+    "ECE329-S094": {"primary_formula_ids": ["stub_impedances"]},
+    "ECE329-S095": {"primary_formula_ids": ["stub_impedances", "same_boundary_resonance", "mixed_boundary_resonance"]},
+    "ECE329-S096": {"primary_formula_ids": ["stub_impedances"]},
+    "ECE329-S097": {"primary_formula_ids": ["half_wave_transformer", "quarter_wave_transformer"], "supporting_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"]},
+    "ECE329-S098": {"primary_formula_ids": ["quarter_wave_transformer"], "supporting_formula_ids": ["line_impedance_gamma"]},
+    "ECE329-S099": {"primary_formula_ids": ["quarter_wave_transformer"], "supporting_formula_ids": ["load_reflection_phasor"]},
+    "ECE329-S100": {"primary_formula_ids": ["load_reflection_phasor"], "supporting_formula_ids": ["line_impedance_gamma"]},
+    "ECE329-S101": {"primary_formula_ids": ["line_impedance_gamma"]},
+    "ECE329-S102": {"primary_formula_ids": ["vswr", "line_impedance_gamma"], "supporting_formula_ids": ["load_reflection_phasor"]},
+    "ECE329-S103": {"primary_formula_ids": ["load_reflection_phasor", "line_impedance_gamma"]},
+    "ECE329-S104": {"primary_formula_ids": ["line_impedance_gamma"], "supporting_formula_ids": ["load_reflection_phasor"]},
+    "ECE329-S105": {"primary_formula_ids": ["line_impedance_gamma"], "supporting_formula_ids": ["load_reflection_phasor"]},
+    "ECE329-S106": {"primary_formula_ids": ["vswr"], "supporting_formula_ids": ["load_reflection_phasor"]},
+    "ECE329-S107": {"primary_formula_ids": ["vswr", "load_reflection_phasor"]},
+    "ECE329-S108": {"primary_formula_ids": ["vswr", "line_impedance_gamma"]},
+    "ECE329-S109": {"primary_formula_ids": ["tl_average_power"], "supporting_formula_ids": ["vswr", "load_reflection_phasor"]},
+    "ECE329-S110": {"primary_formula_ids": ["quarter_wave_matching", "quarter_wave_transformer"]},
+    "ECE329-S111": {"primary_formula_ids": ["stub_impedances", "quarter_wave_matching"], "supporting_formula_ids": ["line_impedance_gamma"]},
+    "ECE329-S112": {"primary_formula_ids": ["junction_coefficients", "line_impedance_gamma"]},
+    "ECE329-S113": {"primary_formula_ids": ["tl_average_power", "junction_coefficients"], "supporting_formula_ids": ["poynting_vector"]},
+    "ECE329-S114": {"primary_formula_ids": ["load_reflection_phasor", "tl_dalembert"], "supporting_formula_ids": ["line_impedance_gamma"]},
+    "ECE329-S115": {"primary_formula_ids": ["lossy_telegrapher", "lossy_line_gamma_z0"]},
+    "ECE329-S116": {"primary_formula_ids": ["high_frequency_lossy_line"], "supporting_formula_ids": ["lossy_line_gamma_z0"]},
+    "ECE329-S117": {"primary_formula_ids": ["lossy_line_gamma_z0"], "supporting_formula_ids": ["tl_speed_impedance", "high_frequency_lossy_line"]},
+    "ECE329-S118": {"primary_formula_ids": ["coulomb_point_charge", "electric_field_superposition", "biot_savart"]},
+    "ECE329-S119": {"primary_formula_ids": ["gauss_integral", "gauss_differential"], "supporting_formula_ids": ["divergence_definition"]},
+    "ECE329-S120": {"primary_formula_ids": ["curl_definition", "stokes_theorem_e"], "supporting_formula_ids": ["maxwell_free_space"]},
+    "ECE329-S121": {"primary_formula_ids": ["electrostatic_potential_gradient", "electrostatic_boundary", "laplace_equation"], "supporting_formula_ids": ["potential_difference"]},
+    "ECE329-S122": {"primary_formula_ids": ["electrostatic_boundary", "linear_dielectric"], "supporting_formula_ids": ["electric_displacement", "electric_energy"]},
+    "ECE329-S123": {"primary_formula_ids": ["capacitance_definition", "electric_energy"], "supporting_formula_ids": ["parallel_plate_capacitance", "coax_capacitance_per_length"]},
+    "ECE329-S124": {"primary_formula_ids": ["biot_savart", "ampere_integral"], "supporting_formula_ids": ["current_sheet_magnetic_field", "long_solenoid_field"]},
+    "ECE329-S125": {"primary_formula_ids": ["faraday_generalized_emf"], "supporting_formula_ids": ["faraday_differential", "lorentz_force"]},
+    "ECE329-S126": {"primary_formula_ids": ["electric_energy", "magnetic_energy"], "supporting_formula_ids": ["inductance_definition"]},
+    "ECE329-S127": {"primary_formula_ids": ["material_maxwell_relations", "wave_equation"], "supporting_formula_ids": ["tem_traveling_wave", "wave_speed_impedance"]},
+    "ECE329-S128": {"primary_formula_ids": ["circular_polarization"], "supporting_formula_ids": ["tem_traveling_wave"]},
+    "ECE329-S129": {"primary_formula_ids": ["poynting_vector", "average_poynting"], "supporting_formula_ids": ["poynting_theorem"]},
+    "ECE329-S130": {"primary_formula_ids": ["wave_reflection_transmission", "conducting_medium_gamma_eta"], "supporting_formula_ids": ["pec_standing_wave", "average_poynting"]},
+    "ECE329-S131": {"primary_formula_ids": ["skin_depth", "conducting_medium_gamma_eta"], "supporting_formula_ids": ["good_conductor_approx"]},
+    "ECE329-S132": {"primary_formula_ids": ["conducting_medium_gamma_eta", "wave_reflection_transmission"], "supporting_formula_ids": ["pec_standing_wave", "lossy_line_gamma_z0"]},
+    "ECE329-S133": {"primary_formula_ids": ["tl_load_source_reflection", "junction_coefficients"], "supporting_formula_ids": ["tl_dalembert"]},
+    "ECE329-S134": {"primary_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"], "supporting_formula_ids": ["stub_impedances"]},
+    "ECE329-S135": {"primary_formula_ids": ["quarter_wave_matching", "tl_average_power"], "supporting_formula_ids": ["load_reflection_phasor", "vswr"]},
+    "ECE329-S136": {"primary_formula_ids": ["quasi_static_condition", "telegrapher_lossless"], "supporting_formula_ids": ["capacitor_current", "tl_speed_impedance", "wave_frequency_relations"]},
+    "ECE329-S137": {"primary_formula_ids": ["charge_relaxation", "skin_depth", "lossy_line_gamma_z0"], "supporting_formula_ids": ["conducting_medium_gamma_eta", "high_frequency_lossy_line"]},
+    "ECE329-S138": {"primary_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"], "supporting_formula_ids": ["rl_decay", "electric_energy", "magnetic_energy"]}
+  }
+}

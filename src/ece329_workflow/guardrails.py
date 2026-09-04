@@ -176,6 +176,17 @@ def build_stage_one_turn_context(
         if isinstance(semantic_updates, dict)
         else "UNCERTAIN"
     )
+    semantic_course_domain = (
+        str(semantic_updates.get("course_domain") or "").strip().casefold()
+        if isinstance(semantic_updates, dict)
+        else ""
+    )
+    if semantic_course_domain not in {
+        "electrostatics",
+        "magnetism",
+        "electromagnetics",
+    }:
+        semantic_course_domain = ""
     semantic_option_ids = (
         semantic_updates.get("selected_option_ids", [])
         if isinstance(semantic_updates, dict)
@@ -279,6 +290,24 @@ def build_stage_one_turn_context(
     elif resolved is not None:
         selected_course_relations = [dict(resolved)]
         selected_scene_ids = []
+    selected_domains = {
+        str(item.get("course_block") or "").strip().casefold()
+        for item in selected_course_relations
+        if str(item.get("course_block") or "").strip().casefold()
+        in {"electrostatics", "magnetism", "electromagnetics"}
+    }
+    course_domain = (
+        next(iter(selected_domains))
+        if len(selected_domains) == 1
+        else semantic_course_domain
+        or str(idea.get("course_domain") or "").strip().casefold()
+    )
+    if course_domain not in {
+        "electrostatics",
+        "magnetism",
+        "electromagnetics",
+    }:
+        course_domain = ""
     relation_selection_text = " + ".join(
         str(item.get("direction") or item.get("focus") or "").strip()
         for item in selected_course_relations
@@ -474,6 +503,7 @@ def build_stage_one_turn_context(
     return {
         "stage_one_preclassification": prompt_preclassification,
         "semantic_course_scope": semantic_scope,
+        "course_domain": course_domain or None,
         "effective_input_category": effective_classification,
         "raw_stage_one_preclassification": preclassification,
         "resolved_stage_one_reference": resolved,

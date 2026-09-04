@@ -48,6 +48,32 @@ The overview explicitly identifies radiation and antennas and dispersion in mate
 
 Each record has a stable formula ID, expression, conditions, concept links and one or more PDF page references. Visually ambiguous symbols were checked against rendered PDF pages during extraction.
 
+`formula_design_profiles.json` adds the experiment-design meaning of those canonical
+formula records. Its 32 profiles cover all 82 lecture formulas and separate:
+
+- primary formulas that define the experiment's causal relationship;
+- supporting formulas used for interpretation, conversion, constraints, or checks;
+- quantities that may be deliberately varied;
+- quantities that may be observed or calculated;
+- geometry, source, material, time, and termination boundary conditions.
+
+The profile catalog stores formula IDs rather than duplicating expressions or page
+numbers. Runtime loading resolves each ID back to `formulas.json`, so an equation and
+its lecture provenance have one authoritative source.
+
+`scene_formula_links.json` connects all 138 internally numbered exploration scenes to
+these profiles. The relationship is many-to-many: one scene may require several
+formula profiles, and one formula may support many scenes. This index is deliberately
+separate from the Stage 1 sampling catalog, so loading it cannot change Guided-mode
+scene selection, deduplication, labels, or student-facing copy.
+
+`experiment_design_patterns.json` defines 15 reviewed experiment-design paradigms,
+including forward visualization, parameter sweeps, controlled comparisons, inverse
+inference, transient/frequency response, model breakdown, and optimization. Every
+formula profile declares which paradigms are applicable. EMVR uses this coverage
+matrix to generate methods at runtime instead of limiting students to the 138
+prewritten exploration scenes; Guide mode continues to use its original catalog.
+
 ## Runtime rules
 
 1. Stage 1 brainstorming must select only the internally numbered lecture or supplemental exploration catalog and retain concept/page provenance.

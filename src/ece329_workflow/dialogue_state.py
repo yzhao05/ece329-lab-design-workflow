@@ -1362,6 +1362,16 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
         "emvr_stage_inputs": emvr_stage_inputs,
         "emvr_structured_requirements": emvr_structured_requirements,
         "emvr_merged_requirements": emvr_merged_requirements,
+        "emvr_formula_flow": deepcopy(
+            emvr_design.get("formula_flow", {})
+            if isinstance(emvr_design.get("formula_flow"), dict)
+            else {}
+        ),
+        "authoritative_experiment_brief": deepcopy(
+            emvr_design.get("authoritative_experiment_brief")
+            if isinstance(emvr_design.get("authoritative_experiment_brief"), dict)
+            else None
+        ),
         "guided_stage_inputs": guided_stage_inputs,
         "visualization_plan": deepcopy(
             unified_fields.get("visualization_plan")
@@ -2104,6 +2114,7 @@ def validate_resolved_intent(
             "quality_review_requests",
             "option_comparison_requests",
             "version_requests",
+            "emvr_formula_actions",
         ):
             existing = (
                 []
@@ -2203,6 +2214,12 @@ def validate_resolved_intent(
         # from carrying the correction sentence into later design prompts.
         primary_content = raw.get("resolved_value")
         for preferred_type in (
+            "SET_EMVR_TOPIC",
+            "SELECT_EMVR_FORMULAS",
+            "SET_EMVR_FORMULA_COMPOSITION",
+            "SELECT_EMVR_EXPERIMENT_METHODS",
+            "REVISE_EMVR_DIRECTION",
+            "LOCK_EMVR_DIRECTION",
             "ANSWER_PENDING_QUESTION",
             "MODIFY_DESIGN_FIELD",
             "MODIFY_STAGE_FIELD",
@@ -2784,6 +2801,13 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             comparison_updates.append(normalized_comparison)
     requested_state = str(raw.get("interaction_state_request") or "").upper()
     course_scope_status = str(raw.get("course_scope_status") or "").upper()
+    course_domain = str(raw.get("course_domain") or "").strip().casefold()
+    if course_domain not in {
+        "electrostatics",
+        "magnetism",
+        "electromagnetics",
+    }:
+        course_domain = ""
     stage_one_direction_detail = str(
         raw.get("stage_one_direction_detail") or ""
     ).strip()[:1200]
@@ -2860,6 +2884,23 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         ][:8]
         if isinstance(raw.get("version_requests"), list)
         else [],
+        "emvr_formula_actions": [
+            deepcopy(item)
+            for item in raw.get("emvr_formula_actions", [])
+            if isinstance(item, dict)
+            and str(item.get("type") or "")
+            in {
+                "SET_EMVR_TOPIC",
+                "SELECT_EMVR_FORMULAS",
+                "SET_EMVR_FORMULA_COMPOSITION",
+                "SELECT_EMVR_EXPERIMENT_METHODS",
+                "REVISE_EMVR_DIRECTION",
+                "LOCK_EMVR_DIRECTION",
+            }
+            and isinstance(item.get("content"), dict)
+        ][:8]
+        if isinstance(raw.get("emvr_formula_actions"), list)
+        else [],
         "unresolved_content": normalized_text_list("unresolved_content"),
         "control_actions": list(
             dict.fromkeys(
@@ -2897,6 +2938,7 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
             in {"COURSE_CONTENT", "OUT_OF_SCOPE", "UNCERTAIN"}
             else "UNCERTAIN"
         ),
+        "course_domain": course_domain or None,
         # This is the substantive idea expressed alongside (or instead of)
         # an A/B/C scene reference.  Keeping it separate lets the state
         # machine accept "I choose A because I want to compare ..." as both
@@ -3273,6 +3315,84 @@ def _apply_comparison_updates(
                 # the catalog id. A single live group is unambiguous state
                 # context, so bind it without examining student keywords.
                 item = editable[0]
+            elif not editable:
+                # A student may define the first comparison group while the
+                # normalized design state is still empty.  The semantic action
+                # is still a replacement of the visible "baseline comparison"
+                # field, but there is no legacy group to replace.  Treat this
+                # as creation only when every case is grounded verbatim in the
+                # student's source message; never copy the whole turn.
+                message_evidence = _normalized_evidence_text(user_message)
+                candidate_cases = [
+                    str(case).strip()
+                    for key in ("new_cases", "cases")
+                    for case in (
+                        update.get(key, [])
+                        if isinstance(update.get(key), list)
+                        else []
+                    )
+                    if str(case).strip()
+                ]
+                supported_cases = list(
+                    dict.fromkeys(
+                        case
+                        for case in candidate_cases
+                        if message_evidence
+                        and _normalized_evidence_text(case) in message_evidence
+                    )
+                )
+                if supported_cases:
+                    raw_case_keys = (
+                        update.get("case_semantic_keys")
+                        if isinstance(update.get("case_semantic_keys"), dict)
+                        else {}
+                    )
+                    supported_cases, normalized_case_keys = (
+                        _deduplicate_cases_by_semantics(
+                            supported_cases,
+                            raw_case_keys,
+                        )
+                    )
+                    comparison_semantic_key = str(
+                        update.get("semantic_key") or ""
+                    ).strip().casefold()
+                    identity_material = comparison_semantic_key or "|".join(
+                        sorted(normalized_case_keys.values())
+                    )
+                    comparison_id = "student_" + uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        identity_material,
+                    ).hex[:16]
+                    title = str(update.get("title") or "").strip()
+                    if not (
+                        title
+                        and _normalized_evidence_text(title) in message_evidence
+                    ):
+                        title = "学生确定的基础比较"
+                    item = {
+                        "comparison_id": comparison_id,
+                        "title": title,
+                        "recommended_cases": list(supported_cases),
+                        "cases": list(supported_cases),
+                        "adoption_status": "MODIFIED",
+                        "semantic_key": comparison_semantic_key,
+                        "case_semantic_keys": normalized_case_keys,
+                    }
+                    comparisons.append(item)
+                    by_id[comparison_id] = item
+                    if comparison_semantic_key:
+                        by_semantic_key[comparison_semantic_key] = item
+                    applied.append(
+                        {
+                            "comparison_id": comparison_id,
+                            "action": "CREATE",
+                            "cases": list(supported_cases),
+                        }
+                    )
+                    # The item already contains the complete replacement.  A
+                    # second pass through MODIFY would only turn the same
+                    # creation into a misleading no-op acknowledgement.
+                    continue
         if item is None:
             continue
         before = deepcopy(item)

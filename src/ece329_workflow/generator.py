@@ -11,6 +11,7 @@ from .emvr_design import (
     formulas_for_emvr_relations,
     merge_emvr_structured_requirements,
 )
+from .emvr_formula_flow import formula_support_map_for_selection
 from .guardrails import (
     BREADTH_EXPLORATION,
     COURSE_CONTENT,
@@ -454,9 +455,147 @@ def _idea(session: DesignSession, user_message: str) -> str:
     return "尚未明确的ECE329实验想法"
 
 
+def _formula_brief_object_inventory(
+    session: DesignSession,
+    requirements: dict[str, Any],
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, str]]]:
+    """Materialize the confirmed formula brief into concrete Unity roles.
+
+    This is a deterministic projection of already confirmed semantic fields;
+    it does not infer objects from words in the current turn.  It prevents the
+    final Builder document from containing generic placeholders such as
+    "student-defined object" after Stage 1 already named the actual objects.
+    """
+
+    emvr = session.design_context.get("emvr_design", {})
+    brief = (
+        emvr.get("authoritative_experiment_brief", {})
+        if isinstance(emvr, dict)
+        else {}
+    )
+    brief = brief if isinstance(brief, dict) else {}
+
+    def items(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return list(
+                dict.fromkeys(str(item).strip() for item in value if str(item).strip())
+            )
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    objects = items(brief.get("objects"))
+    research_object = str(requirements.get("research_object") or "").strip()
+    if research_object:
+        objects = [research_object]
+    operations = items(requirements.get("required_behaviors")) or items(
+        brief.get("operations")
+    )
+    changed = items(requirements.get("changed_quantities")) or items(
+        brief.get("changed_quantities")
+    )
+    observed = items(requirements.get("observed_quantities")) or items(
+        brief.get("observed_quantities")
+    )
+    operation_text = "；".join(operations) or "按已确认的实验操作改变模型状态"
+    changed_text = "、".join(changed) or "已确认的模型输入"
+    observed_text = "、".join(observed) or "已确认的理论响应"
+
+    inventory: list[dict[str, Any]] = []
+    for name in objects:
+        inventory.append(
+            {
+                "object_name": name,
+                "category": "实验物理对象",
+                "purpose": f"承载研究对象，并使学生能够改变{changed_text}",
+                "student_interaction": operation_text,
+                "physics_or_data_state": f"保存与{changed_text}有关的当前物理状态",
+                "visual_feedback": f"对象状态变化后同步显示{observed_text}",
+                "required": True,
+            }
+        )
+
+    supporting_objects = [
+        {
+            "object_name": "XR Origin与左右控制器",
+            "category": "VR交互基础",
+            "purpose": "提供学生视角、射线选择、抓取和界面输入",
+            "student_interaction": "移动、指向、选择、抓取或触发已确认的实验操作",
+            "physics_or_data_state": "不直接参与电磁计算，只传递交互事件",
+            "visual_feedback": "射线、选中状态和操作确认",
+            "required": True,
+        },
+        {
+            "object_name": "参数与状态控制面板",
+            "category": "用户界面",
+            "purpose": f"显示并控制{changed_text}，同时锁定其余条件",
+            "student_interaction": "操作带单位控件、比较条件按钮和参考状态重置",
+            "physics_or_data_state": "保存参数值、单位、允许范围、比较条件和参考状态",
+            "visual_feedback": "显示当前值、范围、有效性和已选择的比较情形",
+            "required": True,
+        },
+        {
+            "object_name": "理论计算组件",
+            "category": "计算与数据",
+            "purpose": "依据已确认的主要公式和辅助公式计算当前实验状态",
+            "student_interaction": "不直接操作；由对象或参数变化触发",
+            "physics_or_data_state": f"读取{changed_text}并计算{observed_text}",
+            "visual_feedback": "显示计算状态、模型边界和无效条件说明",
+            "required": True,
+        },
+        {
+            "object_name": "空间观察与测量工具",
+            "category": "观察与测量",
+            "purpose": f"在指定位置、路径或区域读取{observed_text}",
+            "student_interaction": "移动观察工具、选择采样位置或切换已确认的观察方式",
+            "physics_or_data_state": "保存采样位置、观察方式和当前理论读数",
+            "visual_feedback": f"以数值、单位和空间标记呈现{observed_text}",
+            "required": True,
+        },
+        {
+            "object_name": "场量可视化系统",
+            "category": "教学可视化",
+            "purpose": f"把{observed_text}映射为空间图形、颜色、箭头或曲线",
+            "student_interaction": "切换已确认的显示层和比较视图",
+            "physics_or_data_state": "只读取理论计算输出，不独立生成物理结论",
+            "visual_feedback": "同步更新空间表现，并标明理论计算与教学示意的区别",
+            "required": True,
+        },
+        {
+            "object_name": "结果记录与比较面板",
+            "category": "实验控制与反馈",
+            "purpose": "保存参考状态和各次操作结果，支持公平对照",
+            "student_interaction": "记录、比较、撤销或重置实验状态",
+            "physics_or_data_state": "保存参数快照、理论结果和比较顺序",
+            "visual_feedback": "显示记录列表、差异摘要和重置确认",
+            "required": True,
+        },
+    ]
+    existing = {str(item.get("object_name") or "").casefold() for item in inventory}
+    for item in supporting_objects:
+        if str(item["object_name"]).casefold() not in existing:
+            inventory.append(item)
+    object_names = [str(item["object_name"]) for item in inventory]
+    interactions = [
+        {
+            "user_action": operation_text,
+            "physical_meaning": f"改变{changed_text}",
+            "system_response": f"重新计算并更新{observed_text}",
+        },
+        {
+            "user_action": "记录当前设置并与参考状态比较",
+            "physical_meaning": "在其余条件保持一致时比较主要实验情形",
+            "system_response": "保存参数与结果快照，并显示差异",
+        },
+    ]
+    return object_names, inventory, interactions
+
+
 def _topic_options(
     text: str,
     session: DesignSession | None = None,
+    *,
+    course_domain: str | None = None,
 ) -> list[dict[str, Any]]:
     shown = shown_exploration_option_ids(session.history) if session else set()
     seed_key = (
@@ -468,6 +607,7 @@ def _topic_options(
         text,
         exclude_option_ids=shown,
         seed_key=seed_key,
+        course_domain=course_domain,
     )
 
 
@@ -631,11 +771,9 @@ def build_experiment_outline_seed(
 ) -> dict[str, Any]:
     """Build the Stage 1 draft without inventing later-stage design decisions."""
 
-    relations = [
-        str(item.get("direction") or item.get("focus") or "").strip()
-        for item in selected_course_relations
-        if str(item.get("direction") or item.get("focus") or "").strip()
-    ]
+    relations = _course_relationships_for_selected_relations(
+        selected_course_relations
+    )
     comparisons = [
         {
             "comparison_id": str(item.get("comparison_id") or "").strip(),
@@ -660,6 +798,62 @@ def build_experiment_outline_seed(
             "概念实验结构",
         ],
     }
+
+
+def _course_relationships_for_selected_relations(
+    selected_course_relations: list[dict[str, Any]],
+) -> list[str]:
+    """Translate an internal scene selection into student-facing course links.
+
+    A scene's display direction can be a broad lecture heading (for example,
+    ``Divergence and curl``).  The formula-scene knowledge graph is more
+    specific and already records which course relationship makes that scene
+    useful.  Prefer that stable binding so selecting one scene cannot leave a
+    different scene's course relationship in the canonical design state.
+    """
+
+    relationships: list[str] = []
+    for relation in selected_course_relations:
+        if not isinstance(relation, dict):
+            continue
+        focus = str(relation.get("focus") or "").strip().rstrip("？?")
+        scene_id = str(relation.get("catalog_scene_id") or "").strip()
+        linked = KNOWLEDGE.formula_links_for_scene(scene_id) if scene_id else None
+        profile_titles = [
+            str(profile.get("title_zh") or "").strip()
+            for profile in (
+                linked.get("formula_design_profiles", [])
+                if isinstance(linked, dict)
+                else []
+            )
+            if isinstance(profile, dict) and str(profile.get("title_zh") or "").strip()
+        ]
+        if profile_titles:
+            base = "、".join(dict.fromkeys(profile_titles))
+            direction = str(relation.get("direction") or "").strip()
+            course_heading = (
+                f"（课程主题：{direction}）"
+                if direction and direction not in base
+                else ""
+            )
+            rendered_base = f"{base}{course_heading}"
+            rendered = (
+                f"{rendered_base}：{focus}"
+                if focus and focus not in rendered_base
+                else rendered_base
+            )
+        else:
+            direction = str(
+                relation.get("direction") or relation.get("focus") or ""
+            ).strip()
+            rendered = (
+                f"{direction}：{focus}"
+                if direction and focus and focus not in direction
+                else direction or focus
+            )
+        if rendered and rendered not in relationships:
+            relationships.append(rendered)
+    return relationships
 
 
 def _format_experiment_outline_seed(outline: dict[str, Any]) -> str:
@@ -1051,7 +1245,11 @@ class RuleBasedStageGenerator:
     def _generate_guided(self, session: DesignSession, user_message: str) -> StepOutput:
         stage = session.current_stage
         idea = _idea(session, user_message)
-        options = _topic_options(idea, session)
+        options = _topic_options(
+            idea,
+            session,
+            course_domain=str(session.turn_context.get("course_domain") or "") or None,
+        )
 
         if stage is Stage.IDEA_BRAINSTORMING:
             stage_one_context = session.turn_context
@@ -1147,7 +1345,11 @@ class RuleBasedStageGenerator:
             )
             if input_kind == COURSE_CONTENT and retrieval_text:
                 idea = current_focus or topic_anchor or idea
-                options = _topic_options(retrieval_text, session)
+                options = _topic_options(
+                    retrieval_text,
+                    session,
+                    course_domain=str(stage_one_context.get("course_domain") or "") or None,
+                )
             no_direction = stage_one_context.get("stage_one_no_direction") is True
             if input_kind != COURSE_CONTENT:
                 shown = shown_exploration_option_ids(session.history)
@@ -1604,7 +1806,25 @@ class RuleBasedStageGenerator:
                 structured_requirements.get("research_question")
                 or _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
             )
-            formulas = _focused_emvr_formula_references(theory_relation_ids)
+            emvr_design = session.design_context.get("emvr_design", {})
+            selected_formula_ids = (
+                [
+                    *emvr_design.get("selected_primary_formula_ids", []),
+                    *emvr_design.get("selected_supporting_formula_ids", []),
+                ]
+                if isinstance(emvr_design, dict)
+                else []
+            )
+            formula_by_id = {
+                str(formula.get("id") or ""): formula
+                for formula in KNOWLEDGE.formulas
+                if isinstance(formula, dict)
+            }
+            formulas = [
+                dict(formula_by_id[formula_id])
+                for formula_id in dict.fromkeys(str(item) for item in selected_formula_ids)
+                if formula_id in formula_by_id
+            ] or _focused_emvr_formula_references(theory_relation_ids)
             theory_selection_status = (
                 "selected_for_current_research"
                 if formulas
@@ -1615,10 +1835,24 @@ class RuleBasedStageGenerator:
                 for relation_id in theory_relation_ids
                 if relation_id in EMVR_THEORY_RELATIONS
             ]
+            if formulas and not relation_labels:
+                relation_labels = [
+                    str(profile.get("title_zh") or "")
+                    for profile_id in (
+                        emvr_design.get("formula_flow", {})
+                        .get("formula_selection", {})
+                        .get("primary_profile_ids", [])
+                        if isinstance(emvr_design, dict)
+                        and isinstance(emvr_design.get("formula_flow"), dict)
+                        else []
+                    )
+                    for profile in KNOWLEDGE.public_formula_design_profiles()
+                    if profile.get("profile_id") == profile_id
+                ]
             support_map = emvr_formula_support_map(
                 theory_relation_ids,
                 structured_requirements,
-            )
+            ) or formula_support_map_for_selection(session)
             return StepOutput(
                 assistant_message=(
                     "我已经只保留能直接解释当前变化条件和观察现象的课程关系。"
@@ -1665,6 +1899,9 @@ class RuleBasedStageGenerator:
                 structured_requirements.get("research_question")
                 or _emvr_latest_stage_input(session, Stage.RESEARCH_QUESTION)
             )
+            unity_objects, object_inventory, interactions = (
+                _formula_brief_object_inventory(session, structured_requirements)
+            )
             return StepOutput(
                 assistant_message="你原有的场景条件已经保留；我在此基础上补全了Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
                 stage_payload={
@@ -1682,104 +1919,9 @@ class RuleBasedStageGenerator:
                     "student_constraints": stage_inputs,
                     "user_role": latest_stage_input or "通过有物理意义的交互调整参数、观察结果并进行比较",
                     "core_learning_task": research_focus or f"探索学生定义的条件变化与{topics[0]}响应之间的关系",
-                    "unity_objects": [
-                        "XR Origin与控制器（若项目已有则复用）",
-                        "学生定义的可交互物理源或带电对象（不额外增设重复源）",
-                        "材料或边界比较对象（仅按学生设计保留）",
-                        "虚拟探测器",
-                        "参数控制面板",
-                        "数据与理论反馈面板",
-                        "场或波的可视化对象",
-                        "记录与重置组件",
-                    ],
-                    "object_inventory": [
-                        {
-                            "object_name": "XR Origin与左右控制器",
-                            "category": "VR交互基础",
-                            "purpose": "提供学生视角、指向、抓取与参数操作输入",
-                            "student_interaction": "移动、指向、抓取或触发界面",
-                            "physics_or_data_state": "不直接参与电磁计算，只传递交互事件",
-                            "visual_feedback": "射线、选中状态和操作确认",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "学生定义的可交互物理源或带电对象",
-                            "category": "物理对象",
-                            "purpose": "复用学生指定的对象来定义模型源条件，不额外创建重复电磁源",
-                            "student_interaction": "按设计需要移动、旋转或调节源参数",
-                            "physics_or_data_state": "保存学生已定义的源强、极性、位置、方向或其他源状态",
-                            "visual_feedback": "方向标记、状态颜色和当前参数读数",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "材料或边界比较对象",
-                            "category": "物理对象",
-                            "purpose": "承载学生设计中需要比较的几何、材料和边界条件",
-                            "student_interaction": "抓取、定位、旋转或切换已定义材料预设",
-                            "physics_or_data_state": "保存几何、材料参数和空间变换",
-                            "visual_feedback": "轮廓、材料标签和有效状态提示",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "虚拟探测器",
-                            "category": "观察与测量",
-                            "purpose": "读取指定空间位置的理论场量或传播响应",
-                            "student_interaction": "移动探测器或选择固定采样点",
-                            "physics_or_data_state": "保存采样位置、方向与当前理论输出",
-                            "visual_feedback": "数值、单位、方向箭头和采样标记",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "参数控制面板",
-                            "category": "用户界面",
-                            "purpose": "调整主要自变量并锁定控制条件",
-                            "student_interaction": "操作滑块、旋钮、开关或预设按钮",
-                            "physics_or_data_state": "保存参数值、单位、范围和合法性",
-                            "visual_feedback": "当前值、允许范围和越界说明",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "理论计算组件",
-                            "category": "计算与数据",
-                            "purpose": "根据ECE329关系式或预计算数据更新理论输出",
-                            "student_interaction": "不直接操作，由参数变化触发",
-                            "physics_or_data_state": "保存模型输入、输出、假设和有效范围",
-                            "visual_feedback": "计算状态与无效条件提示",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "场或波可视化对象",
-                            "category": "教学可视化",
-                            "purpose": "把方向、强度、相位或传播变化映射到空间表现",
-                            "student_interaction": "切换已设计的显示层或观察视角",
-                            "physics_or_data_state": "读取计算输出，不单独生成物理结论",
-                            "visual_feedback": "场线、箭头、颜色、透明度或波前",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "数据与理论反馈面板",
-                            "category": "用户界面",
-                            "purpose": "并列显示参数、理论数值、曲线和模型说明",
-                            "student_interaction": "查看、切换比较记录或读取解释提示",
-                            "physics_or_data_state": "保存当前显示数据与比较记录",
-                            "visual_feedback": "带单位数值、图例、曲线和理论/示意标记",
-                            "required": True,
-                        },
-                        {
-                            "object_name": "记录、比较与重置组件",
-                            "category": "实验控制",
-                            "purpose": "建立基准、保存条件并恢复可重复状态",
-                            "student_interaction": "记录、比较、撤销或重置",
-                            "physics_or_data_state": "保存基准与各次参数快照",
-                            "visual_feedback": "记录列表、比较状态和重置确认",
-                            "required": True,
-                        },
-                    ],
-                    "interactions": [
-                        {"user_action": "调整滑块或旋钮", "physical_meaning": "改变主要模型参数", "system_response": "重新计算并更新数值、曲线和视觉编码"},
-                        {"user_action": "移动虚拟探测器", "physical_meaning": "改变观察位置", "system_response": "显示当前位置对应的理论场量"},
-                        {"user_action": "记录当前设置", "physical_meaning": "保存一个比较条件", "system_response": "向数据面板添加理论预测记录"},
-                    ],
+                    "unity_objects": unity_objects,
+                    "object_inventory": object_inventory,
+                    "interactions": interactions,
                     "physics_layer": {
                         "user_inputs": structured_requirements.get(
                             "changed_quantities", []

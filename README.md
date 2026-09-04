@@ -325,10 +325,15 @@ GET /v1/knowledge/source
 GET /v1/knowledge/concepts
 GET /v1/knowledge/supplemental-concepts
 GET /v1/knowledge/formulas
+GET /v1/knowledge/formula-design-profiles
+GET /v1/knowledge/experiment-design-patterns
+GET /v1/knowledge/scene-formula-links
 GET /v1/knowledge/search?q=偏振
 ```
 
-搜索响应会同时返回课程范围概念、补充概念、公式、阶段1候选方向及来源页码。创建设计和处理每轮的响应保留 `knowledge_source`，并新增 `knowledge_sources` 记录全部启用来源。
+搜索响应会同时返回课程范围概念、补充概念、公式、公式设计档案、阶段1候选方向、候选图景与公式的独立映射及来源页码。公式设计档案将讲义中的规范公式区分为主要公式与辅助公式，并记录公式支持的变化量、观察量和适用边界条件。创建设计和处理每轮的响应保留 `knowledge_source`，并新增 `knowledge_sources` 记录全部启用来源。
+
+EMVR 模式的阶段 1 使用独立的公式优先入口：语义模型先把模糊主题整理为课程领域、对象、变化量和观察量，程序再用稳定档案 ID 计算候选公式。候选只有经学生确认后才进入实验设计；存在多条公式时，学生先决定联合设计，还是逐个小实验后组合。系统随后依据公式档案声明的 15 类实验设计范式实时生成覆盖矩阵和实验方法，不从固定图景库抽取。学生选择、组合并锁定实验方法后，系统才生成权威 `experiment_brief` 并进入后续对象、交互、参数和报告设计。该入口不读取或改写 Guide 模式的三图景抽样状态。
 
 ### 私有调试：获取大模型提示包
 

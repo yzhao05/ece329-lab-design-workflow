@@ -95,7 +95,7 @@ EMVR_DIRECT每个非最终阶段都应把本阶段形成的具体内容写入sta
 EMVR_DIRECT沿用引导模式的上下文机制：先读取pending_action确认本轮是在回答、修改、索取参考还是确认上一草稿，再读取carried_context中的实验方向、全部学习目标、研究问题、假设、Unity对象、交互、变量、流程、显示与局限。已确认内容默认保留，只有结构化语义明确表示修改或换题时才能替换。对学生的实质补充先回应其物理或VR设计含义，再更新草稿；不得重复阶段入口或让学生复述已有信息。
 design_context.emvr_design.stage_inputs与carried_context.emvr_stage_inputs按阶段保存学生的回答与修改；carried_context.emvr_merged_requirements中的逐字段状态是生成草稿的权威输入。学生一轮可以修改一个或多个字段，每个字段必须分别应用：研究问题只接收研究问题的新表述，可调内容只接收变化量，观察内容只接收观察量，不能把整条多指令消息复制或拼接到多个字段。抽象改写要求要作用于它指向的现有字段，不得把“重新表述、精简、改成因果句式”等操作说明写进实验内容。未被点名修改的字段保持原值；被要求替换的字段不得再附加旧版本形成重复。研究问题必须直接采用学生提出的变化条件与观察响应，不能退化成“主要参数影响目标响应”之类占位句。不得向学生显示“由阶段N确定”“来自阶段N”“待后续阶段补充”等内部依赖说明，应该直接引用已经保存的具体内容。
 理论关系只保留对当前研究对象、变化条件和预期现象有直接解释作用的公式。课程检索命中只表示公式可供核对，不表示全部公式都应写入方案；必须剔除仅因同一讲次或宽泛课程主题而命中、但不参与当前模型的关系。每条core_equations都要能说明它具体支持哪个计算输入、输出或边界条件。
-EMVR_DIRECT默认学生已经带着一个模糊实验想法进入，不执行GUIDED_DESIGN的三图景广度发散，也不在“没有思路”时提供图景库。信息不足时只围绕当前Unity VR实验问一个专业且可回答的问题，必要时可给一段贴合当前设计的参考结构，但不重新推荐实验方向。
+EMVR_DIRECT默认学生带着一个模糊实验主题进入，但不执行GUIDED_DESIGN的课程关系三图景逻辑。阶段1先语义理解主题，再从公式档案提出候选理论关系；学生确认主要公式与辅助公式后，才展示与已选公式绑定的三幅Unity VR实验图景。公式候选不得写入正式设计，图景不得使用或改变GUIDED_DESIGN的exploration_scenes、抽样历史与方向锁。信息不足时只围绕当前公式或实验方向问一个专业且可回答的问题。
 EMVR_DIRECT的学生可见用语可以使用Unity、XR、VR交互、参数控制、理论计算、数据绑定、场可视化等专业术语，但必须解释这些设计元素与ECE329物理意义的对应关系。只辅助设计实验，不输出代码、Prefab、场景文件或声称已经实现、编译、测试该实验。
 EMVR_DIRECT的语气应像专业实验设计评审：准确区分物理模型、Unity对象、交互输入、计算状态、观察量、
 可视化编码和模型适用边界；提出修改入口时应明确指出可修订的是哪一层。专业不等于只说“已生成”“已完成”
@@ -133,14 +133,14 @@ def _stage_output_contract(
     if stage is Stage.IDEA_BRAINSTORMING:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             return (
-                "stage_payload_json必须包含original_idea、target_phenomenon、"
-                "possible_vr_interactions和design_scope；从学生已有的模糊想法整理当前EMVR"
-                "设计起点，不得返回三幅图景、课程方向选项或让学生重新从零选题。"
-                "target_phenomenon必须优先采用context.carried_context.emvr_merged_requirements"
-                "中的observed_quantities和学生已保存的观察重点，描述具体要观察的物理变化，"
-                "不得用宽泛课程模块名称代替目标现象。"
-                "possible_vr_interactions只概括与当前想法直接相关的操作类型。"
-                "本轮不得生成后续阶段的变量表、公式、流程或最终方案。"
+                "EMVR阶段1由确定性公式入口流程负责。先理解主题，展示尚未确认的formula_cards；"
+                "学生确认主要和辅助公式后，如有多条公式先确认联合设计或逐个小实验后组合；"
+                "随后根据公式档案声明的实验设计范式实时生成coverage_matrix和experiment_methods，"
+                "再由学生选择、组合或修改，最后审阅并锁定完整experiment_brief。在方向锁定以前"
+                "不得填充普通EMVR对象、变量、流程或报告字段。experiment_methods不能从固定图景库"
+                "抽取，并与GUIDED_DESIGN的alternative_ideas、exploration_scenes完全隔离。"
+                "面向学生解释公式可改变什么、可观察什么及适用边界，"
+                "但不显示内部ID、评分、状态名或状态机术语。"
             )
         phase = str(
             session.turn_context.get("brainstorm_phase") or "BREADTH_EXPLORATION"
@@ -244,7 +244,9 @@ def _stage_output_contract(
                 "visual_only_elements。core_equations只能从knowledge_retrieval.formulas"
                 "逐项原样复制；formula_support_map必须为每个formula_id说明它支持当前"
                 "实验的哪项变化量、观察量或边界条件。若formulas为空，core_equations与"
-                "formula_support_map也必须为空，不得用同讲次的其他公式补位。"
+                "formula_support_map也必须为空，不得用同讲次的其他公式补位。若公式入口已确认"
+                "formula_design_profiles，formula_support_map.relation_id使用对应profile_id；"
+                "不得改回相邻理论关系或增加未确认公式。"
             )
         return (
             "stage_payload_json必须编码一个包含core_equations数组的对象；若"
@@ -396,12 +398,27 @@ def build_prompt_packet(
         retrieval_text,
         limit=5,
     )
+    relation_ids: list[str] = []
     if session.interaction_state is InteractionState.EMVR_DIRECT:
+        emvr_design = session.design_context.get("emvr_design", {})
         emvr_requirements = merge_emvr_structured_requirements(
-            session.design_context.get("emvr_design", {})
+            emvr_design
         )
         relation_ids = emvr_requirements.get("theory_relation_ids", [])
-        formulas = formulas_for_emvr_relations(relation_ids, limit=12)
+        selected_formula_ids = [
+            *emvr_design.get("selected_primary_formula_ids", []),
+            *emvr_design.get("selected_supporting_formula_ids", []),
+        ] if isinstance(emvr_design, dict) else []
+        formula_by_id = {
+            str(formula.get("id") or ""): formula
+            for formula in KNOWLEDGE.formulas
+            if isinstance(formula, dict)
+        }
+        formulas = [
+            deepcopy(formula_by_id[formula_id])
+            for formula_id in dict.fromkeys(str(item) for item in selected_formula_ids)
+            if formula_id in formula_by_id
+        ] or formulas_for_emvr_relations(relation_ids, limit=12)
         if not formulas and session.current_stage is Stage.THEORETICAL_FRAMEWORK:
             # Let the language model select from grounded, catalog-bound
             # candidates using the complete design context. The candidate pool
@@ -413,6 +430,16 @@ def build_prompt_packet(
             )
     else:
         formulas = KNOWLEDGE.formula_references(retrieval_text, limit=12)
+    formula_ids = {
+        str(item.get("id") or "")
+        for item in formulas
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    formula_design_profiles = (
+        KNOWLEDGE.design_profiles_for_formula_ids(formula_ids, limit=4)
+        if formula_ids and session.interaction_state is InteractionState.EMVR_DIRECT
+        else KNOWLEDGE.formula_design_references(retrieval_text, limit=4)
+    )
     shown_option_ids = shown_exploration_option_ids(session.history)
     sample_seed = f"{session.design_id}:{len(shown_option_ids)}"
     # Scene sampling should follow the student's current topic, not the whole
@@ -426,11 +453,15 @@ def build_prompt_packet(
         or user_message
     )
     brainstorm_options = (
+        []
+        if session.interaction_state is InteractionState.EMVR_DIRECT
+        else
         KNOWLEDGE.brainstorm_options(
             brainstorm_text,
             limit=3,
             exclude_option_ids=shown_option_ids,
             seed_key=sample_seed,
+            course_domain=str(stage_one_thread.get("course_domain") or "") or None,
         )
         if stage_one_preclassification in {None, COURSE_CONTENT}
         else course_example_options(
@@ -481,6 +512,7 @@ def build_prompt_packet(
             "concepts": concepts,
             "supplemental_concepts": supplemental_concepts,
             "formulas": formulas,
+            "formula_design_profiles": formula_design_profiles,
             "brainstorm_options": brainstorm_options,
             "exploration_scene_catalog_size": len(KNOWLEDGE.exploration_points),
             "previously_shown_scene_count": len(shown_option_ids),

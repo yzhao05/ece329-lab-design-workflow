@@ -594,6 +594,45 @@ def apply_emvr_field_updates(
             emvr_design["brief"] = synthesized
             emvr_design["brief_source"] = "STRUCTURED_FIELD_SYNTHESIS"
 
+    # Keep the formula-driven structured brief synchronized with later
+    # field-level corrections.  The Stage 1 object is not a frozen transcript:
+    # it is the Builder-facing design contract, so exports must not retain an
+    # old variable or observation after the student revised it elsewhere.
+    authoritative = emvr_design.get("authoritative_experiment_brief")
+    if isinstance(authoritative, dict):
+        if "experiment_brief" in touched_fields:
+            summary = str(field_state.get("experiment_brief") or "").strip()
+            if summary:
+                authoritative["summary"] = summary
+            else:
+                authoritative.pop("summary", None)
+        if touched_fields & {"direction_summary", "research_summary"}:
+            topic = str(
+                field_state.get("direction_summary")
+                or field_state.get("research_summary")
+                or ""
+            ).strip()
+            if topic:
+                authoritative["topic"] = topic
+        if "research_object" in touched_fields:
+            research_object = str(field_state.get("research_object") or "").strip()
+            authoritative["objects"] = [research_object] if research_object else []
+        for field_id, brief_field in (
+            ("required_behaviors", "operations"),
+            ("changed_quantities", "changed_quantities"),
+            ("observed_quantities", "observed_quantities"),
+            ("object_constraints", "boundary_conditions"),
+        ):
+            if field_id not in touched_fields:
+                continue
+            value = field_state.get(field_id, [])
+            authoritative[brief_field] = (
+                list(value) if isinstance(value, list) else []
+            )
+        formula_flow = emvr_design.get("formula_flow")
+        if isinstance(formula_flow, dict):
+            formula_flow["experiment_brief"] = deepcopy(authoritative)
+
     raw_theory_links = structured_update.get("theory_links", [])
     raw_theory_links = raw_theory_links if isinstance(raw_theory_links, list) else []
     theory_edits = structured_update.get("theory_link_updates", [])

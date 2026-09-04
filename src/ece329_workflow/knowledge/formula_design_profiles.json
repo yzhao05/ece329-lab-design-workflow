@@ -1,0 +1,719 @@
+{
+  "schema_version": 1,
+  "source_id": "ece329_lecture_notes_2026",
+  "description": "ECE329讲义公式到实验设计要素的人工整理映射。公式正文与讲义页码以formulas.json为唯一事实来源。",
+  "field_contract": {
+    "primary_formula_ids": "决定实验核心因果关系的主要公式。",
+    "supporting_formula_ids": "用于解释、换算、约束或交叉验证的辅助公式。",
+    "supported_variations": "公式允许在实验中有意识改变的量。",
+    "supported_observations": "能够用于回答研究问题的可观察量或可计算量。",
+    "boundary_conditions": "公式成立所需的几何、材料、源、时间或端接条件。"
+  },
+  "profiles": [
+    {
+      "profile_id": "FD01_FIELD_FOUNDATIONS",
+      "title_zh": "电磁场基本方程与准静态边界",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["maxwell_free_space"],
+      "supporting_formula_ids": ["lorentz_force", "quasi_static_condition", "divergence_definition", "curl_definition"],
+      "supported_variations": [
+        {"quantity": "源电荷密度与电流密度", "symbols": ["ρ", "J"], "units": ["C/m³", "A/m²"]},
+        {"quantity": "场随时间的变化尺度", "symbols": ["T", "f"], "units": ["s", "Hz"]},
+        {"quantity": "实验系统特征尺寸", "symbols": ["L"], "units": ["m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电场与磁场的空间分布", "symbols": ["E", "B", "D", "H"]},
+        {"quantity": "电荷所受力与运动趋势", "symbols": ["F"]},
+        {"quantity": "场的散度、旋度及电磁耦合"}
+      ],
+      "boundary_conditions": [
+        {"condition": "自由空间关系使用D=ε₀E、B=μ₀H；材料介质需改用相应本构关系。"},
+        {"condition": "采用准静态近似时需满足T≫L/c，等价于L≪λ。"},
+        {"condition": "洛伦兹力需明确参考系、粒子电荷与速度。"}
+      ]
+    },
+    {
+      "profile_id": "FD02_COULOMB_SUPERPOSITION",
+      "title_zh": "点电荷场与矢量叠加",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["coulomb_point_charge", "electric_field_superposition"],
+      "supporting_formula_ids": ["potential_volume_charge"],
+      "supported_variations": [
+        {"quantity": "电荷量与极性", "symbols": ["Qᵢ"], "units": ["C"]},
+        {"quantity": "电荷数量、相对位置与间距", "symbols": ["rᵢ", "|r-rᵢ|"], "units": ["m"]},
+        {"quantity": "观察点位置", "symbols": ["r"], "units": ["m"]},
+        {"quantity": "均匀线性介质的介电常数", "symbols": ["ε"], "units": ["F/m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电场矢量、大小与方向", "symbols": ["E"], "units": ["V/m"]},
+        {"quantity": "电场线形状、零场点和对称性"},
+        {"quantity": "多个电荷贡献的分量与合场"}
+      ],
+      "boundary_conditions": [
+        {"condition": "点电荷模型要求源尺寸相对观察距离足够小。"},
+        {"condition": "叠加原理适用于线性介质；讲义中的基本表达首先针对自由空间。"},
+        {"condition": "观察点不能与理想点电荷位置重合。"}
+      ]
+    },
+    {
+      "profile_id": "FD03_GAUSS_FLUX_SYMMETRY",
+      "title_zh": "高斯定律、通量与对称源",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["gauss_integral", "gauss_differential"],
+      "supporting_formula_ids": ["line_charge_field", "sheet_charge_field", "divergence_definition"],
+      "supported_variations": [
+        {"quantity": "闭合面的形状、大小与位置"},
+        {"quantity": "闭合面包围的电荷量", "symbols": ["Q_V", "ρ"], "units": ["C", "C/m³"]},
+        {"quantity": "线电荷密度或面电荷密度", "symbols": ["λ", "ρ_s"], "units": ["C/m", "C/m²"]}
+      ],
+      "supported_observations": [
+        {"quantity": "穿过闭合面的电位移通量", "symbols": ["∮D·dS"], "units": ["C"]},
+        {"quantity": "闭合面局部通量密度与法向分量"},
+        {"quantity": "高对称源周围场强随距离的变化", "symbols": ["E"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "积分形式必须使用闭合面。"},
+        {"condition": "由高斯定律直接求场需具备足够的球、柱或平面对称性。"},
+        {"condition": "无限线电荷和无限面电荷是理想几何；有限模型需关注边缘效应。"}
+      ]
+    },
+    {
+      "profile_id": "FD04_ELECTROSTATIC_POTENTIAL",
+      "title_zh": "电势、电场与静电环流",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["electrostatic_potential_gradient", "potential_difference"],
+      "supporting_formula_ids": ["stokes_theorem_e"],
+      "supported_variations": [
+        {"quantity": "源或电极电势", "symbols": ["V"], "units": ["V"]},
+        {"quantity": "起点、终点和空间路径"},
+        {"quantity": "电极几何与间距", "units": ["m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电势分布与电势差", "symbols": ["V", "ΔV"], "units": ["V"]},
+        {"quantity": "等势面及其与电场线的正交关系"},
+        {"quantity": "由电势梯度得到的电场", "symbols": ["E"], "units": ["V/m"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "静电场满足∇×E=0，因此电势差与积分路径无关。"},
+        {"condition": "电势零点可自由选取，但同一比较中必须保持一致。"},
+        {"condition": "不适用于磁通随时间变化导致的非保守电场。"}
+      ]
+    },
+    {
+      "profile_id": "FD05_ELECTROSTATIC_BOUNDARY",
+      "title_zh": "静电场材料界面与边界条件",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["electrostatic_boundary"],
+      "supporting_formula_ids": ["electric_displacement", "linear_dielectric"],
+      "supported_variations": [
+        {"quantity": "两侧介电常数", "symbols": ["ε₁", "ε₂", "ε_r"], "units": ["F/m"]},
+        {"quantity": "自由表面电荷密度", "symbols": ["ρ_s"], "units": ["C/m²"]},
+        {"quantity": "界面形状、法向与入射方向"}
+      ],
+      "supported_observations": [
+        {"quantity": "界面两侧E的切向分量"},
+        {"quantity": "界面两侧D的法向跃变"},
+        {"quantity": "场线在界面附近的偏折、聚集与稀疏"}
+      ],
+      "boundary_conditions": [
+        {"condition": "静态界面满足n̂×(E⁺-E⁻)=0。"},
+        {"condition": "D的法向跃变等于自由表面电荷密度。"},
+        {"condition": "线性各向同性介质可使用D=εE；其他材料不能直接套用。"}
+      ]
+    },
+    {
+      "profile_id": "FD06_POISSON_LAPLACE",
+      "title_zh": "泊松方程与拉普拉斯方程的静电场求解",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["poisson_equation", "laplace_equation"],
+      "supporting_formula_ids": ["potential_volume_charge", "electrostatic_potential_gradient"],
+      "supported_variations": [
+        {"quantity": "体电荷密度", "symbols": ["ρ"], "units": ["C/m³"]},
+        {"quantity": "电势边界值", "symbols": ["V"], "units": ["V"]},
+        {"quantity": "区域几何与介电常数", "symbols": ["ε"], "units": ["F/m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "区域内电势分布", "symbols": ["V"]},
+        {"quantity": "由-∇V得到的电场分布", "symbols": ["E"]},
+        {"quantity": "边界形状变化引起的等势面与场线重排"}
+      ],
+      "boundary_conditions": [
+        {"condition": "拉普拉斯方程仅用于无自由电荷区域。"},
+        {"condition": "泊松方程的讲义形式假定区域内ε为常数。"},
+        {"condition": "必须给出足够且相容的电势或法向场边界条件。"}
+      ]
+    },
+    {
+      "profile_id": "FD07_CONDUCTION_RELAXATION",
+      "title_zh": "导电介质中的电流与电荷弛豫",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["ohm_law_density", "charge_relaxation"],
+      "supporting_formula_ids": ["continuity_equation", "conductance_capacitance_relation"],
+      "supported_variations": [
+        {"quantity": "电导率", "symbols": ["σ"], "units": ["S/m"]},
+        {"quantity": "介电常数", "symbols": ["ε"], "units": ["F/m"]},
+        {"quantity": "初始自由电荷密度与施加电场", "symbols": ["ρ(0)", "E"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电流密度", "symbols": ["J"], "units": ["A/m²"]},
+        {"quantity": "自由电荷随时间的衰减", "symbols": ["ρ(t)"]},
+        {"quantity": "弛豫时间", "symbols": ["τ=ε/σ"], "units": ["s"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "J=σE使用线性各向同性导电模型。"},
+        {"condition": "指数弛豫关系要求均匀线性导电介质。"},
+        {"condition": "若材料分区或σ、ε随场变化，需分区处理或改用更一般模型。"}
+      ]
+    },
+    {
+      "profile_id": "FD08_DIELECTRIC_POLARIZATION",
+      "title_zh": "介质极化与电位移",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["electric_displacement", "linear_dielectric"],
+      "supporting_formula_ids": ["polarization_current", "electrostatic_boundary"],
+      "supported_variations": [
+        {"quantity": "相对介电常数和电极化率", "symbols": ["ε_r", "χ_e"]},
+        {"quantity": "外加电场强度与方向", "symbols": ["E"], "units": ["V/m"]},
+        {"quantity": "介质形状、层数与界面位置"}
+      ],
+      "supported_observations": [
+        {"quantity": "极化强度与电位移", "symbols": ["P", "D"]},
+        {"quantity": "材料内外电场线与等势面分布"},
+        {"quantity": "时变极化对应的极化电流密度", "symbols": ["J_p"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "D=εE的简化形式要求线性各向同性介质。"},
+        {"condition": "静电比较中应保持外加场或自由电荷条件一致。"},
+        {"condition": "讨论极化电流时必须允许P随时间变化。"}
+      ]
+    },
+    {
+      "profile_id": "FD09_CAPACITANCE_ENERGY",
+      "title_zh": "电容、电场储能与几何参数",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["capacitance_definition", "parallel_plate_capacitance"],
+      "supporting_formula_ids": ["capacitor_current", "electric_energy"],
+      "supported_variations": [
+        {"quantity": "极板面积与间距", "symbols": ["A", "d"], "units": ["m²", "m"]},
+        {"quantity": "介电常数", "symbols": ["ε"], "units": ["F/m"]},
+        {"quantity": "电势差或电荷量", "symbols": ["V", "Q"], "units": ["V", "C"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电容", "symbols": ["C"], "units": ["F"]},
+        {"quantity": "电场储能与能量密度", "symbols": ["W", "w_e"], "units": ["J", "J/m³"]},
+        {"quantity": "电压变化产生的电流", "symbols": ["I"], "units": ["A"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "Q=CV针对线性静电双导体结构。"},
+        {"condition": "C=εA/d要求均匀介质、近似均匀场并忽略边缘效应。"},
+        {"condition": "I=C dV/dt要求电容C不随时间变化。"}
+      ]
+    },
+    {
+      "profile_id": "FD10_COAXIAL_CAPACITANCE_CONDUCTANCE",
+      "title_zh": "同轴结构的电容与漏导",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["coax_capacitance_per_length", "conductance_capacitance_relation"],
+      "supporting_formula_ids": ["capacitance_definition", "ohm_law_density"],
+      "supported_variations": [
+        {"quantity": "内外导体半径", "symbols": ["a", "b"], "units": ["m"]},
+        {"quantity": "介电常数与电导率", "symbols": ["ε", "σ"], "units": ["F/m", "S/m"]},
+        {"quantity": "同轴线长度", "units": ["m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "单位长度电容", "symbols": ["C′"], "units": ["F/m"]},
+        {"quantity": "漏导与电容的比例关系", "symbols": ["G/C"]},
+        {"quantity": "径向电场和电势分布"}
+      ],
+      "boundary_conditions": [
+        {"condition": "同轴导体应足够长，端部边缘效应可忽略。"},
+        {"condition": "导体之间使用均匀介质。"},
+        {"condition": "G=(σ/ε)C要求导电与静电问题具有相同几何和场型。"}
+      ]
+    },
+    {
+      "profile_id": "FD11_DRUDE_CONDUCTIVITY",
+      "title_zh": "Drude载流子响应与频率相关电导率",
+      "course_block": "electrostatics",
+      "primary_formula_ids": ["drude_dc_conductivity", "drude_ac_conductivity"],
+      "supporting_formula_ids": ["ohm_law_density", "conducting_medium_gamma_eta"],
+      "supported_variations": [
+        {"quantity": "载流子密度、电荷和质量", "symbols": ["N_s", "q_s", "m_s"]},
+        {"quantity": "碰撞频率", "symbols": ["ν_s"], "units": ["Hz"]},
+        {"quantity": "激励角频率", "symbols": ["ω"], "units": ["rad/s"]}
+      ],
+      "supported_observations": [
+        {"quantity": "直流与复数交流电导率", "symbols": ["σ", "σ_s(ω)"], "units": ["S/m"]},
+        {"quantity": "电流相对电场的幅值与相位响应"},
+        {"quantity": "低频与高频极限下的材料响应差异"}
+      ],
+      "boundary_conditions": [
+        {"condition": "采用具有单一碰撞频率的经典Drude模型。"},
+        {"condition": "交流表达使用相量稳态。"},
+        {"condition": "若材料存在强色散或多种载流子，应分别计入各载流子贡献。"}
+      ]
+    },
+    {
+      "profile_id": "FD12_MAGNETIC_SOURCE_FIELD",
+      "title_zh": "稳恒电流产生的磁场",
+      "course_block": "magnetism",
+      "primary_formula_ids": ["biot_savart", "ampere_integral"],
+      "supporting_formula_ids": ["ampere_magnetostatic"],
+      "supported_variations": [
+        {"quantity": "电流大小与方向", "symbols": ["I", "J"], "units": ["A", "A/m²"]},
+        {"quantity": "载流路径的形状、位置和尺度"},
+        {"quantity": "介质磁导率", "symbols": ["μ"], "units": ["H/m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "磁通密度与磁场强度", "symbols": ["B", "H"], "units": ["T", "A/m"]},
+        {"quantity": "磁场线方向、环绕性与叠加"},
+        {"quantity": "沿闭合路径的磁场环流"}
+      ],
+      "boundary_conditions": [
+        {"condition": "Biot-Savart与讲义中的安培定律形式用于稳恒电流。"},
+        {"condition": "用安培环路直接求场需要足够的对称性。"},
+        {"condition": "细导线表达把电流路径视为丝状电流。"}
+      ]
+    },
+    {
+      "profile_id": "FD13_CURRENT_SHEET_SOLENOID",
+      "title_zh": "电流面与长螺线管磁场",
+      "course_block": "magnetism",
+      "primary_formula_ids": ["current_sheet_magnetic_field", "long_solenoid_field"],
+      "supporting_formula_ids": ["ampere_integral", "linear_magnetic_medium"],
+      "supported_variations": [
+        {"quantity": "面电流密度或线圈电流", "symbols": ["J_s", "I"]},
+        {"quantity": "单位长度匝数", "symbols": ["n"], "units": ["1/m"]},
+        {"quantity": "磁导率与线圈几何", "symbols": ["μ"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电流面两侧的磁场方向与大小"},
+        {"quantity": "螺线管内外磁场分布和均匀性"},
+        {"quantity": "B随I、n和μ的变化趋势"}
+      ],
+      "boundary_conditions": [
+        {"condition": "无限电流面是理想近似，有限面需观察边缘效应。"},
+        {"condition": "H=nI适用于足够长的螺线管内部。"},
+        {"condition": "B=μH要求使用相应材料的本构关系。"}
+      ]
+    },
+    {
+      "profile_id": "FD14_MAGNETIC_VECTOR_POTENTIAL",
+      "title_zh": "磁矢势与电流分布",
+      "course_block": "magnetism",
+      "primary_formula_ids": ["magnetic_vector_potential", "vector_potential_poisson"],
+      "supporting_formula_ids": ["biot_savart", "ampere_magnetostatic"],
+      "supported_variations": [
+        {"quantity": "电流密度分布", "symbols": ["J"], "units": ["A/m²"]},
+        {"quantity": "载流体几何和观察点位置"},
+        {"quantity": "磁导率", "symbols": ["μ"], "units": ["H/m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "磁矢势分布", "symbols": ["A"]},
+        {"quantity": "由∇×A得到的磁通密度", "symbols": ["B"]},
+        {"quantity": "电流几何改变后的磁场拓扑"}
+      ],
+      "boundary_conditions": [
+        {"condition": "讲义中的泊松方程解针对磁静态自由空间问题。"},
+        {"condition": "使用库仑规范∇·A=0。"},
+        {"condition": "边界与材料变化需要相应调整积分核或区域条件。"}
+      ]
+    },
+    {
+      "profile_id": "FD15_FARADAY_INDUCTION",
+      "title_zh": "法拉第感应与运动电动势",
+      "course_block": "magnetism",
+      "primary_formula_ids": ["faraday_differential", "faraday_generalized_emf"],
+      "supporting_formula_ids": ["lorentz_force", "stokes_theorem_e"],
+      "supported_variations": [
+        {"quantity": "磁通量变化率", "symbols": ["dΦ_B/dt"], "units": ["Wb/s"]},
+        {"quantity": "磁场大小、方向或变化频率", "symbols": ["B", "f"]},
+        {"quantity": "回路面积、朝向、形状与运动速度", "symbols": ["v"]}
+      ],
+      "supported_observations": [
+        {"quantity": "感应电动势及方向", "symbols": ["ℰ"], "units": ["V"]},
+        {"quantity": "时变磁场产生的旋涡电场"},
+        {"quantity": "固定回路与运动回路的响应差异"}
+      ],
+      "boundary_conditions": [
+        {"condition": "积分回路必须与计算磁通的曲面边界一致。"},
+        {"condition": "运动回路需计入v×B项，并明确测量参考系。"},
+        {"condition": "电动势符号需与回路方向和曲面法向约定一致。"}
+      ]
+    },
+    {
+      "profile_id": "FD16_INDUCTANCE_ENERGY",
+      "title_zh": "电感、瞬态与磁场储能",
+      "course_block": "magnetism",
+      "primary_formula_ids": ["inductance_definition", "solenoid_inductance"],
+      "supporting_formula_ids": ["rl_decay", "magnetic_energy"],
+      "supported_variations": [
+        {"quantity": "线圈电流与匝数", "symbols": ["I", "N", "n"]},
+        {"quantity": "截面积、长度和磁导率", "symbols": ["A", "ℓ", "μ"]},
+        {"quantity": "串联电阻", "symbols": ["R"], "units": ["Ω"]}
+      ],
+      "supported_observations": [
+        {"quantity": "磁通链、电感和感应电压", "symbols": ["NΦ", "L", "V"]},
+        {"quantity": "RL电流衰减曲线与时间常数"},
+        {"quantity": "磁场储能和能量密度", "symbols": ["W", "w_m"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "NΦ=LI与V=L dI/dt要求线性、参数L恒定。"},
+        {"condition": "螺线管电感公式采用长螺线管和近似均匀内部磁场。"},
+        {"condition": "RL自然响应要求无外部源且R、L为常数。"}
+      ]
+    },
+    {
+      "profile_id": "FD17_CHARGE_CONTINUITY_MAXWELL",
+      "title_zh": "电荷守恒与位移电流",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["continuity_equation", "ampere_maxwell"],
+      "supporting_formula_ids": ["maxwell_free_space", "capacitor_current"],
+      "supported_variations": [
+        {"quantity": "电荷密度与电流密度的时间变化", "symbols": ["ρ", "J"]},
+        {"quantity": "电位移变化率", "symbols": ["∂D/∂t"]},
+        {"quantity": "激励频率与电容结构几何"}
+      ],
+      "supported_observations": [
+        {"quantity": "传导电流与位移电流的相对贡献"},
+        {"quantity": "电荷积累或消散"},
+        {"quantity": "时变电场周围的磁场环流"}
+      ],
+      "boundary_conditions": [
+        {"condition": "局域连续性方程适用于任意守恒电荷系统。"},
+        {"condition": "位移电流项在时变电场中不可省略。"},
+        {"condition": "材料介质中D必须采用相应本构关系。"}
+      ]
+    },
+    {
+      "profile_id": "FD18_MATERIAL_MAXWELL",
+      "title_zh": "材料介质中的Maxwell方程与磁化",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["material_maxwell_relations", "linear_magnetic_medium"],
+      "supporting_formula_ids": ["electric_displacement", "linear_dielectric", "polarization_current"],
+      "supported_variations": [
+        {"quantity": "介电常数、电极化率和磁化率", "symbols": ["ε", "χ_e", "χ_m"]},
+        {"quantity": "磁导率", "symbols": ["μ"], "units": ["H/m"]},
+        {"quantity": "自由电荷、自由电流与激励频率"}
+      ],
+      "supported_observations": [
+        {"quantity": "E、D、B、H在材料内外的分布"},
+        {"quantity": "极化与磁化响应", "symbols": ["P", "M"]},
+        {"quantity": "材料改变后的场传播或储能差异"}
+      ],
+      "boundary_conditions": [
+        {"condition": "D和H吸收束缚电荷及束缚电流效应。"},
+        {"condition": "B=μH和D=εE的简化关系要求线性各向同性材料。"},
+        {"condition": "跨材料界面时必须同时应用相应边界条件。"}
+      ]
+    },
+    {
+      "profile_id": "FD19_WAVE_PROPAGATION",
+      "title_zh": "均匀介质中的TEM波传播",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["wave_equation", "tem_traveling_wave"],
+      "supporting_formula_ids": ["wave_speed_impedance", "wave_frequency_relations"],
+      "supported_variations": [
+        {"quantity": "介电常数与磁导率", "symbols": ["ε", "μ"]},
+        {"quantity": "频率、波长与传播方向", "symbols": ["f", "λ", "β"]},
+        {"quantity": "电场振幅与波形", "symbols": ["E₀"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电场和磁场波形、方向与相位"},
+        {"quantity": "传播速度、波长与波数", "symbols": ["v", "λ", "β"]},
+        {"quantity": "本征阻抗及E/H幅值比", "symbols": ["η"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "波动方程形式要求均匀、无源、非导电且μ、ε为常数。"},
+        {"condition": "TEM波中E、H与传播方向彼此正交，E×H指向能量传播方向。"},
+        {"condition": "速度与本征阻抗公式针对均匀无损介质。"}
+      ]
+    },
+    {
+      "profile_id": "FD20_POYNTING_POWER",
+      "title_zh": "Poynting矢量与电磁能量守恒",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["poynting_vector", "poynting_theorem"],
+      "supporting_formula_ids": ["average_poynting", "electric_energy", "magnetic_energy"],
+      "supported_variations": [
+        {"quantity": "E与H的振幅、相位和相对方向"},
+        {"quantity": "介质参数与导电损耗", "symbols": ["ε", "μ", "σ"]},
+        {"quantity": "积分曲面的位置与朝向"}
+      ],
+      "supported_observations": [
+        {"quantity": "瞬时与时间平均功率流密度", "symbols": ["S", "⟨S⟩"], "units": ["W/m²"]},
+        {"quantity": "穿过选定曲面的净功率", "units": ["W"]},
+        {"quantity": "场能变化、功率流出与焦耳损耗的平衡"}
+      ],
+      "boundary_conditions": [
+        {"condition": "讲义中的能量定理形式采用线性非色散介质。"},
+        {"condition": "时间平均式使用单频相量和峰值相量约定。"},
+        {"condition": "积分曲面的法向约定决定功率流符号。"}
+      ]
+    },
+    {
+      "profile_id": "FD21_PHASOR_FIELDS",
+      "title_zh": "正弦稳态相量场",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["phasor_maxwell", "wave_frequency_relations"],
+      "supporting_formula_ids": ["average_poynting", "tem_traveling_wave"],
+      "supported_variations": [
+        {"quantity": "角频率与相位", "symbols": ["ω"]},
+        {"quantity": "介质参数", "symbols": ["ε", "μ"]},
+        {"quantity": "源相量的幅值与相位"}
+      ],
+      "supported_observations": [
+        {"quantity": "复数E、H、D、B相量"},
+        {"quantity": "波数、波长、周期与传播速度"},
+        {"quantity": "场之间的幅值比和相位差"}
+      ],
+      "boundary_conditions": [
+        {"condition": "采用Re{phasor·e^{jωt}}时间约定。"},
+        {"condition": "仅表示单频正弦稳态，瞬态需回到时域。"},
+        {"condition": "频率关系的简化式要求均匀无损介质。"}
+      ]
+    },
+    {
+      "profile_id": "FD22_CONDUCTING_WAVES",
+      "title_zh": "导电介质中的传播、衰减与趋肤深度",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["conducting_medium_gamma_eta", "damped_wave_phasors"],
+      "supporting_formula_ids": ["good_conductor_approx", "skin_depth"],
+      "supported_variations": [
+        {"quantity": "电导率、介电常数和磁导率", "symbols": ["σ", "ε", "μ"]},
+        {"quantity": "频率", "symbols": ["f", "ω"], "units": ["Hz", "rad/s"]},
+        {"quantity": "传播距离与材料厚度", "symbols": ["z"], "units": ["m"]}
+      ],
+      "supported_observations": [
+        {"quantity": "衰减常数与相位常数", "symbols": ["α", "β"], "units": ["Np/m", "rad/m"]},
+        {"quantity": "场振幅随深度的指数衰减"},
+        {"quantity": "本征阻抗、相位和趋肤深度", "symbols": ["η", "δ"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "介质均匀、线性，并采用e^{jωt}相量约定。"},
+        {"condition": "良导体近似要求σ/(ωε)≫1。"},
+        {"condition": "δ≈1/√(πfμσ)仅在良导体近似下使用。"}
+      ]
+    },
+    {
+      "profile_id": "FD23_WAVE_POLARIZATION",
+      "title_zh": "电磁波偏振与场矢量轨迹",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["circular_polarization"],
+      "supporting_formula_ids": ["tem_traveling_wave", "wave_frequency_relations"],
+      "supported_variations": [
+        {"quantity": "正交分量的幅值比"},
+        {"quantity": "正交分量相位差"},
+        {"quantity": "传播方向、频率和偏振手性"}
+      ],
+      "supported_observations": [
+        {"quantity": "固定空间点处E矢量端点轨迹"},
+        {"quantity": "线偏振、圆偏振与椭圆偏振状态"},
+        {"quantity": "偏振旋向与传播方向的关系"}
+      ],
+      "boundary_conditions": [
+        {"condition": "圆偏振要求两个正交分量等幅且相差±90°。"},
+        {"condition": "符号与手性判断必须遵循讲义采用的时间和传播方向约定。"},
+        {"condition": "场保持横向并满足TEM传播条件。"}
+      ]
+    },
+    {
+      "profile_id": "FD24_WAVE_INTERFACE",
+      "title_zh": "介质界面的波反射与透射",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["wave_reflection_transmission"],
+      "supporting_formula_ids": ["wave_speed_impedance", "average_poynting"],
+      "supported_variations": [
+        {"quantity": "两侧本征阻抗", "symbols": ["η₁", "η₂"], "units": ["Ω"]},
+        {"quantity": "两侧介电常数与磁导率"},
+        {"quantity": "入射场振幅和频率"}
+      ],
+      "supported_observations": [
+        {"quantity": "电场反射与透射系数", "symbols": ["Γ", "τ"]},
+        {"quantity": "入射、反射和透射场幅值"},
+        {"quantity": "界面两侧的平均功率流"}
+      ],
+      "boundary_conditions": [
+        {"condition": "讲义公式针对平面界面法向入射。"},
+        {"condition": "界面无外加表面电荷和表面电流。"},
+        {"condition": "τ为电场振幅透射系数，不能直接当作功率透射率。"}
+      ]
+    },
+    {
+      "profile_id": "FD25_PEC_STANDING_WAVE",
+      "title_zh": "理想导体反射与驻波",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["pec_standing_wave"],
+      "supporting_formula_ids": ["wave_reflection_transmission", "poynting_vector"],
+      "supported_variations": [
+        {"quantity": "观察位置与离导体表面的距离", "symbols": ["z"], "units": ["m"]},
+        {"quantity": "频率和波长", "symbols": ["f", "λ"]},
+        {"quantity": "入射场幅值"}
+      ],
+      "supported_observations": [
+        {"quantity": "E与H驻波的节点和腹点位置"},
+        {"quantity": "E与H空间错位关系"},
+        {"quantity": "理想导体表面的反射相位"}
+      ],
+      "boundary_conditions": [
+        {"condition": "平面波法向入射到z=0处的理想电导体。"},
+        {"condition": "PEC边界上切向电场为零，电场反射系数Γ=-1。"},
+        {"condition": "介质侧为均匀无损介质。"}
+      ]
+    },
+    {
+      "profile_id": "FD26_TL_PROPAGATION",
+      "title_zh": "无损传输线传播与分布参数",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["telegrapher_lossless", "tl_dalembert"],
+      "supporting_formula_ids": ["parallel_plate_tl_parameters", "tl_speed_impedance"],
+      "supported_variations": [
+        {"quantity": "单位长度电感与电容", "symbols": ["L", "C"]},
+        {"quantity": "平行板宽度、间距与介质参数", "symbols": ["W", "d", "ε", "μ"]},
+        {"quantity": "源波形、振幅和传播位置", "symbols": ["z", "t"]}
+      ],
+      "supported_observations": [
+        {"quantity": "电压与电流行波", "symbols": ["V(z,t)", "I(z,t)"]},
+        {"quantity": "传播速度与特性阻抗", "symbols": ["v", "Z₀"]},
+        {"quantity": "前向波和后向波的方向及幅值关系"}
+      ],
+      "boundary_conditions": [
+        {"condition": "无损线忽略单位长度电阻R和电导G。"},
+        {"condition": "线路均匀，L和C沿线不变。"},
+        {"condition": "平行板参数公式要求W≫d并忽略边缘效应。"}
+      ]
+    },
+    {
+      "profile_id": "FD27_TL_TRANSIENT_REFLECTION",
+      "title_zh": "传输线端接与结点瞬态反射",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["tl_load_source_reflection", "junction_coefficients"],
+      "supporting_formula_ids": ["tl_dalembert", "tl_speed_impedance"],
+      "supported_variations": [
+        {"quantity": "负载、源或相邻线路阻抗", "symbols": ["R_L", "R_g", "Z_j", "Z_k"], "units": ["Ω"]},
+        {"quantity": "线路特性阻抗", "symbols": ["Z₀"], "units": ["Ω"]},
+        {"quantity": "线路长度和信号传播时间"}
+      ],
+      "supported_observations": [
+        {"quantity": "负载、源端和结点反射系数", "symbols": ["Γ_L", "Γ_g", "Γ_jk"]},
+        {"quantity": "透射系数与波幅跳变", "symbols": ["τ_jk"]},
+        {"quantity": "反射波到达各位置的时间序列"}
+      ],
+      "boundary_conditions": [
+        {"condition": "讲义瞬态示例中的负载和源为实电阻；正弦稳态需使用复阻抗。"},
+        {"condition": "每段线路在结点附近视为均匀传输线。"},
+        {"condition": "反射系数的正负与波入射方向、端口定义保持一致。"}
+      ]
+    },
+    {
+      "profile_id": "FD28_TL_RESONANCE_STUBS",
+      "title_zh": "传输线共振与开短路支节",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["same_boundary_resonance", "mixed_boundary_resonance"],
+      "supporting_formula_ids": ["stub_impedances", "wave_frequency_relations"],
+      "supported_variations": [
+        {"quantity": "线路或支节长度", "symbols": ["ℓ"], "units": ["m"]},
+        {"quantity": "端接类型：开路或短路"},
+        {"quantity": "频率、相速度和特性阻抗", "symbols": ["f", "v", "Z₀"]}
+      ],
+      "supported_observations": [
+        {"quantity": "共振频率序列", "symbols": ["f_n"], "units": ["Hz"]},
+        {"quantity": "电压电流驻波节点与腹点"},
+        {"quantity": "开路或短路支节输入阻抗", "symbols": ["Z_open", "Z_short"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "共振和支节公式针对均匀无损传输线。"},
+        {"condition": "相同端接与混合端接对应不同的半波或四分之一波序列。"},
+        {"condition": "开路和短路必须按理想边界处理。"}
+      ]
+    },
+    {
+      "profile_id": "FD29_TL_IMPEDANCE_TRANSFORM",
+      "title_zh": "半波与四分之一波阻抗变换",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["half_wave_transformer", "quarter_wave_transformer"],
+      "supporting_formula_ids": ["line_impedance_gamma", "load_reflection_phasor"],
+      "supported_variations": [
+        {"quantity": "线路电长度与频率", "symbols": ["βℓ", "λ"]},
+        {"quantity": "负载阻抗", "symbols": ["Z_L"], "units": ["Ω"]},
+        {"quantity": "线路特性阻抗", "symbols": ["Z₀"], "units": ["Ω"]}
+      ],
+      "supported_observations": [
+        {"quantity": "输入阻抗", "symbols": ["Z_in"], "units": ["Ω"]},
+        {"quantity": "半波重复和四分之一波倒置变换"},
+        {"quantity": "沿线反射系数的相位旋转"}
+      ],
+      "boundary_conditions": [
+        {"condition": "公式针对均匀无损传输线。"},
+        {"condition": "半波和四分之一波长度均指相应工作频率下的电长度。"},
+        {"condition": "Z₀取实正值时可直接使用讲义中的Smith图变换。"}
+      ]
+    },
+    {
+      "profile_id": "FD30_TL_REFLECTION_VSWR_POWER",
+      "title_zh": "反射系数、沿线阻抗、驻波比与功率",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["load_reflection_phasor", "line_impedance_gamma", "vswr"],
+      "supporting_formula_ids": ["tl_average_power"],
+      "supported_variations": [
+        {"quantity": "复负载阻抗", "symbols": ["Z_L"], "units": ["Ω"]},
+        {"quantity": "离负载的距离与电长度", "symbols": ["d", "βd"]},
+        {"quantity": "入射波振幅与特性阻抗", "symbols": ["V⁺", "Z₀"]}
+      ],
+      "supported_observations": [
+        {"quantity": "复反射系数的大小与相位", "symbols": ["Γ_L", "Γ(d)"]},
+        {"quantity": "沿线输入阻抗和驻波比", "symbols": ["Z(d)", "VSWR"]},
+        {"quantity": "送入负载的时间平均功率", "symbols": ["P"], "units": ["W"]}
+      ],
+      "boundary_conditions": [
+        {"condition": "公式针对均匀无损线且Z₀为实正值。"},
+        {"condition": "距离d按讲义约定从负载向信号源测量。"},
+        {"condition": "平均功率式使用峰值相量。"}
+      ]
+    },
+    {
+      "profile_id": "FD31_TL_QUARTER_WAVE_MATCHING",
+      "title_zh": "四分之一波阻抗匹配",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["quarter_wave_matching"],
+      "supporting_formula_ids": ["quarter_wave_transformer", "tl_average_power", "vswr"],
+      "supported_variations": [
+        {"quantity": "负载和主线阻抗", "symbols": ["Z_L", "Z₀"], "units": ["Ω"]},
+        {"quantity": "匹配段特性阻抗", "symbols": ["Z_q"], "units": ["Ω"]},
+        {"quantity": "匹配段长度与工作频率"}
+      ],
+      "supported_observations": [
+        {"quantity": "匹配前后的反射系数与VSWR"},
+        {"quantity": "负载获得的平均功率"},
+        {"quantity": "偏离设计频率后的匹配退化"}
+      ],
+      "boundary_conditions": [
+        {"condition": "匹配段在设计频率处为四分之一波长。"},
+        {"condition": "Z_q=√(Z_LZ₀)要求变压器位置处负载为实正阻抗。"},
+        {"condition": "复负载必须先沿线变换到实电阻位置。"}
+      ]
+    },
+    {
+      "profile_id": "FD32_LOSSY_TRANSMISSION_LINE",
+      "title_zh": "有损传输线传播与高频低损近似",
+      "course_block": "electromagnetics",
+      "primary_formula_ids": ["lossy_telegrapher", "lossy_line_gamma_z0"],
+      "supporting_formula_ids": ["high_frequency_lossy_line", "telegrapher_lossless"],
+      "supported_variations": [
+        {"quantity": "单位长度R、L、G、C参数"},
+        {"quantity": "频率", "symbols": ["ω"], "units": ["rad/s"]},
+        {"quantity": "线路长度与负载条件"}
+      ],
+      "supported_observations": [
+        {"quantity": "传播常数、衰减常数和相位常数", "symbols": ["γ", "α", "β"]},
+        {"quantity": "复特性阻抗", "symbols": ["Z₀"], "units": ["Ω"]},
+        {"quantity": "电压电流沿线衰减与相位变化"}
+      ],
+      "boundary_conditions": [
+        {"condition": "线路均匀并处于单频正弦稳态。"},
+        {"condition": "高频低损近似要求ωL≫R且ωC≫G。"},
+        {"condition": "无损极限仅在R=G=0时成立。"}
+      ]
+    }
+  ]
+}

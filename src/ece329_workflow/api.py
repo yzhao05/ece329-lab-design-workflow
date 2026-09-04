@@ -122,6 +122,32 @@ class WorkflowAPI:
                 )
             if method == "GET" and path == "/v1/knowledge/formulas":
                 return self._respond(start_response, HTTPStatus.OK, {"formulas": self.engine.list_knowledge_formulas()})
+            if method == "GET" and path == "/v1/knowledge/formula-design-profiles":
+                return self._respond(
+                    start_response,
+                    HTTPStatus.OK,
+                    {
+                        "formula_design_profiles": (
+                            self.engine.list_formula_design_profiles()
+                        )
+                    },
+                )
+            if method == "GET" and path == "/v1/knowledge/experiment-design-patterns":
+                return self._respond(
+                    start_response,
+                    HTTPStatus.OK,
+                    {
+                        "experiment_design_patterns": (
+                            self.engine.list_experiment_design_patterns()
+                        )
+                    },
+                )
+            if method == "GET" and path == "/v1/knowledge/scene-formula-links":
+                return self._respond(
+                    start_response,
+                    HTTPStatus.OK,
+                    {"scene_formula_links": self.engine.list_scene_formula_links()},
+                )
             if method == "GET" and path == "/v1/knowledge/search":
                 query = parse_qs(environ.get("QUERY_STRING", "")).get("q", [""])[0].strip()
                 if not query:

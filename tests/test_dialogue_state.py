@@ -828,6 +828,42 @@ class DialogueStateTests(unittest.TestCase):
         self.assertIn("规则边界、尖角边界、窄缝边界", result["assistant_message"])
         self.assertNotIn("electrostatic_material_class_pair", result["assistant_message"])
 
+    def test_first_explicit_comparison_replacement_creates_canonical_group(self) -> None:
+        message = "基础比较改成曲面完全包住场源、部分包住场源、未包住场源"
+        replacement = ["曲面完全包住场源", "部分包住场源", "未包住场源"]
+        engine = WorkflowEngine(
+            generator=MultiActSemanticGenerator(
+                [
+                    {
+                        "type": "MODIFY_COMPARISON",
+                        "target": "baseline_comparisons",
+                        "operation": "REPLACE",
+                        "content": {
+                            "comparison_id": "baseline_comparisons",
+                            "action": "REPLACE",
+                            "cases": replacement,
+                            "replace_all": True,
+                        },
+                        "source_text": message,
+                        "confidence": 0.99,
+                    }
+                ]
+            )
+        )
+        session = idea_facet_session("design_first_comparison_group")
+        set_baseline_comparisons(session, [])
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": message})
+
+        comparisons = result["stage_payload"]["design_state"][
+            "baseline_comparisons"
+        ]
+        self.assertEqual(len(comparisons), 1)
+        self.assertEqual(comparisons[0]["cases"], replacement)
+        self.assertEqual(comparisons[0]["adoption_status"], "MODIFIED")
+        self.assertIn("曲面完全包住场源", result["assistant_message"])
+
     def test_rejected_model_comparison_creation_is_not_acknowledged_as_saved(self) -> None:
         session = idea_facet_session("design_rejected_comparison_ack")
         session.turn_context = {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+from copy import deepcopy
 from io import BytesIO
 from typing import Any
 
@@ -24,7 +25,11 @@ from reportlab.platypus import (
 from .models import DesignSession, InteractionState, Stage, WorkflowStatus
 from .stages import stage_title
 from .design_quality import evaluate_design_quality, public_quality_review
-from .emvr_design import EMVR_THEORY_RELATIONS
+from .dialogue_acts import stage_design_state_snapshot
+from .emvr_design import EMVR_THEORY_RELATIONS, merge_emvr_structured_requirements
+from .emvr_formula_flow import EMVR_DETAIL_DESIGN, formula_support_map_for_selection
+from .knowledge_base import KNOWLEDGE
+from .builder_requirements import validate_builder_requirements
 
 
 _FIELD_LABELS = {
@@ -32,6 +37,13 @@ _FIELD_LABELS = {
     "normalized_idea": "设计起点",
     "target_phenomenon": "目标现象",
     "possible_vr_interactions": "可用交互",
+    "formula_direction_summary": "公式驱动的实验方向",
+    "primary_formulas": "主要公式",
+    "supporting_formulas": "辅助公式",
+    "formula_composition_strategy": "公式组织方式",
+    "selected_experiment_methods": "采用的实验方法",
+    "selected_experiment_patterns": "覆盖的实验设计形式",
+    "model_boundary_conditions": "公式适用边界",
     "primary_topic": "主要课程主题",
     "secondary_topics": "相关课程主题",
     "selected_direction": "设计方向",
@@ -129,6 +141,13 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "normalized_idea",
         "target_phenomenon",
         "possible_vr_interactions",
+        "formula_direction_summary",
+        "primary_formulas",
+        "supporting_formulas",
+        "formula_composition_strategy",
+        "selected_experiment_methods",
+        "selected_experiment_patterns",
+        "model_boundary_conditions",
     ),
     Stage.COURSE_MAPPING_AND_DIRECTION: (
         "lab_title",
@@ -261,6 +280,266 @@ def _plain(value: Any, *, depth: int = 0) -> str:
     return str(value).strip()
 
 
+def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
+    """Return the latest structured EMVR brief used by every final artifact.
+
+    The formula onboarding owns the initial brief, while later stages may
+    legitimately refine its object, operation, variable, observation or model
+    boundary fields.  Final exports must therefore overlay the latest
+    canonical field state instead of reading the Stage 1 snapshot verbatim.
+    """
+
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    stored = emvr.get("authoritative_experiment_brief", {})
+    brief = deepcopy(stored) if isinstance(stored, dict) else {}
+    requirements = merge_emvr_structured_requirements(emvr)
+
+    def values(field: str) -> list[str]:
+        value = requirements.get(field)
+        if isinstance(value, list):
+            return list(
+                dict.fromkeys(str(item).strip() for item in value if str(item).strip())
+            )
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        prior = brief.get(field, [])
+        return (
+            list(dict.fromkeys(str(item).strip() for item in prior if str(item).strip()))
+            if isinstance(prior, list)
+            else []
+        )
+
+    topic = str(
+        requirements.get("direction_summary")
+        or requirements.get("research_summary")
+        or brief.get("topic")
+        or ""
+    ).strip()
+    research_object = str(requirements.get("research_object") or "").strip()
+    if topic:
+        brief["topic"] = topic
+    if research_object:
+        stored_objects = values("objects")
+        # Formula onboarding projects its structured object list into the
+        # legacy scalar research_object using this exact separator.  Reading
+        # that compatibility projection back as one object would silently
+        # collapse the Builder inventory ("source、probe、surface" becomes a
+        # single object). Preserve the authoritative list unless the student
+        # later supplied a genuinely different object description.
+        projected_objects = "、".join(stored_objects)
+        brief["objects"] = (
+            stored_objects
+            if stored_objects and research_object == projected_objects
+            else [research_object]
+        )
+    else:
+        brief["objects"] = values("objects")
+    for target, source in (
+        ("operations", "required_behaviors"),
+        ("changed_quantities", "changed_quantities"),
+        ("observed_quantities", "observed_quantities"),
+        ("boundary_conditions", "object_constraints"),
+    ):
+        latest = values(source)
+        if latest:
+            brief[target] = latest
+        else:
+            brief[target] = values(target)
+    summary = str(requirements.get("experiment_brief") or "").strip()
+    if summary:
+        brief["summary"] = summary
+    return brief
+
+
+def effective_emvr_stage_payload(
+    session: DesignSession,
+    stage: Stage,
+) -> dict[str, Any]:
+    """Project latest canonical EMVR state onto a stage-shaped report view."""
+
+    stored = session.stage_outputs.get(stage.value, {})
+    payload = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
+    payload = deepcopy(payload) if isinstance(payload, dict) else {}
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    requirements = merge_emvr_structured_requirements(emvr)
+    stage_state = stage_design_state_snapshot(session)
+    brief = effective_experiment_brief(session)
+
+    def set_if(field: str, value: Any) -> None:
+        if value not in (None, "", [], {}):
+            payload[field] = deepcopy(value)
+
+    if stage is Stage.IDEA_BRAINSTORMING:
+        summary = str(brief.get("summary") or emvr.get("brief") or "").strip()
+        set_if("normalized_idea", summary)
+        set_if("formula_direction_summary", summary)
+        set_if("target_phenomenon", brief.get("observed_quantities"))
+        set_if("possible_vr_interactions", brief.get("operations"))
+        formula_ids = list(brief.get("primary_formula_ids", []))
+        supporting_ids = list(brief.get("supporting_formula_ids", []))
+        formulas = {
+            str(item.get("id") or ""): item
+            for item in KNOWLEDGE.formulas
+            if isinstance(item, dict)
+        }
+        set_if(
+            "primary_formulas",
+            [
+                "：".join(
+                    part
+                    for part in (
+                        str(formulas[item].get("name") or "").strip(),
+                        str(formulas[item].get("expression") or "").strip(),
+                    )
+                    if part
+                )
+                for item in formula_ids
+                if item in formulas
+            ],
+        )
+        set_if(
+            "supporting_formulas",
+            [
+                "：".join(
+                    part
+                    for part in (
+                        str(formulas[item].get("name") or "").strip(),
+                        str(formulas[item].get("expression") or "").strip(),
+                    )
+                    if part
+                )
+                for item in supporting_ids
+                if item in formulas
+            ],
+        )
+        composition_labels = {
+            "SINGLE": "围绕一组公式形成完整实验",
+            "COMBINED": "多组公式共同解释一个完整实验",
+            "SEPARATE_THEN_COMBINE": "先分别设计小实验，再组合为连续任务",
+        }
+        set_if(
+            "formula_composition_strategy",
+            composition_labels.get(str(brief.get("formula_composition_strategy") or "")),
+        )
+        flow = emvr.get("formula_flow", {})
+        flow = flow if isinstance(flow, dict) else {}
+        methods = {
+            str(item.get("method_id") or ""): item
+            for item in flow.get("experiment_methods", [])
+            if isinstance(item, dict)
+        }
+        method_titles = [
+            str(methods[item].get("title") or "").strip()
+            for item in brief.get("selected_experiment_method_ids", [])
+            if item in methods and str(methods[item].get("title") or "").strip()
+        ]
+        patterns = {
+            str(item.get("pattern_id") or ""): str(item.get("title_zh") or "").strip()
+            for item in KNOWLEDGE.experiment_design_patterns
+            if isinstance(item, dict)
+        }
+        pattern_titles = [
+            patterns[item]
+            for item in brief.get("selected_experiment_pattern_ids", [])
+            if item in patterns and patterns[item]
+        ]
+        set_if("selected_experiment_methods", method_titles)
+        set_if("selected_experiment_patterns", pattern_titles)
+        set_if("model_boundary_conditions", brief.get("boundary_conditions"))
+    elif stage is Stage.COURSE_MAPPING_AND_DIRECTION:
+        set_if("lab_title", requirements.get("lab_title") or stage_state.get("lab_title"))
+        set_if("lab_id", requirements.get("lab_id") or stage_state.get("lab_id"))
+        set_if("selected_direction", requirements.get("experiment_brief"))
+        set_if("course_relationship", requirements.get("course_relationship"))
+    elif stage is Stage.LEARNING_OBJECTIVES:
+        for field in (
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+        ):
+            set_if(field, requirements.get(field))
+    elif stage is Stage.RESEARCH_QUESTION:
+        set_if(
+            "main_research_question",
+            requirements.get("research_question") or stage_state.get("research_question"),
+        )
+        set_if("adjustable_quantity_in_vr", requirements.get("changed_quantities"))
+        set_if("observable_quantity_in_vr", requirements.get("observed_quantities"))
+        set_if("comparison_cases", requirements.get("comparison_cases"))
+    elif stage is Stage.THEORETICAL_FRAMEWORK:
+        selected_ids = list(
+            dict.fromkeys(
+                [
+                    *emvr.get("selected_primary_formula_ids", []),
+                    *emvr.get("selected_supporting_formula_ids", []),
+                ]
+            )
+        )
+        formula_by_id = {
+            str(item.get("id") or ""): item
+            for item in KNOWLEDGE.formulas
+            if isinstance(item, dict)
+        }
+        set_if(
+            "core_equations",
+            [deepcopy(formula_by_id[item]) for item in selected_ids if item in formula_by_id],
+        )
+        set_if("formula_support_map", formula_support_map_for_selection(session))
+    elif stage is Stage.HYPOTHESIS:
+        hypothesis = requirements.get("hypothesis") or stage_state.get("hypothesis")
+        set_if("research_hypothesis", hypothesis)
+        set_if("expected_trend", hypothesis)
+    elif stage is Stage.CONCEPTUAL_OR_VR_SETUP:
+        for field in (
+            "desktop_interaction_plan",
+            "room_spatial_requirements",
+            "hidden_object_lifecycle",
+        ):
+            set_if(field, requirements.get(field) or stage_state.get(field))
+    elif stage is Stage.VARIABLES_AND_CONDITIONS:
+        changed = requirements.get("changed_quantities") or stage_state.get("independent_variable")
+        observed = requirements.get("observed_quantities") or stage_state.get("observations")
+        controls = stage_state.get("controlled_conditions")
+        if changed:
+            set_if("independent_variable", {"name": _plain(changed)})
+        if observed:
+            set_if("dependent_variable", {"name": _plain(observed)})
+        set_if("controlled_variables", controls)
+        set_if(
+            "parameter_specifications",
+            requirements.get("parameter_specifications")
+            or stage_state.get("parameter_specifications"),
+        )
+    elif stage is Stage.CONCEPTUAL_PROCEDURE:
+        latest_steps = requirements.get("procedure_steps") or stage_state.get(
+            "procedure_steps"
+        )
+        latest_steps = latest_steps if isinstance(latest_steps, list) else []
+        if len(latest_steps) >= 5:
+            set_if("procedure_steps", latest_steps)
+        elif latest_steps:
+            # A concise student description is valuable context but is not a
+            # replacement for the already materialized, ordered Builder flow.
+            set_if("student_required_steps", latest_steps)
+    elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        set_if(
+            "student_visualization_requirements",
+            requirements.get("visualization_requirements")
+            or stage_state.get("visualization_plan"),
+        )
+    elif stage is Stage.RESULT_INTERPRETATION:
+        for field in ("expected_results", "acceptance_criteria", "report_questions"):
+            set_if(field, requirements.get(field) or stage_state.get(field))
+        set_if("student_result_interpretation", stage_state.get("result_interpretation"))
+    elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
+        set_if("limitations", requirements.get("limitations") or stage_state.get("limitations"))
+    return payload
+
+
 def stage_report_section(
     stage: Stage,
     payload: dict[str, Any],
@@ -377,9 +656,7 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
         stored = session.stage_outputs.get(stage.value)
         if not isinstance(stored, dict):
             continue
-        payload = stored.get("stage_payload", {})
-        if not isinstance(payload, dict):
-            payload = {}
+        payload = effective_emvr_stage_payload(session, stage)
         section = stage_report_section(
             stage,
             payload,
@@ -604,14 +881,43 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
 def validate_emvr_report_completeness(session: DesignSession) -> None:
     if session.interaction_state is not InteractionState.EMVR_DIRECT:
         raise ValueError("EMVR report validation requires an EMVR design")
+    # The student-facing report renders the same Lab-specific requirements
+    # collected for Builder Gate 1 (desktop/VR controls, room placement,
+    # hidden-object lifecycle, parameter units, expected results, acceptance
+    # criteria, and report questions).  Validate them here as well so a legacy
+    # completed session cannot expose a superficially complete PDF with empty
+    # requirement rows.
+    validate_builder_requirements(session)
     evaluate_design_quality(session, final_review=True)
 
     def payload(stage: Stage) -> dict[str, Any]:
-        stored = session.stage_outputs.get(stage.value, {})
-        value = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
-        return value if isinstance(value, dict) else {}
+        return effective_emvr_stage_payload(session, stage)
 
     missing_sections: list[str] = []
+
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    formula_flow = emvr.get("formula_flow")
+    if isinstance(formula_flow, dict):
+        brief = effective_experiment_brief(session)
+        if (
+            formula_flow.get("phase") != EMVR_DETAIL_DESIGN
+            or formula_flow.get("direction_locked") is not True
+        ):
+            missing_sections.append("已锁定的公式驱动实验方向")
+        required_brief_fields = {
+            "topic": "实验主题",
+            "primary_formula_ids": "主要公式",
+            "selected_experiment_method_ids": "实验方法",
+            "objects": "研究对象",
+            "operations": "核心操作",
+            "changed_quantities": "变化量",
+            "observed_quantities": "观察量",
+            "boundary_conditions": "公式适用边界",
+        }
+        for field, label in required_brief_fields.items():
+            if not _plain(brief.get(field)):
+                missing_sections.append(label)
 
     research = payload(Stage.RESEARCH_QUESTION)
     if not _plain(research.get("main_research_question")):

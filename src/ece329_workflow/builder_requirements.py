@@ -115,7 +115,10 @@ def builder_requirement_values(session: DesignSession) -> dict[str, str]:
     field_state = emvr.get("field_state", {})
     field_state = field_state if isinstance(field_state, dict) else {}
     return {
-        field: _text(stage_state.get(field) or field_state.get(field))
+        # EMVR field_state is the latest field-level source of truth.  A
+        # student may revise an earlier Builder item from a later stage; the
+        # old stage snapshot must never override that newer correction.
+        field: _text(field_state.get(field) or stage_state.get(field))
         for field in BUILDER_REQUIREMENT_FIELDS
     }
 

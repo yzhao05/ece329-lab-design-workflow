@@ -37,6 +37,10 @@ from .emvr_design import (
     EMVR_THEORY_RELATIONS,
     candidate_formulas_for_emvr_context,
 )
+from .emvr_formula_flow import (
+    EMVR_FORMULA_ACTION_TYPES,
+    normalize_formula_flow_action,
+)
 from .design_state import seen_scene_signatures
 from .generator import (
     ILLUSTRATIVE_EXTENSION_SCOPE,
@@ -87,11 +91,7 @@ GUIDED_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("review_dimension", "limitations"),
 }
 EMVR_REQUIRED_PAYLOAD_FIELDS: dict[Stage, tuple[str, ...]] = {
-    Stage.IDEA_BRAINSTORMING: (
-        "original_idea",
-        "target_phenomenon",
-        "possible_vr_interactions",
-    ),
+    Stage.IDEA_BRAINSTORMING: ("emvr_formula_phase",),
     Stage.COURSE_MAPPING_AND_DIRECTION: (
         "course_references",
         "selected_direction",
@@ -470,6 +470,7 @@ def _parse_compact_intent_response(
             "CORRECT_ASSISTANT",
             "VERSION_CONTROL",
             "COMPARE_OPTIONS",
+            *EMVR_FORMULA_ACTION_TYPES,
         } and isinstance(act.get("content"), str):
             try:
                 decoded_content = json.loads(act["content"])
@@ -506,6 +507,12 @@ def _parse_compact_intent_response(
         "REQUEST_NEW_TOPIC": "NEW_TOPIC",
         "NEW_TOPIC_CONTENT": "NEW_TOPIC",
         "NEW_TOPIC": "NEW_TOPIC",
+        "SET_EMVR_TOPIC": "ANSWER_CURRENT_QUESTION",
+        "SELECT_EMVR_FORMULAS": "ANSWER_CURRENT_QUESTION",
+        "SET_EMVR_FORMULA_COMPOSITION": "ANSWER_CURRENT_QUESTION",
+        "SELECT_EMVR_EXPERIMENT_METHODS": "ANSWER_CURRENT_QUESTION",
+        "REVISE_EMVR_DIRECTION": "MODIFY_PREVIOUS_PROPOSAL",
+        "LOCK_EMVR_DIRECTION": "ACCEPT_PREVIOUS_PROPOSAL",
         "UNRESOLVED": "UNCLEAR",
     }
     intent = intent_by_type.get(primary_type, "UNCLEAR")
@@ -594,6 +601,8 @@ def _dialogue_act_writes_state(act: Any) -> bool:
         return False
     if act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
         return content not in (None, "", [], {})
+    if act_type in EMVR_FORMULA_ACTION_TYPES:
+        return normalize_formula_flow_action(act_type, content) is not None
     if act_type != "CORRECT_ASSISTANT":
         return False
     content = act.get("content")
@@ -1184,7 +1193,51 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
     ):
         requirements = _emvr_structured_requirements(session)
         relation_ids = requirements.get("theory_relation_ids", [])
-        allowed_formulas = _focused_emvr_formula_references(relation_ids)
+        emvr_design = session.design_context.get("emvr_design", {})
+        selected_formula_ids = list(
+            dict.fromkeys(
+                str(item)
+                for item in [
+                    *emvr_design.get("selected_primary_formula_ids", []),
+                    *emvr_design.get("selected_supporting_formula_ids", []),
+                ]
+                if str(item).strip()
+            )
+        ) if isinstance(emvr_design, dict) else []
+        formula_by_id = {
+            str(formula.get("id") or ""): formula
+            for formula in KNOWLEDGE.formulas
+            if isinstance(formula, dict)
+        }
+        selected_profiles = (
+            emvr_design.get("formula_flow", {})
+            .get("formula_selection", {})
+            if isinstance(emvr_design, dict)
+            and isinstance(emvr_design.get("formula_flow"), dict)
+            else {}
+        )
+        profile_ids = [
+            *selected_profiles.get("primary_profile_ids", []),
+            *selected_profiles.get("supporting_profile_ids", []),
+        ] if isinstance(selected_profiles, dict) else []
+        profile_for_formula = {
+            str(formula_id): str(profile.get("profile_id") or "")
+            for profile_id in profile_ids
+            for profile in KNOWLEDGE.public_formula_design_profiles()
+            if profile.get("profile_id") == profile_id
+            for formula_id in [
+                *profile.get("primary_formula_ids", []),
+                *profile.get("supporting_formula_ids", []),
+            ]
+        }
+        allowed_formulas = [
+            {
+                **deepcopy(formula_by_id[formula_id]),
+                "supports_relation_id": profile_for_formula.get(formula_id, ""),
+            }
+            for formula_id in selected_formula_ids
+            if formula_id in formula_by_id
+        ] or _focused_emvr_formula_references(relation_ids)
         if not allowed_formulas:
             allowed_formulas = candidate_formulas_for_emvr_context(
                 _emvr_context_text(session, ""),
@@ -2028,6 +2081,7 @@ class OpenAIStageGenerator:
     final_max_output_tokens: int = 5000
     stateful: bool = False
     repair_attempts: int = 1
+    supports_emvr_formula_flow: bool = field(default=True, init=False, repr=False)
     _api_successes: int = field(default=0, init=False, repr=False)
     _api_failures: int = field(default=0, init=False, repr=False)
     _chain_resets: int = field(default=0, init=False, repr=False)
@@ -2098,6 +2152,11 @@ class OpenAIStageGenerator:
                 "控制动作必须分别列出。学生表示暂时不能确定并要求举例时，用REQUEST_REFERENCE"
                 "覆盖这整个请求，不要再把‘不确定’单列为UNRESOLVED；参考请求只改变本轮回答方式，"
                 "不能改写设计字段或清除当前待办。"
+                "如果carried_context.emvr_formula_flow显示EMVR公式入口尚未完成，只能使用"
+                "SET_EMVR_TOPIC、SELECT_EMVR_FORMULAS、SET_EMVR_FORMULA_COMPOSITION、"
+                "SELECT_EMVR_EXPERIMENT_METHODS、"
+                "REVISE_EMVR_DIRECTION或LOCK_EMVR_DIRECTION；content必须写成符合主解析契约的JSON对象"
+                "字符串。此时不得使用普通EMVR字段动作替代公式选择或方向审阅。"
                 "每个动作的source_text必须逐字复制它所依据的最小学生原文片段；所有source_text"
                 "必须覆盖本轮全部独立要求，不能遗漏较早出现的修改。"
                 "不能把整条混合消息塞进一个字段；能确定的动作照常返回，剩余片段才用UNRESOLVED。"
@@ -2187,6 +2246,77 @@ class OpenAIStageGenerator:
             "store": False,
         }
         response = self.transport.create(focus_payload)
+        return _parse_compact_intent_response(response)
+
+    def _recover_guided_design_turn(
+        self,
+        intent_input: str,
+        pending_action: dict[str, Any],
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
+        """Recover a GUIDED answer or revision with an action-only contract.
+
+        This pass is deliberately semantic rather than phrase based.  It is
+        used only after the general planner failed to produce a valid write,
+        and it can split a long turn across the current answer, other design
+        fields, comparison cases and a flow-control action.
+        """
+
+        subject = str(pending_action.get("subject") or "").strip()
+        answer_fields = [
+            str(field).strip()
+            for field in (
+                pending_action.get("answer_fields", [])
+                if isinstance(pending_action.get("answer_fields"), list)
+                else []
+            )
+            if str(field).strip()
+        ]
+        if not answer_fields and subject:
+            answer_fields = [subject]
+        payload = {
+            "model": self.model,
+            "instructions": (
+                "你只负责恢复GUIDED实验设计中的学生回答和修改，不回答学生。"
+                f"当前可回应的主要字段是{json.dumps(answer_fields, ensure_ascii=False)}，"
+                "但当前待办不是排他的输入槽。逐项识别：回答当前问题、修改任意已确认设计字段、"
+                "新增或替换基础比较、课程提问、索取参考、总结请求、纠错，以及继续或返回等控制动作。"
+                "回答当前问题使用ANSWER_PENDING_QUESTION；跨字段修改使用MODIFY_DESIGN_FIELD或"
+                "MODIFY_STAGE_FIELD。普通设计字段只允许research_object、course_relationship、"
+                "learning_objective、research_question、theoretical_framework、hypothesis、"
+                "expected_phenomenon、conceptual_structure；后续阶段字段只允许independent_variable、"
+                "observations、controlled_conditions、procedure_steps、visualization_plan、"
+                "result_interpretation、design_rationale、design_value、limitations和student_summary。"
+                "基础比较必须用MODIFY_COMPARISON，content为JSON对象字符串；学生给出完整替换组时"
+                "使用action=MODIFY、replace_all=true，并把每个case独立列入cases。若现有状态中没有"
+                "比较组，仍保持这个动作，状态机将用学生原文证据创建第一组。"
+                "学生一轮修改多个栏目时必须生成多个动作，不得要求拆开重说；不得把整段混合消息"
+                "复制进一个字段。字段content只保留最终设计内容，不含‘建议改成’等会话外壳。"
+                "course_relationship必须说明当前研究对象、变化或观察现象与哪条ECE329概念、定律或"
+                "公式相连；若学生只要求它‘更贴合’当前实验，应读取已保存研究问题与理论依据生成"
+                "这条连接，不能只返回一个孤立的公式名称。"
+                "明确继续、接受、返回或要求参考时使用CONTROL或REQUEST_REFERENCE，不得作为设计"
+                "补充。确实无法归类的最小片段才使用UNRESOLVED。每个动作都必须附带最小source_text；"
+                "只返回action-only结构。"
+            ),
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": intent_input}],
+                }
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ece329_guided_design_turn_recovery",
+                    "schema": _compact_intent_response_schema(),
+                    "strict": True,
+                }
+            },
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": max(self.intent_max_output_tokens, 1800),
+            "store": False,
+        }
+        response = self.transport.create(payload)
         return _parse_compact_intent_response(response)
 
     def _verify_scene_batch_request(
@@ -2331,6 +2461,9 @@ class OpenAIStageGenerator:
                 "原子含义，同一句涉及多个字段或同一字段中的多个独立要点时必须拆成多个动作；"
                 "type只能为ANSWER_PENDING_QUESTION、MODIFY_DESIGN_FIELD、MODIFY_STAGE_FIELD、"
                 "MODIFY_EMVR_FIELD、"
+                "SET_EMVR_TOPIC、SELECT_EMVR_FORMULAS、SET_EMVR_FORMULA_COMPOSITION、"
+                "SELECT_EMVR_EXPERIMENT_METHODS、"
+                "REVISE_EMVR_DIRECTION、LOCK_EMVR_DIRECTION、"
                 "MODIFY_COMPARISON、ASK_COURSE_QUESTION、REQUEST_REFERENCE、REQUEST_SUMMARY、"
                 "REQUEST_QUALITY_REVIEW、COMPARE_OPTIONS、VERSION_CONTROL、CORRECT_ASSISTANT、"
                 "CONTROL、REQUEST_NEW_TOPIC、NEW_TOPIC_CONTENT、NEW_TOPIC或UNRESOLVED。"
@@ -2377,6 +2510,47 @@ class OpenAIStageGenerator:
                 "other_version_id与fields。学生要求分析设计是否合理时使用REQUEST_QUALITY_REVIEW；"
                 "提出两个以上方案并要求比较时使用COMPARE_OPTIONS，content保留各方案的实质内容。"
                 "每个动作的content只含该动作的实质内容。"
+                "当interaction_state=EMVR_DIRECT、current_stage=IDEA_BRAINSTORMING且"
+                "carried_context.emvr_formula_flow.phase尚未进入EMVR_DETAIL_DESIGN时，必须使用公式优先入口动作，"
+                "不得直接写experiment_brief、对象、变量、流程或其他普通EMVR字段。"
+                "首次收到实验主题时返回SET_EMVR_TOPIC，content必须包含course_domain、topic_description、"
+                "mentioned_objects、changed_quantities、observed_quantities、explicit_formula_ids、specificity、"
+                "confidence和profile_evidence。course_domain只能使用formula_profile_catalog中存在的"
+                "course_domain；specificity只能为BROAD、PARTIALLY_DEFINED或SPECIFIC。profile_evidence逐项使用"
+                "合法profile_id，并分别给出course_concept_match、variation_match、observation_match、"
+                "object_geometry_match、boundary_match和condition_conflict布尔值。这里按整句物理含义映射，"
+                "不能因出现某个词就直接选择公式，也不能把候选公式视为学生已经确认。"
+                "如果emvr_formula_flow.topic_seed存在，它是从另一模式交接来的既有研究含义；学生确认"
+                "沿用时，SET_EMVR_TOPIC应以topic_seed与本轮补充共同完成结构化主题分析，不能把‘沿用’"
+                "本身当作topic_description，也不能要求学生重新输入原方向。"
+                "如果emvr_formula_flow.semantic_recovery存在，其中messages是先前因语义服务失败而尚未提交的"
+                "学生原话，phase是当时所在步骤。必须把这些原话与本轮消息、当前待办一起理解，恢复出该phase"
+                "允许的一个或多个公式流程动作；不能只处理本轮的简短确认，也不能把恢复内容写进不相干字段。"
+                "成功恢复时正常返回字段化动作，程序会在动作提交后清除候选；仍无法确定时只把真正不明确的"
+                "局部放入UNRESOLVED，不得重新播放整段入口。"
+                "在FORMULA_CANDIDATES_PRESENTED阶段，学生选择或组合理论关系时返回SELECT_EMVR_FORMULAS；"
+                "content包含primary_profile_ids、supporting_profile_ids、student_rationale，并可包含学生明确"
+                "点名的primary_formula_ids与supporting_formula_ids；公式ID只能来自当前候选卡片。学生只选择"
+                "一张卡片时，只确认该卡片的主要公式，卡片中的可选辅助公式不能被默认写入；只有学生明确"
+                "选择、组合或说明辅助用途时，才写入supporting_profile_ids或supporting_formula_ids。所有"
+                "profile ID必须来自当前candidate_profile_ids。实验方向锁定前，学生明确要求更换、删除或"
+                "重新组合公式时仍返回SELECT_EMVR_FORMULAS，不得把它误写成实验对象或普通方向修改。"
+                "确认的公式多于一条时，系统会进入"
+                "FORMULA_COMPOSITION_REVIEW；学生决定联合设计或逐条设计后组合时返回"
+                "SET_EMVR_FORMULA_COMPOSITION，content.strategy只能为COMBINED或SEPARATE_THEN_COMBINE。"
+                "实验方法由程序依据已确认公式与experiment_pattern_catalog实时组合，不从固定图景库抽取。"
+                "在EXPERIMENT_METHODS_PRESENTED阶段，学生选择、组合或改造实验方法时返回"
+                "SELECT_EMVR_EXPERIMENT_METHODS；content包含selected_method_ids，并可分别包含custom_direction、"
+                "objects、operations、changed_quantities、observed_quantities和boundary_conditions。"
+                "在EXPERIMENT_DIRECTION_REVIEW阶段，学生只要求修改方向草稿时返回REVISE_EMVR_DIRECTION；"
+                "确认不再修改时返回LOCK_EMVR_DIRECTION；如果学生修改后同时明确要求继续，可返回"
+                "LOCK_EMVR_DIRECTION。两类动作的content.brief_updates都只能列出被学生点名修改的字段，"
+                "不得重写或推断其他字段；可用字段只有topic、objects、operations、changed_quantities、"
+                "observed_quantities和boundary_conditions。每个被修改字段写成"
+                "{operation:MERGE|REPLACE|CLEAR,value:新值}；topic的value为字符串，其余value均为"
+                "字符串数组。补充用MERGE，完整改写用REPLACE，删除用CLEAR。"
+                "公式候选、公式确认、公式组合方式、实验方法选择与方向锁定可以"
+                "和课程问题并列为多动作，但不得退回普通EMVR字段写入路径。"
                 "外层intent、target、resolved_value_json和semantic_updates_json继续返回，只作为旧接口"
                 "兼容摘要和非写入型分析；程序不会用这些外层字段写入实验设计。所有设计字段、阶段字段、"
                 "基础比较和纠错修改都必须有对应dialogue_acts_json动作。外层intent应概括最主要动作，"
@@ -2431,6 +2605,8 @@ class OpenAIStageGenerator:
                 "semantic_updates_json用于返回同一轮已经明确的结构化更新，只能包含："
                 "selected_option_ids（必须来自carried_context.latest_exploration_scenes中的真实option_id）、"
                 "no_direction、course_scope_status（只能为COURSE_CONTENT、OUT_OF_SCOPE或UNCERTAIN）、"
+                "course_domain（根据整句物理含义返回electrostatics、magnetism、electromagnetics之一；"
+                "无法确定时为null。它只用于课程知识检索，不是设计字段）、"
                 "stage_one_direction_detail（只在学生回应三幅图景时，同时说出了自己想研究的"
                 "具体物理现象或关系时填写其实质描述；只选A/B/C时为null）、"
                 "stage_one_scene_response（只能为SELECT_OR_DEVELOP、PROVIDE_BROAD_TOPIC、"
@@ -2451,6 +2627,9 @@ class OpenAIStageGenerator:
                 "expected_phenomenon、conceptual_structure；operation只能为MERGE、REPLACE、CLEAR。"
                 "一个请求修改几项就返回几项，不得合并字段。学生补充且保留原内容时必须MERGE；"
                 "明确改写时REPLACE。模型只提出修改，程序负责验证和提交）、"
+                "course_relationship的value应说明课程概念、定律或公式怎样支持当前研究对象、"
+                "比较条件或观察量；学生提出抽象的‘改得更贴合当前实验’时，应根据"
+                "carried_context中的研究问题与理论依据生成简洁而具体的关系，不能只复制一个定律名称。"
                 "stage_field_updates（后续阶段和EMVR中的字段级更新；每项同样包含semantic_key；field只能为"
                 "independent_variable、observations、controlled_conditions、procedure_steps、"
                 "visualization_plan、result_interpretation、design_rationale、design_value、limitations、"
@@ -2494,7 +2673,8 @@ class OpenAIStageGenerator:
                 "以及interaction_state_request"
                 "（只能为GUIDED_DESIGN、EMVR_DIRECT或null），以及仅供EMVR_DIRECT使用的"
                 "emvr_design_update。不得臆造ID或把宽泛主题当成已回答学习目标。"
-                "当interaction_state=EMVR_DIRECT且本轮包含实质实验内容时，emvr_design_update"
+                "当interaction_state=EMVR_DIRECT、本轮包含实质实验内容，且公式优先入口已经进入"
+                "EMVR_DETAIL_DESIGN（或旧会话没有公式入口状态）时，emvr_design_update"
                 "必须根据整句含义和carried_context.emvr_merged_requirements返回结构化物理设计解释。快照字段为："
                 "experiment_brief、research_object、direction_summary、research_summary、course_relationship、research_question、learning_objectives、"
                 "conceptual_objective、calculation_objective、analysis_objective、vr_interaction_objective、observation_objective、"
@@ -2552,6 +2732,9 @@ class OpenAIStageGenerator:
                 "不能因为没有命中某个词、用户只说序号或使用了代词就判OUT_OF_SCOPE；此时必须结合"
                 "previous_question、pending_action和已保存方向。没有具体思路属于课程内头脑风暴，"
                 "course_scope_status返回COURSE_CONTENT并把no_direction设为true。"
+                "当学生给出宽泛但明确的课程领域（例如只确定属于某一课程大类）时，也必须返回"
+                "course_domain，使后续图景只从该课程领域中检索；不得因为主题尚宽泛就在三个课程"
+                "大类之间各抽取一个图景。"
                 "学生在三幅图景后可能在同一句里完成两件事：指向一个或多个图景，并进一步说明"
                 "自己的研究设想。此时selected_option_ids与stage_one_direction_detail必须同时返回；"
                 "不得只记录选项而丢掉实质想法，也不得因为说得较长就重新展示图景。学生不引用图景"
@@ -3143,6 +3326,83 @@ class OpenAIStageGenerator:
             _dialogue_act_writes_state(item)
             for item in normalized_emvr_acts
         )
+        has_routable_nonwrite_act = any(
+            str(item.get("type") or "").upper()
+            in {
+                "ASK_COURSE_QUESTION",
+                "REQUEST_REFERENCE",
+                "REQUEST_SUMMARY",
+                "REQUEST_QUALITY_REVIEW",
+                "COMPARE_OPTIONS",
+                "VERSION_CONTROL",
+                "CONTROL",
+                "REQUEST_NEW_TOPIC",
+                "NEW_TOPIC_CONTENT",
+                "NEW_TOPIC",
+            }
+            for item in normalized_emvr_acts
+            if isinstance(item, dict)
+        )
+        if (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and isinstance(pending_action, dict)
+            and pending_type
+            in {
+                "ANSWER_IDEA_FACET",
+                "ANSWER_STAGE_QUESTION",
+                "CONFIRM_STAGE_OR_MODIFY",
+            }
+            and "dialogue_acts_json" in raw
+            and not has_valid_emvr_state_write
+            and not has_routable_nonwrite_act
+            and not explicitly_unanswered
+            and repaired_intent
+            in {
+                "UNCLEAR",
+                "ANSWER_CURRENT_QUESTION",
+                "MODIFY_PREVIOUS_PROPOSAL",
+                "ACCEPT_PREVIOUS_PROPOSAL",
+            }
+            and not (
+                repaired_intent == "ACCEPT_PREVIOUS_PROPOSAL"
+                and pending_action.get("candidate_binding_authorized") is True
+            )
+        ):
+            # The general planner and compact retry can both be syntactically
+            # valid while still omitting a clear long answer or one of several
+            # field revisions.  Use a GUIDED-specific action-only pass before
+            # storing an unbound candidate or replaying the pending question.
+            previous_result = (raw, resolved_value, semantic_updates)
+            try:
+                raw, resolved_value, semantic_updates = (
+                    self._recover_guided_design_turn(intent_input, pending_action)
+                )
+            except (ModelOutputError, ModelServiceError):
+                # This is an optional semantic recovery pass.  If it cannot
+                # produce a valid action envelope, retain the already safe
+                # non-writing result and let localized clarification handle
+                # the turn; do not turn recovery failure into a service error.
+                raw, resolved_value, semantic_updates = previous_result
+            raw_dialogue_acts = raw.get("dialogue_acts", [])
+            has_executable_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    isinstance(item, dict)
+                    and str(item.get("type") or "").upper()
+                    in DIALOGUE_ACT_TYPES
+                    and str(item.get("type") or "").upper() != "UNRESOLVED"
+                    for item in raw_dialogue_acts
+                )
+            )
+            has_state_writing_dialogue_acts = bool(
+                isinstance(raw_dialogue_acts, list)
+                and any(
+                    _dialogue_act_writes_state(item)
+                    for item in raw_dialogue_acts
+                )
+            )
+            repaired_intent = str(raw.get("intent") or "UNCLEAR")
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and pending_type == "ANSWER_EMVR_STAGE_QUESTION"
@@ -3693,6 +3953,10 @@ class FallbackStageGenerator:
     _fallback_calls: int = field(default=0, init=False, repr=False)
     _last_fallback_reason: str | None = field(default=None, init=False, repr=False)
     _metrics_lock: RLock = field(default_factory=RLock, init=False, repr=False)
+
+    @property
+    def supports_emvr_formula_flow(self) -> bool:
+        return self.primary.supports_emvr_formula_flow
 
     def resolve_intent(
         self,

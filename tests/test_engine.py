@@ -17,6 +17,7 @@ from ece329_workflow.dialogue_state import (
     record_pending_clarification,
     resolved_intent,
 )
+from ece329_workflow.design_state import design_state_snapshot
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import (
     RuleBasedStageGenerator,
@@ -32,6 +33,14 @@ from ece329_workflow.emvr_design import (
     emvr_stage_one_readiness,
     merge_emvr_structured_requirements,
     normalize_emvr_design_update,
+)
+from ece329_workflow.emvr_formula_flow import (
+    EXPERIMENT_METHODS_PRESENTED,
+    EXPERIMENT_DIRECTION_REVIEW,
+    FORMULA_CANDIDATES_PRESENTED,
+    FORMULA_COMPOSITION_REVIEW,
+    TOPIC_RECEIVED,
+    ensure_emvr_formula_flow,
 )
 from ece329_workflow.guardrails import (
     AMBIGUOUS,
@@ -248,6 +257,61 @@ class ContextAwareEMVRGenerator(RuleBasedStageGenerator):
 
 
 def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
+    formula_phase = result.get("stage_payload", {}).get("emvr_formula_phase")
+    if formula_phase == TOPIC_RECEIVED:
+        # RuleBasedStageGenerator intentionally does not infer formulas from
+        # words. Seed the output of the semantic topic parser so the test can
+        # exercise the same deterministic formula state machine as production.
+        session = engine.store.get(result["design_id"])
+        flow = ensure_emvr_formula_flow(session)
+        flow["topic_analysis"] = {
+            "course_domain": "electrostatics",
+            "topic_description": "比较两个点电荷相对位置变化时的空间电场",
+            "mentioned_objects": ["两个点电荷"],
+            "changed_quantities": ["电荷间距"],
+            "observed_quantities": ["电场线形状"],
+            "explicit_formula_ids": ["coulomb_point_charge"],
+            "specificity": "PARTIALLY_DEFINED",
+            "profile_evidence": [
+                {
+                    "profile_id": "FD02_COULOMB_SUPERPOSITION",
+                    "course_concept_match": True,
+                    "variation_match": True,
+                    "observation_match": True,
+                    "object_geometry_match": True,
+                    "boundary_match": True,
+                    "condition_conflict": False,
+                }
+            ],
+            "confidence": 0.99,
+        }
+        engine.store.save(session)
+        return engine.process_turn(result["design_id"], {"message": "请展示相关公式"})
+    if formula_phase == FORMULA_CANDIDATES_PRESENTED:
+        card = result["stage_payload"]["formula_cards"][0]
+        return engine.process_turn(
+            result["design_id"],
+            {"message": "采用这组主要公式", "selected_option_id": card["option_id"]},
+        )
+    if formula_phase == FORMULA_COMPOSITION_REVIEW:
+        return engine.process_turn(
+            result["design_id"],
+            {
+                "message": "组合成一个完整实验",
+                "selected_option_id": "emvr-composition:combined",
+            },
+        )
+    if formula_phase == EXPERIMENT_METHODS_PRESENTED:
+        method = result["stage_payload"]["experiment_methods"][0]
+        return engine.process_turn(
+            result["design_id"],
+            {"message": "采用这个实验方法", "selected_option_id": method["option_id"]},
+        )
+    if formula_phase == EXPERIMENT_DIRECTION_REVIEW:
+        return engine.process_turn(
+            result["design_id"],
+            {"message": "确认这份方向", "complete_stage": True},
+        )
     if result.get("stage_payload", {}).get("awaiting_user_design_input") is True:
         if result["current_stage"] == Stage.THEORETICAL_FRAMEWORK.value:
             # The rule-based test generator has no semantic resolver.  Model a
@@ -305,6 +369,64 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
 class WorkflowEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+
+    def test_structured_course_domain_keeps_broad_brainstorm_in_one_block(self) -> None:
+        options = KNOWLEDGE.brainstorm_options(
+            "一个还很宽泛的课程实验主题",
+            limit=3,
+            seed_key="guided-electrostatics-domain",
+            course_domain="electrostatics",
+        )
+
+        self.assertEqual(len(options), 3)
+        self.assertEqual(
+            {option["course_block"] for option in options},
+            {"electrostatics"},
+        )
+
+    def test_selected_scene_updates_research_object_and_course_relationship(self) -> None:
+        session = DesignSession(
+            design_id="guided_scene_course_binding",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {"original": "我想做一个静电场实验"}},
+        )
+        selected = next(
+            point
+            for point in KNOWLEDGE.exploration_points
+            if point.get("catalog_scene_id") == "ECE329-S012"
+        )
+        turn_context = {
+            "resolved_stage_one_reference": selected,
+            "resolved_scene_relations": [],
+            "selected_course_relations": [selected],
+            "selected_scene_ids": ["ECE329-S012"],
+            "direction_summary": "比较闭合曲面形状与大小对局部场和总通量的影响",
+            "topic_anchor": "静电场实验",
+            "current_focus": "闭合曲面上的局部场与总通量",
+            "focus_history": ["闭合曲面上的局部场与总通量"],
+            "brainstorm_phase": "DEPTH_EXPANSION",
+            "direction_locked": True,
+            "course_domain": "electrostatics",
+            "standard_comparisons": [],
+        }
+        output = StepOutput(
+            assistant_message="继续完善当前方向。",
+            stage_payload={"input_category": COURSE_CONTENT},
+        )
+
+        WorkflowEngine._commit_stage_one_thread(
+            session,
+            Stage.IDEA_BRAINSTORMING,
+            "我对图景A感兴趣",
+            turn_context,
+            output,
+        )
+
+        snapshot = design_state_snapshot(session)
+        self.assertIn("闭合曲面形状", snapshot["research_object"])
+        self.assertIn("高斯定律", snapshot["course_relationship"])
+        self.assertNotIn("Lorentz", snapshot["course_relationship"])
+        self.assertEqual(session.design_context["idea"]["course_domain"], "electrostatics")
 
     def _fill_idea_development(self, design_id: str, response: dict) -> dict:
         answers = {
@@ -1668,6 +1790,54 @@ class WorkflowEngineTests(unittest.TestCase):
             r"(?:由|来自)阶段\s*\d+|阶段\s*\d+\s*(?:确定|补充|处理)",
         )
 
+    def test_formula_first_emvr_reaches_both_complete_export_contracts(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        generator.supports_emvr_formula_flow = True
+        engine = WorkflowEngine(generator=generator)
+        result = engine.create_design(
+            "进入EMVR模式",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+
+        turns = 0
+        while result["workflow_status"] != "complete":
+            result = continue_emvr(engine, result)
+            turns += 1
+            self.assertLess(turns, 60)
+
+        self.assertTrue(result["report_ready"])
+        self.assertTrue(result["builder_input_ready"])
+        self.assertNotIn("artifact_validation_errors", result)
+        report = result["task_report"]
+        idea_section = next(
+            section
+            for section in report["sections"]
+            if section["stage_id"] == Stage.IDEA_BRAINSTORMING.value
+        )
+        labels = {item["label"] for item in idea_section["items"]}
+        self.assertIn("主要公式", labels)
+        self.assertIn("采用的实验方法", labels)
+        self.assertIn("公式适用边界", labels)
+        builder = build_builder_gate1_input(engine.store.get(result["design_id"]))
+        formula_contract = builder["formula_driven_experiment"]
+        for field in (
+            "topic",
+            "summary",
+            "primary_formulas",
+            "selected_methods",
+            "selected_pattern_ids",
+            "objects",
+            "operations",
+            "changed_quantities",
+            "observed_quantities",
+            "boundary_conditions",
+        ):
+            self.assertTrue(formula_contract[field], field)
+        self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
+        self.assertTrue(
+            engine.render_builder_input_pdf(result["design_id"]).startswith(b"%PDF")
+        )
+
     def test_builder_gate1_pdf_requires_completed_emvr_design(self) -> None:
         guided_engine = WorkflowEngine(generator=RuleBasedStageGenerator())
         guided = guided_engine.create_design("我想研究静电场")
@@ -1950,8 +2120,19 @@ class WorkflowEngineTests(unittest.TestCase):
             "场线随拖拽实时重新计算",
             json.dumps(result["stage_payload"], ensure_ascii=False),
         )
-        source_object = result["stage_payload"]["object_inventory"][1]
-        self.assertIn("不额外创建重复电磁源", source_object["purpose"])
+        source_object = next(
+            item
+            for item in result["stage_payload"]["object_inventory"]
+            if "两个带电物体" in item["object_name"]
+        )
+        self.assertIn("承载研究对象", source_object["purpose"])
+        self.assertNotIn(
+            "学生定义的可交互物理源或带电对象",
+            [
+                item["object_name"]
+                for item in result["stage_payload"]["object_inventory"]
+            ],
+        )
         self.assertIn("不把预设动画或固定序列当作实验结果", result["stage_payload"]["physics_layer"]["update_policy"])
 
     def test_emvr_formula_retrieval_uses_experiment_level_relevance(self) -> None:
@@ -3086,8 +3267,169 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(KNOWLEDGE.validate(), [])
         self.assertEqual(len(KNOWLEDGE.lectures), 39)
         self.assertGreaterEqual(len(KNOWLEDGE.formulas), 80)
+        self.assertEqual(len(KNOWLEDGE.formula_design_profiles), 32)
         self.assertEqual(len(KNOWLEDGE.supplemental_sources), 3)
         self.assertEqual(len(KNOWLEDGE.supplemental_concepts), 7)
+
+    def test_formula_design_profiles_cover_every_canonical_lecture_formula(self) -> None:
+        catalog_ids = {item["id"] for item in KNOWLEDGE.formulas}
+        covered_ids = {
+            formula_id
+            for profile in KNOWLEDGE.formula_design_profiles
+            for formula_id in [
+                *profile["primary_formula_ids"],
+                *profile["supporting_formula_ids"],
+            ]
+        }
+
+        self.assertEqual(covered_ids, catalog_ids)
+        self.assertTrue(
+            all(profile["supported_variations"] for profile in KNOWLEDGE.formula_design_profiles)
+        )
+        self.assertTrue(
+            all(profile["supported_observations"] for profile in KNOWLEDGE.formula_design_profiles)
+        )
+        self.assertTrue(
+            all(profile["boundary_conditions"] for profile in KNOWLEDGE.formula_design_profiles)
+        )
+
+    def test_every_formula_profile_declares_supported_experiment_patterns(self) -> None:
+        patterns = KNOWLEDGE.public_experiment_design_patterns()
+        pattern_ids = {item["pattern_id"] for item in patterns}
+
+        self.assertEqual(len(patterns), 15)
+        self.assertEqual(
+            set(KNOWLEDGE._pattern_ids_by_formula_profile),
+            {item["profile_id"] for item in KNOWLEDGE.formula_design_profiles},
+        )
+        for profile in KNOWLEDGE.public_formula_design_profiles():
+            applicable = set(profile["applicable_experiment_pattern_ids"])
+            self.assertTrue(applicable)
+            self.assertFalse(applicable - pattern_ids)
+
+    def test_formula_design_profile_resolves_canonical_formula_and_provenance(self) -> None:
+        profile = next(
+            item
+            for item in KNOWLEDGE.public_formula_design_profiles()
+            if item["profile_id"] == "FD02_COULOMB_SUPERPOSITION"
+        )
+
+        self.assertEqual(
+            [item["id"] for item in profile["primary_formulas"]],
+            ["coulomb_point_charge", "electric_field_superposition"],
+        )
+        self.assertTrue(all(item["pages"] for item in profile["primary_formulas"]))
+        self.assertTrue(all(item["concept_ids"] for item in profile["primary_formulas"]))
+
+    def test_formula_design_retrieval_returns_design_semantics_not_only_equations(self) -> None:
+        profiles = KNOWLEDGE.formula_design_references(
+            "比较多个点电荷距离和极性变化时的电场线",
+            limit=4,
+        )
+        profile_ids = {item["profile_id"] for item in profiles}
+
+        self.assertIn("FD02_COULOMB_SUPERPOSITION", profile_ids)
+        self.assertTrue(all(item["primary_formulas"] for item in profiles))
+        self.assertTrue(all(item["supported_variations"] for item in profiles))
+        self.assertTrue(all(item["supported_observations"] for item in profiles))
+        self.assertTrue(all(item["boundary_conditions"] for item in profiles))
+
+    def test_broad_electrostatic_request_returns_electrostatic_formula_families(self) -> None:
+        profiles = KNOWLEDGE.formula_design_references(
+            "我想搭建一个静电场实验",
+            limit=4,
+        )
+
+        self.assertEqual(
+            profiles[0]["profile_id"],
+            "FD02_COULOMB_SUPERPOSITION",
+        )
+        self.assertTrue(all(item["course_block"] == "electrostatics" for item in profiles))
+
+    def test_every_exploration_scene_has_canonical_formula_links(self) -> None:
+        links = KNOWLEDGE.public_scene_formula_links()
+
+        self.assertEqual(len(links), len(KNOWLEDGE.exploration_points))
+        self.assertEqual(
+            {item["scene_id"] for item in links},
+            {item["catalog_scene_id"] for item in KNOWLEDGE.exploration_points},
+        )
+        self.assertTrue(all(item["profile_ids"] for item in links))
+        self.assertTrue(all(item["primary_formulas"] for item in links))
+        self.assertTrue(
+            all(
+                formula["pages"]
+                for item in links
+                for formula in [
+                    *item["primary_formulas"],
+                    *item["supporting_formulas"],
+                ]
+            )
+        )
+        role_formula_ids = {
+            formula_id
+            for item in links
+            for formula_id in [
+                *item["primary_formula_ids"],
+                *item["supporting_formula_ids"],
+            ]
+        }
+        self.assertEqual(role_formula_ids, {item["id"] for item in KNOWLEDGE.formulas})
+
+    def test_scene_formula_roles_follow_scene_focus_not_only_profile_defaults(self) -> None:
+        force_scene = KNOWLEDGE.formula_links_for_scene("ECE329-S001")
+        boundary_scene = KNOWLEDGE.formula_links_for_scene("ECE329-S121")
+
+        self.assertEqual(force_scene["primary_formula_ids"], ["lorentz_force"])
+        self.assertNotIn("maxwell_free_space", force_scene["primary_formula_ids"])
+        self.assertEqual(
+            boundary_scene["primary_formula_ids"],
+            [
+                "electrostatic_potential_gradient",
+                "electrostatic_boundary",
+                "laplace_equation",
+            ],
+        )
+
+    def test_scene_formula_mapping_supports_both_many_to_many_directions(self) -> None:
+        boundary_scene = KNOWLEDGE.formula_links_for_scene("ECE329-S121")
+        formula_scenes = KNOWLEDGE.scenes_for_formula(
+            "electrostatic_potential_gradient"
+        )
+
+        self.assertIsNotNone(boundary_scene)
+        self.assertGreaterEqual(len(boundary_scene["profile_ids"]), 3)
+        self.assertGreaterEqual(len(boundary_scene["primary_formula_ids"]), 3)
+        self.assertGreater(len(formula_scenes), 1)
+        self.assertTrue(
+            all(item["formula_role"] in {"PRIMARY", "SUPPORTING"} for item in formula_scenes)
+        )
+
+    def test_scene_formula_mapping_does_not_modify_guided_scene_payloads(self) -> None:
+        result = self.engine.create_design("我想研究静电场")
+        options = result["stage_payload"]["alternative_ideas"]
+
+        self.assertTrue(options)
+        self.assertTrue(
+            all(
+                "primary_formula_ids" not in item
+                and "supporting_formula_ids" not in item
+                and "formula_design_profiles" not in item
+                for item in options
+            )
+        )
+
+    def test_knowledge_search_links_only_its_returned_scene_candidates(self) -> None:
+        result = KNOWLEDGE.search("传输线反射")
+        option_scene_ids = {
+            item["catalog_scene_id"] for item in result["brainstorm_options"]
+        }
+
+        self.assertEqual(
+            {item["scene_id"] for item in result["scene_formula_links"]},
+            option_scene_ids,
+        )
+        self.assertTrue(all(item["primary_formula_ids"] for item in result["scene_formula_links"]))
 
     def test_supplemental_topic_maps_back_to_course_formula_scope(self) -> None:
         concepts = KNOWLEDGE.concept_references("我想探索电磁传感器", limit=5)
