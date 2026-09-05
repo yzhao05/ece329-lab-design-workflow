@@ -658,6 +658,10 @@ def _pending_action_for_status(status: dict[str, Any]) -> dict[str, Any]:
             "subject": "experiment_idea_outline",
             "proposal": {"complete": True},
             "question": _next_task(status),
+            # This is a completed-section review, not another idea facet.
+            # A semantically recognized acceptance must therefore advance
+            # even if an older saved pending action still names the last facet.
+            "advance_on_accept": True,
             "allowed_intents": [
                 "ACCEPT_PREVIOUS_PROPOSAL",
                 "MODIFY_PREVIOUS_PROPOSAL",

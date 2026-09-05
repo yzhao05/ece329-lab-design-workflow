@@ -7,6 +7,7 @@ from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Any
 
+from .knowledge_base import KNOWLEDGE
 from .models import DesignSession
 
 
@@ -523,6 +524,131 @@ def apply_design_updates(
     state["explicitly_cleared_fields"] = sorted(explicitly_cleared)
     refresh_topic_lock(session)
     return list(dict.fromkeys(changed))
+
+
+def ground_guided_course_relationship(
+    session: DesignSession,
+    changed_fields: list[str] | tuple[str, ...] | set[str],
+) -> list[str]:
+    """Align the guided course link with confirmed theory through the catalog.
+
+    ``course_relationship`` is a knowledge-backed explanation, not a place to
+    store an editing instruction such as "make it closer to the selected
+    theory".  Once the semantic layer has explicitly changed that field, or a
+    newly confirmed theory makes an older agent/scene suggestion stale, use
+    the formula-profile graph to materialize a concrete relationship.
+
+    This does not infer dialogue intent from words and it never chooses among
+    formula candidates for EMVR.  It only validates already committed guided
+    fields against the curated course graph.
+    """
+
+    if getattr(session.interaction_state, "value", "") != "GUIDED_DESIGN":
+        return []
+    changed = {str(item) for item in changed_fields}
+    if not changed.intersection({"course_relationship", "theoretical_framework"}):
+        return []
+    state = ensure_design_state(session)
+    theory = _text(state.get("theoretical_framework"))
+    if not theory:
+        # Course retrieval can propose candidates before the student has
+        # chosen an explanatory theory, but it must not silently turn that
+        # broad match into a confirmed course relationship.
+        return []
+    current_relationship = _text(state.get("course_relationship"))
+    grounding_text = " ".join(
+        item
+        for item in (
+            (
+                current_relationship
+                if "course_relationship" in changed
+                else ""
+            ),
+            theory,
+            _text(state.get("research_question")),
+            _text(state.get("research_object")),
+        )
+        if item
+    )
+    profiles = (
+        KNOWLEDGE.formula_design_references(current_relationship, limit=1)
+        if "course_relationship" in changed and current_relationship
+        else []
+    )
+    if not profiles:
+        profiles = KNOWLEDGE.formula_design_references(grounding_text, limit=1)
+    if not profiles:
+        return []
+    profile = profiles[0]
+    profile_id = str(profile.get("profile_id") or "").strip()
+    if not profile_id:
+        return []
+
+    # An explicit edit to the course relationship is always materialized from
+    # the matched profile.  For a theory-only edit, overwrite only an old
+    # system/scene-derived relationship; a student's independent, substantive
+    # mapping remains theirs to revise or compare in the quality review.
+    should_ground = "course_relationship" in changed
+    if not should_ground:
+        provenance = state.get("field_provenance", {})
+        records = (
+            provenance.get("course_relationship", [])
+            if isinstance(provenance, dict)
+            else []
+        )
+        latest_source = str(
+            records[-1].get("source") or ""
+            if isinstance(records, list) and records and isinstance(records[-1], dict)
+            else ""
+        )
+        should_ground = not current_relationship or latest_source in {
+            "AGENT_SUGGESTION",
+            "COURSE_RETRIEVAL",
+            "CONFIRMED_SCENE_DIRECTION",
+            "MIGRATED_LEGACY_STATE",
+        }
+    if not should_ground:
+        return []
+
+    title = str(profile.get("title_zh") or profile.get("title") or "").strip()
+    primary_names = list(
+        dict.fromkeys(
+            str(item.get("name") or item.get("title") or "").strip()
+            for item in profile.get("primary_formulas", [])
+            if isinstance(item, dict)
+            and str(item.get("name") or item.get("title") or "").strip()
+        )
+    )
+    variations = [
+        str(item.get("quantity") or "").strip()
+        for item in profile.get("supported_variations", [])
+        if isinstance(item, dict) and str(item.get("quantity") or "").strip()
+    ]
+    observations = [
+        str(item.get("quantity") or "").strip()
+        for item in profile.get("supported_observations", [])
+        if isinstance(item, dict) and str(item.get("quantity") or "").strip()
+    ]
+    formula_text = "、".join(primary_names[:3]) or title
+    relationship = f"{title}：用{formula_text}"
+    if variations and observations:
+        relationship += f"连接“{variations[0]}”与“{observations[0]}”"
+    relationship += "，作为当前研究问题的课程依据。"
+    if relationship == current_relationship:
+        return []
+    return apply_design_updates(
+        session,
+        [
+            {
+                "field": "course_relationship",
+                "operation": "REPLACE",
+                "value": relationship,
+                "semantic_key": f"course_profile:{profile_id}",
+                "provenance": "COURSE_KNOWLEDGE_ALIGNMENT",
+            }
+        ],
+        provenance="COURSE_KNOWLEDGE_ALIGNMENT",
+    )
 
 
 def refresh_topic_lock(

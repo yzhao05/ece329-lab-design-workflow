@@ -3314,6 +3314,32 @@ class WorkflowEngine:
                 }
             )
         )
+        if (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and session.current_stage is Stage.IDEA_BRAINSTORMING
+            and has_idea_development(session)
+        ):
+            refresh_idea_development(session)
+            completed_idea = bool(
+                session.design_context.get("idea_development", {}).get("complete")
+                if isinstance(session.design_context.get("idea_development"), dict)
+                else False
+            )
+            if completed_idea and (
+                intent_name
+                in {
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                    UserIntent.ADVANCE_STAGE.value,
+                }
+                or "ACCEPT" in control_actions
+                or "ADVANCE" in control_actions
+            ):
+                # The canonical checklist outranks a stale final-facet pending
+                # item.  Once every idea field is complete, an accepted review
+                # must advance to variables instead of reopening course mapping
+                # or replaying the same summary.
+                explicit_transition_intent = True
+                turn_intent["advance_requested"] = True
         if formula_onboarding_output is not None:
             explicit_transition_intent = formula_onboarding_should_complete
         pre_transition_attempted = bool(

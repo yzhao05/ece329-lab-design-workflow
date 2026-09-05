@@ -506,8 +506,16 @@ def effective_emvr_stage_payload(
         set_if("formula_support_map", formula_support_map_for_selection(session))
     elif stage is Stage.HYPOTHESIS:
         hypothesis = requirements.get("hypothesis") or stage_state.get("hypothesis")
+        expected_trend = (
+            requirements.get("expected_phenomenon")
+            or stage_state.get("expected_phenomenon")
+        )
         set_if("research_hypothesis", hypothesis)
-        set_if("expected_trend", hypothesis)
+        # A hypothesis is the proposed explanation; an expected trend is the
+        # observable consequence.  If the student has not independently
+        # revised the latter, keep the stage generator's concrete trend rather
+        # than copying the hypothesis into both final-report rows.
+        set_if("expected_trend", expected_trend)
     elif stage is Stage.CONCEPTUAL_OR_VR_SETUP:
         for field in (
             "desktop_interaction_plan",

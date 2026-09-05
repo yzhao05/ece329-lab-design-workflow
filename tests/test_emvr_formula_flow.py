@@ -399,6 +399,36 @@ class EmvrFormulaFlowTests(unittest.TestCase):
 
         self.assertEqual(repaired["phase"], TOPIC_RECEIVED)
 
+    def test_final_hypothesis_view_preserves_distinct_expected_trend(self) -> None:
+        session = self._session()
+        session.stage_outputs[Stage.HYPOTHESIS.value] = {
+            "stage_payload": {
+                "research_hypothesis": "距离减小时局部场强增大。",
+                "expected_trend": "场强曲线随距离减小而上升。",
+                "limiting_cases": ["远距离基准", "近距离模型边界"],
+            }
+        }
+        session.design_context["emvr_design"]["field_state"].update(
+            {
+                "hypothesis": "距离减小时局部场强增大。",
+            }
+        )
+
+        report_view = effective_emvr_stage_payload(session, Stage.HYPOTHESIS)
+
+        self.assertEqual(
+            report_view["research_hypothesis"],
+            "距离减小时局部场强增大。",
+        )
+        self.assertEqual(
+            report_view["expected_trend"],
+            "场强曲线随距离减小而上升。",
+        )
+        self.assertNotEqual(
+            report_view["research_hypothesis"],
+            report_view["expected_trend"],
+        )
+
     def test_unity_inventory_uses_locked_objects_instead_of_generic_placeholders(self) -> None:
         session = self._session()
         emvr = session.design_context["emvr_design"]

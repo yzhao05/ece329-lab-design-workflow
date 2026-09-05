@@ -38,11 +38,13 @@ from ece329_workflow.design_state import (
     apply_design_updates,
     design_state_snapshot,
     ensure_design_state,
+    ground_guided_course_relationship,
     set_baseline_comparisons,
 )
 from ece329_workflow.idea_development import (
     build_facet_reference_output,
     build_gap_output,
+    canonical_idea_pending_action,
     initialize_idea_development,
     update_idea_development,
 )
@@ -212,6 +214,138 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_complete_idea_pending_acceptance_is_an_advancing_review(self) -> None:
+        session = DesignSession(
+            design_id="guided_complete_idea_pending",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {"original": "静电场实验"}},
+        )
+        development = initialize_idea_development(
+            session,
+            {"core_phenomenon": "比较两个点电荷靠近时的场线变化"},
+        )
+        for facet in development["facets"].values():
+            facet.update(
+                {
+                    "status": "CLEAR",
+                    "evidence": f"已确认的{facet['title']}",
+                    "source": "STUDENT_SEMANTIC",
+                }
+            )
+        from ece329_workflow.idea_development import refresh_idea_development
+
+        refresh_idea_development(session)
+        pending = canonical_idea_pending_action(session)
+
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["subject"], "experiment_idea_outline")
+        self.assertTrue(pending["advance_on_accept"])
+
+    def test_guided_course_relationship_is_materialized_from_formula_profile(self) -> None:
+        session = DesignSession(
+            design_id="guided_course_grounding",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        changed = apply_design_updates(
+            session,
+            [
+                {
+                    "field": "research_question",
+                    "operation": "REPLACE",
+                    "value": "比较同种和异种点电荷靠近时的场线变化。",
+                },
+                {
+                    "field": "theoretical_framework",
+                    "operation": "REPLACE",
+                    "value": "库仑定律和电场矢量叠加原理。",
+                },
+                {
+                    "field": "course_relationship",
+                    "operation": "REPLACE",
+                    "value": "与前面理论更接近的课程关系。",
+                },
+            ],
+        )
+
+        grounded = ground_guided_course_relationship(session, changed)
+        relationship = design_state_snapshot(session)["course_relationship"]
+        self.assertEqual(grounded, ["course_relationship"])
+        self.assertIn("点电荷场与矢量叠加", relationship)
+        self.assertIn("Coulomb electric field", relationship)
+        self.assertNotEqual(relationship, "与前面理论更接近的课程关系。")
+
+    def test_explicit_course_relationship_edit_outweighs_stale_theory(self) -> None:
+        session = DesignSession(
+            design_id="guided_explicit_course_rebind",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "theoretical_framework",
+                    "operation": "REPLACE",
+                    "value": "Vector fields and Lorentz force",
+                }
+            ],
+        )
+        changed = apply_design_updates(
+            session,
+            [
+                {
+                    "field": "course_relationship",
+                    "operation": "REPLACE",
+                    "value": "请改为库仑定律与电场叠加对距离变化的解释。",
+                }
+            ],
+        )
+
+        ground_guided_course_relationship(session, changed)
+
+        relationship = design_state_snapshot(session)["course_relationship"]
+        self.assertIn("点电荷场与矢量叠加", relationship)
+        self.assertIn("Coulomb electric field", relationship)
+        self.assertNotIn("Lorentz", relationship)
+
+    def test_confirmed_theory_replaces_only_stale_scene_course_binding(self) -> None:
+        session = DesignSession(
+            design_id="guided_theory_rebinds_scene",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "course_relationship",
+                    "operation": "REPLACE",
+                    "value": "Vector fields and Lorentz force",
+                    "provenance": "CONFIRMED_SCENE_DIRECTION",
+                }
+            ],
+            provenance="CONFIRMED_SCENE_DIRECTION",
+        )
+        changed = apply_design_updates(
+            session,
+            [
+                {
+                    "field": "research_question",
+                    "operation": "REPLACE",
+                    "value": "改变点电荷间距时，合电场和场线怎样变化？",
+                },
+                {
+                    "field": "theoretical_framework",
+                    "operation": "REPLACE",
+                    "value": "用点电荷场与矢量叠加解释结果。",
+                },
+            ],
+        )
+
+        grounded = ground_guided_course_relationship(session, changed)
+        relationship = design_state_snapshot(session)["course_relationship"]
+        self.assertEqual(grounded, ["course_relationship"])
+        self.assertIn("点电荷场与矢量叠加", relationship)
+        self.assertNotIn("Lorentz", relationship)
+
     def test_confirmed_scene_candidate_commits_its_resolved_course_binding(self) -> None:
         session = DesignSession(
             design_id="confirmed_scene_binding",
@@ -4585,6 +4719,10 @@ class DialogueStateTests(unittest.TestCase):
         engine = WorkflowEngine(generator=RuleBasedStageGenerator())
         first = engine.create_design("我想探索静电场中的物体相互影响")
         scenes = first["stage_payload"]["exploration_scenes"]
+        self.assertEqual(
+            [scene["option_id"] for scene in scenes],
+            [scene["course_anchor"]["option_id"] for scene in scenes],
+        )
         latest_b = scenes[1]["course_anchor"]
         generator = ScriptedSemanticGenerator(
             UserIntent.ANSWER_CURRENT_QUESTION,

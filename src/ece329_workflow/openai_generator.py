@@ -2372,6 +2372,74 @@ class OpenAIStageGenerator:
             )
         return raw, resolved_value, semantic_updates
 
+    @staticmethod
+    def _catalog_grounded_emvr_topic_recovery(
+        intent_input: str,
+        phase: str,
+    ) -> tuple[dict[str, Any], Any, dict[str, Any]] | None:
+        """Keep a broad, course-grounded EMVR topic usable during an outage.
+
+        Formula selection remains semantic and must still be confirmed by the
+        student.  At the entry phase, however, accepting a broad ECE329 course
+        block does not choose a formula or write ordinary design fields.  If
+        the focused semantic retry fails, the curated knowledge index can
+        therefore safely retain the topic and present formula *candidates*
+        instead of replaying the entry question forever.
+
+        This is intentionally limited to ``TOPIC_RECEIVED``.  Later phases
+        contain consequential choices among formulas, composition strategies,
+        methods, or briefs and must never be guessed by a catalog fallback.
+        """
+
+        if phase != TOPIC_RECEIVED:
+            return None
+        try:
+            turn_context = json.loads(intent_input)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(turn_context, dict):
+            return None
+        user_message = str(turn_context.get("user_message") or "").strip()
+        if not user_message:
+            return None
+        course_domain = KNOWLEDGE.course_domain_for_text(user_message)
+        if not course_domain:
+            return None
+        topic_analysis = {
+            "course_domain": course_domain,
+            "topic_description": user_message[:1200],
+            "mentioned_objects": [],
+            "changed_quantities": [],
+            "observed_quantities": [],
+            "explicit_formula_ids": [],
+            "specificity": "BROAD",
+            "profile_evidence": [],
+            "confidence": 0.82,
+        }
+        action = {
+            "type": "SET_EMVR_TOPIC",
+            "target": "emvr_formula_topic",
+            "operation": "EXECUTE",
+            "content": topic_analysis,
+            "source_text": user_message,
+            "source_start": 0,
+            "source_end": len(user_message),
+            "semantic_key": f"catalog_course_topic:{course_domain}",
+            "confidence": 0.82,
+        }
+        raw = {
+            "intent": "ANSWER_CURRENT_QUESTION",
+            "target": "emvr_formula_topic",
+            "resolved_value_json": json.dumps(topic_analysis, ensure_ascii=False),
+            "semantic_updates_json": None,
+            "dialogue_acts_json": json.dumps([action], ensure_ascii=False),
+            "dialogue_acts": [action],
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.82,
+        }
+        return raw, topic_analysis, {}
+
     def _recover_guided_design_turn(
         self,
         intent_input: str,
@@ -3854,28 +3922,22 @@ class OpenAIStageGenerator:
             and not has_formula_phase_bypass_act
             and not has_explicit_formula_topic_change
         ):
-            previous_result = (raw, resolved_value, semantic_updates)
             try:
                 raw, resolved_value, semantic_updates = (
                     self._recover_emvr_formula_phase(intent_input, formula_phase)
                 )
-            except ModelOutputError:
-                # Returning the general action here is not a safe fallback:
-                # the active formula phase cannot execute it, so the next
-                # response would simply repeat the same prompt.  Surface the
-                # rejected semantic result through the existing degraded
-                # service path, which preserves the turn for a retry without
-                # pretending that the topic was processed.
-                raise
             except ModelServiceError:
-                # This action is the only transition accepted by the active
-                # formula phase.  Hiding an outage here would turn it into an
-                # ordinary UNCLEAR result and replay the same entry prompt.
-                # Let the fallback layer expose a retryable service failure
-                # while the formula state keeps the student's turn intact.
-                with self._metrics_lock:
-                    self._intent_api_failures += 1
-                raise
+                catalog_recovery = self._catalog_grounded_emvr_topic_recovery(
+                    intent_input,
+                    formula_phase,
+                )
+                if catalog_recovery is None:
+                    # Later formula phases require a real semantic decision;
+                    # an outage there must remain visible and non-writing.
+                    with self._metrics_lock:
+                        self._intent_api_failures += 1
+                    raise
+                raw, resolved_value, semantic_updates = catalog_recovery
             raw_dialogue_acts = raw.get("dialogue_acts", [])
             has_executable_dialogue_acts = bool(
                 isinstance(raw_dialogue_acts, list)

@@ -304,6 +304,75 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         )
         self.assertTrue(output.stage_payload["formula_cards"])
 
+    def test_emvr_broad_course_topic_survives_focused_semantic_outage(self) -> None:
+        message = "我想做一个静电场实验"
+
+        class RecoveryOutageTransport:
+            def __init__(self) -> None:
+                self.requests: list[dict[str, Any]] = []
+
+            def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+                self.requests.append(deepcopy(payload))
+                schema_name = payload["text"]["format"]["name"]
+                if schema_name == "ece329_emvr_formula_phase_recovery":
+                    raise ModelServiceError("focused semantic service unavailable")
+                generic_act = {
+                    "type": "NEW_TOPIC_CONTENT",
+                    "target": "new_topic",
+                    "operation": "EXECUTE",
+                    "content": message,
+                    "source_text": message,
+                    "source_start": 0,
+                    "source_end": len(message),
+                    "semantic_key": "broad_electrostatics_topic",
+                    "confidence": 0.95,
+                }
+                output = {
+                    "intent": "NEW_TOPIC",
+                    "target": "new_topic",
+                    "resolved_value_json": json.dumps(message, ensure_ascii=False),
+                    "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+                    "dialogue_acts_json": json.dumps([generic_act], ensure_ascii=False),
+                    "advance_requested": False,
+                    "preserve_current_design": True,
+                    "confidence": 0.95,
+                }
+                return {
+                    "id": f"resp_{len(self.requests)}",
+                    "output_text": json.dumps(output, ensure_ascii=False),
+                }
+
+        transport = RecoveryOutageTransport()
+        session = guided_session()
+        session.interaction_state = InteractionState.EMVR_DIRECT
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            {
+                "type": "ANSWER_EMVR_FORMULA_TOPIC",
+                "subject": "emvr_formula_topic",
+                "question": "你想研究哪个ECE329主题，或想验证哪条公式？",
+            },
+            {
+                "emvr_formula_flow": {"phase": "TOPIC_RECEIVED"},
+                "formula_design_profiles": KNOWLEDGE.formula_design_profiles,
+            },
+        )
+
+        formula_actions = result["semantic_updates"]["emvr_formula_actions"]
+        self.assertEqual(formula_actions[0]["type"], "SET_EMVR_TOPIC")
+        self.assertEqual(
+            formula_actions[0]["content"]["course_domain"],
+            "electrostatics",
+        )
+        output, completed = handle_emvr_formula_turn(session, message, result)
+        self.assertFalse(completed)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            "FORMULA_CANDIDATES_PRESENTED",
+        )
+        self.assertTrue(output.stage_payload["formula_cards"])
+
     def test_pending_comparison_is_semantically_committed_with_a_facet_answer(self) -> None:
         transport = FakeTransport(
             {

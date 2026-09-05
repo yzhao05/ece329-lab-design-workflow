@@ -1282,6 +1282,89 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertEqual(len(result["stage_payload"]["reference_draft"]), 5)
 
+    def test_completed_guided_idea_acceptance_overrides_stale_facet_pending(self) -> None:
+        class AcceptCompleteIdeaGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                    confidence=0.97,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={"control_actions": ["ACCEPT"]},
+                    dialogue_acts=[
+                        {
+                            "type": "CONTROL",
+                            "target": "ACCEPT",
+                            "operation": "EXECUTE",
+                            "content": None,
+                            "confidence": 0.97,
+                        }
+                    ],
+                    actions_authoritative=True,
+                )
+
+        engine = WorkflowEngine(generator=AcceptCompleteIdeaGenerator())
+        session = DesignSession(
+            design_id="guided_complete_stale_pending",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "original": "比较点电荷靠近时的场线变化",
+                    "phenomenon": "点电荷靠近时的场线变化",
+                    "main_direction": "比较同种与异种电荷",
+                    "direction_locked": True,
+                    "student_confirmed": True,
+                    "course_scope_confirmed": True,
+                },
+                "experiment_outline_seed": {
+                    "core_phenomenon": "点电荷靠近时的场线变化"
+                },
+            },
+        )
+        development = initialize_idea_development(
+            session,
+            session.design_context["experiment_outline_seed"],
+        )
+        for facet in development["facets"].values():
+            facet.update(
+                {
+                    "status": "CLEAR",
+                    "evidence": f"已确认的{facet['title']}",
+                    "source": "STUDENT_SEMANTIC",
+                }
+            )
+        from ece329_workflow.idea_development import refresh_idea_development
+
+        refresh_idea_development(session)
+        session.model_context["dialogue_state"] = {
+            "pending_action": {
+                "type": "ANSWER_IDEA_FACET",
+                "subject": "course_mapping",
+                "question": "请继续补充课程映射。",
+                "proposal": {"facet_id": "course_mapping"},
+                "status": "PENDING",
+                "repeat_count": 2,
+            }
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "就按上面整理的内容继续"},
+        )
+
+        self.assertEqual(result["current_stage"], Stage.VARIABLES_AND_CONDITIONS.value)
+        self.assertEqual(
+            result["transitioned_from_stage"],
+            Stage.IDEA_BRAINSTORMING.value,
+        )
+        self.assertNotIn("请继续补充课程映射", result["assistant_message"])
+
     def test_short_reply_resolves_previous_guided_choice_instead_of_resetting(self) -> None:
         class AcceptingGenerator(RuleBasedStageGenerator):
             def resolve_intent(

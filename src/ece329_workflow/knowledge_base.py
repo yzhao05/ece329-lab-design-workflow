@@ -900,7 +900,57 @@ class LectureKnowledgeBase:
                     for item in supplemental.get("course_scope_concept_ids", [])
                     if str(item).strip()
                 )
-        if not ranked_concept_ids:
+        normalized_text = text.casefold()
+
+        def profile_evidence_score(profile: dict[str, Any]) -> int:
+            """Rank catalog descriptors without maintaining routing keywords.
+
+            Course concepts remain the main retrieval path.  Formula/profile
+            titles and their curated variation/observation descriptors provide
+            direct evidence when several profiles share the same lecture—for
+            example point-charge superposition and Gauss-law profiles in the
+            same electrostatics block.
+            """
+
+            descriptors = [str(profile.get("title_zh") or "")]
+            descriptors.extend(
+                str(item.get("quantity") or "")
+                for key in ("supported_variations", "supported_observations")
+                for item in profile.get(key, [])
+                if isinstance(item, dict)
+            )
+            descriptors.extend(
+                str(self._formula_by_id.get(str(formula_id), {}).get("name") or "")
+                for formula_id in [
+                    *profile.get("primary_formula_ids", []),
+                    *profile.get("supporting_formula_ids", []),
+                ]
+            )
+            terms = {
+                chunk.strip().casefold()
+                for descriptor in descriptors
+                for chunk in re.split(
+                    r"[、，,；;：:（）()\s/]+|(?:与|和|以及|及)",
+                    descriptor,
+                )
+                # Very short descriptors such as the course-wide word
+                # "electrostatics" must not reorder every formula family in
+                # that block.  Direct evidence is reserved for a distinctive
+                # profile phrase; broad topics keep the catalog's curated
+                # default ordering.
+                if len(re.sub(r"[\W_]", "", chunk, flags=re.UNICODE)) >= 4
+            }
+            return sum(
+                max(2, len(re.sub(r"\s+", "", term)))
+                for term in terms
+                if self._term_matches(term, normalized_text)
+            )
+
+        direct_profile_scores = {
+            str(profile.get("profile_id") or ""): profile_evidence_score(profile)
+            for profile in self.formula_design_profiles
+        }
+        if not ranked_concept_ids and not any(direct_profile_scores.values()):
             return []
 
         concept_rank = {
@@ -934,16 +984,24 @@ class LectureKnowledgeBase:
             }
             matched_primary = primary_concepts.intersection(concept_rank)
             matched_supporting = supporting_concepts.intersection(concept_rank)
-            if not matched_primary and not matched_supporting:
+            direct_score = direct_profile_scores.get(
+                str(profile.get("profile_id") or ""),
+                0,
+            )
+            if not matched_primary and not matched_supporting and not direct_score:
                 continue
             best_rank = min(
-                concept_rank[item]
-                for item in matched_primary.union(matched_supporting)
+                (
+                    concept_rank[item]
+                    for item in matched_primary.union(matched_supporting)
+                ),
+                default=len(concept_rank) + 1,
             )
             score = (
                 len(matched_primary) * 20
                 + len(matched_supporting) * 4
                 + max(0, 10 - best_rank)
+                + direct_score * 8
             )
             profile_block = str(profile.get("course_block") or "")
             if profile_block in block_rank:

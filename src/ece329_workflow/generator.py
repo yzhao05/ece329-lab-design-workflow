@@ -948,6 +948,11 @@ def build_exploration_scenes(
         scenes.append(
             {
                 "scene_id": f"scene_{labels[index].lower()}",
+                # Keep the visible scene and its underlying course option
+                # joined by the same stable identifier.  Semantic selection
+                # returns this ID; later course binding must not have to infer
+                # the relation again from the scene label or prose.
+                "option_id": option.get("option_id"),
                 "catalog_scene_id": option.get("catalog_scene_id"),
                 "catalog_scene_number": option.get("catalog_scene_number"),
                 "scene_template_id": template["template_id"],

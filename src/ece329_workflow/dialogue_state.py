@@ -22,6 +22,7 @@ from .design_state import (
     design_state_snapshot,
     design_updates_from_facets,
     ensure_design_state,
+    ground_guided_course_relationship,
     refresh_topic_lock,
     topic_lock_snapshot,
     set_baseline_comparisons,
@@ -3675,6 +3676,9 @@ def apply_semantic_design_updates(
         pending_action=pending_action,
         provenance="STUDENT_CONFIRMED",
     )
+    grounded_fields = ground_guided_course_relationship(session, changed_fields)
+    if grounded_fields:
+        changed_fields = list(dict.fromkeys([*changed_fields, *grounded_fields]))
     if changed_fields:
         if (
             isinstance(pending_action, dict)

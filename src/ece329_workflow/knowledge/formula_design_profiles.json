@@ -34,7 +34,7 @@
     },
     {
       "profile_id": "FD02_COULOMB_SUPERPOSITION",
-      "title_zh": "点电荷场与矢量叠加",
+      "title_zh": "库仑定律、点电荷场与矢量叠加",
       "course_block": "electrostatics",
       "primary_formula_ids": ["coulomb_point_charge", "electric_field_superposition"],
       "supporting_formula_ids": ["potential_volume_charge"],
