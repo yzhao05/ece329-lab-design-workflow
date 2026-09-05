@@ -2672,6 +2672,24 @@ def validate_resolved_intent(
         source = "SEMANTIC_RECOVERED_REFERENCE_REQUEST"
     advance_requested = raw.get("advance_requested")
     if (
+        intent == UserIntent.ADVANCE_STAGE.value
+        and isinstance(pending_action, dict)
+        and pending_action.get("advance_on_accept") is True
+        and pending_action.get("proposal") not in (None, "", [], {})
+    ):
+        # Advancing from a concrete visible draft means accepting that draft
+        # and then moving on.  Preserve the distinction from an unanswered
+        # open question so the engine can materialize the proposal instead of
+        # saving the student's control utterance as field content.
+        intent = UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+        controls = semantic_updates.get("control_actions", [])
+        controls = list(controls) if isinstance(controls, list) else []
+        if "ACCEPT" not in controls:
+            controls.append("ACCEPT")
+        semantic_updates["control_actions"] = controls
+        advance_requested = True
+        source = "SEMANTIC_ACCEPTED_VISIBLE_REFERENCE"
+    if (
         intent == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
         and isinstance(pending_action, dict)
         and pending_action.get("advance_on_accept") is True

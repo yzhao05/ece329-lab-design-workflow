@@ -192,6 +192,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             "operations": _as_list(procedure.get("procedure_steps")),
             "changed_quantities": _as_list(variables.get("independent_variable")),
             "observed_quantities": _as_list(variables.get("dependent_variable")),
+            "comparison_cases": _as_list(research.get("comparison_cases")),
             "boundary_conditions": _as_list(value_limits.get("limitations")),
         }
     method_by_id = {
@@ -302,6 +303,9 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             ),
             "observed_quantities": list(
                 experiment_brief.get("observed_quantities", [])
+            ),
+            "comparison_cases": list(
+                experiment_brief.get("comparison_cases", [])
             ),
             "boundary_conditions": list(
                 experiment_brief.get("boundary_conditions", [])

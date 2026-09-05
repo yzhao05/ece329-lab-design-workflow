@@ -335,7 +335,13 @@ class TurnPlanningTests(unittest.TestCase):
         self.assertIn("learning_objective", summary["confirmed"])
         self.assertIn("research_question", summary["confirmed"])
         self.assertTrue(output.stage_payload["reference_draft"])
-        self.assertIn("研究问题", output.assistant_message)
+        self.assertTrue(
+            any(
+                "研究问题" in item
+                for item in output.stage_payload["reference_basis"]
+            )
+        )
+        self.assertNotIn("我们已经有这些线索", output.assistant_message)
 
     def test_emvr_entry_starts_from_a_professional_editable_draft(self) -> None:
         session = DesignSession(

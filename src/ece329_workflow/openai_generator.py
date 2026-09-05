@@ -685,6 +685,182 @@ def _dialogue_act_writes_state(act: Any) -> bool:
     return valid_design_update or valid_stage_update or valid_comparison_update
 
 
+def _formula_direction_revision_from_field_acts(
+    acts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Project already parsed EMVR edits onto the formula-review brief.
+
+    The general semantic planner is allowed to express a review turn as
+    several precise field edits.  Requiring it to repeat the same meaning in
+    a second formula-specific action creates an unnecessary model call and can
+    turn a valid multi-edit turn into a service failure.  This adapter consumes
+    only validated act types and canonical field IDs; it never infers fields
+    from words in the student message.
+    """
+
+    field_map = {
+        "experiment_brief": "topic",
+        "direction_summary": "topic",
+        "research_summary": "topic",
+        "research_question": "topic",
+        "research_object": "objects",
+        "required_behaviors": "operations",
+        "procedure_steps": "operations",
+        "independent_variable": "changed_quantities",
+        "changed_quantities": "changed_quantities",
+        "observations": "observed_quantities",
+        "observed_quantities": "observed_quantities",
+        "comparison_cases": "comparison_cases",
+        "controlled_conditions": "boundary_conditions",
+        "object_constraints": "boundary_conditions",
+    }
+    brief_updates: dict[str, dict[str, Any]] = {}
+    source_parts: list[str] = []
+
+    def add_update(target: str, operation: str, value: Any) -> None:
+        brief_field = field_map.get(target)
+        if not brief_field:
+            return
+        normalized_operation = (
+            operation
+            if operation in {"MERGE", "REPLACE", "CLEAR"}
+            else "REPLACE"
+        )
+        if normalized_operation == "CLEAR":
+            normalized_value: Any = None
+        elif brief_field == "topic":
+            if not isinstance(value, str) or not value.strip():
+                return
+            normalized_value = value.strip()
+        else:
+            if isinstance(value, str) and value.strip():
+                normalized_value = [value.strip()]
+            elif isinstance(value, list):
+                normalized_value = [
+                    str(item).strip()
+                    for item in value
+                    if str(item).strip()
+                ]
+            else:
+                return
+            if not normalized_value:
+                return
+        existing = brief_updates.get(brief_field)
+        if (
+            existing is not None
+            and normalized_operation == "MERGE"
+            and brief_field != "topic"
+        ):
+            existing_value = existing.get("value")
+            existing_items = (
+                existing_value if isinstance(existing_value, list) else []
+            )
+            normalized_value = list(
+                dict.fromkeys([*existing_items, *normalized_value])
+            )
+            normalized_operation = (
+                "REPLACE"
+                if existing.get("operation") in {"REPLACE", "CLEAR"}
+                else "MERGE"
+            )
+        brief_updates[brief_field] = {
+            "operation": normalized_operation,
+            "value": normalized_value,
+        }
+
+    for act in acts:
+        if not isinstance(act, dict):
+            continue
+        act_type = str(act.get("type") or "").upper()
+        operation = str(act.get("operation") or "REPLACE").upper()
+        target = str(act.get("target") or "").strip()
+        content = act.get("content")
+        if act_type in {
+            "MODIFY_EMVR_FIELD",
+            "MODIFY_DESIGN_FIELD",
+            "MODIFY_STAGE_FIELD",
+            "ANSWER_PENDING_QUESTION",
+        }:
+            add_update(target, operation, content)
+        elif act_type == "MODIFY_COMPARISON" and isinstance(content, dict):
+            action = str(content.get("action") or operation).upper()
+            cases = [
+                *(
+                    content.get("cases", [])
+                    if isinstance(content.get("cases"), list)
+                    else []
+                ),
+                *(
+                    content.get("new_cases", [])
+                    if isinstance(content.get("new_cases"), list)
+                    else []
+                ),
+            ]
+            if action in {"REJECT", "CLEAR"}:
+                add_update("comparison_cases", "CLEAR", None)
+            elif cases:
+                add_update(
+                    "comparison_cases",
+                    (
+                        "REPLACE"
+                        if content.get("replace_all") is True
+                        or action == "REPLACE"
+                        else "MERGE"
+                    ),
+                    cases,
+                )
+        elif act_type == "CORRECT_ASSISTANT" and isinstance(content, dict):
+            for collection, field_key in (
+                ("design_updates", "field"),
+                ("stage_field_updates", "field"),
+                ("emvr_field_updates", "field_id"),
+            ):
+                updates = content.get(collection, [])
+                for update in updates if isinstance(updates, list) else []:
+                    if not isinstance(update, dict):
+                        continue
+                    add_update(
+                        str(update.get(field_key) or ""),
+                        str(update.get("operation") or "REPLACE").upper(),
+                        update.get("value"),
+                    )
+            comparison_updates = content.get("comparison_updates", [])
+            for update in (
+                comparison_updates if isinstance(comparison_updates, list) else []
+            ):
+                if not isinstance(update, dict):
+                    continue
+                action = str(update.get("action") or "MODIFY").upper()
+                cases = update.get("cases", [])
+                if action in {"REJECT", "CLEAR"}:
+                    add_update("comparison_cases", "CLEAR", None)
+                elif isinstance(cases, list) and cases:
+                    add_update(
+                        "comparison_cases",
+                        "REPLACE" if update.get("replace_all") is True else "MERGE",
+                        cases,
+                    )
+        source_text = str(act.get("source_text") or "").strip()
+        if source_text and source_text not in source_parts:
+            source_parts.append(source_text)
+    if not brief_updates:
+        return None
+    return {
+        "type": "REVISE_EMVR_DIRECTION",
+        "target": "experiment_brief",
+        "operation": "EXECUTE",
+        "content": {
+            "brief_updates": brief_updates,
+            "student_rationale": None,
+        },
+        "source_text": "\n".join(source_parts),
+        "confidence": max(
+            (float(act.get("confidence") or 0.0) for act in acts),
+            default=0.9,
+        ),
+    }
+
+
 def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
     """Return substantial source text not accounted for by semantic acts.
 
@@ -2327,6 +2503,9 @@ class OpenAIStageGenerator:
                 "学生给出宽泛或具体课程主题时也属于有效主题；不要因为没有同时给出对象、变量、"
                 "观察量和公式而拒绝SET_EMVR_TOPIC。选择、组合、修改或确认必须只引用当前状态中"
                 "真实存在的稳定ID。若学生在方向审阅中同时修改多个部分，分别写进brief_updates；"
+                "brief_updates可分别修改topic、objects、operations、changed_quantities、"
+                "observed_quantities、comparison_cases和boundary_conditions；不要把基础比较塞进"
+                "变化量或观察量。"
                 "若明确认可当前草稿则使用LOCK_EMVR_DIRECTION。"
                 "content必须是符合该公式流程动作契约的JSON对象字符串。source_text逐字复制支持"
                 "该动作的最小学生原文。只有整句在当前步骤确实没有可执行含义时才返回UNRESOLVED。"
@@ -3908,6 +4087,32 @@ class OpenAIStageGenerator:
                 "LOCK_EMVR_DIRECTION",
             },
         }.get(formula_phase, set())
+        if formula_phase == EXPERIMENT_DIRECTION_REVIEW:
+            projected_revision = _formula_direction_revision_from_field_acts(
+                normalized_emvr_acts
+            )
+            if projected_revision is not None and not any(
+                str(item.get("type") or "").upper()
+                in {"REVISE_EMVR_DIRECTION", "LOCK_EMVR_DIRECTION"}
+                for item in normalized_emvr_acts
+                if isinstance(item, dict)
+            ):
+                # Keep the original field acts as the auditable semantic
+                # source and add one deterministic formula-flow projection.
+                # The formula state consumes only the projection; later field
+                # persistence is suspended until the direction is locked.
+                raw_dialogue_acts = [*raw_dialogue_acts, projected_revision]
+                raw["dialogue_acts"] = raw_dialogue_acts
+                raw["dialogue_acts_json"] = json.dumps(
+                    raw_dialogue_acts,
+                    ensure_ascii=False,
+                )
+                normalized_emvr_acts, _ = normalize_dialogue_acts(
+                    raw_dialogue_acts,
+                    pending_action=pending_action,
+                )
+                has_executable_dialogue_acts = True
+                has_state_writing_dialogue_acts = True
         has_phase_formula_action = any(
             str(item.get("type") or "").upper() in required_formula_actions
             for item in normalized_emvr_acts
@@ -4217,6 +4422,7 @@ class OpenAIStageGenerator:
             and pending_type in OPEN_QUESTION_PENDING_TYPES
             and isinstance(pending_action, dict)
             and not str(pending_action.get("candidate_answer") or "").strip()
+            and not has_confirmable_reference
         ):
             # An open question has nothing to accept until a reference or a
             # previously field-bound candidate exists.  A mistaken ACCEPT from

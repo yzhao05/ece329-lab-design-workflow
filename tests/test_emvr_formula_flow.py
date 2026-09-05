@@ -681,6 +681,74 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             ["电场线形状", "零场点位置"],
         )
 
+    def test_review_applies_comparison_and_observation_edits_independently(self) -> None:
+        session = self._session()
+        flow = ensure_emvr_formula_flow(session)
+        flow["phase"] = EXPERIMENT_DIRECTION_REVIEW
+        flow["experiment_brief"] = {
+            "topic": "两个点电荷靠近时的空间电场",
+            "primary_formula_ids": ["coulomb_point_charge"],
+            "supporting_formula_ids": ["electric_field_superposition"],
+            "selected_experiment_method_ids": ["EMVR-METHOD-test"],
+            "selected_experiment_pattern_ids": ["CONTROLLED_COMPARISON"],
+            "objects": ["两个点电荷"],
+            "operations": ["连续改变两电荷间距"],
+            "changed_quantities": ["电荷间距离"],
+            "observed_quantities": ["电场线形状", "零场点和对称性"],
+            "comparison_cases": [],
+            "boundary_conditions": ["点电荷近似"],
+        }
+
+        output, complete = handle_emvr_formula_turn(
+            session,
+            "同时调整基础比较和观察量",
+            _formula_intent(
+                "REVISE_EMVR_DIRECTION",
+                {
+                    "brief_updates": {
+                        "comparison_cases": {
+                            "operation": "REPLACE",
+                            "value": ["同种电荷", "异种电荷"],
+                        },
+                        "observed_quantities": {
+                            "operation": "REPLACE",
+                            "value": ["场线形状、合并、扭曲和重排形态"],
+                        },
+                    }
+                },
+            ),
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            flow["experiment_brief"]["comparison_cases"],
+            ["同种电荷", "异种电荷"],
+        )
+        self.assertEqual(
+            flow["experiment_brief"]["observed_quantities"],
+            ["场线形状、合并、扭曲和重排形态"],
+        )
+        self.assertNotIn("零场点", output.assistant_message)
+
+        _, complete = handle_emvr_formula_turn(
+            session,
+            "确认方向",
+            resolved_intent(
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL,
+                semantic_updates={"control_actions": ["ACCEPT"]},
+            ),
+        )
+        self.assertTrue(complete)
+        emvr = session.design_context["emvr_design"]
+        self.assertEqual(
+            emvr["field_state"]["comparison_cases"],
+            ["同种电荷", "异种电荷"],
+        )
+        self.assertEqual(
+            effective_experiment_brief(session)["comparison_cases"],
+            ["同种电荷", "异种电荷"],
+        )
+
     def test_engine_advances_only_after_formula_scene_and_direction_lock(self) -> None:
         engine = WorkflowEngine(generator=FormulaSemanticGenerator())
         first = engine.create_design(

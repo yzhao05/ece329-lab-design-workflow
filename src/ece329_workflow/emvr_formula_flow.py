@@ -174,6 +174,7 @@ def normalize_formula_flow_action(act_type: str, raw: Any) -> dict[str, Any] | N
             "operations": _unique_text(raw.get("operations")),
             "changed_quantities": _unique_text(raw.get("changed_quantities")),
             "observed_quantities": _unique_text(raw.get("observed_quantities")),
+            "comparison_cases": _unique_text(raw.get("comparison_cases")),
             "boundary_conditions": _unique_text(raw.get("boundary_conditions")),
         }
     if act_type in {"REVISE_EMVR_DIRECTION", "LOCK_EMVR_DIRECTION"}:
@@ -186,6 +187,7 @@ def normalize_formula_flow_action(act_type: str, raw: Any) -> dict[str, Any] | N
             "operations",
             "changed_quantities",
             "observed_quantities",
+            "comparison_cases",
             "boundary_conditions",
         ):
             raw_update = source_updates.get(field_id)
@@ -548,6 +550,7 @@ def _apply_brief_updates(brief: dict[str, Any], updates: Any) -> None:
             "operations",
             "changed_quantities",
             "observed_quantities",
+            "comparison_cases",
             "boundary_conditions",
         } or not isinstance(update, dict):
             continue
@@ -1087,6 +1090,7 @@ def _build_experiment_brief(
             for item in method.get("observed_quantities", [])
         )
     )[:5]
+    comparisons = _unique_text(method_choice.get("comparison_cases"))
     objects = _unique_text(method_choice.get("objects")) or _unique_text(
         analysis.get("mentioned_objects")
     )
@@ -1145,15 +1149,21 @@ def _build_experiment_brief(
         "operations": operations,
         "changed_quantities": changed,
         "observed_quantities": observed,
+        "comparison_cases": comparisons,
         "boundary_conditions": boundaries,
     }
 
 
 def _brief_summary(brief: dict[str, Any]) -> str:
+    comparison_text = (
+        f"，并比较{'、'.join(brief.get('comparison_cases', []))}"
+        if brief.get("comparison_cases")
+        else ""
+    )
     return (
         f"围绕“{brief.get('topic')}”，使用{'、'.join(brief.get('objects', []))}，"
         f"通过{'、'.join(brief.get('operations', []))}改变{'、'.join(brief.get('changed_quantities', []))}，"
-        f"观察{'、'.join(brief.get('observed_quantities', []))}。"
+        f"观察{'、'.join(brief.get('observed_quantities', []))}{comparison_text}。"
     )
 
 
@@ -1183,6 +1193,7 @@ def _commit_brief(session: DesignSession, flow: dict[str, Any]) -> None:
             "required_behaviors": list(brief.get("operations", [])),
             "changed_quantities": list(brief.get("changed_quantities", [])),
             "observed_quantities": list(brief.get("observed_quantities", [])),
+            "comparison_cases": list(brief.get("comparison_cases", [])),
             "object_constraints": list(brief.get("boundary_conditions", [])),
         }
     )

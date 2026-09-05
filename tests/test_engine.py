@@ -1860,9 +1860,11 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertTrue(any(item["label"] == "实验流程" for item in procedure["items"]))
         self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
-        builder_payload = build_builder_gate1_input(
-            engine.store.get(result["design_id"])
-        )
+        completed_session = engine.store.get(result["design_id"])
+        completed_session.stage_outputs[Stage.RESEARCH_QUESTION.value][
+            "stage_payload"
+        ]["comparison_cases"] = ["导体", "介质"]
+        builder_payload = build_builder_gate1_input(completed_session)
         self.assertEqual(builder_payload["document"]["target_gate"], "Gate 1 — Brief confirmed")
         self.assertGreaterEqual(len(builder_payload["objects"]), 5)
         self.assertGreaterEqual(len(builder_payload["student_tasks"]), 5)
@@ -1871,6 +1873,10 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(builder_payload["initial_and_action_states"])
         self.assertTrue(builder_payload["acceptance_and_evidence"])
         self.assertTrue(builder_payload["builder_runtime_constraints"])
+        self.assertEqual(
+            builder_payload["formula_driven_experiment"]["comparison_cases"],
+            ["导体", "介质"],
+        )
         self.assertNotIn(
             "unresolved",
             json.dumps(builder_payload, ensure_ascii=False).casefold(),

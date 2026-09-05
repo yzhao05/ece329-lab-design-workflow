@@ -7267,6 +7267,86 @@ class DialogueStateTests(unittest.TestCase):
             Stage.EXPECTED_DATA_VISUALIZATION.value,
         )
 
+    def test_advancing_from_visible_procedure_reference_accepts_draft_not_command(self) -> None:
+        class AdvanceReferenceGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.ADVANCE_STAGE,
+                    confidence=0.98,
+                    source="SEMANTIC_TEST",
+                    semantic_updates={"control_actions": ["ADVANCE"]},
+                    dialogue_acts=[
+                        {
+                            "type": "CONTROL",
+                            "target": "ADVANCE",
+                            "operation": "EXECUTE",
+                            "content": "",
+                            "confidence": 0.98,
+                        }
+                    ],
+                    actions_authoritative=True,
+                )
+
+        engine = WorkflowEngine(generator=AdvanceReferenceGenerator())
+        session = DesignSession(
+            design_id="advance-procedure-reference",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            current_stage_index=list(Stage).index(Stage.CONCEPTUAL_PROCEDURE),
+            design_context={
+                "idea": {"main_direction": "比较两种电荷配置随距离变化的场线"},
+            },
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "independent_variable",
+                    "operation": "REPLACE",
+                    "value": "两个电荷之间的距离",
+                },
+                {
+                    "field": "observations",
+                    "operation": "REPLACE",
+                    "value": "场线弯曲与连接形态",
+                },
+                {
+                    "field": "controlled_conditions",
+                    "operation": "REPLACE",
+                    "value": "电荷量与环境",
+                },
+            ],
+            stage=Stage.VARIABLES_AND_CONDITIONS,
+        )
+        entry = guided_stage_entry_output(session)
+        reference = list(entry.stage_payload["reference_draft"])
+        save_pending_action(session, Stage.CONCEPTUAL_PROCEDURE, entry)
+        session.stage_outputs[Stage.CONCEPTUAL_PROCEDURE.value] = {
+            "revision": 1,
+            **entry.to_dict(),
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": "继续"})
+
+        procedure = str(
+            stage_design_state_snapshot(engine.store.get(session.design_id))[
+                "procedure_steps"
+            ]
+        )
+        self.assertEqual(
+            result["current_stage"],
+            Stage.EXPECTED_DATA_VISUALIZATION.value,
+        )
+        self.assertNotEqual(procedure, "继续")
+        for step in reference:
+            self.assertIn(step, procedure)
+
 
 if __name__ == "__main__":
     unittest.main()

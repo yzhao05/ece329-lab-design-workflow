@@ -4116,8 +4116,7 @@ class WorkflowEngine:
                         definition = STAGES_BY_ID[handled_stage]
                         next_output = guided_stage_entry_output(session)
                         next_output.assistant_message = (
-                            f"{completed_output.assistant_message.rstrip()}\n\n"
-                            "这个环节已经能支撑后面的设计，我们直接接着完善下一项。\n\n"
+                            "你刚才补充的内容已经把这一项说明清楚，我们直接接着完善下一项。\n\n"
                             f"{next_output.assistant_message}"
                         )
                         next_output.visualization = (
@@ -4207,9 +4206,7 @@ class WorkflowEngine:
             # that question and send the conversation back to an earlier
             # field.  Guided mode keeps the existing coaching bridge.
             quality_may_steer_response = not (
-                session.interaction_state is InteractionState.EMVR_DIRECT
-                and emvr_stage_entry_turn
-                and bool(output.student_task)
+                guided_stage_entry_turn or emvr_stage_entry_turn
             )
             if finding and quality_may_steer_response:
                 bridge = (

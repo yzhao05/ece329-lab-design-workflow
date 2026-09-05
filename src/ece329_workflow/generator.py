@@ -371,14 +371,8 @@ def guided_stage_entry_output(
         numbered = "\n".join(
             f"{index}. {step}" for index, step in enumerate(reference_steps, start=1)
         )
-        basis_text = (
-            f"我们已经有这些线索：{'；'.join(prior_context)}。\n"
-            if prior_context
-            else ""
-        )
         reference_text = (
             "我先把已有线索顺成一份可以随手修改的参考：\n"
-            f"{basis_text}"
             f"{numbered}\n\n"
             "觉得合适的部分可以留下；想改哪里，直接告诉我就行。"
         )
@@ -1133,14 +1127,21 @@ def _guided_reference_output(session: DesignSession) -> StepOutput:
         }
         visualization = None
     elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
+        boundary_basis = controls or "前面采用的理想化条件"
+        response_basis = observations or "准备观察的场或响应"
         message = (
-            f"前面已经把学习目标说成“{objective or '解释当前实验中的核心物理关系'}”，"
-            "这里不用再重复一遍。可以直接检查两点：现有比较和显示是否足以支撑这个目标；"
-            "结论是否会受到理想化模型、有限显示方式，以及未纳入比较条件的限制。"
+            "可以。前面的学习目标已经保留，这里不用再重复一遍。"
+            "我先给你一条贴合当前设计、可以直接修改的局限："
+            f"当前结论以“{boundary_basis}”保持成立为前提；如果主动改变量进入模型不再适用的极端范围，"
+            f"或者“{response_basis}”受到显示密度与分辨率限制，画面上的差异就不能直接等同于物理趋势。"
+            f"这条局限可以用来检查现有设计是否仍能支撑“{objective or '当前学习目标'}”。"
         )
         payload = {
             "review_dimension": "learning_value_and_model_limits",
-            "limitations": ["理想化模型", "有限的显示方式", "未纳入比较的条件"],
+            "limitations": [
+                f"结论依赖于{boundary_basis}",
+                f"{response_basis}可能受到显示密度与分辨率限制",
+            ],
             "reference_review_dimensions": ["课程理解价值", "模型与展示边界"],
             "stage_readiness": readiness,
         }

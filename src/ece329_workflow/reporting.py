@@ -354,6 +354,7 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
         ("operations", "required_behaviors"),
         ("changed_quantities", "changed_quantities"),
         ("observed_quantities", "observed_quantities"),
+        ("comparison_cases", "comparison_cases"),
         ("boundary_conditions", "object_constraints"),
     ):
         latest = values(source)

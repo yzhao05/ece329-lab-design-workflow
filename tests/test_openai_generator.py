@@ -4064,6 +4064,211 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             {"provider": "rule_based", "model": None, "fallback_enabled": False},
         )
 
+    def test_guided_reference_acceptance_is_not_rejected_as_open_answer(self) -> None:
+        message = "这份参考符合我的想法，继续下一项。"
+        response = {
+            "intent": "ACCEPT_PREVIOUS_PROPOSAL",
+            "target": Stage.CONCEPTUAL_PROCEDURE.value,
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps(
+                {"control_actions": ["ACCEPT", "ADVANCE"]},
+                ensure_ascii=False,
+            ),
+            "dialogue_acts_json": json.dumps(
+                [
+                    {
+                        "type": "CONTROL",
+                        "target": "ACCEPT",
+                        "operation": "EXECUTE",
+                        "content": "",
+                        "source_text": message,
+                        "source_start": 0,
+                        "source_end": len(message),
+                        "semantic_key": "accept_visible_reference",
+                        "confidence": 0.99,
+                    },
+                    {
+                        "type": "CONTROL",
+                        "target": "ADVANCE",
+                        "operation": "EXECUTE",
+                        "content": "",
+                        "source_text": message,
+                        "source_start": 0,
+                        "source_end": len(message),
+                        "semantic_key": "advance_after_acceptance",
+                        "confidence": 0.99,
+                    },
+                ],
+                ensure_ascii=False,
+            ),
+            "advance_requested": True,
+            "preserve_current_design": True,
+            "confidence": 0.99,
+        }
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.CONCEPTUAL_PROCEDURE.value,
+            "proposal": {"reference_draft": ["建立基准", "改变距离", "记录场线"]},
+            "advance_on_accept": True,
+            "allowed_intents": [
+                "ACCEPT_PREVIOUS_PROPOSAL",
+                "ADVANCE_STAGE",
+                "UNCLEAR",
+            ],
+        }
+
+        result = OpenAIStageGenerator(
+            transport=FakeTransport(response)
+        ).resolve_intent(
+            guided_session(list(Stage).index(Stage.CONCEPTUAL_PROCEDURE)),
+            message,
+            pending,
+            {},
+        )
+
+        self.assertEqual(result["intent"], "ACCEPT_PREVIOUS_PROPOSAL")
+        self.assertTrue(result["advance_requested"])
+
+    def test_emvr_formula_review_reuses_multi_field_acts_without_second_call(self) -> None:
+        message = "分别调整基础比较和观察量。"
+        acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "comparison_cases",
+                "operation": "REPLACE",
+                "content": ["同种电荷", "异种电荷"],
+                "source_text": message,
+                "source_start": 0,
+                "source_end": len(message),
+                "semantic_key": "comparison_cases_replace",
+                "confidence": 0.98,
+            },
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "observed_quantities",
+                "operation": "REPLACE",
+                "content": ["场线形状、合并、扭曲和重排形态"],
+                "source_text": message,
+                "source_start": 0,
+                "source_end": len(message),
+                "semantic_key": "observations_replace",
+                "confidence": 0.98,
+            },
+        ]
+        response = {
+            "intent": "MODIFY_PREVIOUS_PROPOSAL",
+            "target": "experiment_brief",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps(acts, ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        session = DesignSession(
+            design_id="emvr-multi-review",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            design_context={"idea": {}, "emvr_design": {"field_state": {}}},
+        )
+        transport = FakeTransport(response)
+
+        result = OpenAIStageGenerator(transport=transport).resolve_intent(
+            session,
+            message,
+            {
+                "type": "CONFIRM_EMVR_FORMULA_DIRECTION",
+                "subject": "experiment_brief",
+                "proposal": {},
+                "advance_on_accept": True,
+            },
+            {
+                "emvr_formula_flow": {
+                    "phase": "EXPERIMENT_DIRECTION_REVIEW",
+                }
+            },
+        )
+
+        formula_actions = result["semantic_updates"]["emvr_formula_actions"]
+        revision = next(
+            item for item in formula_actions
+            if item["type"] == "REVISE_EMVR_DIRECTION"
+        )
+        updates = revision["content"]["brief_updates"]
+        self.assertEqual(
+            updates["comparison_cases"]["value"],
+            ["同种电荷", "异种电荷"],
+        )
+        self.assertEqual(
+            updates["observed_quantities"]["value"],
+            ["场线形状、合并、扭曲和重排形态"],
+        )
+        self.assertEqual(len(transport.requests), 1)
+
+    def test_emvr_formula_review_preserves_multiple_edits_to_same_list_field(self) -> None:
+        message = "保留场线形状，再补充零场点和中间区域场强。"
+        acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "observed_quantities",
+                "operation": "MERGE",
+                "content": ["零场点位置"],
+                "source_text": "补充零场点",
+                "semantic_key": "add_zero_field_point",
+                "confidence": 0.98,
+            },
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "observed_quantities",
+                "operation": "MERGE",
+                "content": ["中间区域场强"],
+                "source_text": "中间区域场强",
+                "semantic_key": "add_middle_field_strength",
+                "confidence": 0.98,
+            },
+        ]
+        response = {
+            "intent": "MODIFY_PREVIOUS_PROPOSAL",
+            "target": "experiment_brief",
+            "resolved_value_json": None,
+            "semantic_updates_json": json.dumps({}, ensure_ascii=False),
+            "dialogue_acts_json": json.dumps(acts, ensure_ascii=False),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": 0.98,
+        }
+        session = DesignSession(
+            design_id="emvr-multi-same-field-review",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            design_context={"idea": {}, "emvr_design": {"field_state": {}}},
+        )
+
+        result = OpenAIStageGenerator(
+            transport=FakeTransport(response)
+        ).resolve_intent(
+            session,
+            message,
+            {
+                "type": "CONFIRM_EMVR_FORMULA_DIRECTION",
+                "subject": "experiment_brief",
+                "proposal": {},
+                "advance_on_accept": True,
+            },
+            {"emvr_formula_flow": {"phase": "EXPERIMENT_DIRECTION_REVIEW"}},
+        )
+
+        revision = next(
+            item
+            for item in result["semantic_updates"]["emvr_formula_actions"]
+            if item["type"] == "REVISE_EMVR_DIRECTION"
+        )
+        self.assertEqual(
+            revision["content"]["brief_updates"]["observed_quantities"],
+            {
+                "operation": "MERGE",
+                "value": ["零场点位置", "中间区域场强"],
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
