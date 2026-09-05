@@ -434,6 +434,44 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn("Lorentz", snapshot["course_relationship"])
         self.assertEqual(session.design_context["idea"]["course_domain"], "electrostatics")
 
+    def test_rule_fallback_keeps_selected_scene_course_and_formula_binding(self) -> None:
+        selected = next(
+            point
+            for point in KNOWLEDGE.exploration_points
+            if point.get("catalog_scene_id") == "ECE329-S004"
+        )
+        session = DesignSession(
+            design_id="guided_scene_rule_fallback",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "original": "两个带电物体靠近时观察电场和电场线",
+                    "selected_scene_ids": ["ECE329-S004"],
+                    "selected_course_relations": [selected],
+                    "direction_locked": True,
+                }
+            },
+        )
+        generator = RuleBasedStageGenerator()
+        session.current_stage_index = list(Stage).index(
+            Stage.COURSE_MAPPING_AND_DIRECTION
+        )
+        mapping = generator.generate(session, "继续整理课程关系")
+        self.assertEqual(
+            {item["concept_id"] for item in mapping.stage_payload["course_references"]},
+            {selected["concept_id"]},
+        )
+
+        session.current_stage_index = list(Stage).index(Stage.THEORETICAL_FRAMEWORK)
+        theory = generator.generate(session, "继续整理理论关系")
+        formula_ids = {
+            item["id"]
+            for item in theory.stage_payload["lecture_formula_candidates"]
+        }
+        self.assertIn("coulomb_point_charge", formula_ids)
+        self.assertIn("electric_field_superposition", formula_ids)
+        self.assertNotIn("lorentz_force", formula_ids)
+
     def _fill_idea_development(self, design_id: str, response: dict) -> dict:
         answers = {
             "direction_outline": "我想比较不同条件下电磁现象的空间分布变化。",

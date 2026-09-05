@@ -3,7 +3,14 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from .design_state import baseline_comparisons_snapshot, format_design_summary
+from .design_state import (
+    apply_design_updates,
+    baseline_comparisons_snapshot,
+    design_state_snapshot,
+    ensure_design_state,
+    format_design_summary,
+    sync_design_state_to_legacy,
+)
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, StepOutput
 from .stages import IDEA_DEVELOPMENT_FACETS
@@ -65,6 +72,185 @@ def refresh_idea_development(session: DesignSession) -> None:
         _refresh(development)
 
 
+def _selected_scene_course_support(session: DesignSession) -> dict[str, Any] | None:
+    """Return exact course support for the student's selected catalog scenes.
+
+    Scene ids and their formula links are authoritative after selection.  This
+    function intentionally does not inspect the student's prose, so broad words
+    cannot redirect an established experiment to a neighbouring lecture.
+    """
+
+    idea = session.design_context.get("idea", {})
+    if not isinstance(idea, dict):
+        return None
+    raw_scene_ids = idea.get("selected_scene_ids", [])
+    scene_ids = (
+        [str(item).strip() for item in raw_scene_ids if str(item).strip()]
+        if isinstance(raw_scene_ids, list)
+        else []
+    )
+    relations = idea.get("selected_course_relations", [])
+    relations = relations if isinstance(relations, list) else []
+    for relation in relations:
+        if not isinstance(relation, dict):
+            continue
+        scene_id = str(relation.get("catalog_scene_id") or "").strip()
+        if scene_id:
+            scene_ids.append(scene_id)
+    links = KNOWLEDGE.formula_links_for_scenes(list(dict.fromkeys(scene_ids)))
+    if not links:
+        return None
+
+    concept_ids = [
+        str(relation.get("concept_id") or "").strip()
+        for relation in relations
+        if isinstance(relation, dict)
+        and str(relation.get("concept_id") or "").strip()
+    ]
+    if not concept_ids:
+        selected_ids = {str(link.get("scene_id") or "") for link in links}
+        concept_ids = [
+            str(point.get("concept_id") or "").strip()
+            for point in KNOWLEDGE.exploration_points
+            if str(point.get("catalog_scene_id") or "") in selected_ids
+            and str(point.get("concept_id") or "").strip()
+        ]
+
+    formulas: list[dict[str, Any]] = []
+    profiles: list[dict[str, Any]] = []
+    formula_ids: set[str] = set()
+    profile_ids: set[str] = set()
+    for link in links:
+        for key in ("primary_formulas", "supporting_formulas"):
+            for formula in link.get(key, []):
+                if not isinstance(formula, dict):
+                    continue
+                formula_id = str(formula.get("id") or "").strip()
+                if formula_id and formula_id not in formula_ids:
+                    formula_ids.add(formula_id)
+                    formulas.append(deepcopy(formula))
+        for profile in link.get("formula_design_profiles", []):
+            if not isinstance(profile, dict):
+                continue
+            profile_id = str(profile.get("profile_id") or "").strip()
+            if profile_id and profile_id not in profile_ids:
+                profile_ids.add(profile_id)
+                profiles.append(deepcopy(profile))
+
+    state_relationship = str(
+        design_state_snapshot(session).get("course_relationship") or ""
+    ).strip()
+    canonical_state = ensure_design_state(session)
+    provenance = canonical_state.get("field_provenance", {})
+    relationship_records = (
+        provenance.get("course_relationship", [])
+        if isinstance(provenance, dict)
+        else []
+    )
+    latest_source = str(
+        relationship_records[-1].get("source") or ""
+        if isinstance(relationship_records, list)
+        and relationship_records
+        and isinstance(relationship_records[-1], dict)
+        else ""
+    )
+    outline = session.design_context.get("experiment_outline_seed", {})
+    outline_relationships = (
+        outline.get("course_relationships", [])
+        if isinstance(outline, dict)
+        else []
+    )
+    outline_text = "；".join(
+        str(item).strip() for item in outline_relationships if str(item).strip()
+    ) if isinstance(outline_relationships, list) else str(outline_relationships).strip()
+    profile_text = "、".join(
+        str(profile.get("title_zh") or profile.get("title") or "").strip()
+        for profile in profiles
+        if str(profile.get("title_zh") or profile.get("title") or "").strip()
+    )
+    explicitly_bound_state = latest_source in {
+        "STUDENT_CONFIRMED",
+        "STUDENT_SCENE_SELECTION",
+        "CONFIRMED_SCENE_DIRECTION",
+        "COURSE_KNOWLEDGE_ALIGNMENT",
+    }
+    relationship = (
+        state_relationship
+        if explicitly_bound_state and state_relationship
+        else outline_text or profile_text or state_relationship
+    )
+    return {
+        "scene_formula_links": deepcopy(links),
+        "course_references": KNOWLEDGE.concept_references_for_ids(concept_ids),
+        "formula_references": formulas,
+        "formula_design_profiles": profiles,
+        "course_relationship": relationship,
+    }
+
+
+def _profile_formula_candidates(text: str, *, limit: int = 4) -> list[dict[str, Any]]:
+    """Return profile-bound candidates without accepting any as the theory."""
+
+    profiles = KNOWLEDGE.formula_design_references(text, limit=limit)
+    formulas: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        for key in ("primary_formulas", "supporting_formulas"):
+            for formula in profile.get(key, []):
+                if not isinstance(formula, dict):
+                    continue
+                formula_id = str(formula.get("id") or "").strip()
+                if formula_id and formula_id not in seen:
+                    seen.add(formula_id)
+                    formulas.append(deepcopy(formula))
+    return formulas
+
+
+def _profile_course_candidates(text: str, *, limit: int = 4) -> list[dict[str, Any]]:
+    """Return lectures that support a candidate profile's primary formulas."""
+
+    profiles = KNOWLEDGE.formula_design_references(text, limit=limit)
+    concept_ids: list[str] = []
+    for profile in profiles:
+        for formula in profile.get("primary_formulas", []):
+            if not isinstance(formula, dict):
+                continue
+            concept_ids.extend(
+                str(item).strip()
+                for item in formula.get("concept_ids", [])
+                if str(item).strip()
+            )
+    return KNOWLEDGE.concept_references_for_ids(concept_ids)
+
+
+def _repair_scene_bound_course_relationship(
+    session: DesignSession,
+    selected_support: dict[str, Any],
+) -> None:
+    """Replace only stale system retrieval with the selected scene binding."""
+
+    relationship = str(selected_support.get("course_relationship") or "").strip()
+    current = str(
+        design_state_snapshot(session).get("course_relationship") or ""
+    ).strip()
+    if not relationship or relationship == current:
+        return
+    changed = apply_design_updates(
+        session,
+        [
+            {
+                "field": "course_relationship",
+                "operation": "REPLACE",
+                "value": relationship,
+                "semantic_key": "selected_scene_course_relationship",
+            }
+        ],
+        provenance="SELECTED_SCENE_BINDING",
+    )
+    if changed:
+        sync_design_state_to_legacy(session)
+
+
 def initialize_idea_development(
     session: DesignSession,
     outline: dict[str, Any],
@@ -72,8 +258,20 @@ def initialize_idea_development(
 ) -> dict[str, Any]:
     idea = session.design_context.get("idea", {})
     idea_text = _idea_text(idea, outline)
-    course_references = KNOWLEDGE.concept_references(idea_text, limit=1)
-    formula_references = KNOWLEDGE.focused_formula_references(idea_text, limit=1)
+    selected_support = _selected_scene_course_support(session)
+    if selected_support is not None:
+        _repair_scene_bound_course_relationship(session, selected_support)
+    course_references = (
+        selected_support["course_references"]
+        if selected_support is not None
+        else _profile_course_candidates(idea_text, limit=2)
+        or KNOWLEDGE.concept_references(idea_text, limit=1)
+    )
+    formula_references = (
+        selected_support["formula_references"]
+        if selected_support is not None
+        else _profile_formula_candidates(idea_text, limit=2)
+    )
     facets = {
         definition.facet_id: {
             "facet_id": definition.facet_id,
@@ -91,16 +289,12 @@ def initialize_idea_development(
             "source": "STUDENT_AND_AGENT",
         }
     )
-    if course_references:
+    if selected_support is not None and selected_support.get("course_relationship"):
         facets["course_mapping"].update(
             {
                 "status": CLEAR,
-                "evidence": "；".join(
-                    str(item.get("title") or item.get("lecture_title") or "").strip()
-                    for item in course_references
-                    if str(item.get("title") or item.get("lecture_title") or "").strip()
-                ),
-                "source": "COURSE_RETRIEVAL",
+                "evidence": str(selected_support["course_relationship"]),
+                "source": "SELECTED_SCENE_BINDING",
             }
         )
     # Course retrieval supplies candidates for discussion, not an accepted
@@ -121,6 +315,11 @@ def initialize_idea_development(
         "complete": False,
         "course_references": course_references,
         "formula_references": formula_references,
+        "selected_scene_formula_links": (
+            deepcopy(selected_support.get("scene_formula_links", []))
+            if selected_support is not None
+            else []
+        ),
         "last_clarified_facet_ids": [],
     }
     _refresh(development)
@@ -195,10 +394,43 @@ def _refresh_course_evidence(
         )
         if item
     )
+    selected_support = _selected_scene_course_support(session)
+    if selected_support is not None:
+        _repair_scene_bound_course_relationship(session, selected_support)
+        development["course_references"] = deepcopy(
+            selected_support.get("course_references", [])
+        )
+        development["formula_references"] = deepcopy(
+            selected_support.get("formula_references", [])
+        )
+        development["selected_scene_formula_links"] = deepcopy(
+            selected_support.get("scene_formula_links", [])
+        )
+        course_facet = facets.get("course_mapping")
+        if isinstance(course_facet, dict) and str(
+            course_facet.get("source") or ""
+        ) in {"", "COURSE_RETRIEVAL", "SELECTED_SCENE_BINDING"}:
+            relationship = str(
+                selected_support.get("course_relationship") or ""
+            ).strip()
+            if relationship:
+                course_facet.update(
+                    {
+                        "status": CLEAR,
+                        "evidence": relationship,
+                        "source": "SELECTED_SCENE_BINDING",
+                    }
+                )
+        # The stable graph binding is the complete retrieval refresh.  Do not
+        # let later prose re-rank it to a different lecture or formula family.
+        return
     if not search_text:
         return
-    course_references = KNOWLEDGE.concept_references(search_text, limit=1)
-    formula_references = KNOWLEDGE.focused_formula_references(search_text, limit=1)
+    course_references = (
+        _profile_course_candidates(search_text, limit=2)
+        or KNOWLEDGE.concept_references(search_text, limit=1)
+    )
+    formula_references = _profile_formula_candidates(search_text, limit=2)
     if course_references:
         development["course_references"] = course_references
         course_facet = facets.get("course_mapping")
@@ -206,10 +438,12 @@ def _refresh_course_evidence(
             isinstance(course_facet, dict)
             and str(course_facet.get("source") or "").startswith("COURSE_RETRIEVAL")
         ):
-            course_facet["evidence"] = "；".join(
-                str(item.get("title") or item.get("lecture_title") or "").strip()
-                for item in course_references
-                if str(item.get("title") or item.get("lecture_title") or "").strip()
+            # Repair legacy sessions which had accepted a broad text match as
+            # the course relationship.  The references remain available as
+            # candidates, but only a scene binding or field-level semantic
+            # update may close this facet.
+            course_facet.update(
+                {"status": MISSING, "evidence": "", "source": None}
             )
     if formula_references:
         development["formula_references"] = formula_references

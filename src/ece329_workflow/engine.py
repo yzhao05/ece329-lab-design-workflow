@@ -27,6 +27,7 @@ from .dialogue_state import (
     record_scene_direction_confirmation,
     recoverable_pending_field,
     recover_repeated_pending_answer,
+    recover_visible_scene_selection_intent,
     required_pending_facet_id,
     resolved_intent,
     save_pending_action,
@@ -2495,6 +2496,7 @@ class WorkflowEngine:
                             if isinstance(scene.get("course_anchor"), dict)
                             else ""
                         )
+                        or scene.get("option_id")
                         or ""
                     ),
                     "course_anchor": deepcopy(scene.get("course_anchor", {})),
@@ -2594,6 +2596,15 @@ class WorkflowEngine:
             )
             if recovered is not None:
                 validated = validate_resolved_intent(recovered, pending)
+            scene_recovery = recover_visible_scene_selection_intent(
+                validated,
+                session,
+                message,
+                pending,
+                carried_context,
+            )
+            if scene_recovery is not None:
+                validated = scene_recovery
             return validated, pending
         # Offline/rule-only deployments cannot resolve conversational commands.
         # Explicit UI actions still arrive through complete_stage above; typed

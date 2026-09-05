@@ -768,6 +768,37 @@ class LectureKnowledgeBase:
             for item in matches
         ]
 
+    def concept_references_for_ids(
+        self,
+        concept_ids: list[str] | set[str] | tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        """Materialize already-bound lecture ids without re-running retrieval.
+
+        Once a student selects a catalog scene, its ``concept_id`` is a stable
+        knowledge-graph edge.  Re-querying the student's prose at that point can
+        replace the selected relation with a nearby lecture that happens to
+        share broad terms such as "electric field".  This method deliberately
+        performs no text matching; unknown ids are ignored.
+        """
+
+        matches = [
+            self._lecture_by_id[concept_id]
+            for concept_id in dict.fromkeys(
+                str(item).strip() for item in concept_ids if str(item).strip()
+            )
+            if concept_id in self._lecture_by_id
+        ]
+        return [
+            {
+                "concept_id": item["id"],
+                "lecture": item["lecture"],
+                "title": item["title"],
+                "pages": item["pages"],
+                "concepts": item["concepts"],
+            }
+            for item in matches
+        ]
+
     def formula_references(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
         concept_ids = {item["id"] for item in self.match_concepts(text, limit=5)}
         if not concept_ids:

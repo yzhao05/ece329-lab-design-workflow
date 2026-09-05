@@ -1921,6 +1921,22 @@ def degraded_context_intent(
         and not idea_development
     )
 
+    recovered_scene = recover_visible_scene_selection_intent(
+        resolved_intent(
+            UserIntent.UNCLEAR,
+            target=subject or Stage.IDEA_BRAINSTORMING.value,
+            confidence=0.0,
+            source=source,
+            unresolved_content=preserved_input,
+        ),
+        session,
+        message,
+        pending_action,
+        carried_context,
+    )
+    if stage_one_entry and recovered_scene is not None:
+        return recovered_scene
+
     if stage_one_entry and has_course_evidence and course_anchor:
         # Retrieval proves that the turn touches course material, but a broad
         # match is not precise enough to become the student's research object.
@@ -1989,6 +2005,145 @@ def degraded_context_intent(
         source=f"{source}_LOCAL_CLARIFICATION",
         unresolved_content=preserved_input,
     )
+
+
+def _visible_scene_reference_option_ids(
+    user_message: str,
+    carried_context: dict[str, Any],
+) -> list[str]:
+    """Resolve exact references against only the currently visible scene batch.
+
+    This is identifier resolution, not topic or intent classification.  The
+    labels and titles come from the response the student can currently see,
+    so a later A/B/C batch cannot accidentally resolve to an older scene.
+    """
+
+    message_key = "".join(user_message.casefold().split())
+    if not message_key:
+        return []
+    scenes = carried_context.get("latest_exploration_scenes", [])
+    if not isinstance(scenes, list):
+        return []
+    matched_ids: list[str] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        option_id = str(scene.get("option_id") or "").strip()
+        if not option_id:
+            continue
+        references: list[str] = []
+        label = "".join(str(scene.get("label") or "").casefold().split())
+        title = "".join(str(scene.get("title") or "").casefold().split())
+        if len(label) >= 3:
+            references.append(label)
+        # A one-letter generated title is not a stable natural-language
+        # reference.  Real scene titles are long enough to be unambiguous.
+        if len(title) >= 4:
+            references.append(title)
+        if any(reference in message_key for reference in references):
+            matched_ids.append(option_id)
+    return list(dict.fromkeys(matched_ids))
+
+
+def recover_visible_scene_selection_intent(
+    turn_intent: dict[str, Any],
+    session: DesignSession,
+    user_message: str,
+    pending_action: dict[str, Any] | None,
+    carried_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Bind an unmistakable current-scene reference after semantic omission.
+
+    The semantic model remains responsible for interpreting free-form physics
+    content.  This recovery only supplies the stable option binding when the
+    student names one or more currently visible labels/titles and the turn is not
+    a course question, topic reset, or authorized request for a new batch.
+    """
+
+    if (
+        session.interaction_state is not InteractionState.GUIDED_DESIGN
+        or session.current_stage is not Stage.IDEA_BRAINSTORMING
+        or not user_message.strip()
+        or user_message.rstrip().endswith(("?", "？"))
+        or (
+            isinstance(pending_action, dict)
+            and pending_action.get("candidate_purpose")
+            == STAGE_ONE_DIRECTION_CANDIDATE
+        )
+    ):
+        return None
+    idea = session.design_context.get("idea", {})
+    if isinstance(idea, dict) and idea.get("direction_locked") is True:
+        return None
+    updates = turn_intent.get("semantic_updates", {})
+    updates = deepcopy(updates) if isinstance(updates, dict) else {}
+    if (
+        updates.get("stage_one_scene_response") == "SELECT_OR_DEVELOP"
+        or updates.get("selected_option_ids")
+        or updates.get("scene_batch_authorized") is True
+        or updates.get("course_scope_status") == "OUT_OF_SCOPE"
+        or turn_intent.get("intent")
+        in {
+            UserIntent.ASK_COURSE_QUESTION.value,
+            UserIntent.NEW_TOPIC.value,
+            UserIntent.SET_INTERACTION_STATE.value,
+        }
+    ):
+        return None
+    selected_ids = _visible_scene_reference_option_ids(
+        user_message,
+        carried_context,
+    )
+    # One or several explicitly named current scenes are all unambiguous
+    # bindings.  Several ids mean the student is combining visible scenes,
+    # not that the reference itself is unresolved.
+    if not selected_ids:
+        return None
+
+    controls = updates.get("control_actions", [])
+    controls = list(controls) if isinstance(controls, list) else []
+    updates.update(
+        {
+            "selected_option_ids": selected_ids,
+            "stage_one_scene_response": "SELECT_OR_DEVELOP",
+            "stage_one_direction_detail": str(
+                updates.get("stage_one_direction_detail") or user_message
+            ).strip()[:1200],
+            "scene_batch_authorized": False,
+            "no_direction": False,
+            "course_scope_status": "COURSE_CONTENT",
+            "pending_answer_status": "CLEAR",
+            "control_actions": [
+                action for action in controls if action != "REQUEST_REFERENCE"
+            ],
+        }
+    )
+    recovered = deepcopy(turn_intent)
+    recovered.update(
+        {
+            "intent": UserIntent.ANSWER_CURRENT_QUESTION.value,
+            "target": (
+                str(pending_action.get("subject") or "stage_one_direction")
+                if isinstance(pending_action, dict)
+                else "stage_one_direction"
+            ),
+            "resolved_value": (
+                turn_intent.get("resolved_value")
+                if turn_intent.get("resolved_value") not in (None, "", [], {})
+                else user_message.strip()
+            ),
+            "advance_requested": False,
+            "preserve_current_design": True,
+            "confidence": max(float(turn_intent.get("confidence") or 0.0), 0.9),
+            # Keep the SEMANTIC prefix because the engine intentionally accepts
+            # structured update packets only from semantic/recovery sources.
+            # Without it the stable scene id survived intent resolution but
+            # was discarded before Stage 1 built its direction context.
+            "source": "SEMANTIC_VISIBLE_SCENE_REFERENCE_RECOVERY",
+            "semantic_updates": updates,
+        }
+    )
+    return recovered
 
 
 def resolved_intent(

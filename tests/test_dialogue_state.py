@@ -13,6 +13,7 @@ from ece329_workflow.dialogue_state import (
     fallback_intent,
     hydrate_pending_action_from_history,
     recover_repeated_pending_answer,
+    recover_visible_scene_selection_intent,
     record_pending_clarification,
     record_scene_direction_confirmation,
     STAGE_ONE_DIRECTION_CANDIDATE,
@@ -48,6 +49,7 @@ from ece329_workflow.idea_development import (
     initialize_idea_development,
     update_idea_development,
 )
+from ece329_workflow.knowledge_base import KNOWLEDGE
 from ece329_workflow.models import DesignSession, InteractionState, Stage, StepOutput
 from ece329_workflow.dialogue_acts import (
     apply_stage_field_updates,
@@ -4617,6 +4619,166 @@ class DialogueStateTests(unittest.TestCase):
         self.assertTrue(stored.design_context["idea"]["direction_locked"])
         self.assertIn("idea_development", stored.design_context)
 
+    def test_visible_scene_reference_recovers_missing_semantic_selection(self) -> None:
+        """A named current scene plus elaboration must not fall into confirmation."""
+
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        first = engine.create_design(
+            "我想探究静电场，看看不同物体的场线分布和相互影响"
+        )
+        scenes = first["stage_payload"]["exploration_scenes"]
+        selected = scenes[0]["course_anchor"]
+        # Reproduce the broad parser omission: it treats the detailed scene
+        # response as another reference request and supplies no scene fields.
+        engine.generator = ScriptedSemanticGenerator(
+            UserIntent.REQUEST_MORE_EXAMPLES,
+            target="exploration_scenes",
+            semantic_updates={
+                "control_actions": ["REQUEST_REFERENCE"],
+                "course_scope_status": "COURSE_CONTENT",
+            },
+        )
+
+        result = engine.process_turn(
+            first["design_id"],
+            {
+                "message": (
+                    "我对图景A感兴趣，并想比较两种材料在相同外加场中"
+                    "界面附近的场线弯曲与疏密变化。"
+                )
+            },
+        )
+
+        self.assertTrue(result["stage_payload"]["direction_locked"])
+        self.assertEqual(result["stage_payload"]["exploration_scenes"], [])
+        self.assertEqual(
+            result["stage_payload"]["selected_course_relations"],
+            [selected],
+        )
+        self.assertNotIn("沿用这个研究重点", result["assistant_message"])
+        self.assertNotIn("下面不是一组标准答案", result["assistant_message"])
+
+    def test_visible_scene_question_is_not_silently_locked_as_selection(self) -> None:
+        session = DesignSession(
+            design_id="scene-question",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+        }
+        turn_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            source="SEMANTIC_TEST",
+        )
+        recovered = recover_visible_scene_selection_intent(
+            turn_intent,
+            session,
+            "图景A是什么意思？",
+            pending,
+            {
+                "latest_exploration_scenes": [
+                    {
+                        "label": "图景 A",
+                        "title": "比较材料边界",
+                        "option_id": "scene:material-boundary",
+                    }
+                ]
+            },
+        )
+
+        self.assertIsNone(recovered)
+
+    def test_multiple_visible_scene_references_recover_as_a_combination(self) -> None:
+        session = DesignSession(
+            design_id="scene-combination",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        recovered = recover_visible_scene_selection_intent(
+            resolved_intent(
+                UserIntent.UNCLEAR,
+                source="SEMANTIC_TEST",
+            ),
+            session,
+            "我想组合图景A和图景C，比较材料边界改变后场的空间分布。",
+            {
+                "type": "ANSWER_STAGE_QUESTION",
+                "subject": Stage.IDEA_BRAINSTORMING.value,
+            },
+            {
+                "latest_exploration_scenes": [
+                    {
+                        "label": "图景 A",
+                        "title": "材料边界",
+                        "option_id": "scene:a",
+                    },
+                    {
+                        "label": "图景 B",
+                        "title": "电磁感应",
+                        "option_id": "scene:b",
+                    },
+                    {
+                        "label": "图景 C",
+                        "title": "空间场分布",
+                        "option_id": "scene:c",
+                    },
+                ]
+            },
+        )
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(
+            recovered["semantic_updates"]["selected_option_ids"],
+            ["scene:a", "scene:c"],
+        )
+        self.assertEqual(
+            recovered["semantic_updates"]["stage_one_scene_response"],
+            "SELECT_OR_DEVELOP",
+        )
+
+    def test_semantic_outage_keeps_an_exact_visible_scene_selection_executable(self) -> None:
+        session = DesignSession(
+            design_id="scene-outage",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+        )
+        pending = {
+            "type": "ANSWER_STAGE_QUESTION",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+            "question": "你想沿哪幅图景继续？",
+        }
+        recovered = degraded_context_intent(
+            session,
+            "我对图景A感兴趣，并想观察改变间距后的场线变化。",
+            pending,
+            {
+                "latest_exploration_scenes": [
+                    {
+                        "label": "图景 A",
+                        "title": "改变对象间距",
+                        "option_id": "scene:distance",
+                    }
+                ],
+                "intent_entry_context": {"direction_status": "UNSET"},
+                "topic_lock": {"locked": False},
+                "current_course_evidence": {},
+                "idea_development": {},
+            },
+            source="SEMANTIC_SERVICE_FALLBACK",
+        )
+
+        self.assertEqual(
+            recovered["intent"],
+            UserIntent.ANSWER_CURRENT_QUESTION.value,
+        )
+        self.assertEqual(
+            recovered["semantic_updates"]["selected_option_ids"],
+            ["scene:distance"],
+        )
+        self.assertEqual(
+            recovered["semantic_updates"]["stage_one_scene_response"],
+            "SELECT_OR_DEVELOP",
+        )
+
     def test_scene_reference_control_cannot_override_substantive_direction_content(self) -> None:
         """A long scene response is content, even if the parser also emits REQUEST_REFERENCE."""
 
@@ -5499,6 +5661,154 @@ class DialogueStateTests(unittest.TestCase):
         evidence = development["facets"]["conceptual_structure"]["evidence"]
         self.assertIn(original, evidence)
         self.assertIn("没有完全包住场源", evidence)
+
+    def test_selected_scene_course_binding_survives_later_broad_field_language(self) -> None:
+        """A selected Coulomb scene must not drift to a nearby lecture title."""
+
+        selected = next(
+            point
+            for point in KNOWLEDGE.exploration_points
+            if point.get("catalog_scene_id") == "ECE329-S004"
+        )
+        session = DesignSession(
+            design_id="stable_scene_course_support",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "original": "研究两个带电物体靠近时的电场线变化",
+                    "selected_scene_ids": ["ECE329-S004"],
+                    "selected_course_relations": [selected],
+                    "direction_locked": True,
+                }
+            },
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "course_relationship",
+                    "operation": "REPLACE",
+                    "value": "库仑定律、点电荷场与矢量叠加",
+                    "provenance": "STUDENT_SCENE_SELECTION",
+                }
+            ],
+        )
+        development = initialize_idea_development(
+            session,
+            {
+                "core_phenomenon": "两个点电荷从远到近时中间区域电场线的变化",
+                "course_relationships": ["库仑定律、点电荷场与矢量叠加"],
+            },
+        )
+
+        self.assertEqual(
+            development["facets"]["course_mapping"]["source"],
+            "SELECTED_SCENE_BINDING",
+        )
+        self.assertIn(
+            "库仑",
+            development["facets"]["course_mapping"]["evidence"],
+        )
+        formula_ids = {
+            item["id"] for item in development["formula_references"]
+        }
+        self.assertIn("coulomb_point_charge", formula_ids)
+        self.assertIn("electric_field_superposition", formula_ids)
+        self.assertNotIn("lorentz_force", formula_ids)
+
+        # Repeating broad field vocabulary later must refresh from the stable
+        # scene graph, not run a new lecture-title search.
+        update_idea_development(
+            session,
+            "我要继续观察电场、电场线和中间区域的电场空间变化。",
+            semantic_updates={
+                "facet_updates": [
+                    {
+                        "facet_id": "research_question",
+                        "status": "CLEAR",
+                        "value": "距离减小时中间区域电场线怎样变化？",
+                    }
+                ]
+            },
+        )
+        self.assertIn(
+            "库仑",
+            development["facets"]["course_mapping"]["evidence"],
+        )
+        self.assertNotIn(
+            "Lorentz",
+            development["facets"]["course_mapping"]["evidence"],
+        )
+        self.assertNotIn(
+            "lorentz_force",
+            {item["id"] for item in development["formula_references"]},
+        )
+
+    def test_unbound_text_retrieval_does_not_confirm_course_mapping(self) -> None:
+        """Text similarity alone remains a candidate, never accepted state."""
+
+        session = DesignSession(
+            design_id="unbound_course_candidates",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={"idea": {"original": "我想观察电场和电场线"}},
+        )
+        development = initialize_idea_development(
+            session,
+            {"core_phenomenon": "观察电场和电场线"},
+        )
+
+        self.assertEqual(
+            development["facets"]["course_mapping"]["status"],
+            "MISSING",
+        )
+        self.assertTrue(development["course_references"])
+        self.assertTrue(development["formula_references"])
+
+    def test_selected_scene_repairs_a_legacy_agent_retrieval_mismatch(self) -> None:
+        selected = next(
+            point
+            for point in KNOWLEDGE.exploration_points
+            if point.get("catalog_scene_id") == "ECE329-S004"
+        )
+        session = DesignSession(
+            design_id="repair_legacy_course_mismatch",
+            interaction_state=InteractionState.GUIDED_DESIGN,
+            design_context={
+                "idea": {
+                    "original": "两个点电荷靠近时的电场线变化",
+                    "selected_scene_ids": ["ECE329-S004"],
+                    "selected_course_relations": [selected],
+                    "direction_locked": True,
+                },
+                "experiment_outline_seed": {
+                    "core_phenomenon": "两个点电荷靠近时的电场线变化",
+                    "course_relationships": ["库仑定律、点电荷场与矢量叠加"],
+                },
+            },
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": "course_relationship",
+                    "operation": "REPLACE",
+                    "value": "Vector fields and Lorentz force",
+                }
+            ],
+            provenance="AGENT_SUGGESTION",
+        )
+
+        development = initialize_idea_development(
+            session,
+            session.design_context["experiment_outline_seed"],
+        )
+
+        evidence = development["facets"]["course_mapping"]["evidence"]
+        self.assertIn("库仑", evidence)
+        self.assertNotIn("Lorentz", evidence)
+        canonical_relationship = design_state_snapshot(session)["course_relationship"]
+        self.assertIn("库仑", canonical_relationship)
+        self.assertNotIn("Lorentz", canonical_relationship)
 
     def test_semantic_facet_updates_do_not_erase_confirmed_facets(self) -> None:
         session = DesignSession(

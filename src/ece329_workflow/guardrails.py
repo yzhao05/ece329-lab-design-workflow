@@ -295,7 +295,24 @@ def build_stage_one_turn_context(
         ]
     elif resolved is not None:
         selected_course_relations = [dict(resolved)]
-        selected_scene_ids = []
+        resolved_scene_id = str(resolved.get("catalog_scene_id") or "").strip()
+        if not resolved_scene_id:
+            resolved_scene_id = next(
+                (
+                    str(scene.get("catalog_scene_id") or scene.get("scene_id") or "").strip()
+                    for scene in scenes
+                    if isinstance(scene, dict)
+                    and isinstance(scene.get("course_anchor"), dict)
+                    and scene.get("course_anchor") == resolved
+                    and str(
+                        scene.get("catalog_scene_id")
+                        or scene.get("scene_id")
+                        or ""
+                    ).strip()
+                ),
+                "",
+            )
+        selected_scene_ids = [resolved_scene_id] if resolved_scene_id else []
     selected_domains = {
         str(item.get("course_block") or "").strip().casefold()
         for item in selected_course_relations

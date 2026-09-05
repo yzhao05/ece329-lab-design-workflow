@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any, Protocol
 
 from .dialogue_state import UserIntent, build_carried_context
@@ -620,8 +621,74 @@ def _course_references(text: str) -> list[dict[str, Any]]:
     return KNOWLEDGE.concept_references(text)
 
 
-def _formula_references(text: str) -> list[dict[str, Any]]:
-    return KNOWLEDGE.formula_references(text)
+def _profile_course_references(text: str) -> list[dict[str, Any]]:
+    """Return lecture anchors for the best supported formula profiles."""
+
+    concept_ids: list[str] = []
+    for profile in KNOWLEDGE.formula_design_references(text, limit=2):
+        for formula in profile.get("primary_formulas", []):
+            if not isinstance(formula, dict):
+                continue
+            concept_ids.extend(
+                str(item).strip()
+                for item in formula.get("concept_ids", [])
+                if str(item).strip()
+            )
+    return KNOWLEDGE.concept_references_for_ids(concept_ids)
+
+
+def _guided_scene_course_support(
+    session: DesignSession,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read exact course/formula records for a locked guided scene."""
+
+    idea = session.design_context.get("idea", {})
+    if not isinstance(idea, dict):
+        return [], []
+    relations = idea.get("selected_course_relations", [])
+    relations = relations if isinstance(relations, list) else []
+    raw_scene_ids = idea.get("selected_scene_ids", [])
+    scene_ids = (
+        [str(item).strip() for item in raw_scene_ids if str(item).strip()]
+        if isinstance(raw_scene_ids, list)
+        else []
+    )
+    scene_ids.extend(
+        str(item.get("catalog_scene_id") or "").strip()
+        for item in relations
+        if isinstance(item, dict)
+        and str(item.get("catalog_scene_id") or "").strip()
+    )
+    links = KNOWLEDGE.formula_links_for_scenes(list(dict.fromkeys(scene_ids)))
+    if not links:
+        return [], []
+    concept_ids = [
+        str(item.get("concept_id") or "").strip()
+        for item in relations
+        if isinstance(item, dict)
+        and str(item.get("concept_id") or "").strip()
+    ]
+    if not concept_ids:
+        linked_scene_ids = {str(link.get("scene_id") or "") for link in links}
+        concept_ids = [
+            str(point.get("concept_id") or "").strip()
+            for point in KNOWLEDGE.exploration_points
+            if str(point.get("catalog_scene_id") or "") in linked_scene_ids
+            and str(point.get("concept_id") or "").strip()
+        ]
+    concepts = KNOWLEDGE.concept_references_for_ids(concept_ids)
+    formulas: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for link in links:
+        for key in ("primary_formulas", "supporting_formulas"):
+            for formula in link.get(key, []):
+                if not isinstance(formula, dict):
+                    continue
+                formula_id = str(formula.get("id") or "").strip()
+                if formula_id and formula_id not in seen:
+                    seen.add(formula_id)
+                    formulas.append(deepcopy(formula))
+    return concepts, formulas
 
 
 def _emvr_content_text(value: Any) -> str:
@@ -1543,7 +1610,12 @@ class RuleBasedStageGenerator:
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             topics = _course_topics(idea)
-            references = _course_references(idea)
+            bound_references, _ = _guided_scene_course_support(session)
+            references = (
+                bound_references
+                or _profile_course_references(idea)
+                or _course_references(idea)
+            )
             prior_output = session.stage_outputs.get(Stage.IDEA_BRAINSTORMING.value, {})
             prior_payload = prior_output.get("stage_payload", {}) if isinstance(prior_output, dict) else {}
             outline = prior_payload.get("experiment_outline_seed", {}) if isinstance(prior_payload, dict) else {}
@@ -1588,7 +1660,20 @@ class RuleBasedStageGenerator:
                 student_task="你希望实验主要改变哪一个因素？",
             )
         if stage is Stage.THEORETICAL_FRAMEWORK:
-            formulas = _formula_references(idea)
+            _, bound_formulas = _guided_scene_course_support(session)
+            if bound_formulas:
+                formulas = bound_formulas
+            else:
+                profiles = KNOWLEDGE.formula_design_references(idea, limit=4)
+                formulas = []
+                seen_formula_ids: set[str] = set()
+                for profile in profiles:
+                    for key in ("primary_formulas", "supporting_formulas"):
+                        for formula in profile.get(key, []):
+                            formula_id = str(formula.get("id") or "").strip()
+                            if formula_id and formula_id not in seen_formula_ids:
+                                seen_formula_ids.add(formula_id)
+                                formulas.append(deepcopy(formula))
             return StepOutput(
                 assistant_message="理论框架先从一个核心课程关系开始。",
                 stage_payload={

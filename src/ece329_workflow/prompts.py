@@ -44,6 +44,8 @@ brainstorm_options中的catalog_scene_id和catalog_scene_number只用于内部�
 学生选定一个点后进入INTEREST_DESCRIPTION：停止继续列选项，邀请学生用自己的话描述感兴趣的现象、物理联系或疑惑，不替学生补写描述。收到描述后进入DEPTH_EXPANSION：结合检索到的课程关系对学生原话作较深入的概念拓展，不再把内容写成选择题，也不重复相同的编号列表。不同阶段的回复结构和措辞应自然变化，避免每轮都使用相同开头、相同三项列表和相同结尾。
 学生负责决定核心现象、希望理解的物理关系、研究范围，以及是否接受助手对方向的概括。不要把每一个常识性的基本case拆成连续问题让学生逐项决定；对于互补且共同构成基本比较的情形，应在standard_comparisons中一次性提出有理由的默认建议，而不是连续追问学生先选哪一种。此规则适用于任何ECE329课内主题，不得写成只识别某几个器件、材料或电荷名称的特例。建议的adoption_status必须先为PENDING，不能写成已自动纳入：只有学生明确接受这组比较，或语义解析器为该组提交ACCEPT/MODIFY动作后，才改为ACCEPTED/MODIFIED；仅仅继续流程不能把尚未确认的建议写入规范化设计。学生也可以通过自然语言只保留任意case、排除任意case、恢复任意case或拒绝整组，分别改成MODIFIED、ACCEPTED或REJECTED。解析必须以当前standard_comparisons实际包含的case为准，学生一旦删改或拒绝，后续不得擅自恢复。除这种基础case整理外，核心物理关系、范围和重点等实质性取舍仍由学生决定。
 若学生组合两个或更多图景，必须把每个图景对应的course_anchor分别保存在selected_course_relations中。后续每轮都要保留这些关系：可以区分主要现象与辅助解释角度，但不得因为学生继续描述主要现象而静默删除组合中的另一条关系。
+学生一旦选择图景，knowledge_retrieval.selected_scene_formula_links就是该方向的权威课程绑定。后续不得因学生反复使用“电场”“磁场”“波”等宽泛词语而重新检索并替换这些绑定；只有学生明确修改理论关系或更换研究方向时才允许重绑定。没有稳定图景绑定时，knowledge_retrieval.concepts、formulas和formula_design_profiles只是待审查的候选，不能仅凭文本相似就写成已确认课程关系。
+任何准备写入课程关系或理论依据的公式，都必须能通过公式档案说明它具体支持当前实验的变化量、观察量及适用边界；缺少这种字段级对应时不得自动加入。验证依据是稳定公式ID、公式设计档案和已确认设计字段，不得靠扩充某几个公式名称的排除关键词来补救。
 一旦context.stage_one_thread.ready_for_next_stage=true，本轮目标变为快速收敛：用不超过两段的简洁文字概括核心现象、全部组合关系、标准对照的建议或采纳状态，以及学生明确提出的观察重点，不重复完整对话链，不使用空泛肯定语，不再提出新的内容选择题。PENDING对照要说明它是默认建议，并说明学生可以直接删改；不得声称“自动纳入”。student_task只请学生检查大纲或指出关键遗漏；不要继续问“更想A还是B”“先看哪一种”“哪部分更重要”等细节。
 想法探索不得要求学生在形成方向前确定具体自变量、因变量、公式、研究问题、假设、装置或实验流程；收敛时应把核心现象、已选课程关系、基础对照和观察重点整理为experiment_outline_seed实验大纲雏形。大纲形成后，课程映射、学习目标、研究问题、理论依据、预期趋势和概念实验结构成为同一阶段的动态完整性清单：每轮重新判断已明确项与缺失项，一次只引导当前最关键缺口，学生一条回复可以同时明确多项，不得按固定小点顺序推进。
 课程映射和理论依据由助手根据已核对的课程资料主动检索并展示；不得再次要求学生选择课程方向或凭记忆指定公式。
@@ -317,6 +319,123 @@ def _stage_output_contract(
     return "stage_payload_json只编码当前阶段的结构化内容，不得包含其他阶段的结果。"
 
 
+def _formula_records_from_profiles(
+    profiles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Flatten formulas that have an explicit design-profile relationship."""
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        for key in ("primary_formulas", "supporting_formulas"):
+            for formula in profile.get(key, []):
+                if not isinstance(formula, dict):
+                    continue
+                formula_id = str(formula.get("id") or "").strip()
+                if formula_id and formula_id not in seen:
+                    seen.add(formula_id)
+                    records.append(deepcopy(formula))
+    return records
+
+
+def _concept_records_from_profiles(
+    profiles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve lecture references supporting the profiles' primary formulas."""
+
+    concept_ids: list[str] = []
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        for formula in profile.get("primary_formulas", []):
+            if not isinstance(formula, dict):
+                continue
+            concept_ids.extend(
+                str(item).strip()
+                for item in formula.get("concept_ids", [])
+                if str(item).strip()
+            )
+    return KNOWLEDGE.concept_references_for_ids(concept_ids)
+
+
+def _selected_scene_formula_context(
+    stage_one_thread: dict[str, Any],
+    idea_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve selected scenes through stable ids instead of student prose."""
+
+    thread_has_selection = bool(
+        stage_one_thread.get("selected_scene_ids")
+        or stage_one_thread.get("selected_course_relations")
+    )
+    # During a Stage 1 selection change the freshly resolved thread context
+    # supersedes the previously saved idea.  Combining both would retain a
+    # stale formula family for one turn.  Outside Stage 1, the saved idea is the
+    # only source and remains authoritative.
+    source = stage_one_thread if thread_has_selection else idea_context
+    raw_ids = source.get("selected_scene_ids", [])
+    scene_ids = (
+        [str(item).strip() for item in raw_ids if str(item).strip()]
+        if isinstance(raw_ids, list)
+        else []
+    )
+    raw_relations = source.get("selected_course_relations", [])
+    relations = (
+        [item for item in raw_relations if isinstance(item, dict)]
+        if isinstance(raw_relations, list)
+        else []
+    )
+    for relation in relations:
+        scene_id = str(relation.get("catalog_scene_id") or "").strip()
+        if scene_id:
+            scene_ids.append(scene_id)
+    links = KNOWLEDGE.formula_links_for_scenes(list(dict.fromkeys(scene_ids)))
+    if not links:
+        return None
+
+    profiles: list[dict[str, Any]] = []
+    formulas: list[dict[str, Any]] = []
+    seen_profiles: set[str] = set()
+    seen_formulas: set[str] = set()
+    for link in links:
+        for profile in link.get("formula_design_profiles", []):
+            if not isinstance(profile, dict):
+                continue
+            profile_id = str(profile.get("profile_id") or "").strip()
+            if profile_id and profile_id not in seen_profiles:
+                seen_profiles.add(profile_id)
+                profiles.append(deepcopy(profile))
+        for key in ("primary_formulas", "supporting_formulas"):
+            for formula in link.get(key, []):
+                if not isinstance(formula, dict):
+                    continue
+                formula_id = str(formula.get("id") or "").strip()
+                if formula_id and formula_id not in seen_formulas:
+                    seen_formulas.add(formula_id)
+                    formulas.append(deepcopy(formula))
+    concept_ids = [
+        str(relation.get("concept_id") or "").strip()
+        for relation in relations
+        if str(relation.get("concept_id") or "").strip()
+    ]
+    if not concept_ids:
+        linked_scene_ids = {str(link.get("scene_id") or "") for link in links}
+        concept_ids = [
+            str(point.get("concept_id") or "").strip()
+            for point in KNOWLEDGE.exploration_points
+            if str(point.get("catalog_scene_id") or "") in linked_scene_ids
+            and str(point.get("concept_id") or "").strip()
+        ]
+    return {
+        "links": deepcopy(links),
+        "concepts": KNOWLEDGE.concept_references_for_ids(concept_ids),
+        "formulas": formulas,
+        "profiles": profiles,
+    }
+
+
 def build_prompt_packet(
     session: DesignSession,
     user_message: str,
@@ -393,7 +512,26 @@ def build_prompt_packet(
         if stage_one_preclassification is not None
         else False
     )
-    concepts = KNOWLEDGE.concept_references(retrieval_text, limit=5)
+    selected_scene_formula_context = (
+        _selected_scene_formula_context(
+            stage_one_thread,
+            idea_context if isinstance(idea_context, dict) else {},
+        )
+        if session.interaction_state is InteractionState.GUIDED_DESIGN
+        else None
+    )
+    guided_candidate_profiles = (
+        KNOWLEDGE.formula_design_references(retrieval_text, limit=4)
+        if session.interaction_state is InteractionState.GUIDED_DESIGN
+        and selected_scene_formula_context is None
+        else []
+    )
+    concepts = (
+        selected_scene_formula_context["concepts"]
+        if selected_scene_formula_context is not None
+        else _concept_records_from_profiles(guided_candidate_profiles)
+        or KNOWLEDGE.concept_references(retrieval_text, limit=5)
+    )
     supplemental_concepts = KNOWLEDGE.supplemental_concept_references(
         retrieval_text,
         limit=5,
@@ -428,18 +566,27 @@ def build_prompt_packet(
                 retrieval_text,
                 limit=12,
             )
+        formula_ids = {
+            str(item.get("id") or "")
+            for item in formulas
+            if isinstance(item, dict) and str(item.get("id") or "")
+        }
+        formula_design_profiles = (
+            KNOWLEDGE.design_profiles_for_formula_ids(formula_ids, limit=4)
+            if formula_ids
+            else KNOWLEDGE.formula_design_references(retrieval_text, limit=4)
+        )
     else:
-        formulas = KNOWLEDGE.formula_references(retrieval_text, limit=12)
-    formula_ids = {
-        str(item.get("id") or "")
-        for item in formulas
-        if isinstance(item, dict) and str(item.get("id") or "")
-    }
-    formula_design_profiles = (
-        KNOWLEDGE.design_profiles_for_formula_ids(formula_ids, limit=4)
-        if formula_ids and session.interaction_state is InteractionState.EMVR_DIRECT
-        else KNOWLEDGE.formula_design_references(retrieval_text, limit=4)
-    )
+        formula_design_profiles = (
+            selected_scene_formula_context["profiles"]
+            if selected_scene_formula_context is not None
+            else guided_candidate_profiles
+        )
+        formulas = (
+            selected_scene_formula_context["formulas"]
+            if selected_scene_formula_context is not None
+            else _formula_records_from_profiles(formula_design_profiles)
+        )
     shown_option_ids = shown_exploration_option_ids(session.history)
     sample_seed = f"{session.design_id}:{len(shown_option_ids)}"
     # Scene sampling should follow the student's current topic, not the whole
@@ -513,6 +660,11 @@ def build_prompt_packet(
             "supplemental_concepts": supplemental_concepts,
             "formulas": formulas,
             "formula_design_profiles": formula_design_profiles,
+            "selected_scene_formula_links": (
+                selected_scene_formula_context["links"]
+                if selected_scene_formula_context is not None
+                else []
+            ),
             "brainstorm_options": brainstorm_options,
             "exploration_scene_catalog_size": len(KNOWLEDGE.exploration_points),
             "previously_shown_scene_count": len(shown_option_ids),

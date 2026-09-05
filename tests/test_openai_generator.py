@@ -604,6 +604,89 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertIn("supported_observations", profile)
         self.assertIn("boundary_conditions", profile)
 
+    def test_guided_prompt_uses_selected_scene_formula_links_as_authority(self) -> None:
+        selected = next(
+            point
+            for point in KNOWLEDGE.exploration_points
+            if point.get("catalog_scene_id") == "ECE329-S004"
+        )
+        session = guided_session()
+        session.design_context["idea"] = {
+            "original": "研究两个带电物体靠近时的电场和电场线",
+            "topic_anchor": "静电场实验",
+            "current_focus": "两个点电荷靠近时的电场线变化",
+            "selected_scene_ids": ["ECE329-S004"],
+            "selected_course_relations": [selected],
+            "direction_locked": True,
+        }
+
+        packet = build_prompt_packet(
+            session,
+            "继续研究电场、电场线和中间区域的空间变化",
+        )
+        retrieval = json.loads(packet["serialized_context"])["knowledge_retrieval"]
+        formula_ids = {item["id"] for item in retrieval["formulas"]}
+        profile_ids = {
+            item["profile_id"] for item in retrieval["formula_design_profiles"]
+        }
+
+        self.assertTrue(retrieval["selected_scene_formula_links"])
+        self.assertEqual(profile_ids, {"FD02_COULOMB_SUPERPOSITION"})
+        self.assertIn("coulomb_point_charge", formula_ids)
+        self.assertIn("electric_field_superposition", formula_ids)
+        self.assertNotIn("lorentz_force", formula_ids)
+        self.assertEqual(
+            {item["concept_id"] for item in retrieval["concepts"]},
+            {selected["concept_id"]},
+        )
+
+    def test_single_scene_selection_keeps_its_catalog_scene_id(self) -> None:
+        selected = next(
+            point
+            for point in KNOWLEDGE.exploration_points
+            if point.get("catalog_scene_id") == "ECE329-S004"
+        )
+
+        context = build_stage_one_turn_context(
+            "我想沿这个图景继续研究两个电荷靠近时的场线变化",
+            options=[selected],
+            idea_context={},
+            selected_option_id=selected["option_id"],
+            semantic_updates={"course_scope_status": "COURSE_CONTENT"},
+        )
+
+        self.assertEqual(context["selected_scene_ids"], ["ECE329-S004"])
+        self.assertEqual(context["selected_course_relations"], [selected])
+
+    def test_unbound_guided_formula_candidates_come_from_design_profiles(self) -> None:
+        session = guided_session()
+        session.design_context["idea"] = {
+            "original": "我想观察静电场中的电场线变化"
+        }
+        packet = build_prompt_packet(session, "我想观察静电场中的电场线变化")
+        retrieval = json.loads(packet["serialized_context"])["knowledge_retrieval"]
+        allowed_formula_ids = {
+            formula["id"]
+            for profile in retrieval["formula_design_profiles"]
+            for key in ("primary_formulas", "supporting_formulas")
+            for formula in profile.get(key, [])
+        }
+
+        self.assertTrue(retrieval["formula_design_profiles"])
+        self.assertEqual(
+            {item["id"] for item in retrieval["formulas"]},
+            allowed_formula_ids,
+        )
+        self.assertNotIn(
+            "lorentz_force",
+            {item["id"] for item in retrieval["formulas"]},
+        )
+        self.assertNotIn(
+            "lecture_01",
+            {item["concept_id"] for item in retrieval["concepts"]},
+        )
+        self.assertEqual(retrieval["selected_scene_formula_links"], [])
+
     def test_coverage_audit_ignores_separate_field_wrappers_in_compound_answer(self) -> None:
         question = "两个带电物体靠近时，场线如何随距离和电荷类型变化"
         changed = "距离和电荷类型"
