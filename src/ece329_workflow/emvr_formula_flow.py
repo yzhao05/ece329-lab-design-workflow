@@ -359,6 +359,8 @@ def public_formula_flow_state(session: DesignSession) -> dict[str, Any] | None:
             "primary_formula_ids": list(selection.get("primary_formula_ids", [])),
             "supporting_formula_ids": list(selection.get("supporting_formula_ids", [])),
             "selection_status": selection.get("selection_status", "PENDING"),
+            "student_rationale": str(selection.get("student_rationale") or "")
+            or None,
         },
         "formula_composition": deepcopy(flow.get("formula_composition")),
         "method_selection": {
@@ -1033,6 +1035,84 @@ def _formula_selection_from_option(option_id: str | None) -> dict[str, Any] | No
     return {"primary_profile_ids": [profile_id], "supporting_profile_ids": [], "student_rationale": None}
 
 
+def _formula_selection_from_visible_card_reference(
+    message: str,
+    flow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve one exact reference to the currently visible formula cards.
+
+    This is an outage-safe equivalent of clicking a formula-card button.  It
+    compares only the complete labels carried by the current state and never
+    searches a topic keyword list or infers a formula from physics words.
+    """
+
+    compact_message = "".join(message.split()).casefold()
+    if not compact_message:
+        return None
+    candidates = set(
+        str(item)
+        for item in flow.get("formula_selection", {}).get(
+            "candidate_profile_ids", []
+        )
+        if str(item)
+    )
+    matches = [
+        str(card.get("profile_id") or "")
+        for card in flow.get("formula_cards", [])
+        if isinstance(card, dict)
+        and str(card.get("profile_id") or "") in candidates
+        and (title := "".join(str(card.get("title") or "").split()).casefold())
+        and title in compact_message
+    ]
+    matches = list(dict.fromkeys(item for item in matches if item))
+    if len(matches) != 1:
+        return None
+    return {
+        "primary_profile_ids": matches,
+        "supporting_profile_ids": [],
+        "student_rationale": message.strip()[:1000] or None,
+    }
+
+
+def _semantic_outage_stage_payload(
+    flow: dict[str, Any],
+    phase: str,
+) -> dict[str, Any]:
+    """Keep deterministic UI actions available while semantics are offline."""
+
+    payload: dict[str, Any] = {
+        "emvr_formula_phase": phase,
+        "semantic_recovery_pending": True,
+        "preserve_pending_action": True,
+    }
+    if phase == FORMULA_CANDIDATES_PRESENTED:
+        payload["formula_cards"] = deepcopy(flow.get("formula_cards", []))
+    elif phase == FORMULA_COMPOSITION_REVIEW:
+        payload["composition_options"] = [
+            {
+                "option_id": "emvr-composition:combined",
+                "label": "组合成一个完整实验",
+            },
+            {
+                "option_id": "emvr-composition:separate_then_combine",
+                "label": "逐个小实验后组合",
+            },
+        ]
+        payload["confirmed_formula_selection"] = deepcopy(
+            flow.get("formula_selection", {})
+        )
+    elif phase == EXPERIMENT_METHODS_PRESENTED:
+        payload["coverage_matrix"] = deepcopy(flow.get("coverage_matrix", {}))
+        payload["experiment_methods"] = deepcopy(
+            flow.get("experiment_methods", [])
+        )
+    elif phase == EXPERIMENT_DIRECTION_REVIEW:
+        payload["experiment_brief_draft"] = deepcopy(
+            flow.get("experiment_brief", {})
+        )
+    return payload
+
+
 def _composition_from_option(option_id: str | None) -> dict[str, Any] | None:
     prefix = "emvr-composition:"
     if not isinstance(option_id, str) or not option_id.startswith(prefix):
@@ -1226,6 +1306,7 @@ def handle_emvr_formula_turn(
 
     flow = ensure_emvr_formula_flow(session)
     phase = str(flow.get("phase") or TOPIC_RECEIVED)
+    outage_formula_selection: dict[str, Any] | None = None
     if _semantic_service_failed(turn_intent):
         _remember_semantic_recovery(
             flow,
@@ -1233,21 +1314,26 @@ def handle_emvr_formula_turn(
             message=message,
             turn_intent=turn_intent,
         )
-        return (
-            StepOutput(
-                assistant_message=(
-                    "这次课程理解服务没有完成解析，所以我没有把你的话误写进实验设计。"
-                    "你刚才的内容和当前进度都已保留；服务恢复后可以直接重试或继续补充，不需要重新开始。"
+        if phase == FORMULA_CANDIDATES_PRESENTED:
+            outage_formula_selection = _formula_selection_from_visible_card_reference(
+                message,
+                flow,
+            )
+        if outage_formula_selection is None:
+            return (
+                StepOutput(
+                    assistant_message=(
+                        "这次课程理解服务没有完成解析，所以我没有把你的话误写进实验设计。"
+                        "当前公式、方法和进度都已保留；如果页面下方仍有选项，可以直接点击继续，"
+                        "不需要重新输入整段内容，也不需要重新开始。"
+                    ),
+                    stage_payload=_semantic_outage_stage_payload(flow, phase),
+                    student_task=(
+                        "可以直接点击当前选项继续；若需要自由修改，稍后再重试刚才的内容。"
+                    ),
                 ),
-                stage_payload={
-                    "emvr_formula_phase": phase,
-                    "semantic_recovery_pending": True,
-                    "preserve_pending_action": True,
-                },
-                student_task="请稍后重试刚才的内容；已经确认的设计不会丢失。",
-            ),
-            False,
-        )
+                False,
+            )
     topic_action = _selected_action(turn_intent, "SET_EMVR_TOPIC")
     if topic_action:
         _clear_semantic_recovery(flow)
@@ -1398,6 +1484,7 @@ def handle_emvr_formula_turn(
         chosen = (
             _formula_selection_from_option(selected_option_id)
             or _selected_action(turn_intent, "SELECT_EMVR_FORMULAS")
+            or outage_formula_selection
         )
         candidates = set(flow["formula_selection"].get("candidate_profile_ids", []))
         if chosen:

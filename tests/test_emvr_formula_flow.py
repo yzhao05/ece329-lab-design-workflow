@@ -85,6 +85,18 @@ class FormulaSemanticGenerator(RuleBasedStageGenerator):
         )
 
 
+class FormulaSelectionOutageGenerator(FormulaSemanticGenerator):
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        flow = carried_context.get("emvr_formula_flow", {})
+        if flow.get("phase") == TOPIC_RECEIVED:
+            return _formula_intent("SET_EMVR_TOPIC", _topic_analysis())
+        return resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+
 class EmvrFormulaFlowTests(unittest.TestCase):
     def _session(self) -> DesignSession:
         session = DesignSession(
@@ -194,6 +206,111 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             FORMULA_CANDIDATES_PRESENTED,
         )
         self.assertNotIn("semantic_recovery", flow)
+
+    def test_formula_choice_recovers_from_exact_visible_card_during_outage(self) -> None:
+        session = self._session()
+        handle_emvr_formula_turn(
+            session,
+            "我想研究静电场",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        flow = session.design_context["emvr_design"]["formula_flow"]
+        selected_card = next(
+            card
+            for card in flow["formula_cards"]
+            if card["profile_id"] == "FD02_COULOMB_SUPERPOSITION"
+        )
+        message = (
+            f"我选第一组：{selected_card['title']}。"
+            "主要想通过VR看到两个点电荷的场线如何随距离和极性变化"
+        )
+        failed_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+        output, complete = handle_emvr_formula_turn(
+            session,
+            message,
+            failed_intent,
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            flow["formula_selection"]["primary_profile_ids"],
+            ["FD02_COULOMB_SUPERPOSITION"],
+        )
+        self.assertEqual(flow["formula_selection"]["student_rationale"], message)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            FORMULA_COMPOSITION_REVIEW,
+        )
+        self.assertNotIn("semantic_recovery", flow)
+
+    def test_formula_outage_keeps_current_cards_clickable(self) -> None:
+        session = self._session()
+        initial, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究静电场",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        failed_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+        outage, complete = handle_emvr_formula_turn(
+            session,
+            "这几组我还需要再比较一下",
+            failed_intent,
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            outage.stage_payload["formula_cards"],
+            initial.stage_payload["formula_cards"],
+        )
+        self.assertTrue(
+            all(card.get("option_id") for card in outage.stage_payload["formula_cards"])
+        )
+        self.assertIn("直接点击", outage.assistant_message)
+
+    def test_engine_does_not_loop_when_visible_formula_choice_hits_outage(self) -> None:
+        engine = WorkflowEngine(generator=FormulaSelectionOutageGenerator())
+        first = engine.create_design(
+            "我想做一个静电场实验",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        selected_card = next(
+            card
+            for card in first["stage_payload"]["formula_cards"]
+            if card["profile_id"] == "FD02_COULOMB_SUPERPOSITION"
+        )
+
+        result = engine.process_turn(
+            first["design_id"],
+            {
+                "message": (
+                    f"我选第一组：{selected_card['title']}。"
+                    "主要想通过VR看到两个点电荷的场线如何随距离和极性变化"
+                )
+            },
+        )
+
+        self.assertEqual(
+            result["stage_payload"]["emvr_formula_phase"],
+            FORMULA_COMPOSITION_REVIEW,
+        )
+        self.assertNotIn("请稍后重试刚才的内容", result["assistant_message"])
+        stored = engine.store.get(first["design_id"])
+        self.assertEqual(
+            stored.design_context["emvr_design"]["formula_flow"][
+                "formula_selection"
+            ]["primary_profile_ids"],
+            ["FD02_COULOMB_SUPERPOSITION"],
+        )
 
     def test_effective_brief_preserves_formula_flow_object_enumeration(self) -> None:
         session = self._session()
