@@ -97,7 +97,65 @@ class FormulaSelectionOutageGenerator(FormulaSemanticGenerator):
         )
 
 
+class FormulaQuestionPriorityGenerator(FormulaSemanticGenerator):
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        flow = carried_context.get("emvr_formula_flow", {})
+        if flow.get("phase") == TOPIC_RECEIVED:
+            return _formula_intent("SET_EMVR_TOPIC", _topic_analysis())
+        if "为什么" in user_message:
+            candidate = flow["formula_selection"]["candidate_profile_ids"][0]
+            return resolved_intent(
+                UserIntent.ASK_COURSE_QUESTION,
+                confidence=0.99,
+                source="SEMANTIC_TEST",
+                semantic_updates={
+                    "student_questions": ["为什么这组公式适合这个实验？"],
+                    "emvr_formula_actions": [
+                        {
+                            "type": "SELECT_EMVR_FORMULAS",
+                            "content": {
+                                "primary_profile_ids": [candidate],
+                                "supporting_profile_ids": [],
+                            },
+                        }
+                    ],
+                },
+            )
+        return resolved_intent(
+            UserIntent.ADVANCE_STAGE,
+            confidence=0.99,
+            source="SEMANTIC_TEST",
+            semantic_updates={"control_actions": ["ADVANCE"]},
+        )
+
+
 class EmvrFormulaFlowTests(unittest.TestCase):
+    def test_course_question_pauses_formula_progress_and_preserves_selection(self) -> None:
+        engine = WorkflowEngine(generator=FormulaQuestionPriorityGenerator())
+        first = engine.create_design(
+            "我想研究两个带电球靠近时的电场",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+
+        answered = engine.process_turn(
+            first["design_id"],
+            {"message": "为什么这组公式适合这个实验？我也想采用它"},
+        )
+        stored = engine.store.get(first["design_id"])
+        flow = stored.design_context["emvr_design"]["formula_flow"]
+
+        self.assertEqual(flow["phase"], FORMULA_CANDIDATES_PRESENTED)
+        self.assertTrue(flow.get("deferred_formula_actions"))
+        self.assertTrue(answered["stage_payload"].get("answered_student_questions"))
+
+        continued = engine.process_turn(first["design_id"], {"message": "继续当前选择"})
+        flow = engine.store.get(first["design_id"]).design_context["emvr_design"]["formula_flow"]
+        self.assertEqual(flow["phase"], FORMULA_COMPOSITION_REVIEW)
+        self.assertEqual(
+            continued["stage_payload"]["emvr_formula_phase"],
+            FORMULA_COMPOSITION_REVIEW,
+        )
+
     def _session(self) -> DesignSession:
         session = DesignSession(
             design_id="formula-flow-test",
@@ -391,6 +449,9 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             for pattern_id in item["pattern_ids"]
         }
         self.assertIn("INVERSE_PARAMETER_INFERENCE", generated_patterns)
+        self.assertNotIn("覆盖矩阵", methods.assistant_message)
+        self.assertNotIn("|公式|", methods.assistant_message)
+        self.assertNotIn("简要过程", methods.assistant_message)
 
         method_option = methods.stage_payload["experiment_methods"][0]["option_id"]
         review, _ = handle_emvr_formula_turn(
@@ -402,6 +463,7 @@ class EmvrFormulaFlowTests(unittest.TestCase):
         self.assertEqual(review.stage_payload["emvr_formula_phase"], EXPERIMENT_DIRECTION_REVIEW)
         self.assertNotIn("coulomb_point_charge", review.assistant_message)
         self.assertIn("公式", review.assistant_message)
+        self.assertIn("实验过程", review.assistant_message)
 
         locked, complete = handle_emvr_formula_turn(
             session,
@@ -426,6 +488,74 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(item["supports_design_fields"] for item in support_map))
+
+    def test_direction_review_can_reselect_methods_before_locking(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究两个电荷",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        composition, _ = handle_emvr_formula_turn(
+            session,
+            "采用第一组公式",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=cards.stage_payload["formula_cards"][0]["option_id"],
+        )
+        if composition.stage_payload.get("emvr_formula_phase") == EXPERIMENT_METHODS_PRESENTED:
+            methods = composition
+        else:
+            methods, _ = handle_emvr_formula_turn(
+                session,
+                "组合成一个实验",
+                resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+                selected_option_id="emvr-composition:combined",
+            )
+        first, second = methods.stage_payload["experiment_methods"][:2]
+        handle_emvr_formula_turn(
+            session,
+            "先看第一种",
+            _formula_intent(
+                "SELECT_EMVR_EXPERIMENT_METHODS",
+                {"selected_method_ids": [first["method_id"]]},
+            ),
+        )
+
+        revised, complete = handle_emvr_formula_turn(
+            session,
+            "改看第二种方法",
+            _formula_intent(
+                "SELECT_EMVR_EXPERIMENT_METHODS",
+                {"selected_method_ids": [second["method_id"]]},
+            ),
+        )
+
+        flow = session.design_context["emvr_design"]["formula_flow"]
+        self.assertFalse(complete)
+        self.assertEqual(flow["phase"], EXPERIMENT_DIRECTION_REVIEW)
+        self.assertEqual(flow["method_selection"]["selected_method_ids"], [second["method_id"]])
+        self.assertEqual(
+            flow["experiment_brief"]["selected_experiment_method_ids"],
+            [second["method_id"]],
+        )
+        self.assertIn(str(second["title"]), revised.assistant_message)
+        self.assertNotIn(str(first["title"]), revised.assistant_message)
+
+        rejected, complete = handle_emvr_formula_turn(
+            session,
+            "这版不满意，重新选方法",
+            resolved_intent(
+                UserIntent.REJECT_PREVIOUS_PROPOSAL,
+                semantic_updates={"control_actions": ["REJECT"]},
+            ),
+        )
+        self.assertFalse(complete)
+        self.assertEqual(
+            rejected.stage_payload["emvr_formula_phase"],
+            EXPERIMENT_METHODS_PRESENTED,
+        )
+        self.assertNotIn("覆盖矩阵", rejected.assistant_message)
+        self.assertNotIn("experiment_brief", flow)
 
     def test_later_field_revision_updates_formula_brief_and_final_report_view(self) -> None:
         session = self._session()

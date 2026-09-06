@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from ece329_workflow.design_state import (
     apply_design_updates,
@@ -8,12 +9,20 @@ from ece329_workflow.design_state import (
     is_topic_locked,
     topic_lock_snapshot,
 )
-from ece329_workflow.dialogue_acts import apply_stage_field_updates
+from ece329_workflow.dialogue_acts import (
+    apply_stage_field_updates,
+    compile_dialogue_acts,
+)
 from ece329_workflow.dialogue_state import build_carried_context
 from ece329_workflow.design_quality import evaluate_design_quality
-from ece329_workflow.engine import _emvr_stage_entry_output
+from ece329_workflow.engine import (
+    _emvr_stage_entry_output,
+    _has_structured_stage_content,
+    _prepare_emvr_completion_repair,
+)
 from ece329_workflow.generator import guided_stage_entry_output
-from ece329_workflow.models import DesignSession, InteractionState, Stage
+from ece329_workflow.models import DesignSession, InteractionState, Stage, StepOutput
+from ece329_workflow.reporting import effective_emvr_stage_payload
 from ece329_workflow.turn_planning import (
     build_stage_context_summary,
     build_turn_task_plan,
@@ -25,6 +34,192 @@ from ece329_workflow.turn_planning import (
 
 
 class TurnPlanningTests(unittest.TestCase):
+    def test_emvr_hypothesis_entry_asks_student_instead_of_confirming_placeholder(self) -> None:
+        session = DesignSession(
+            design_id="emvr-hypothesis-entry",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.HYPOTHESIS),
+            design_context={
+                "idea": {},
+                "emvr_design": {
+                    "field_state": {
+                        "lab_title": "双电荷场线实验",
+                        "lab_id": "two_charge_field",
+                    }
+                },
+            },
+        )
+
+        output = _emvr_stage_entry_output(session, Stage.HYPOTHESIS)
+
+        self.assertEqual(
+            output.stage_payload["pending_action"]["type"],
+            "ANSWER_EMVR_STAGE_QUESTION",
+        )
+        self.assertFalse(output.stage_payload["pending_action"]["advance_on_accept"])
+        self.assertEqual(
+            output.stage_payload["pending_action"]["answer_fields"],
+            ["research_hypothesis"],
+        )
+        self.assertNotIn(
+            "预期变化趋势",
+            output.stage_payload["pending_action"].get("proposal", {}),
+        )
+
+    def test_new_emvr_hypothesis_and_visual_fields_count_as_real_answers(self) -> None:
+        session = DesignSession(
+            design_id="emvr-new-report-fields",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "research_hypothesis",
+                    "operation": "REPLACE",
+                    "value": "距离减小时中间区域场强增大",
+                },
+                {
+                    "field": "trend_annotation",
+                    "operation": "REPLACE",
+                    "value": "用实时曲线和方向箭头标出变化趋势",
+                },
+            ],
+            stage=Stage.HYPOTHESIS,
+        )
+
+        self.assertTrue(_has_structured_stage_content(session, Stage.HYPOTHESIS))
+        self.assertTrue(
+            _has_structured_stage_content(session, Stage.EXPECTED_DATA_VISUALIZATION)
+        )
+
+    def test_emvr_completion_gap_binds_direct_report_field(self) -> None:
+        session = DesignSession(
+            design_id="emvr-visual-gap",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.EXPECTED_DATA_VISUALIZATION),
+        )
+        output = StepOutput(assistant_message="当前显示草稿")
+        issue = {
+            "field": "trend_annotation",
+            "label": "趋势标注",
+            "question": "理论趋势在界面上如何标注？",
+        }
+
+        with patch("ece329_workflow.engine.emvr_stage_completeness_issues", return_value=[issue]):
+            _prepare_emvr_completion_repair(
+                session,
+                Stage.EXPECTED_DATA_VISUALIZATION,
+                output,
+            )
+
+        self.assertEqual(
+            output.stage_payload["pending_action"]["answer_fields"],
+            ["trend_annotation"],
+        )
+
+    def test_emvr_completion_gaps_bind_to_canonical_writable_fields(self) -> None:
+        session = DesignSession(
+            design_id="emvr-report-field-bindings",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+        )
+        cases = {
+            "main_research_question": "research_question",
+            "adjustable_quantity_in_vr": "changed_quantities",
+            "object_inventory": "unity_objects",
+            "visualization_requirements": "visualization_plan",
+            "if_prediction_supported": "if_prediction_supported",
+        }
+        for report_field, expected_field in cases.items():
+            output = StepOutput(assistant_message="当前草稿")
+            issue = {
+                "field": report_field,
+                "label": report_field,
+                "question": "请补充这一项。",
+            }
+            with self.subTest(report_field=report_field), patch(
+                "ece329_workflow.engine.emvr_stage_completeness_issues",
+                return_value=[issue],
+            ):
+                _prepare_emvr_completion_repair(
+                    session,
+                    Stage.RESEARCH_QUESTION,
+                    output,
+                )
+                self.assertEqual(
+                    output.stage_payload["pending_action"]["answer_fields"],
+                    [expected_field],
+                )
+
+    def test_emvr_overlapping_stage_edit_uses_typed_emvr_state(self) -> None:
+        compiled = compile_dialogue_acts(
+            [
+                {
+                    "act_id": "replace-procedure",
+                    "type": "MODIFY_STAGE_FIELD",
+                    "target": "procedure_steps",
+                    "operation": "REPLACE",
+                    "content": ["建立基准", "改变距离", "记录场线", "切换极性", "比较结果"],
+                }
+            ],
+            pending_action={
+                "interaction_state": InteractionState.EMVR_DIRECT.value,
+                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "subject": Stage.CONCEPTUAL_PROCEDURE.value,
+                "answer_fields": ["procedure_steps"],
+            },
+        )
+
+        self.assertFalse(compiled["stage_field_updates"])
+        self.assertEqual(
+            compiled["emvr_field_updates"][0]["field_id"],
+            "procedure_steps",
+        )
+        self.assertEqual(len(compiled["emvr_field_updates"][0]["value"]), 5)
+
+    def test_latest_student_stage_revision_overrides_stale_emvr_report_value(self) -> None:
+        session = DesignSession(
+            design_id="emvr-latest-report-value",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            design_context={
+                "emvr_design": {
+                    "field_state": {
+                        "desktop_interaction_plan": "旧的鼠标操作",
+                        "expected_results": ["旧的预期结果"],
+                    }
+                }
+            },
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "desktop_interaction_plan",
+                    "operation": "REPLACE",
+                    "value": "鼠标拖动带电球并实时刷新场线",
+                },
+                {
+                    "field": "expected_results",
+                    "operation": "REPLACE",
+                    "value": "距离减小时中间区域场强按理论趋势变化",
+                },
+            ],
+            stage=Stage.RESULT_INTERPRETATION,
+        )
+
+        setup = effective_emvr_stage_payload(session, Stage.CONCEPTUAL_OR_VR_SETUP)
+        results = effective_emvr_stage_payload(session, Stage.RESULT_INTERPRETATION)
+
+        self.assertEqual(
+            setup["desktop_interaction_plan"],
+            "鼠标拖动带电球并实时刷新场线",
+        )
+        self.assertEqual(
+            results["expected_results"],
+            "距离减小时中间区域场强按理论趋势变化",
+        )
+
     def test_emvr_formula_actions_are_executable_state_tasks(self) -> None:
         plan = build_turn_task_plan(
             [

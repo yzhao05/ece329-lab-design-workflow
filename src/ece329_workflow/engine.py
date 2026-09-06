@@ -40,6 +40,7 @@ from .generator import (
     guided_stage_entry_output,
 )
 from .emvr_design import (
+    EMVR_EDITABLE_FIELDS,
     apply_emvr_field_updates,
     emvr_stage_one_readiness,
     merge_emvr_structured_requirements,
@@ -51,7 +52,12 @@ from .emvr_formula_flow import (
     handle_emvr_formula_turn,
     public_formula_flow_state,
 )
-from .dialogue_acts import apply_stage_field_updates, stage_design_state_snapshot
+from .dialogue_acts import (
+    DESIGN_ACT_FIELDS,
+    STAGE_ACT_FIELDS,
+    apply_stage_field_updates,
+    stage_design_state_snapshot,
+)
 from .design_state import (
     apply_design_updates,
     baseline_comparisons_snapshot,
@@ -268,6 +274,11 @@ _GUIDED_COMPLETION_HINTS: dict[Stage, str] = {
 }
 
 _STRUCTURED_STAGE_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
+    Stage.HYPOTHESIS: (
+        "research_hypothesis",
+        "expected_trend",
+        "limiting_cases",
+    ),
     Stage.CONCEPTUAL_OR_VR_SETUP: ("unity_objects", "interactions"),
     Stage.VARIABLES_AND_CONDITIONS: (
         "independent_variable",
@@ -275,6 +286,11 @@ _STRUCTURED_STAGE_COMPLETION_FIELDS: dict[Stage, tuple[str, ...]] = {
         "controlled_conditions",
     ),
     Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+    Stage.EXPECTED_DATA_VISUALIZATION: (
+        "visualization_plan",
+        "trend_annotation",
+        "unity_update_event",
+    ),
     Stage.RESULT_INTERPRETATION: ("result_interpretation",),
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
 }
@@ -514,7 +530,7 @@ _STUDENT_FIELD_LABELS = {
     "design_rationale": "设计依据",
     "design_value": "设计价值",
     "limitations": "设计局限",
-    "unity_objects": "VR实验对象",
+    "unity_objects": "Unity/VR实验对象",
     "interactions": "VR交互",
 }
 
@@ -696,15 +712,9 @@ def _remove_repeated_guided_question(
         return
     if interaction_state is InteractionState.EMVR_DIRECT:
         if assistant_repeated:
-            output.assistant_message = (
-                "已记录本轮对当前设计项的回应，无需再次回答同一问题。"
-                "如需修订，请只指出要调整的设计字段；否则可以继续下一项评审。"
-            )
+            output.assistant_message = "已按本轮内容更新当前设计。"
         else:
-            output.assistant_message = (
-                f"{output.assistant_message}\n\n"
-                "本轮回应已记录，同一问题不再重复；后续只处理尚未明确的设计项。"
-            )
+            output.assistant_message = output.assistant_message.rstrip()
         output.student_task = None
         output.stage_payload["repeated_question_avoided"] = True
         return
@@ -1543,7 +1553,10 @@ def _emvr_entry_reference(
         text = text[:240]
         return text or fallback
 
-    direction = compact(context.get("research_direction"), "当前电磁现象")
+    research_focus = compact(
+        context.get("research_object") or context.get("research_question"),
+        "当前电磁现象",
+    )
     objective = compact(context.get("learning_objective"), "解释核心物理关系")
     question = compact(context.get("research_question"), "当前研究问题")
     variable = compact(context.get("independent_variable"), "主要可调参数")
@@ -1552,7 +1565,7 @@ def _emvr_entry_reference(
     hypothesis = compact(context.get("hypothesis"), "预期变化趋势")
     references: dict[Stage, list[str]] = {
         Stage.LEARNING_OBJECTIVES: [
-            f"概念目标：能够用ECE329关系解释{direction}",
+            f"概念目标：能够用ECE329关系解释{research_focus}",
             f"比较目标：能够根据可视化结果判断不同条件下的差异",
             "交互目标：能够通过VR操作建立参数变化与理论响应之间的对应",
         ],
@@ -1573,7 +1586,7 @@ def _emvr_entry_reference(
             f"判定依据：{observations}",
         ],
         Stage.CONCEPTUAL_OR_VR_SETUP: [
-            f"物理层：围绕{direction}枚举场源、受影响对象、边界与观察载体",
+            f"物理层：围绕{research_focus}枚举场源、受影响对象、边界与观察载体",
             "Unity层：分别定义可交互对象、参数控制器、理论计算状态与反馈面板",
             "对应原则：每个视觉反馈都必须能追溯到研究问题中的物理量",
         ],
@@ -1642,7 +1655,11 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
     ):
         acknowledgement = "目前还没有具体实验主题，我们先确定设计起点。"
     elif direction:
-        acknowledgement = f"我会继续沿用“{direction}”这个实验方向。"
+        # The locked brief is already visible in the workspace and carried in
+        # structured state.  Reprinting it at every stage made long EMVR
+        # designs look as if the agent had restarted, so later stages only
+        # acknowledge continuity and show the current layer or its delta.
+        acknowledgement = "我会沿用已经锁定的实验方向。"
     else:
         acknowledgement = "我会承接前面已经确定的实验内容。"
     reference_draft = _emvr_entry_reference(stage, context)
@@ -1658,7 +1675,12 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
     # The theory reference lists committed variables and the binding rule; it
     # is context, not a proposed theory answer. A bare acceptance must not skip
     # generation of the theory payload consumed by the final report.
-    reference_is_confirmable = bool(reference_draft) and stage is not Stage.THEORETICAL_FRAMEWORK
+    reference_is_confirmable = bool(reference_draft) and stage not in {
+        Stage.THEORETICAL_FRAMEWORK,
+        # A context-derived trend is useful framing, but it is not the
+        # student's research hypothesis. Ask for the hypothesis explicitly.
+        Stage.HYPOTHESIS,
+    }
     review_question = (
         "这份草稿是否准确承接了当前研究问题？如需修订，请直接指出对应的物理内容、"
         "Unity映射或展示要求。"
@@ -1670,10 +1692,13 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         if reference_is_confirmable
         else "ANSWER_EMVR_STAGE_QUESTION"
     )
+    direct_answer_fields = {
+        Stage.HYPOTHESIS: ["research_hypothesis"],
+    }
     pending_subject = (
         "experiment_brief"
         if stage is Stage.IDEA_BRAINSTORMING and not reference_draft
-        else stage.value
+        else direct_answer_fields.get(stage, [stage.value])[0]
     )
     allowed_intents = (
         [
@@ -1709,14 +1734,17 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
                 "answer_fields": (
                     ["experiment_brief"]
                     if pending_subject == "experiment_brief"
-                    else []
+                    else direct_answer_fields.get(stage, [])
                 ),
                 "proposal": {
                     "carried_context": deepcopy(context),
                     "reference_draft": reference_draft,
                 },
                 "question": review_question,
-                "advance_on_accept": bool(reference_draft),
+                # Only a concrete proposal can be accepted as completion.
+                # Hypothesis/theory reference text is framing, so a generic
+                # confirmation must not skip the student's substantive answer.
+                "advance_on_accept": reference_is_confirmable,
                 "allowed_intents": allowed_intents,
             },
         },
@@ -1770,9 +1798,73 @@ def _prepare_emvr_stage_output(
         stage,
         output.stage_payload,
         visualization=output.visualization,
+        include_field_ids=True,
     )
-    output.stage_payload["emvr_report_section"] = deepcopy(section)
+    public_section = deepcopy(section)
+    for item in public_section.get("items", []):
+        if isinstance(item, dict):
+            item.pop("field", None)
+    output.stage_payload["emvr_report_section"] = public_section
     visible_items = section.get("items", [])
+    # Formula onboarding also stores outputs under stage 1.  It must not make
+    # the first real EMVR stage report look like a repeated report; only an
+    # earlier output that actually contained a report section counts here.
+    previous_stage_output = session.stage_outputs.get(stage.value, {})
+    previous_stage_payload = (
+        previous_stage_output.get("stage_payload", {})
+        if isinstance(previous_stage_output, dict)
+        else {}
+    )
+    stage_seen_before = isinstance(
+        previous_stage_payload.get("emvr_report_section"), dict
+    )
+    resolved = session.turn_context.get("resolved_intent", {})
+    semantic_updates = (
+        resolved.get("semantic_updates", {}) if isinstance(resolved, dict) else {}
+    )
+    touched_fields: set[str] = set()
+    if isinstance(semantic_updates, dict):
+        for key in ("stage_field_updates", "design_updates"):
+            for update in semantic_updates.get(key, []):
+                if isinstance(update, dict):
+                    field_id = str(update.get("field") or "").strip()
+                    if field_id:
+                        touched_fields.add(field_id)
+        emvr_update = semantic_updates.get("emvr_design_update", {})
+        if isinstance(emvr_update, dict):
+            for update in emvr_update.get("field_updates", []):
+                if isinstance(update, dict):
+                    field_id = str(update.get("field_id") or "").strip()
+                    if field_id:
+                        touched_fields.add(field_id)
+    if stage_seen_before:
+        report_sources = {
+            "selected_direction": {"experiment_brief", "direction_summary", "research_summary"},
+            "target_phenomenon": {"observed_quantities", "observations"},
+            "possible_vr_interactions": {"required_behaviors", "interactions"},
+            "main_research_question": {"research_question"},
+            "adjustable_quantity_in_vr": {"changed_quantities", "independent_variable"},
+            "observable_quantity_in_vr": {"observed_quantities", "observations"},
+            "research_hypothesis": {"hypothesis", "research_hypothesis"},
+            "expected_trend": {"expected_phenomenon", "expected_trend"},
+            "student_visualization_requirements": {
+                "visualization_requirements",
+                "visualization_plan",
+            },
+            "student_result_interpretation": {"result_interpretation"},
+        }
+        changed_items = [
+            item
+            for item in visible_items
+            if (
+                str(item.get("field") or "") in touched_fields
+                or bool(
+                    report_sources.get(str(item.get("field") or ""), set())
+                    & touched_fields
+                )
+            )
+        ]
+        visible_items = changed_items
     lines = []
     for item in visible_items:
         value = str(item.get("value") or "").strip()
@@ -1781,9 +1873,11 @@ def _prepare_emvr_stage_output(
         if value:
             lines.append(f"• {item.get('label')}：{value}")
 
-    lead = _EMVR_STAGE_LEADS[stage]
+    lead = "本轮更新：" if stage_seen_before and touched_fields else _EMVR_STAGE_LEADS[stage]
     if lines:
         output.assistant_message = f"{lead}\n\n" + "\n".join(lines)
+    elif stage_seen_before:
+        output.assistant_message = ""
     else:
         output.assistant_message = f"{lead}\n\n{output.assistant_message.strip()}"
 
@@ -1807,10 +1901,15 @@ def _prepare_emvr_stage_output(
             }
             target_field = field_by_gap[missing_key]
             task = question_by_gap[missing_key]
-            output.assistant_message = (
-                f"{output.assistant_message.rstrip()}\n\n"
+            existing_message = output.assistant_message.rstrip()
+            gap_message = (
                 f"你已经给出的方向信息都会保留；现在只补齐"
                 f"{readiness['missing'][0]}，不会要求你重写前面的内容。"
+            )
+            output.assistant_message = (
+                f"{existing_message}\n\n{gap_message}"
+                if existing_message
+                else gap_message
             )
             output.student_task = task
             output.stage_payload["emvr_stage_one_readiness"] = readiness
@@ -1838,9 +1937,14 @@ def _prepare_emvr_stage_output(
     if requirement is not None:
         field = str(requirement["field"])
         task = str(requirement["question"])
-        output.assistant_message = (
-            f"{output.assistant_message.rstrip()}\n\n"
+        existing_message = output.assistant_message.rstrip()
+        requirement_message = (
             f"这部分还需要明确{requirement['label']}，确认后才会进入 Builder 交接文档。"
+        )
+        output.assistant_message = (
+            f"{existing_message}\n\n{requirement_message}"
+            if existing_message
+            else requirement_message
         )
         output.student_task = task
         output.stage_payload["awaiting_user_design_input"] = True
@@ -1925,6 +2029,37 @@ def _prepare_emvr_completion_repair(
         "field": issue["field"],
         "label": issue["label"],
     }
+    report_field = str(issue["field"])
+    answer_field = {
+        # Report projections use student-facing names.  Bind them back to the
+        # single canonical state field that actually owns the value so a clear
+        # answer cannot be retained as an unbound candidate and asked again.
+        "selected_direction": "experiment_brief",
+        "main_research_question": "research_question",
+        "adjustable_quantity_in_vr": "changed_quantities",
+        "observable_quantity_in_vr": "observed_quantities",
+        "physical_mechanism": "physical_mechanism",
+        "simulation_inputs": "simulation_inputs",
+        "calculated_outputs": "calculated_outputs",
+        "object_inventory": "unity_objects",
+        "dependent_variable": "observations",
+        "controlled_variables": "controlled_conditions",
+        "reference_condition": "reference_condition",
+        "comparison_logic": "comparison_logic",
+        "visualization_requirements": "visualization_plan",
+        "student_visualization_requirements": "visualization_plan",
+        "if_prediction_supported": "if_prediction_supported",
+        "if_opposite_trend": "if_opposite_trend",
+        "if_no_clear_change": "if_no_clear_change",
+        "conceptual_feasibility": "conceptual_feasibility",
+        "teaching_value": "teaching_value",
+        "vr_added_value": "vr_added_value",
+    }.get(report_field, report_field)
+    writable_fields = {
+        *DESIGN_ACT_FIELDS,
+        *STAGE_ACT_FIELDS,
+        *EMVR_EDITABLE_FIELDS,
+    }
     output.stage_payload["pending_action"] = {
         "type": "ANSWER_EMVR_STAGE_QUESTION",
         "interaction_state": InteractionState.EMVR_DIRECT.value,
@@ -1933,7 +2068,7 @@ def _prepare_emvr_completion_repair(
         # support map) are model-built structured artifacts rather than one
         # directly editable scalar.  The semantic resolver receives the
         # explicit gap below and may emit all required field-level actions.
-        "answer_fields": [],
+        "answer_fields": [answer_field] if answer_field in writable_fields else [],
         "required_report_field": issue["field"],
         "question": question,
         "advance_on_accept": False,
@@ -3054,6 +3189,18 @@ class WorkflowEngine:
             session.current_stage_index = 0
         formula_onboarding_output: StepOutput | None = None
         formula_onboarding_should_complete = False
+        formula_semantic = turn_intent.get("semantic_updates", {})
+        formula_questions = (
+            formula_semantic.get("student_questions", [])
+            if isinstance(formula_semantic, dict)
+            else []
+        )
+        formula_question_pause = bool(
+            isinstance(formula_questions, list)
+            and any(str(item).strip() for item in formula_questions)
+            and self._emvr_formula_first_enabled()
+            and emvr_formula_flow_active(session)
+        )
         if (
             self._emvr_formula_first_enabled()
             and emvr_formula_flow_active(session)
@@ -3075,15 +3222,22 @@ class WorkflowEngine:
                 "comparison_updates",
             ):
                 formula_updates.pop(key, None)
-            formula_onboarding_output, formula_onboarding_should_complete = (
-                handle_emvr_formula_turn(
-                    session,
-                    message,
-                    turn_intent,
-                    selected_option_id=request.selected_option_id,
-                    complete_stage=request.complete_stage,
+            if formula_question_pause:
+                deferred = formula_updates.get("emvr_formula_actions", [])
+                if isinstance(deferred, list) and deferred:
+                    ensure_emvr_formula_flow(session)["deferred_formula_actions"] = deepcopy(
+                        deferred
+                    )
+            else:
+                formula_onboarding_output, formula_onboarding_should_complete = (
+                    handle_emvr_formula_turn(
+                        session,
+                        message,
+                        turn_intent,
+                        selected_option_id=request.selected_option_id,
+                        complete_stage=request.complete_stage,
+                    )
                 )
-            )
         if (
             turn_intent.get("intent") == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
             and isinstance(pending_action, dict)
@@ -3296,6 +3450,7 @@ class WorkflowEngine:
 
         if (
             formula_onboarding_output is None
+            and not formula_question_pause
             and self._emvr_formula_first_enabled()
             and emvr_formula_flow_active(session)
         ):
@@ -3479,7 +3634,7 @@ class WorkflowEngine:
             "pending_action": deepcopy(pending_action),
             "carried_context": build_carried_context(session),
         }
-        if formula_onboarding_output is None:
+        if formula_onboarding_output is None and not formula_question_pause:
             _persist_emvr_brief(
                 session,
                 resolved_student_message,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from ece329_workflow.dialogue_acts import compile_dialogue_acts, normalize_dialogue_acts
+
 from ece329_workflow.dialogue_state import (
     UserIntent,
     apply_resolved_intent,
@@ -216,6 +218,31 @@ def idea_facet_session(design_id: str) -> DesignSession:
 
 
 class DialogueStateTests(unittest.TestCase):
+    def test_pending_answer_act_uses_single_visible_target_over_wrong_model_label(self) -> None:
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": "lab_title",
+            "answer_fields": ["lab_title"],
+        }
+        acts, unresolved = normalize_dialogue_acts(
+            [
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": "course_relationship",
+                    "operation": "REPLACE",
+                    "content": "点电荷场中的库仑定律和矢量叠加",
+                    "confidence": 0.98,
+                }
+            ],
+            pending_action=pending,
+        )
+
+        compiled = compile_dialogue_acts(acts, pending_action=pending)
+
+        self.assertFalse(unresolved)
+        self.assertEqual(compiled["stage_field_updates"][0]["field"], "lab_title")
+        self.assertFalse(compiled["design_updates"])
+
     def test_complete_idea_pending_acceptance_is_an_advancing_review(self) -> None:
         session = DesignSession(
             design_id="guided_complete_idea_pending",
@@ -2180,7 +2207,8 @@ class DialogueStateTests(unittest.TestCase):
 
         self.assertTrue(output.stage_payload["repeated_question_avoided"])
         self.assertIsNone(output.student_task)
-        self.assertIn("同一问题不再重复", output.assistant_message)
+        self.assertNotIn("同一问题不再重复", output.assistant_message)
+        self.assertNotIn("无需再次回答", output.assistant_message)
 
     def test_long_answer_that_quotes_previous_question_keeps_useful_response(self) -> None:
         question = "你想研究什么现象，以及它为什么值得观察？"
@@ -6115,7 +6143,11 @@ class DialogueStateTests(unittest.TestCase):
             ],
             Stage.LEARNING_OBJECTIVES: ["learning_objective"],
             Stage.RESEARCH_QUESTION: ["research_question"],
-            Stage.HYPOTHESIS: ["hypothesis", "expected_phenomenon"],
+            Stage.HYPOTHESIS: [
+                "research_hypothesis",
+                "expected_trend",
+                "limiting_cases",
+            ],
             Stage.CONCEPTUAL_OR_VR_SETUP: [
                 "conceptual_structure",
                 "unity_objects",
@@ -6127,7 +6159,11 @@ class DialogueStateTests(unittest.TestCase):
                 "controlled_conditions",
             ],
             Stage.CONCEPTUAL_PROCEDURE: ["procedure_steps"],
-            Stage.EXPECTED_DATA_VISUALIZATION: ["visualization_plan"],
+            Stage.EXPECTED_DATA_VISUALIZATION: [
+                "visualization_plan",
+                "trend_annotation",
+                "unity_update_event",
+            ],
             Stage.DESIGN_VALUE_AND_LIMITATIONS: ["limitations"],
         }
         for stage, expected_fields in expectations.items():

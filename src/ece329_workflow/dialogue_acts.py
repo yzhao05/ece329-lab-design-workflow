@@ -7,12 +7,12 @@ from typing import Any
 
 from .design_state import FACET_TO_DESIGN_FIELD
 from .builder_requirements import BUILDER_REQUIREMENT_FIELDS
-from .emvr_design import EMVR_EDITABLE_FIELDS
+from .emvr_design import EMVR_EDITABLE_FIELDS, EMVR_LIST_FIELDS
 from .emvr_formula_flow import (
     EMVR_FORMULA_ACTION_TYPES,
     normalize_formula_flow_action,
 )
-from .models import DesignSession, Stage
+from .models import DesignSession, InteractionState, Stage
 
 
 DIALOGUE_ACT_TYPES = frozenset(
@@ -75,6 +75,31 @@ STAGE_ACT_FIELD_ORDER = (
     "expected_results",
     "acceptance_criteria",
     "report_questions",
+    # EMVR report fields that can be the direct subject of an open stage
+    # question.  Keeping them writable at field level prevents a clear answer
+    # from being stored as an unbound candidate and replayed indefinitely.
+    "research_hypothesis",
+    "expected_trend",
+    "limiting_cases",
+    "trend_annotation",
+    "unity_update_event",
+    # Later EMVR report rows that students may revise directly.  These remain
+    # plain stage values; structured formula maps and object inventories stay
+    # state-machine generated and are deliberately not writable here.
+    "physical_mechanism",
+    "simulation_inputs",
+    "calculated_outputs",
+    "physics_layer",
+    "visualization_layer",
+    "measurement_interface",
+    "reference_condition",
+    "comparison_logic",
+    "if_prediction_supported",
+    "if_opposite_trend",
+    "if_no_clear_change",
+    "conceptual_feasibility",
+    "teaching_value",
+    "vr_added_value",
     "student_summary",
 )
 STAGE_ACT_FIELDS = frozenset(STAGE_ACT_FIELD_ORDER)
@@ -361,6 +386,11 @@ def compile_dialogue_acts(
         if isinstance(pending_action, dict)
         else ""
     )
+    emvr_context = bool(
+        isinstance(pending_action, dict)
+        and pending_action.get("interaction_state")
+        == InteractionState.EMVR_DIRECT.value
+    )
     pending_answer_fields = (
         [
             str(field).strip()
@@ -405,7 +435,12 @@ def compile_dialogue_acts(
             # type—not surface wording—declares that this content answers the
             # open question, so preserve the field-level target and clear the
             # pending item independently.
-            if target == pending_subject and len(pending_answer_fields) == 1:
+            # This act explicitly means "answer the visible pending question".
+            # When that question has exactly one writable target, it outranks
+            # a model-authored but incompatible label (for example classifying
+            # a lab title as a course relationship). Cross-field edits must be
+            # emitted as their own MODIFY_* acts.
+            if len(pending_answer_fields) == 1:
                 target = pending_answer_fields[0]
             elif (
                 target == pending_subject
@@ -428,6 +463,16 @@ def compile_dialogue_acts(
                     }
                     if canonical in DESIGN_ACT_FIELDS:
                         design_updates.append(update)
+                    elif emvr_context and canonical in EMVR_LIST_FIELDS:
+                        emvr_field_updates.append(
+                            {
+                                "field_id": canonical,
+                                "operation": operation,
+                                "value": value,
+                                "update_id": f"{act_id}:{field}",
+                                "semantic_key": semantic_key,
+                            }
+                        )
                     elif canonical in STAGE_ACT_FIELDS:
                         stage_field_updates.append(update)
                     elif canonical in EMVR_EDITABLE_FIELDS:
@@ -468,6 +513,17 @@ def compile_dialogue_acts(
                 design_updates.append(
                     {
                         "field": target,
+                        "operation": operation,
+                        "value": content,
+                        "update_id": act_id,
+                        "semantic_key": semantic_key,
+                    }
+                )
+                answered_pending = True
+            elif emvr_context and target in EMVR_LIST_FIELDS:
+                emvr_field_updates.append(
+                    {
+                        "field_id": target,
                         "operation": operation,
                         "value": content,
                         "update_id": act_id,
@@ -530,15 +586,26 @@ def compile_dialogue_acts(
                     }
                 )
         elif act_type == "MODIFY_STAGE_FIELD":
-            stage_field_updates.append(
-                {
-                    "field": target,
-                    "operation": operation,
-                    "value": content,
-                    "update_id": act_id,
-                    "semantic_key": semantic_key,
-                }
-            )
+            if emvr_context and target in EMVR_LIST_FIELDS:
+                emvr_field_updates.append(
+                    {
+                        "field_id": target,
+                        "operation": operation,
+                        "value": deepcopy(content),
+                        "update_id": act_id,
+                        "semantic_key": semantic_key,
+                    }
+                )
+            else:
+                stage_field_updates.append(
+                    {
+                        "field": target,
+                        "operation": operation,
+                        "value": content,
+                        "update_id": act_id,
+                        "semantic_key": semantic_key,
+                    }
+                )
         elif act_type == "MODIFY_EMVR_FIELD":
             emvr_field_updates.append(
                 {

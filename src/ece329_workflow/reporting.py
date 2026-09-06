@@ -465,8 +465,8 @@ def effective_emvr_stage_payload(
         set_if("selected_experiment_patterns", pattern_titles)
         set_if("model_boundary_conditions", brief.get("boundary_conditions"))
     elif stage is Stage.COURSE_MAPPING_AND_DIRECTION:
-        set_if("lab_title", requirements.get("lab_title") or stage_state.get("lab_title"))
-        set_if("lab_id", requirements.get("lab_id") or stage_state.get("lab_id"))
+        set_if("lab_title", stage_state.get("lab_title") or requirements.get("lab_title"))
+        set_if("lab_id", stage_state.get("lab_id") or requirements.get("lab_id"))
         set_if("selected_direction", requirements.get("experiment_brief"))
         set_if("course_relationship", requirements.get("course_relationship"))
     elif stage is Stage.LEARNING_OBJECTIVES:
@@ -505,10 +505,17 @@ def effective_emvr_stage_payload(
             [deepcopy(formula_by_id[item]) for item in selected_ids if item in formula_by_id],
         )
         set_if("formula_support_map", formula_support_map_for_selection(session))
+        for field in ("physical_mechanism", "simulation_inputs", "calculated_outputs"):
+            set_if(field, stage_state.get(field))
     elif stage is Stage.HYPOTHESIS:
-        hypothesis = requirements.get("hypothesis") or stage_state.get("hypothesis")
+        hypothesis = (
+            stage_state.get("research_hypothesis")
+            or requirements.get("hypothesis")
+            or stage_state.get("hypothesis")
+        )
         expected_trend = (
-            requirements.get("expected_phenomenon")
+            stage_state.get("expected_trend")
+            or requirements.get("expected_phenomenon")
             or stage_state.get("expected_phenomenon")
         )
         set_if("research_hypothesis", hypothesis)
@@ -517,13 +524,16 @@ def effective_emvr_stage_payload(
         # revised the latter, keep the stage generator's concrete trend rather
         # than copying the hypothesis into both final-report rows.
         set_if("expected_trend", expected_trend)
+        set_if("limiting_cases", stage_state.get("limiting_cases"))
     elif stage is Stage.CONCEPTUAL_OR_VR_SETUP:
         for field in (
             "desktop_interaction_plan",
             "room_spatial_requirements",
             "hidden_object_lifecycle",
         ):
-            set_if(field, requirements.get(field) or stage_state.get(field))
+            set_if(field, stage_state.get(field) or requirements.get(field))
+        for field in ("physics_layer", "visualization_layer", "measurement_interface"):
+            set_if(field, stage_state.get(field))
     elif stage is Stage.VARIABLES_AND_CONDITIONS:
         changed = requirements.get("changed_quantities") or stage_state.get("independent_variable")
         observed = requirements.get("observed_quantities") or stage_state.get("observations")
@@ -535,32 +545,44 @@ def effective_emvr_stage_payload(
         set_if("controlled_variables", controls)
         set_if(
             "parameter_specifications",
-            requirements.get("parameter_specifications")
-            or stage_state.get("parameter_specifications"),
+            stage_state.get("parameter_specifications")
+            or requirements.get("parameter_specifications"),
         )
+        set_if("reference_condition", stage_state.get("reference_condition"))
     elif stage is Stage.CONCEPTUAL_PROCEDURE:
-        latest_steps = requirements.get("procedure_steps") or stage_state.get(
-            "procedure_steps"
-        )
+        latest_steps = requirements.get("procedure_steps")
         latest_steps = latest_steps if isinstance(latest_steps, list) else []
         if len(latest_steps) >= 5:
             set_if("procedure_steps", latest_steps)
-        elif latest_steps:
-            # A concise student description is valuable context but is not a
-            # replacement for the already materialized, ordered Builder flow.
-            set_if("student_required_steps", latest_steps)
+        student_steps = stage_state.get("procedure_steps")
+        if student_steps:
+            # Legacy stage-state revisions are retained as explicit student
+            # requirements. New EMVR edits use the typed requirements list,
+            # so a complete replacement remains available to Builder output.
+            set_if("student_required_steps", student_steps)
+        set_if("comparison_logic", stage_state.get("comparison_logic"))
     elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
         set_if(
             "student_visualization_requirements",
-            requirements.get("visualization_requirements")
-            or stage_state.get("visualization_plan"),
+            stage_state.get("visualization_plan")
+            or requirements.get("visualization_requirements"),
         )
+        set_if("trend_annotation", stage_state.get("trend_annotation"))
+        set_if("unity_update_event", stage_state.get("unity_update_event"))
     elif stage is Stage.RESULT_INTERPRETATION:
         for field in ("expected_results", "acceptance_criteria", "report_questions"):
-            set_if(field, requirements.get(field) or stage_state.get(field))
+            set_if(field, stage_state.get(field) or requirements.get(field))
         set_if("student_result_interpretation", stage_state.get("result_interpretation"))
+        for field in (
+            "if_prediction_supported",
+            "if_opposite_trend",
+            "if_no_clear_change",
+        ):
+            set_if(field, stage_state.get(field))
     elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
-        set_if("limitations", requirements.get("limitations") or stage_state.get("limitations"))
+        set_if("limitations", stage_state.get("limitations") or requirements.get("limitations"))
+        for field in ("conceptual_feasibility", "teaching_value", "vr_added_value"):
+            set_if(field, stage_state.get(field))
     return payload
 
 
@@ -569,6 +591,7 @@ def stage_report_section(
     payload: dict[str, Any],
     *,
     visualization: dict[str, Any] | None = None,
+    include_field_ids: bool = False,
 ) -> dict[str, Any]:
     items: list[dict[str, str]] = []
     stage_one_brief = (
@@ -615,12 +638,13 @@ def stage_report_section(
                     rendered = _plain(obj.get(key))
                     if rendered:
                         details.append(f"{_FIELD_LABELS[key]}：{rendered}")
-                items.append(
-                    {
-                        "label": f"物体 {index}｜{name}",
-                        "value": "；".join(details),
-                    }
-                )
+                item = {
+                    "label": f"物体 {index}｜{name}",
+                    "value": "；".join(details),
+                }
+                if include_field_ids:
+                    item["field"] = field
+                items.append(item)
             continue
         if field == "formula_support_map" and isinstance(payload.get(field), list):
             links = []
@@ -637,12 +661,13 @@ def stage_report_section(
                 if relation and supports:
                     links.append(f"{relation}用于解释：{supports}")
             if links:
-                items.append(
-                    {
-                        "label": _FIELD_LABELS[field],
-                        "value": "；".join(dict.fromkeys(links)),
-                    }
-                )
+                item = {
+                    "label": _FIELD_LABELS[field],
+                    "value": "；".join(dict.fromkeys(links)),
+                }
+                if include_field_ids:
+                    item["field"] = field
+                items.append(item)
             continue
         if field == "theory_selection_status":
             status = str(payload.get(field) or "").strip()
@@ -652,21 +677,37 @@ def stage_report_section(
                 "needs_semantic_theory_confirmation": "尚需确认与研究问题直接相关的理论关系",
             }.get(status, "")
             if friendly_status:
-                items.append(
-                    {"label": _FIELD_LABELS[field], "value": friendly_status}
-                )
+                item = {
+                    "label": _FIELD_LABELS[field],
+                    "value": friendly_status,
+                }
+                if include_field_ids:
+                    item["field"] = field
+                items.append(item)
             continue
         value = _plain(payload.get(field))
         if value:
-            items.append({"label": _FIELD_LABELS.get(field, field), "value": value})
+            item = {"label": _FIELD_LABELS.get(field, field), "value": value}
+            if include_field_ids:
+                item["field"] = field
+            items.append(item)
     if stage is Stage.EXPECTED_DATA_VISUALIZATION and isinstance(visualization, dict):
         x_axis = _plain(visualization.get("x_axis"))
         y_axis = _plain(visualization.get("y_axis"))
         if x_axis:
-            items.append({"label": "横轴", "value": x_axis})
+            item = {"label": "横轴", "value": x_axis}
+            if include_field_ids:
+                item["field"] = "visualization_x_axis"
+            items.append(item)
         if y_axis:
-            items.append({"label": "纵轴", "value": y_axis})
-        items.append({"label": "数据性质", "value": "理论预测，不是实测数据"})
+            item = {"label": "纵轴", "value": y_axis}
+            if include_field_ids:
+                item["field"] = "visualization_y_axis"
+            items.append(item)
+        item = {"label": "数据性质", "value": "理论预测，不是实测数据"}
+        if include_field_ids:
+            item["field"] = "visualization_data_status"
+        items.append(item)
     return {
         "stage_id": stage.value,
         "title": stage_title(stage, InteractionState.EMVR_DIRECT),

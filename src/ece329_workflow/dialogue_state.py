@@ -179,7 +179,11 @@ _EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.LEARNING_OBJECTIVES: ("learning_objective",),
     Stage.RESEARCH_QUESTION: ("research_question",),
     Stage.THEORETICAL_FRAMEWORK: ("theoretical_framework",),
-    Stage.HYPOTHESIS: ("hypothesis", "expected_phenomenon"),
+    Stage.HYPOTHESIS: (
+        "research_hypothesis",
+        "expected_trend",
+        "limiting_cases",
+    ),
     Stage.CONCEPTUAL_OR_VR_SETUP: (
         "conceptual_structure",
         "unity_objects",
@@ -191,7 +195,11 @@ _EMVR_PENDING_ANSWER_FIELDS: dict[Stage, tuple[str, ...]] = {
         "controlled_conditions",
     ),
     Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
-    Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_plan",),
+    Stage.EXPECTED_DATA_VISUALIZATION: (
+        "visualization_plan",
+        "trend_annotation",
+        "unity_update_event",
+    ),
     Stage.RESULT_INTERPRETATION: ("result_interpretation",),
     Stage.DESIGN_VALUE_AND_LIMITATIONS: ("limitations",),
 }
@@ -1291,6 +1299,14 @@ def build_carried_context(session: DesignSession) -> dict[str, Any]:
             )
             or canonical.get("research_object")
             or direction
+        ),
+        # Keep the concise object-level anchor separate from the authoritative
+        # full brief. EMVR stage prompts can then preserve the locked direction
+        # without replaying a long, generated brief on every turn.
+        "research_object": deepcopy(
+            unified_fields.get("research_object")
+            or canonical.get("research_object")
+            or ""
         ),
         "direction_locked": idea.get("direction_locked") is True,
         "topic_lock": topic_lock,

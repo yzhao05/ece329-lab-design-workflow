@@ -2488,7 +2488,9 @@ class OpenAIStageGenerator:
             FORMULA_CANDIDATES_PRESENTED: "SELECT_EMVR_FORMULAS",
             FORMULA_COMPOSITION_REVIEW: "SET_EMVR_FORMULA_COMPOSITION",
             EXPERIMENT_METHODS_PRESENTED: "SELECT_EMVR_EXPERIMENT_METHODS",
-            EXPERIMENT_DIRECTION_REVIEW: "REVISE_EMVR_DIRECTION或LOCK_EMVR_DIRECTION",
+            EXPERIMENT_DIRECTION_REVIEW: (
+                "SELECT_EMVR_EXPERIMENT_METHODS、REVISE_EMVR_DIRECTION或LOCK_EMVR_DIRECTION"
+            ),
         }
         required_action = required_by_phase.get(phase)
         if not required_action:
@@ -2506,6 +2508,8 @@ class OpenAIStageGenerator:
                 "brief_updates可分别修改topic、objects、operations、changed_quantities、"
                 "observed_quantities、comparison_cases和boundary_conditions；不要把基础比较塞进"
                 "变化量或观察量。"
+                "在实验方向审阅中重新选择、增加或改选当前方法目录里的方法时，返回"
+                "SELECT_EMVR_EXPERIMENT_METHODS；只有修改已经生成的方向字段才返回REVISE_EMVR_DIRECTION。"
                 "若明确认可当前草稿则使用LOCK_EMVR_DIRECTION。"
                 "content必须是符合该公式流程动作契约的JSON对象字符串。source_text逐字复制支持"
                 "该动作的最小学生原文。只有整句在当前步骤确实没有可执行含义时才返回UNRESOLVED。"
@@ -2538,7 +2542,11 @@ class OpenAIStageGenerator:
             pending_action=None,
         )
         allowed = (
-            {"REVISE_EMVR_DIRECTION", "LOCK_EMVR_DIRECTION"}
+            {
+                "SELECT_EMVR_EXPERIMENT_METHODS",
+                "REVISE_EMVR_DIRECTION",
+                "LOCK_EMVR_DIRECTION",
+            }
             if phase == EXPERIMENT_DIRECTION_REVIEW
             else {required_action}
         )
@@ -3233,18 +3241,27 @@ class OpenAIStageGenerator:
                 "FORMULA_COMPOSITION_REVIEW；学生决定联合设计或逐条设计后组合时返回"
                 "SET_EMVR_FORMULA_COMPOSITION，content.strategy只能为COMBINED或SEPARATE_THEN_COMBINE。"
                 "实验方法由程序依据已确认公式与experiment_pattern_catalog实时组合，不从固定图景库抽取。"
-                "在EXPERIMENT_METHODS_PRESENTED阶段，学生选择、组合或改造实验方法时返回"
+                "在EXPERIMENT_METHODS_PRESENTED阶段，学生可用当前可见方法的序号、名称或描述选择、"
+                "组合或改造实验方法；必须结合emvr_formula_flow.experiment_methods把引用解析为稳定ID并返回"
                 "SELECT_EMVR_EXPERIMENT_METHODS；content包含selected_method_ids，并可分别包含custom_direction、"
                 "objects、operations、changed_quantities、observed_quantities和boundary_conditions。"
-                "在EXPERIMENT_DIRECTION_REVIEW阶段，学生只要求修改方向草稿时返回REVISE_EMVR_DIRECTION；"
+                "在EXPERIMENT_DIRECTION_REVIEW阶段，学生重新选择、增加或改选方法时仍返回"
+                "SELECT_EMVR_EXPERIMENT_METHODS；学生只要求修改当前方向草稿时返回REVISE_EMVR_DIRECTION；"
+                "学生明确表示当前方法设计不满意但还没给出具体修改时返回CONTROL/REJECT，"
+                "由状态机回到方法目录，不要伪造方向修改。"
                 "确认不再修改时返回LOCK_EMVR_DIRECTION；如果学生修改后同时明确要求继续，可返回"
                 "LOCK_EMVR_DIRECTION。两类动作的content.brief_updates都只能列出被学生点名修改的字段，"
                 "不得重写或推断其他字段；可用字段只有topic、objects、operations、changed_quantities、"
                 "observed_quantities、comparison_cases和boundary_conditions。每个被修改字段写成"
                 "{operation:MERGE|REPLACE|CLEAR,value:新值}；topic的value为字符串，其余value均为"
                 "字符串数组。补充用MERGE，完整改写用REPLACE，删除用CLEAR。"
-                "公式候选、公式确认、公式组合方式、实验方法选择与方向锁定可以"
-                "和课程问题并列为多动作，但不得退回普通EMVR字段写入路径。"
+                "学生要求精简、重写、改成因果句式或移动内容时，必须返回执行后的最终字段值，不能把"
+                "操作说明本身写入实验。移动内容要拆成来源字段删除或替换与目标字段合并两个动作；"
+                "未被点名的字段保持不变。学生提出课程问题或要求解释时优先返回ASK_COURSE_QUESTION；"
+                "该轮不要同时推进公式流程，保留当前选择待办。"
+                "课程问题可以和设计修改并列识别，但学生本轮明确提问时应优先返回课程问题动作；"
+                "公式候选、组合、方法选择或方向锁定留在当前待办，回答后下一轮再推进。"
+                "不得退回普通EMVR字段写入路径。"
                 "外层intent、target、resolved_value_json和semantic_updates_json继续返回，只作为旧接口"
                 "兼容摘要和非写入型分析；程序不会用这些外层字段写入实验设计。所有设计字段、阶段字段、"
                 "基础比较和纠错修改都必须有对应dialogue_acts_json动作。外层intent应概括最主要动作，"

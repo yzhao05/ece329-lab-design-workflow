@@ -936,25 +936,11 @@ def _generate_experiment_methods(
     return methods
 
 
-def _format_coverage_and_methods(
-    matrix: dict[str, Any],
-    methods: list[dict[str, Any]],
-) -> str:
-    columns = matrix.get("columns", [])
-    header = "|公式|" + "|".join(str(item.get("short_title") or "") for item in columns) + "|"
-    divider = "|---|" + "|".join("---" for _ in columns) + "|"
-    rows = [header, divider]
-    for row in matrix.get("rows", []):
-        applicable = set(row.get("applicable_pattern_ids", []))
-        rows.append(
-            f"|{row.get('formula')}|"
-            + "|".join("✓" if item.get("pattern_id") in applicable else "—" for item in columns)
-            + "|"
-        )
+def _format_method_catalog(methods: list[dict[str, Any]]) -> str:
+    """Show a compact student choice; keep the coverage matrix internal."""
+
     parts = [
-        "下面的覆盖矩阵来自已确认公式的适用能力；✓ 表示这类公式适合采用该实验形式，— 表示不强行套用。",
-        "\n".join(rows),
-        "我据此实时生成了下面这些实验方法，它们不是从固定图景库抽取的：",
+        "根据已经确认的公式，我整理出了这些适合做成 Unity VR 实验的方法。先选方法，下一步我再只展开你选中的设计："
     ]
     for index, method in enumerate(methods, start=1):
         pattern_names = [
@@ -964,13 +950,37 @@ def _format_coverage_and_methods(
             if pattern is not None
         ]
         parts.append(
-            f"方法 {index}｜{method.get('title')}\n"
-            f"实验形式：{'、'.join(pattern_names)}\n"
-            f"设计思路：{method.get('description')}\n"
-            f"简要过程：{method.get('process_summary')}"
+            f"{index}. {method.get('title')}（{'、'.join(pattern_names)}）——"
+            f"{method.get('description')}"
         )
     parts.append(
-        "你可以选择一种方法，也可以组合几种方法；选定后我会把它整理成完整实验方向，再请你审阅对象、操作、变化量和观察量。"
+        "请用序号或方法名称选择一种或几种；也可以说明想保留的操作或观察重点。"
+    )
+    return "\n\n".join(parts)
+
+
+def _format_selected_method_designs(
+    flow: dict[str, Any],
+    selected_method_ids: list[str],
+) -> str:
+    """Expand only the selected methods during the second review step."""
+
+    selected = [
+        method
+        for method in flow.get("experiment_methods", [])
+        if isinstance(method, dict)
+        and str(method.get("method_id") or "") in set(selected_method_ids)
+    ]
+    parts = ["下面只展开你刚选中的实验方法："]
+    for index, method in enumerate(selected, start=1):
+        parts.append(
+            f"设计 {index}｜{method.get('title')}\n"
+            f"实验过程：{method.get('process_summary')}\n"
+            f"主动变化：{'、'.join(method.get('changed_quantities', [])) or '待你补充'}\n"
+            f"重点观察：{'、'.join(method.get('observed_quantities', [])) or '待你补充'}"
+        )
+    parts.append(
+        "这套设计是否符合你的设想？满意的话可以直接采用并继续；如果不满意，可以修改其中的对象、操作、变化量或观察量，也可以重新选择或增加其他方法。"
     )
     return "\n\n".join(parts)
 
@@ -1185,9 +1195,10 @@ def _build_experiment_brief(
     operations = _unique_text(method_choice.get("operations"))
     if not operations:
         operations = [
-            str(method.get("process_summary") or "")
+            str(item)
             for method in selected_methods
-            if str(method.get("process_summary") or "").strip()
+            for item in method.get("operations", [])
+            if str(item).strip()
         ]
     boundaries = _unique_text(method_choice.get("boundary_conditions")) or list(
         dict.fromkeys(
@@ -1305,6 +1316,22 @@ def handle_emvr_formula_turn(
     """Execute the EMVR-only topic/formula/scene/direction state machine."""
 
     flow = ensure_emvr_formula_flow(session)
+    semantic_updates = turn_intent.get("semantic_updates", {})
+    current_actions = (
+        semantic_updates.get("emvr_formula_actions", [])
+        if isinstance(semantic_updates, dict)
+        else []
+    )
+    deferred_actions = flow.pop("deferred_formula_actions", [])
+    if (
+        isinstance(deferred_actions, list)
+        and deferred_actions
+        and not (isinstance(current_actions, list) and current_actions)
+    ):
+        if not isinstance(semantic_updates, dict):
+            semantic_updates = {}
+            turn_intent["semantic_updates"] = semantic_updates
+        semantic_updates["emvr_formula_actions"] = deepcopy(deferred_actions)
     phase = str(flow.get("phase") or TOPIC_RECEIVED)
     outage_formula_selection: dict[str, Any] | None = None
     if _semantic_service_failed(turn_intent):
@@ -1406,11 +1433,11 @@ def handle_emvr_formula_turn(
             topic_seed = str(flow.get("topic_seed") or "").strip()
             if topic_seed:
                 introduction = (
-                    f"从引导模式带来的研究方向是“{topic_seed}”。这部分没有丢失，但还没有被当成"
-                    "已确认公式或完整 EMVR 方案。请确认沿用这个方向，或直接补充你想改变和观察的量；"
-                    "我会据此匹配课程公式。"
+                    f"我会沿用从引导模式带来的研究方向“{topic_seed}”，并据此匹配课程公式。"
+                    "为了让后续方案更贴合你的目标，请直接补充最想改变的量、观察的现象，"
+                    "或希望验证的公式；需要调整原方向时也可以在这里说明。"
                 )
-                question = "沿用这个研究方向检索课程公式，还是先修改方向？"
+                question = "你最想改变什么、观察什么，或验证哪条公式？"
             else:
                 introduction = (
                     "我先不替你填写实验对象、变量和流程。请用一两句话说明想研究的 ECE329 主题；"
@@ -1647,7 +1674,7 @@ def handle_emvr_formula_turn(
                 StepOutput(
                     assistant_message=(
                         "公式选择已经保留。请决定把它们放在同一个完整实验中联合使用，"
-                        "还是先分别设计小实验再组合；我会按照你的决定生成覆盖矩阵。"
+                        "还是先分别设计小实验再组合；我会据此整理可选的实验方法。"
                     ),
                     stage_payload={
                         "emvr_formula_phase": FORMULA_COMPOSITION_REVIEW,
@@ -1688,7 +1715,7 @@ def handle_emvr_formula_turn(
         flow["phase"] = EXPERIMENT_METHODS_PRESENTED
         return (
             StepOutput(
-                assistant_message=_format_coverage_and_methods(matrix, methods),
+                assistant_message=_format_method_catalog(methods),
                 stage_payload={
                     "emvr_formula_phase": EXPERIMENT_METHODS_PRESENTED,
                     "coverage_matrix": deepcopy(matrix),
@@ -1724,8 +1751,8 @@ def handle_emvr_formula_turn(
             return (
                 StepOutput(
                     assistant_message=(
-                        "公式、组织方式和覆盖矩阵都已保留。你可以选择一种方法，也可以把几种方法组合起来；"
-                        "如果需要改造其中的方法，请同时说明希望保留的操作和观察方式。"
+                        "这些方法仍可选择。请用序号或名称选一种或几种；"
+                        "如果想组合，也可以同时说明希望保留的操作和观察重点。"
                     ),
                     stage_payload={
                         "emvr_formula_phase": EXPERIMENT_METHODS_PRESENTED,
@@ -1749,13 +1776,8 @@ def handle_emvr_formula_turn(
         flow["phase"] = EXPERIMENT_DIRECTION_REVIEW
         return (
             StepOutput(
-                assistant_message=(
-                    "我已经按你确认的公式和实验方法整理出实验方向草稿：\n\n"
-                    f"{_brief_summary(brief)}\n\n"
-                    f"主要公式：{'；'.join(_formula_display(item) for item in brief['primary_formula_ids'])}。\n"
-                    f"辅助公式：{'；'.join(_formula_display(item) for item in brief['supporting_formula_ids']) or '暂不设置'}。\n"
-                    f"模型边界：{'；'.join(brief['boundary_conditions'])}。\n\n"
-                    "请重点检查研究对象、主动变化量和观察量是否符合你的想法；这里确认后，实验方向才会锁定并进入后续 EMVR 细化。"
+                assistant_message=_format_selected_method_designs(
+                    flow, list(method_choice["selected_method_ids"])
                 ),
                 stage_payload={
                     "emvr_formula_phase": EXPERIMENT_DIRECTION_REVIEW,
@@ -1774,12 +1796,90 @@ def handle_emvr_formula_turn(
         )
 
     if phase == EXPERIMENT_DIRECTION_REVIEW:
+        candidates = set(flow["method_selection"].get("candidate_method_ids", []))
+        method_choice = (
+            _method_selection_from_option(selected_option_id, candidates)
+            or _selected_action(turn_intent, "SELECT_EMVR_EXPERIMENT_METHODS")
+        )
+        if method_choice is not None:
+            selected_ids = [
+                item
+                for item in method_choice.get("selected_method_ids", [])
+                if item in candidates
+            ]
+            if selected_ids:
+                _clear_semantic_recovery(flow)
+                method_choice["selected_method_ids"] = selected_ids
+                brief = _build_experiment_brief(flow, method_choice)
+                flow["method_selection"].update(
+                    {
+                        "selected_method_ids": selected_ids,
+                        "selection_status": "SELECTED",
+                    }
+                )
+                flow["experiment_brief"] = brief
+                return (
+                    StepOutput(
+                        assistant_message=_format_selected_method_designs(flow, selected_ids),
+                        stage_payload={
+                            "emvr_formula_phase": EXPERIMENT_DIRECTION_REVIEW,
+                            "experiment_brief_draft": deepcopy(brief),
+                            "selected_experiment_methods": deepcopy(selected_ids),
+                            "pending_action": {
+                                "type": "CONFIRM_EMVR_FORMULA_DIRECTION",
+                                "subject": "experiment_brief",
+                                "proposal": deepcopy(brief),
+                                "advance_on_accept": True,
+                                "question": "这套设计是否采用；如需调整或增选方法，请直接说明。",
+                            },
+                        },
+                        student_task="这套设计是否采用；如需调整或增选方法，请直接说明。",
+                    ),
+                    False,
+                )
         revise_action = _selected_action(turn_intent, "REVISE_EMVR_DIRECTION")
         lock_action = _selected_action(turn_intent, "LOCK_EMVR_DIRECTION")
         semantic_updates = turn_intent.get("semantic_updates", {})
         controls = set(semantic_updates.get("control_actions", [])) \
             if isinstance(semantic_updates, dict) and isinstance(semantic_updates.get("control_actions"), list) \
             else set()
+        if "REJECT" in controls:
+            _clear_semantic_recovery(flow)
+            flow["method_selection"]["selection_status"] = "PENDING"
+            flow["method_selection"]["selected_method_ids"] = []
+            flow.pop("experiment_brief", None)
+            flow["phase"] = EXPERIMENT_METHODS_PRESENTED
+            methods = [
+                item
+                for item in flow.get("experiment_methods", [])
+                if isinstance(item, dict)
+            ]
+            return (
+                StepOutput(
+                    assistant_message=(
+                        "这版方法设计先不采用。下面仍是当前公式可支持的方法，"
+                        "你可以重新选择一种或组合几种：\n\n"
+                        f"{_format_method_catalog(methods)}"
+                    ),
+                    stage_payload={
+                        "emvr_formula_phase": EXPERIMENT_METHODS_PRESENTED,
+                        "experiment_methods": deepcopy(methods),
+                        "preserve_pending_action": False,
+                        "pending_action": {
+                            "type": "SELECT_EMVR_EXPERIMENT_METHOD",
+                            "subject": "experiment_method_selection",
+                            "proposal": {
+                                "candidate_method_ids": list(
+                                    flow["method_selection"].get("candidate_method_ids", [])
+                                )
+                            },
+                            "question": "你想重新采用或组合哪些实验方法？",
+                        },
+                    },
+                    student_task="你想重新采用或组合哪些实验方法？",
+                ),
+                False,
+            )
         if revise_action is not None:
             _clear_semantic_recovery(flow)
             brief = flow.get("experiment_brief", {})
