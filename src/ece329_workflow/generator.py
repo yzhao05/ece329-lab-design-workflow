@@ -1190,9 +1190,60 @@ def _emvr_parameter_axis(requirements: dict[str, Any]) -> tuple[str, str, str, s
     return x_label, x_unit, y_label, "定性形态或归一化指标"
 
 
+def _emvr_controlled_conditions(
+    session: DesignSession,
+    requirements: dict[str, Any],
+    stage_state: dict[str, Any],
+) -> list[str]:
+    """Return controls tied to the selected EMVR model and causal axis."""
+
+    saved = stage_state.get("controlled_conditions")
+    if saved not in (None, "", [], {}):
+        values = saved if isinstance(saved, list) else [saved]
+        return [str(item).strip() for item in values if str(item).strip()]
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    flow = emvr.get("formula_flow", {})
+    selection = flow.get("formula_selection", {}) if isinstance(flow, dict) else {}
+    formula_ids = {
+        str(item)
+        for item in [
+            *emvr.get("selected_primary_formula_ids", []),
+            *emvr.get("selected_supporting_formula_ids", []),
+            *(
+                selection.get("primary_formula_ids", [])
+                if isinstance(selection, dict)
+                else []
+            ),
+            *(
+                selection.get("supporting_formula_ids", [])
+                if isinstance(selection, dict)
+                else []
+            ),
+        ]
+        if str(item)
+    }
+    changed_text = _compact_context_items(requirements.get("changed_quantities"))
+    if "coulomb_point_charge" in formula_ids:
+        controls = [
+            "均匀线性介质及介电常数",
+            "场线绘制密度、观察尺度与相机或探针设置",
+        ]
+        if "电荷量" not in changed_text and "电量" not in changed_text:
+            controls.insert(0, "两个点电荷的电荷量大小")
+        return controls
+    changed = changed_text or "主要自变量"
+    return [
+        f"除{changed}外的源参数",
+        "未作为自变量的几何、材料与边界参数",
+        "观察位置、显示尺度与记录方式",
+    ]
+
+
 def _emvr_reference_condition(
     requirements: dict[str, Any],
     stage_state: dict[str, Any],
+    session: DesignSession,
 ) -> str:
     saved = stage_state.get("reference_condition")
     if saved not in (None, "", [], {}):
@@ -1218,7 +1269,7 @@ def _emvr_reference_condition(
         elif minimum:
             settings.append(f"{name}设为{minimum.group(1)}{minimum.group(2) or ''}")
     controls = _compact_context_items(
-        stage_state.get("controlled_conditions"),
+        _emvr_controlled_conditions(session, requirements, stage_state),
         limit=4,
         item_length=120,
     ) or "其余源条件、几何、材料和观察方式"
@@ -1234,7 +1285,7 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
     changed = _compact_context_items(requirements.get("changed_quantities")) or "主要参数"
     observed = _compact_context_items(requirements.get("observed_quantities")) or "目标响应"
     comparisons = _compact_context_items(requirements.get("comparison_cases")) or "已确认比较情形"
-    reference = _emvr_reference_condition(requirements, stage_state)
+    reference = _emvr_reference_condition(requirements, stage_state, session)
     x_label, x_unit, y_label, y_unit = _emvr_parameter_axis(requirements)
     if session.current_stage is Stage.EXPECTED_DATA_VISUALIZATION:
         examples = [
@@ -1269,8 +1320,54 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
         if isinstance(pending, dict)
         else ""
     )
+    if not candidate:
+        if field == "physical_mechanism":
+            emvr = session.design_context.get("emvr_design", {})
+            emvr = emvr if isinstance(emvr, dict) else {}
+            selected_formula_ids = {
+                str(item)
+                for item in [
+                    *emvr.get("selected_primary_formula_ids", []),
+                    *emvr.get("selected_supporting_formula_ids", []),
+                ]
+                if str(item)
+            }
+            if "coulomb_point_charge" in selected_formula_ids:
+                candidate = (
+                    "两个点电荷分别按照库仑定律产生电场，系统按矢量叠加原理逐点合成两者贡献。"
+                    f"改变{changed}会改变观察位置处各电荷的场强和方向，因此{observed}随之发生可比较的变化。"
+                )
+            else:
+                support = formula_support_map_for_selection(session)
+                candidate = "；".join(
+                    f"{_compact_context_items(item.get('relation'))}用于解释"
+                    f"{_compact_context_items(item.get('supports_design_content'))}"
+                    for item in support
+                    if isinstance(item, dict)
+                    and _compact_context_items(item.get("relation"))
+                    and _compact_context_items(item.get("supports_design_content"))
+                ) or (
+                    f"所选核心方程把{changed}映射为模型输入，并计算{observed}；"
+                    "各比较情形只改变已确认的自变量，其余模型条件保持一致。"
+                )
+        elif field == "trend_annotation":
+            candidate = (
+                f"界面按{x_label}（{x_unit}）标注当前设置，并用{comparisons}区分比较情形；"
+                f"刷新后以方向箭头和差异提示标出{observed}是否符合理论趋势。"
+            )
+        elif field == "unity_update_event":
+            candidate = (
+                f"每次用户改变{changed}或切换{comparisons}后触发重新计算，"
+                "同一事件同步刷新数值、曲线、空间场与趋势标注。"
+            )
+        elif field == "reference_condition":
+            candidate = reference
+        elif field == "controlled_conditions":
+            candidate = "；".join(
+                _emvr_controlled_conditions(session, requirements, stage_state)
+            )
     candidate_context = (
-        f"\n当前待确认的候选描述是：{candidate}"
+        f"\n可直接采用的参考草稿：{candidate}\n回复“继续”即可采用，也可以直接改写。"
         if candidate
         else ""
     )
@@ -1288,6 +1385,11 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
                 "example": rendered,
                 "editable": True,
             },
+            **(
+                {"reference_draft": {"field": field, "value": candidate}}
+                if candidate
+                else {}
+            ),
             "preserve_pending_action": True,
         },
         student_task="请说明采用这版参考，还是指出需要修改的具体内容。",
@@ -2174,13 +2276,15 @@ class RuleBasedStageGenerator:
                     "comparison_cases": structured_requirements.get(
                         "comparison_cases", []
                     ),
-                    "controlled_variables": (
-                        stage_state.get("controlled_conditions")
-                        or ["除主动改变量外保持不变的源、几何、材料与边界条件"]
+                    "controlled_variables": _emvr_controlled_conditions(
+                        session,
+                        structured_requirements,
+                        stage_state,
                     ),
                     "reference_condition": _emvr_reference_condition(
                         structured_requirements,
                         stage_state,
+                        session,
                     ),
                     "calculated_outputs": structured_requirements.get(
                         "observed_quantities", []
@@ -2304,13 +2408,15 @@ class RuleBasedStageGenerator:
                     "student_variable_definition": variable_definition,
                     "independent_variable": {"name": variable_definition or "学生定义的主要变化条件", "unity_control": "与VR对象操作或带单位控件绑定", "range": "；".join(structured_requirements.get("parameter_specifications", [])) or "需要明确范围与单位"},
                     "dependent_variable": {"name": "；".join(saved_observed) or "研究问题中指定的观察响应", "vr_representation": "数值、曲线和空间编码"},
-                    "controlled_variables": (
-                        stage_state.get("controlled_conditions")
-                        or ["源条件", "几何条件", "材料或边界中未被选为自变量的参数"]
+                    "controlled_variables": _emvr_controlled_conditions(
+                        session,
+                        structured_requirements,
+                        stage_state,
                     ),
                     "reference_condition": _emvr_reference_condition(
                         structured_requirements,
                         stage_state,
+                        session,
                     ),
                     "confounding_factors": ["视觉缩放与真实单位混淆", "多个参数同时变化", "超出模型范围"],
                 },
@@ -2341,6 +2447,7 @@ class RuleBasedStageGenerator:
             reference_text = _emvr_reference_condition(
                 structured_requirements,
                 stage_state,
+                session,
             )
             reference_steps = [
                 f"在控制面板核对参数规格：{parameter_text}",

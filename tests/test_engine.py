@@ -378,6 +378,109 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_emvr_uncertainty_requests_reference_instead_of_becoming_field_value(self) -> None:
+        session = DesignSession(
+            design_id="emvr-uncertainty-reference",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        pending = {
+            "action_id": "physical-mechanism-question",
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": "physical_mechanism",
+            "answer_fields": ["physical_mechanism"],
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context["dialogue_state"] = {"pending_action": pending}
+
+        intent, _ = WorkflowEngine()._resolve_turn_intent(
+            session,
+            TurnRequest(message="暂时不确定"),
+            "暂时不确定",
+        )
+
+        self.assertEqual(intent["intent"], UserIntent.REQUEST_MORE_EXAMPLES.value)
+        self.assertEqual(intent["source"], "EMVR_UNCERTAINTY_REFERENCE_REQUEST")
+        self.assertNotEqual(intent.get("resolved_value"), "暂时不确定")
+
+    def test_emvr_reference_draft_can_be_accepted_with_continue(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        session = DesignSession(
+            design_id="emvr-reference-continue",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.EXPECTED_DATA_VISUALIZATION),
+            design_context={
+                "idea": {},
+                "emvr_design": {
+                    "field_state": {
+                        "changed_quantities": ["距离", "电荷类型（同种/异种）"],
+                        "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                        "comparison_cases": ["同种电荷", "异种电荷"],
+                        "parameter_specifications": ["距离：0.5 米到 5 米，步长 0.1 米"],
+                    }
+                },
+            },
+        )
+        pending = {
+            "action_id": "trend-annotation-question",
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": "trend_annotation",
+            "answer_fields": ["trend_annotation"],
+            "question": "请说明理论趋势如何标注。",
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context["dialogue_state"] = {"pending_action": pending}
+        set_pending_action_snapshot(session, pending)
+        engine.store.save(session)
+
+        reference = engine.process_turn(
+            session.design_id,
+            {"message": "暂时不确定"},
+        )
+        stored = engine.store.get(session.design_id)
+        saved_candidate = current_pending_action(stored)
+
+        self.assertTrue(reference["stage_payload"]["reference_only"])
+        self.assertIn("reference_draft", reference["stage_payload"])
+        self.assertEqual(saved_candidate["candidate_source"], "PROFESSIONAL_REFERENCE")
+        self.assertTrue(saved_candidate["candidate_binding_authorized"])
+
+        intent, _ = engine._resolve_turn_intent(
+            stored,
+            TurnRequest(message="继续"),
+            "继续",
+        )
+        # Candidate acceptance is normalized to a field-bound answer so the
+        # normal persistence path commits it and clears the open question.
+        self.assertEqual(intent["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+        self.assertEqual(intent["source"], "CONFIRMED_PENDING_ANSWER")
+        self.assertEqual(
+            intent["semantic_updates"]["pending_answer_status"],
+            "CLEAR",
+        )
+
+        continued = engine.process_turn(session.design_id, {"message": "继续"})
+        stored = engine.store.get(session.design_id)
+        self.assertEqual(
+            stored.design_context["stage_design_state"]["trend_annotation"],
+            saved_candidate["candidate_answer"],
+        )
+        next_pending = current_pending_action(stored)
+        self.assertNotEqual(
+            (next_pending or {}).get("action_id"),
+            "trend-annotation-question",
+        )
+        self.assertNotIn("clarification_required", continued["stage_payload"])
+
     def test_exact_continue_recovers_only_after_semantic_service_fallback(self) -> None:
         class DegradedGenerator(RuleBasedStageGenerator):
             def resolve_intent(

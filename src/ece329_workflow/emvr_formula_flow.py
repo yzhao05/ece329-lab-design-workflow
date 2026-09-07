@@ -868,7 +868,11 @@ def _generate_experiment_methods(
         if pattern.get("pattern_id") in pattern_ids
     ]
     methods: list[dict[str, Any]] = []
-    for index, pattern_id in enumerate(ordered_pattern_ids, start=1):
+    # The coverage matrix remains exhaustive for internal traceability, while
+    # the student-facing choice is deliberately capped.  Presenting every
+    # compatible pattern produced twelve near-overlapping methods in a common
+    # point-charge flow and made the choice harder rather than more useful.
+    for index, pattern_id in enumerate(ordered_pattern_ids[:6], start=1):
         pattern = _pattern_by_id(pattern_id)
         if pattern is None:
             continue

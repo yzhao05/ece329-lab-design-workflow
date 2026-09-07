@@ -20,6 +20,7 @@ from ece329_workflow.engine import WorkflowEngine, _emvr_entry_reference
 from ece329_workflow.emvr_design import (
     apply_emvr_field_updates,
     clean_emvr_field_text,
+    merge_emvr_structured_requirements,
 )
 from ece329_workflow.generator import RuleBasedStageGenerator, _emvr_parameter_axis
 from ece329_workflow.models import DesignSession, InteractionState, Stage
@@ -184,6 +185,106 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             clean_emvr_field_text("vr_interaction_objective", "交互目标更具体一点"),
             "",
         )
+
+    def test_retain_edit_wrappers_are_removed_from_new_and_legacy_emvr_values(self) -> None:
+        self.assertEqual(
+            clean_emvr_field_text(
+                "changed_quantities",
+                "主动变化只保留距离和电荷类型（同种/异种）",
+            ),
+            "距离和电荷类型（同种/异种）",
+        )
+        self.assertEqual(
+            clean_emvr_field_text(
+                "observed_quantities",
+                "观察只保留场线的合并、扭曲和重排形态",
+            ),
+            "场线的合并、扭曲和重排形态",
+        )
+        self.assertEqual(
+            clean_emvr_field_text(
+                "conceptual_objective",
+                "概念目标只保留理解距离和电荷类型如何影响场线重排",
+            ),
+            "理解距离和电荷类型如何影响场线重排",
+        )
+        emvr = {
+            "field_state": {
+                "changed_quantities": ["主动变化只保留距离"],
+                "observed_quantities": ["观察只保留场线重排形态"],
+                "research_question": "当只保留距离变化时，场线重排形态如何变化？",
+            }
+        }
+        merged = merge_emvr_structured_requirements(emvr)
+        self.assertEqual(merged["changed_quantities"], ["距离"])
+        self.assertEqual(merged["observed_quantities"], ["场线重排形态"])
+        self.assertEqual(
+            merged["research_question"],
+            "当距离变化时，场线重排形态如何变化？",
+        )
+
+    def test_emvr_report_keeps_distinct_objects_with_identical_details(self) -> None:
+        session = self._session()
+        session.stage_outputs[Stage.CONCEPTUAL_OR_VR_SETUP.value] = {
+            "stage_payload": {
+                "object_inventory": [
+                    {
+                        "object_name": name,
+                        "category": "物理源对象",
+                        "purpose": "产生电场并参与双源叠加比较",
+                        "student_interaction": "拖动改变两点电荷间距并切换电荷类型",
+                        "physics_or_data_state": "位置、电荷量与正负号",
+                        "visual_feedback": "场线随参数实时重排并显示方向箭头",
+                        "required": True,
+                    }
+                    for name in ("点电荷 A", "点电荷 B")
+                ]
+            }
+        }
+
+        report = build_emvr_task_report(session)
+        labels = [
+            item["label"]
+            for section in report["sections"]
+            for item in section["items"]
+        ]
+        self.assertIn("物体 1｜点电荷 A", labels)
+        self.assertIn("物体 2｜点电荷 B", labels)
+
+    def test_point_charge_controls_are_lab_specific(self) -> None:
+        session = self._session()
+        emvr = session.design_context["emvr_design"]
+        emvr["selected_primary_formula_ids"] = ["coulomb_point_charge"]
+        emvr["field_state"] = {
+            "changed_quantities": ["距离", "电荷类型（同种/异种）"],
+            "observed_quantities": ["场线合并、扭曲和重排形态"],
+            "parameter_specifications": ["距离：0.5 米到 5 米，步长 0.1 米"],
+        }
+        session.current_stage_index = list(Stage).index(Stage.VARIABLES_AND_CONDITIONS)
+
+        output = RuleBasedStageGenerator().generate(session, "生成变量设计")
+        controls = output.stage_payload["controlled_variables"]
+
+        self.assertIn("两个点电荷的电荷量大小", controls)
+        self.assertIn("均匀线性介质及介电常数", controls)
+        self.assertNotIn("源条件", controls)
+
+    def test_legacy_uncertainty_does_not_replace_generated_physical_mechanism(self) -> None:
+        session = self._session()
+        session.current_stage_index = list(Stage).index(Stage.THEORETICAL_FRAMEWORK)
+        session.design_context["stage_design_state"] = {
+            "physical_mechanism": "暂时不确定",
+        }
+        session.stage_outputs[Stage.THEORETICAL_FRAMEWORK.value] = {
+            "stage_payload": {
+                "physical_mechanism": ["库仑定律", "电场矢量叠加"],
+            }
+        }
+
+        payload = effective_emvr_stage_payload(session, Stage.THEORETICAL_FRAMEWORK)
+
+        self.assertNotEqual(payload.get("physical_mechanism"), "暂时不确定")
+        self.assertIn("库仑定律", str(payload.get("physical_mechanism")))
 
     def test_generator_uses_emvr_parameters_for_procedure_and_axes(self) -> None:
         session = self._session()
@@ -1081,7 +1182,10 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             for method in methods.stage_payload["experiment_methods"]
             for assignment in method["formula_pattern_assignments"]
         }
-        self.assertLessEqual(matrix_cells, generated_cells)
+        # The internal matrix remains exhaustive, while the student-facing
+        # method catalog is capped to avoid an overwhelming list.
+        self.assertLessEqual(generated_cells, matrix_cells)
+        self.assertLessEqual(len(methods.stage_payload["experiment_methods"]), 6)
 
     def test_formula_choice_and_composition_can_be_handled_in_one_long_turn(self) -> None:
         session = self._session()

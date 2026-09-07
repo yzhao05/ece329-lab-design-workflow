@@ -476,7 +476,10 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
         if not {"direction_summary", "research_summary"} <= explicitly_cleared
         else None,
     )
-    topic = str(next((item for item in topic_candidates if item), "")).strip()
+    topic = clean_emvr_field_text(
+        "direction_summary",
+        str(next((item for item in topic_candidates if item), "")).strip(),
+    )
     research_object = (
         str(requirements.get("research_object") or "").strip()
         if "research_object" not in explicitly_cleared
@@ -780,9 +783,30 @@ def effective_emvr_stage_payload(
             "core_equations",
             [deepcopy(formula_by_id[item]) for item in selected_ids if item in formula_by_id],
         )
-        set_if("formula_support_map", formula_support_map_for_selection(session))
+        support_map = formula_support_map_for_selection(session)
+        set_if("formula_support_map", support_map)
+        generated_mechanism = payload.get("physical_mechanism")
+        mechanism = stage_state.get("physical_mechanism")
+        if _plain(mechanism).replace("。", "") in {
+            "不确定", "暂时不确定", "我不确定", "不知道", "暂时不知道", "我不知道", "不清楚",
+        }:
+            # Older EMVR sessions could persist a request for help as if it
+            # were the student's physical explanation.  Rebuild that row from
+            # the already selected formula-to-design links instead.
+            payload.pop("physical_mechanism", None)
+            mechanism = "；".join(
+                f"{_plain(item.get('relation'))}用于解释{_plain(item.get('supports_design_content'))}"
+                for item in support_map
+                if isinstance(item, dict)
+                and _plain(item.get("relation"))
+                and _plain(item.get("supports_design_content"))
+            )
+            if not mechanism and _plain(generated_mechanism).replace("。", "") not in {
+                "不确定", "暂时不确定", "我不确定", "不知道", "暂时不知道", "我不知道", "不清楚",
+            }:
+                mechanism = generated_mechanism
+        set_if("physical_mechanism", mechanism)
         for field in (
-            "physical_mechanism",
             "simulation_inputs",
             "comparison_cases",
             "controlled_variables",
@@ -1066,9 +1090,14 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
         unique_items: list[dict[str, str]] = []
         for item in section.get("items", []):
             normalized = re.sub(r"\s+", "", str(item.get("value") or ""))
-            if len(normalized) >= 80 and normalized in seen_long_values:
+            is_inventory_object = str(item.get("label") or "").startswith("物体 ")
+            if (
+                not is_inventory_object
+                and len(normalized) >= 80
+                and normalized in seen_long_values
+            ):
                 continue
-            if len(normalized) >= 80:
+            if not is_inventory_object and len(normalized) >= 80:
                 seen_long_values.add(normalized)
             unique_items.append(item)
         section["items"] = unique_items

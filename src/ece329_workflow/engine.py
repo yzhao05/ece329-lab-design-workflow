@@ -2659,6 +2659,53 @@ class WorkflowEngine:
             # confirmations. Enrich the in-memory decision context so they use
             # the same normalization as newly created sessions.
             pending["interaction_state"] = InteractionState.EMVR_DIRECT.value
+        compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and isinstance(pending, dict)
+            and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+            and compact_control
+            in {"不确定", "暂时不确定", "我不确定", "不知道", "暂时不知道", "我不知道", "不清楚"}
+        ):
+            # EMVR questions explicitly offer a professional reference.  An
+            # uncertainty response therefore requests that reference; it is
+            # never the physical-mechanism or Unity-field value itself.
+            return (
+                validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.REQUEST_MORE_EXAMPLES,
+                        confidence=1.0,
+                        source="EMVR_UNCERTAINTY_REFERENCE_REQUEST",
+                        semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+                    ),
+                    pending,
+                ),
+                pending,
+            )
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and compact_control in {"继续", "下一步", "确认并继续"}
+            and isinstance(pending, dict)
+            and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+            and str(pending.get("candidate_answer") or "").strip()
+            and pending.get("candidate_binding_authorized") is True
+            and pending.get("candidate_source") == "PROFESSIONAL_REFERENCE"
+        ):
+            # A visibly presented reference draft is a safely bound candidate.
+            # “继续” accepts it before readiness chooses the next question,
+            # preventing the same open item from being asked indefinitely.
+            return (
+                validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ADVANCE_STAGE,
+                        confidence=1.0,
+                        source="EMVR_REFERENCE_CANDIDATE_CONTINUE",
+                        semantic_updates={"control_actions": ["ADVANCE"]},
+                    ),
+                    pending,
+                ),
+                pending,
+            )
         direct = deterministic_intent(
             message,
             pending,
@@ -4060,12 +4107,54 @@ class WorkflowEngine:
                         "课程物理关系",
                     ],
                 }
+            if (
+                isinstance(pending_action, dict)
+                and pending_action.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+                and pending_action.get("subject") != "experiment_brief"
+                and not isinstance(output.stage_payload.get("reference_draft"), dict)
+            ):
+                # A detailed online explanation can still omit the exact value
+                # needed to close the open field. Attach a deterministic draft
+                # derived from confirmed EMVR state without replacing the
+                # useful explanation the student just received.
+                scaffold = _emvr_reference_output(session)
+                reference_draft = scaffold.stage_payload.get("reference_draft")
+                if isinstance(reference_draft, dict):
+                    output.stage_payload["reference_draft"] = deepcopy(reference_draft)
+                    output.stage_payload.setdefault(
+                        "reference_scaffold",
+                        deepcopy(scaffold.stage_payload.get("reference_scaffold", {})),
+                    )
+                    draft_value = str(reference_draft.get("value") or "").strip()
+                    if draft_value and draft_value not in output.assistant_message:
+                        output.assistant_message = (
+                            f"{output.assistant_message.rstrip()}\n\n"
+                            f"可直接采用的参考草稿：{draft_value}\n"
+                            "回复“继续”即可采用，也可以直接改写。"
+                        )
             output.stage_payload["reference_only"] = True
             output.stage_payload["preserve_pending_action"] = True
             if isinstance(pending_action, dict):
+                reference_draft = output.stage_payload.get("reference_draft")
+                expected_field = recoverable_pending_field(pending_action)
+                if (
+                    isinstance(reference_draft, dict)
+                    and str(reference_draft.get("field") or "") == expected_field
+                    and str(reference_draft.get("value") or "").strip()
+                ):
+                    pending_action = deepcopy(pending_action)
+                    pending_action["candidate_answer"] = str(
+                        reference_draft["value"]
+                    ).strip()
+                    pending_action["candidate_binding_authorized"] = True
+                    pending_action["candidate_source"] = "PROFESSIONAL_REFERENCE"
+                    pending_action["candidate_resolution"] = (
+                        UserIntent.ANSWER_CURRENT_QUESTION.value
+                    )
                 dialogue_state(session)["pending_action"] = deepcopy(
                     pending_action
                 )
+                set_pending_action_snapshot(session, pending_action)
             completion_error = None
         elif design_summary_request:
             summary_snapshot = design_state_snapshot(session)

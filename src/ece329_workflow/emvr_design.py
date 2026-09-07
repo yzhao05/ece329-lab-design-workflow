@@ -264,6 +264,23 @@ _EMVR_FIELD_LABELS = {
     "research_question": "研究问题",
 }
 
+_EMVR_RETAIN_VALUE_LABELS = {
+    "experiment_brief": r"(?:实验方向|实验主题|实验简述)",
+    "direction_summary": r"(?:实验主题|研究主题|主题)",
+    "research_summary": r"(?:实验主题|研究主题|主题)",
+    "research_question": r"(?:研究问题|问题主线)",
+    "conceptual_objective": r"(?:概念目标)",
+    "calculation_objective": r"(?:计算目标)",
+    "analysis_objective": r"(?:分析目标)",
+    "vr_interaction_objective": r"(?:交互目标|VR交互目标)",
+    "observation_objective": r"(?:观察目标)",
+    "changed_quantities": r"(?:主动变化|变化量|自变量)",
+    "observed_quantities": r"(?:观察内容|观察量|响应端|响应量|观察)",
+    "comparison_cases": r"(?:比较情形|比较条件)",
+    "required_behaviors": r"(?:核心操作|操作)",
+    "visualization_requirements": r"(?:显示内容|可视化内容|可视化)",
+}
+
 
 def clean_emvr_field_text(field_id: str, value: Any) -> str:
     """Remove revision instructions while preserving the actual design value."""
@@ -271,6 +288,36 @@ def clean_emvr_field_text(field_id: str, value: Any) -> str:
     text = str(value).strip() if isinstance(value, str) else ""
     if not text:
         return ""
+    # “只保留/仅保留” describes the edit operation, not the resulting design
+    # value.  Semantic extractors occasionally copied that wrapper into the
+    # committed value (for example “主动变化只保留距离”), which then polluted
+    # the research question and every downstream report projection.  Keep
+    # this repair field-aware so procedural prose that legitimately uses the
+    # same words is left untouched.
+    retain_label = _EMVR_RETAIN_VALUE_LABELS.get(field_id)
+    if retain_label:
+        text = re.sub(
+            rf"^(?:{retain_label}[：:]?\s*)?(?:只|仅)保留(?:为|成)?[：:]?\s*",
+            "",
+            text,
+            count=1,
+        ).strip()
+    if field_id in {
+        "experiment_brief",
+        "direction_summary",
+        "research_summary",
+        "research_question",
+        "conceptual_objective",
+        "calculation_objective",
+        "analysis_objective",
+        "vr_interaction_objective",
+        "observation_objective",
+    }:
+        text = re.sub(
+            r"(^|(?<=[当，,；;：:]))(?:只|仅)保留",
+            r"\1",
+            text,
+        )
     labels = (
         tuple(_EMVR_FIELD_LABELS.values())
         if field_id == "learning_objectives"
@@ -459,7 +506,10 @@ def _bound_theory_link(
         # snapshot that was semantically approved. If a supported field later
         # changes, the old theory must be selected again rather than silently
         # attaching itself to a different research question or observation.
-        if field_id in prior_binding_map and prior_binding_map[field_id] != value:
+        prior_value = prior_binding_map.get(field_id)
+        if field_id in prior_binding_map and field_id in EMVR_EDITABLE_FIELDS:
+            prior_value = _nonempty_field_value(field_id, prior_value)
+        if field_id in prior_binding_map and prior_value != value:
             return None
         bindings.append(
             {
@@ -809,6 +859,17 @@ def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
                 and value not in (None, "", [], {})
             ):
                 merged[key] = deepcopy(value)
+    # Project legacy sessions through the same value cleaner used for new
+    # edits.  This is intentionally non-mutating: stored audit history remains
+    # intact, while every EMVR generator/report receives canonical values.
+    for key in tuple(merged):
+        if key not in EMVR_EDITABLE_FIELDS:
+            continue
+        cleaned = _nonempty_field_value(key, merged[key])
+        if cleaned is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = deepcopy(cleaned)
     theory_state = (
         emvr_design.get("theory_link_state", {})
         if isinstance(emvr_design, dict)
