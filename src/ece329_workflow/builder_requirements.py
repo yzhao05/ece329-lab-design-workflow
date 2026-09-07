@@ -162,13 +162,31 @@ def _field_valid(field: str, value: str) -> bool:
         # a categorical parameter must explicitly identify itself as discrete.
         has_numeric_boundary = re.search(r"\d", value) is not None
         has_unit = re.search(
-            r"(?:m|cm|mm|km|Hz|kHz|MHz|GHz|V|mV|A|mA|C|μC|uC|F|H|Ω|ohm|S|W|T|Wb|rad|°|deg|s|ms|μs|ns|无量纲)",
+            r"(?:m|cm|mm|km|Hz|kHz|MHz|GHz|V|mV|A|mA|C|μC|uC|F|H|Ω|ohm|S|W|T|Wb|rad|°|deg|s|ms|μs|ns|"
+            r"米|厘米|毫米|千米|秒|毫秒|微秒|纳秒|赫兹|伏特?|安培?|库仑|法拉|亨利|欧姆|特斯拉|韦伯|弧度|度|无量纲)",
             value,
             flags=re.IGNORECASE,
         ) is not None
         explicitly_discrete = re.search(r"(?:离散|选项)", value) is not None
         return explicitly_discrete or (has_numeric_boundary and has_unit)
     return True
+
+
+def _validation_error(field: str, value: str) -> str | None:
+    if not is_resolved_design_value(value) or _field_valid(field, value):
+        return None
+    shown = value[:120]
+    if field == "lab_id":
+        return (
+            f"当前输入“{shown}”不符合 Builder ID 格式：必须以小写字母开头，"
+            "且只能包含小写字母、数字和下划线（长度 3–64 个字符）。"
+        )
+    if field == "parameter_specifications":
+        return (
+            f"当前输入“{shown}”还不能形成可执行参数规格：连续参数需包含数值范围、"
+            "单位和步长，离散参数需明确列出允许选项。"
+        )
+    return None
 
 
 def missing_builder_requirements(
@@ -179,12 +197,18 @@ def missing_builder_requirements(
     if session.interaction_state is not InteractionState.EMVR_DIRECT:
         return []
     values = builder_requirement_values(session)
-    return [
-        deepcopy(spec)
-        for spec in BUILDER_REQUIREMENT_SPECS
-        if (stage is None or spec["stage"] is stage)
-        and not _field_valid(str(spec["field"]), values.get(str(spec["field"]), ""))
-    ]
+    missing: list[dict[str, Any]] = []
+    for spec in BUILDER_REQUIREMENT_SPECS:
+        field = str(spec["field"])
+        value = values.get(field, "")
+        if (stage is not None and spec["stage"] is not stage) or _field_valid(field, value):
+            continue
+        item = deepcopy(spec)
+        error = _validation_error(field, value)
+        if error:
+            item["validation_error"] = error
+        missing.append(item)
+    return missing
 
 
 def next_builder_requirement(

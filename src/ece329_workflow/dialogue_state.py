@@ -216,11 +216,14 @@ _EMVR_CONFIRMATION_FIELDS: dict[Stage, tuple[str, ...]] = {
         "course_relationship",
         "conceptual_structure",
         "design_rationale",
+        "lab_title",
+        "lab_id",
     ),
     Stage.RESEARCH_QUESTION: (
         "research_question",
-        "independent_variable",
-        "observations",
+        "changed_quantities",
+        "observed_quantities",
+        "comparison_cases",
     ),
     Stage.LEARNING_OBJECTIVES: (
         "conceptual_objective",
@@ -234,8 +237,46 @@ _EMVR_CONFIRMATION_FIELDS: dict[Stage, tuple[str, ...]] = {
         "unity_objects",
         "interactions",
         "visualization_plan",
+        "desktop_interaction_plan",
+        "room_spatial_requirements",
+        "hidden_object_lifecycle",
+        "physics_layer",
+        "visualization_layer",
+        "measurement_interface",
     ),
-    Stage.DESIGN_VALUE_AND_LIMITATIONS: ("design_value", "limitations"),
+    Stage.THEORETICAL_FRAMEWORK: (
+        "theoretical_framework",
+        "physical_mechanism",
+        "simulation_inputs",
+        "calculated_outputs",
+        "comparison_cases",
+        "controlled_conditions",
+        "reference_condition",
+    ),
+    Stage.VARIABLES_AND_CONDITIONS: (
+        "independent_variable",
+        "observations",
+        "controlled_conditions",
+        "reference_condition",
+        "parameter_specifications",
+    ),
+    Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps", "comparison_logic"),
+    Stage.RESULT_INTERPRETATION: (
+        "result_interpretation",
+        "expected_results",
+        "acceptance_criteria",
+        "report_questions",
+        "if_prediction_supported",
+        "if_opposite_trend",
+        "if_no_clear_change",
+    ),
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: (
+        "design_value",
+        "limitations",
+        "conceptual_feasibility",
+        "teaching_value",
+        "vr_added_value",
+    ),
 }
 
 
@@ -264,7 +305,7 @@ _PUBLIC_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "conceptual_structure": ("实验结构", "概念结构", "模型边界", "设计边界"),
     "independent_variable": ("自变量", "可调内容", "改变的量"),
     "observations": ("目标现象", "观察量", "可观察内容", "显示现象"),
-    "controlled_conditions": ("控制条件", "控制变量", "基准条件"),
+    "controlled_conditions": ("控制条件", "控制变量", "保持不变的控制条件"),
     "procedure_steps": ("实验流程", "流程环节",),
     "visualization_plan": ("可视化方案", "显示内容", "数据显示"),
     "result_interpretation": ("结果解释", "结果判断",),
@@ -282,13 +323,32 @@ _PUBLIC_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "expected_results": ("Lab预期结果", "具体预期结果"),
     "acceptance_criteria": ("通过条件", "验收条件"),
     "report_questions": ("报告问题", "实验报告问题"),
-    "changed_quantities": ("变化量", "可调参数", "自变量"),
-    "observed_quantities": ("观察量", "目标现象", "记录量"),
+    "changed_quantities": ("变化量", "可调参数", "自变量", "VR中可调内容"),
+    "observed_quantities": ("观察量", "目标现象", "记录量", "VR中可观察内容"),
     "comparison_cases": ("比较情形", "基础比较", "对照情形"),
     "required_behaviors": ("核心操作", "交互行为", "对象行为"),
     "object_constraints": ("对象约束", "模型边界", "控制条件"),
     "visualization_requirements": ("可视化要求", "显示要求"),
     "design_values": ("设计价值", "教学价值"),
+    "research_hypothesis": ("研究假设",),
+    "expected_trend": ("预期趋势",),
+    "limiting_cases": ("边界情形", "极限情形", "模型失效边界"),
+    "trend_annotation": ("趋势标注", "理论趋势标注"),
+    "unity_update_event": ("Unity更新触发", "更新触发"),
+    "physical_mechanism": ("物理机制", "公式与现象的联系"),
+    "simulation_inputs": ("计算输入", "理论计算输入"),
+    "calculated_outputs": ("计算输出", "理论计算输出"),
+    "physics_layer": ("物理计算层",),
+    "visualization_layer": ("可视化层",),
+    "measurement_interface": ("数据显示", "测量界面"),
+    "reference_condition": ("用于比较的基准状态", "基准状态", "参考状态"),
+    "comparison_logic": ("比较逻辑",),
+    "if_prediction_supported": ("符合预期时",),
+    "if_opposite_trend": ("趋势相反时",),
+    "if_no_clear_change": ("变化不明显时",),
+    "conceptual_feasibility": ("概念可行性",),
+    "teaching_value": ("教学价值",),
+    "vr_added_value": ("VR附加价值",),
     "student_summary": ("学生总结",),
 }
 
@@ -997,6 +1057,16 @@ def hydrate_pending_action_from_history(
 
     current = current_pending_action(session)
     if current is not None:
+        pending_stage = str(current.get("stage") or "").strip()
+        if pending_stage and pending_stage != session.current_stage.value:
+            # A pending question is a stage-local transition edge.  Older
+            # sessions could retain that edge after an advance, causing the
+            # next-stage answer to be interpreted against an obsolete prompt
+            # and then asked again.  Preserve all committed design content but
+            # discard the stale conversational pointer.
+            dialogue_state(session).pop("pending_action", None)
+            set_pending_action_snapshot(session, None)
+            return None
         idea = session.design_context.get("idea", {})
         locked_direction_has_stale_confirmation = bool(
             session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -1061,14 +1131,42 @@ def hydrate_pending_action_from_history(
                 and current.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
             ):
                 current["type"] = "ANSWER_STAGE_QUESTION"
-            if not current.get("answer_fields"):
-                current["answer_fields"] = (
-                    _confirmation_answer_fields(
-                        session.current_stage,
-                        session.interaction_state,
+            if current.get("type") in CONFIRMATION_PENDING_TYPES:
+                valid_fields = {
+                    *DESIGN_ACT_FIELDS,
+                    *STAGE_ACT_FIELDS,
+                    *EMVR_EDITABLE_FIELDS,
+                    *FACET_TO_DESIGN_FIELD,
+                }
+                existing_fields = (
+                    [
+                        str(field).strip()
+                        for field in current.get("answer_fields", [])
+                        if str(field).strip() in valid_fields
+                    ]
+                    if isinstance(current.get("answer_fields"), list)
+                    else []
+                )
+                current["answer_fields"] = list(
+                    dict.fromkeys(
+                        [
+                            *existing_fields,
+                            *_confirmation_answer_fields(
+                                session.current_stage,
+                                session.interaction_state,
+                            ),
+                        ]
                     )
-                    if current.get("type") in CONFIRMATION_PENDING_TYPES
-                    else _pending_answer_fields(
+                )
+                # Confirmation drafts expose all visible editable report rows.
+                # Rebuild this derived map during hydration so saved sessions
+                # receive newly added aliases and cannot remain disconnected.
+                current["editable_field_bindings"] = _editable_field_bindings(
+                    current["answer_fields"]
+                )
+            elif not current.get("answer_fields"):
+                current["answer_fields"] = (
+                    _pending_answer_fields(
                         session.current_stage,
                         session.interaction_state,
                         str(current.get("subject") or ""),

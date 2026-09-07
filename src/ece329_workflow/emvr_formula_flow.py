@@ -154,6 +154,16 @@ def normalize_formula_flow_action(act_type: str, raw: Any) -> dict[str, Any] | N
                 if item in _FORMULA_IDS
             ],
             "student_rationale": str(raw.get("student_rationale") or "").strip()[:1000] or None,
+            # A student often explains how the selected formulas will work
+            # together in the same sentence.  Keep those explicit design
+            # details as structured data instead of burying them in a
+            # rationale that later stages cannot project into the brief.
+            "objects": _unique_text(raw.get("objects")),
+            "operations": _unique_text(raw.get("operations")),
+            "changed_quantities": _unique_text(raw.get("changed_quantities")),
+            "observed_quantities": _unique_text(raw.get("observed_quantities")),
+            "comparison_cases": _unique_text(raw.get("comparison_cases")),
+            "boundary_conditions": _unique_text(raw.get("boundary_conditions")),
         }
     if act_type == "SET_EMVR_FORMULA_COMPOSITION":
         strategy = str(raw.get("strategy") or "").strip().upper()
@@ -1084,6 +1094,29 @@ def _formula_selection_from_visible_card_reference(
     }
 
 
+def _composition_from_visible_option_reference(message: str) -> dict[str, Any] | None:
+    """Resolve only an exact currently displayed composition choice.
+
+    This fallback deliberately recognizes UI wording rather than physics
+    keywords, so an unavailable semantic service cannot invent a design.
+    """
+
+    compact = "".join(message.split()).casefold()
+    if not compact:
+        return None
+    labels = {
+        "组合成一个完整实验": "COMBINED",
+        "组合公式设计一个完整实验": "COMBINED",
+        "逐个小实验后组合": "SEPARATE_THEN_COMBINE",
+        "先为每条公式设计一个小实验，再把它们组合成连续任务": "SEPARATE_THEN_COMBINE",
+    }
+    matches = [strategy for label, strategy in labels.items() if label in compact]
+    matches = list(dict.fromkeys(matches))
+    if len(matches) != 1:
+        return None
+    return {"strategy": matches[0], "student_rationale": message.strip()[:1000] or None}
+
+
 def _semantic_outage_stage_payload(
     flow: dict[str, Any],
     phase: str,
@@ -1162,27 +1195,37 @@ def _build_experiment_brief(
         for method_id in method_choice.get("selected_method_ids", [])
         if method_id in candidate_methods
     ]
-    changed = _unique_text(method_choice.get("changed_quantities")) or _unique_text(
-        analysis.get("changed_quantities")
-    ) or list(
+    changed = (
+        _unique_text(method_choice.get("changed_quantities"))
+        or _unique_text(formula_selection.get("changed_quantities"))
+        or _unique_text(analysis.get("changed_quantities"))
+        or list(
         dict.fromkeys(
             item
             for method in selected_methods
             for item in method.get("changed_quantities", [])
         )
-    )[:5]
-    observed = _unique_text(method_choice.get("observed_quantities")) or _unique_text(
-        analysis.get("observed_quantities")
-    ) or list(
+        )[:5]
+    )
+    observed = (
+        _unique_text(method_choice.get("observed_quantities"))
+        or _unique_text(formula_selection.get("observed_quantities"))
+        or _unique_text(analysis.get("observed_quantities"))
+        or list(
         dict.fromkeys(
             item
             for method in selected_methods
             for item in method.get("observed_quantities", [])
         )
-    )[:5]
-    comparisons = _unique_text(method_choice.get("comparison_cases"))
-    objects = _unique_text(method_choice.get("objects")) or _unique_text(
-        analysis.get("mentioned_objects")
+        )[:5]
+    )
+    comparisons = _unique_text(method_choice.get("comparison_cases")) or _unique_text(
+        formula_selection.get("comparison_cases")
+    )
+    objects = (
+        _unique_text(method_choice.get("objects"))
+        or _unique_text(formula_selection.get("objects"))
+        or _unique_text(analysis.get("mentioned_objects"))
     )
     if not objects:
         objects = list(
@@ -1192,7 +1235,9 @@ def _build_experiment_brief(
                 for item in method.get("objects", [])
             )
         )
-    operations = _unique_text(method_choice.get("operations"))
+    operations = _unique_text(method_choice.get("operations")) or _unique_text(
+        formula_selection.get("operations")
+    )
     if not operations:
         operations = [
             str(item)
@@ -1200,25 +1245,29 @@ def _build_experiment_brief(
             for item in method.get("operations", [])
             if str(item).strip()
         ]
-    boundaries = _unique_text(method_choice.get("boundary_conditions")) or list(
+    boundaries = (
+        _unique_text(method_choice.get("boundary_conditions"))
+        or _unique_text(formula_selection.get("boundary_conditions"))
+        or list(
         dict.fromkeys(
             item
             for method in selected_methods
             for item in method.get("required_boundary_conditions", [])
         )
-    )[:6]
+        )[:6]
+    )
     custom = str(method_choice.get("custom_direction") or "").strip()
     original_topic = str(analysis.get("topic_description") or "").strip()
     if custom:
         topic = custom
-    elif analysis.get("specificity") == "BROAD" and selected_methods:
+    elif original_topic:
+        topic = original_topic
+    else:
         topic = "；".join(
             dict.fromkeys(
                 str(method.get("title") or "").strip() for method in selected_methods
             )
         )
-    else:
-        topic = original_topic
     return {
         "topic": topic,
         "primary_formula_ids": list(formula_selection.get("primary_formula_ids", [])),
@@ -1246,16 +1295,18 @@ def _build_experiment_brief(
 
 
 def _brief_summary(brief: dict[str, Any]) -> str:
-    comparison_text = (
-        f"，并比较{'、'.join(brief.get('comparison_cases', []))}"
-        if brief.get("comparison_cases")
-        else ""
-    )
-    return (
-        f"围绕“{brief.get('topic')}”，使用{'、'.join(brief.get('objects', []))}，"
-        f"通过{'、'.join(brief.get('operations', []))}改变{'、'.join(brief.get('changed_quantities', []))}，"
-        f"观察{'、'.join(brief.get('observed_quantities', []))}{comparison_text}。"
-    )
+    clauses = [f"研究主题为“{brief.get('topic')}”"]
+    if brief.get("objects"):
+        clauses.append(f"研究对象为{'、'.join(brief['objects'])}")
+    if brief.get("operations"):
+        clauses.append(f"学生通过{'、'.join(brief['operations'])}开展实验")
+    if brief.get("changed_quantities"):
+        clauses.append(f"主动改变{'、'.join(brief['changed_quantities'])}")
+    if brief.get("observed_quantities"):
+        clauses.append(f"重点观察{'、'.join(brief['observed_quantities'])}")
+    if brief.get("comparison_cases"):
+        clauses.append(f"比较{'、'.join(brief['comparison_cases'])}")
+    return "；".join(clauses) + "。"
 
 
 def _commit_brief(session: DesignSession, flow: dict[str, Any]) -> None:
@@ -1334,6 +1385,7 @@ def handle_emvr_formula_turn(
         semantic_updates["emvr_formula_actions"] = deepcopy(deferred_actions)
     phase = str(flow.get("phase") or TOPIC_RECEIVED)
     outage_formula_selection: dict[str, Any] | None = None
+    outage_composition: dict[str, Any] | None = None
     if _semantic_service_failed(turn_intent):
         _remember_semantic_recovery(
             flow,
@@ -1346,7 +1398,9 @@ def handle_emvr_formula_turn(
                 message,
                 flow,
             )
-        if outage_formula_selection is None:
+        elif phase == FORMULA_COMPOSITION_REVIEW:
+            outage_composition = _composition_from_visible_option_reference(message)
+        if outage_formula_selection is None and outage_composition is None:
             return (
                 StepOutput(
                     assistant_message=(
@@ -1568,6 +1622,12 @@ def handle_emvr_formula_turn(
                         "supporting_formula_ids": support,
                         "selection_status": "CONFIRMED",
                         "student_rationale": chosen.get("student_rationale"),
+                        "objects": list(chosen.get("objects", [])),
+                        "operations": list(chosen.get("operations", [])),
+                        "changed_quantities": list(chosen.get("changed_quantities", [])),
+                        "observed_quantities": list(chosen.get("observed_quantities", [])),
+                        "comparison_cases": list(chosen.get("comparison_cases", [])),
+                        "boundary_conditions": list(chosen.get("boundary_conditions", [])),
                     }
                 )
                 flow["phase"] = FORMULA_SELECTION_CONFIRMED
@@ -1660,6 +1720,7 @@ def handle_emvr_formula_turn(
             choice = (
                 _composition_from_option(selected_option_id)
                 or _selected_action(turn_intent, "SET_EMVR_FORMULA_COMPOSITION")
+                or outage_composition
             )
             if choice and choice.get("strategy") in {"COMBINED", "SEPARATE_THEN_COMBINE"}:
                 _clear_semantic_recovery(flow)

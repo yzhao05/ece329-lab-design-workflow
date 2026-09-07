@@ -66,6 +66,7 @@ from .design_state import (
     format_design_summary,
     is_topic_locked,
     record_seen_scenes,
+    set_pending_action_snapshot,
     set_baseline_comparisons,
     sync_design_state_to_legacy,
 )
@@ -515,6 +516,12 @@ _STUDENT_FIELD_LABELS = {
     "research_object": "研究对象",
     "course_relationship": "课程关系",
     "learning_objective": "学习目标",
+    "learning_objectives": "学习目标",
+    "conceptual_objective": "概念目标",
+    "calculation_objective": "计算目标",
+    "analysis_objective": "分析目标",
+    "vr_interaction_objective": "交互目标",
+    "observation_objective": "观察目标",
     "research_question": "研究问题",
     "theoretical_framework": "理论依据",
     "hypothesis": "假设",
@@ -532,6 +539,35 @@ _STUDENT_FIELD_LABELS = {
     "limitations": "设计局限",
     "unity_objects": "Unity/VR实验对象",
     "interactions": "VR交互",
+    "lab_title": "实验名称",
+    "lab_id": "实验ID",
+    "desktop_interaction_plan": "桌面鼠标操作与VR映射",
+    "room_spatial_requirements": "房间空间与相对摆放",
+    "hidden_object_lifecycle": "初始隐藏与触发后状态",
+    "parameter_specifications": "参数范围、单位与步长",
+    "expected_results": "Lab特有预期结果",
+    "acceptance_criteria": "Lab特有通过条件",
+    "report_questions": "实验报告问题",
+    "research_hypothesis": "研究假设",
+    "expected_trend": "预期趋势",
+    "limiting_cases": "边界情形",
+    "trend_annotation": "趋势标注",
+    "unity_update_event": "Unity更新触发",
+    "physical_mechanism": "物理机制",
+    "simulation_inputs": "计算输入",
+    "calculated_outputs": "计算输出",
+    "physics_layer": "物理计算层",
+    "visualization_layer": "可视化层",
+    "measurement_interface": "数据显示",
+    "reference_condition": "用于比较的基准状态",
+    "comparison_logic": "比较逻辑",
+    "if_prediction_supported": "符合预期时",
+    "if_opposite_trend": "趋势相反时",
+    "if_no_clear_change": "变化不明显时",
+    "conceptual_feasibility": "概念可行性",
+    "teaching_value": "教学价值",
+    "vr_added_value": "VR附加价值",
+    "student_summary": "学生总结",
 }
 
 
@@ -1558,9 +1594,10 @@ def _emvr_entry_reference(
         "当前电磁现象",
     )
     objective = compact(context.get("learning_objective"), "解释核心物理关系")
-    question = compact(context.get("research_question"), "当前研究问题")
     variable = compact(context.get("independent_variable"), "主要可调参数")
     observations = compact(context.get("observations"), "目标场量或响应")
+    saved_question = compact(context.get("research_question"), "")
+    question = saved_question or f"当{variable}改变时，{observations}将如何变化"
     controls = compact(context.get("controlled_conditions"), "其余物理条件")
     hypothesis = compact(context.get("hypothesis"), "预期变化趋势")
     references: dict[Stage, list[str]] = {
@@ -1619,10 +1656,12 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
     if requirement is not None:
         field = str(requirement["field"])
         question = str(requirement["question"])
+        validation_error = str(requirement.get("validation_error") or "").strip()
         return StepOutput(
             assistant_message=(
                 f"为了让这份设计可以直接交给 EMVR Builder 使用，"
                 f"现在先明确{requirement['label']}。"
+                + (f"\n\n{validation_error}" if validation_error else "")
             ),
             stage_payload={
                 "emvr_guided_entry": True,
@@ -1938,8 +1977,10 @@ def _prepare_emvr_stage_output(
         field = str(requirement["field"])
         task = str(requirement["question"])
         existing_message = output.assistant_message.rstrip()
+        validation_error = str(requirement.get("validation_error") or "").strip()
         requirement_message = (
             f"这部分还需要明确{requirement['label']}，确认后才会进入 Builder 交接文档。"
+            + (f" {validation_error}" if validation_error else "")
         )
         output.assistant_message = (
             f"{existing_message}\n\n{requirement_message}"
@@ -3172,6 +3213,7 @@ class WorkflowEngine:
                 dialogue = session.model_context.get("dialogue_state")
                 if isinstance(dialogue, dict):
                     dialogue.pop("pending_action", None)
+                set_pending_action_snapshot(session, None)
         if session.interaction_state is InteractionState.GUIDED_DESIGN:
             # EMVR physical-role updates are an EMVR-only state channel.  Even
             # if a semantic service returns one unexpectedly, it must not leak
@@ -5263,6 +5305,7 @@ class WorkflowEngine:
         dialogue = session.model_context.get("dialogue_state", {})
         if isinstance(dialogue, dict):
             dialogue.pop("pending_action", None)
+        set_pending_action_snapshot(session, None)
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and handled_stage is Stage.IDEA_BRAINSTORMING

@@ -485,8 +485,18 @@ def _formula_brief_object_inventory(
 
     objects = items(brief.get("objects"))
     research_object = str(requirements.get("research_object") or "").strip()
-    if research_object:
+    brief_object_summary = "、".join(objects)
+    if research_object and research_object != brief_object_summary:
         objects = [research_object]
+    expanded_objects: list[str] = []
+    for name in objects:
+        counted = re.fullmatch(r"(?:两个|2个)(.+)", name.strip())
+        if counted:
+            base_name = counted.group(1).strip()
+            expanded_objects.extend([f"{base_name} A", f"{base_name} B"])
+        else:
+            expanded_objects.append(name)
+    objects = list(dict.fromkeys(expanded_objects))
     operations = items(requirements.get("required_behaviors")) or items(
         brief.get("operations")
     )
@@ -496,7 +506,10 @@ def _formula_brief_object_inventory(
     observed = items(requirements.get("observed_quantities")) or items(
         brief.get("observed_quantities")
     )
-    operation_text = "；".join(operations) or "按已确认的实验操作改变模型状态"
+    concrete_interaction = str(
+        requirements.get("desktop_interaction_plan") or ""
+    ).strip()
+    operation_text = concrete_interaction or "；".join(operations) or "按已确认的实验操作改变模型状态"
     changed_text = "、".join(changed) or "已确认的模型输入"
     observed_text = "、".join(observed) or "已确认的理论响应"
 
@@ -1973,11 +1986,20 @@ class RuleBasedStageGenerator:
                     "core_equations": formulas,
                     "formula_support_map": support_map,
                     "theory_selection_status": theory_selection_status,
-                    "simulation_inputs": [
-                        *structured_requirements.get("changed_quantities", []),
-                        "其余保持不变的控制条件",
-                        "用于比较的基准状态",
-                    ],
+                    "simulation_inputs": structured_requirements.get(
+                        "changed_quantities", []
+                    ),
+                    "comparison_cases": structured_requirements.get(
+                        "comparison_cases", []
+                    ),
+                    "controlled_variables": (
+                        structured_requirements.get("controlled_conditions")
+                        or ["除主动改变量外保持不变的源、几何、材料与边界条件"]
+                    ),
+                    "reference_condition": {
+                        "purpose": "用于公平比较的基准状态",
+                        "definition": "每轮改变参数前保存或恢复的同一初始状态",
+                    },
                     "calculated_outputs": structured_requirements.get(
                         "observed_quantities", []
                     ) or ["研究问题中指定的电磁响应"],
@@ -2039,7 +2061,15 @@ class RuleBasedStageGenerator:
                     "user_original_design": idea,
                     "existing_context": "保留你已有的场景设定；这一部分不额外改写VR场景。",
                     "student_constraints": stage_inputs,
-                    "user_role": latest_stage_input or "通过有物理意义的交互调整参数、观察结果并进行比较",
+                    "user_role": (
+                        structured_requirements.get("desktop_interaction_plan")
+                        or "；".join(
+                            str(item).strip()
+                            for item in structured_requirements.get("required_behaviors", [])
+                            if str(item).strip()
+                        )
+                        or "通过有物理意义的交互调整参数、观察结果并进行比较"
+                    ),
                     "core_learning_task": research_focus or f"探索学生定义的条件变化与{topics[0]}响应之间的关系",
                     "unity_objects": unity_objects,
                     "object_inventory": object_inventory,

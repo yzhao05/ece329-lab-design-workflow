@@ -95,8 +95,8 @@ _FIELD_LABELS = {
     "independent_variable": "自变量",
     "student_variable_definition": "学生定义的变量与观察方式",
     "dependent_variable": "观察量",
-    "controlled_variables": "控制条件",
-    "reference_condition": "基准条件",
+    "controlled_variables": "保持不变的控制条件",
+    "reference_condition": "用于比较的基准状态",
     "parameter_specifications": "参数范围、单位与步长",
     "procedure_steps": "实验流程",
     "student_required_steps": "学生要求保留的流程",
@@ -183,6 +183,9 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "formula_support_map",
         "theory_selection_status",
         "simulation_inputs",
+        "comparison_cases",
+        "controlled_variables",
+        "reference_condition",
         "calculated_outputs",
         "visual_only_elements",
     ),
@@ -195,7 +198,6 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "desktop_interaction_plan",
         "room_spatial_requirements",
         "hidden_object_lifecycle",
-        "student_constraints",
         "user_role",
         "core_learning_task",
         "unity_objects",
@@ -505,7 +507,14 @@ def effective_emvr_stage_payload(
             [deepcopy(formula_by_id[item]) for item in selected_ids if item in formula_by_id],
         )
         set_if("formula_support_map", formula_support_map_for_selection(session))
-        for field in ("physical_mechanism", "simulation_inputs", "calculated_outputs"):
+        for field in (
+            "physical_mechanism",
+            "simulation_inputs",
+            "comparison_cases",
+            "controlled_variables",
+            "reference_condition",
+            "calculated_outputs",
+        ):
             set_if(field, stage_state.get(field))
     elif stage is Stage.HYPOTHESIS:
         hypothesis = (

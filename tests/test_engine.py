@@ -20,7 +20,11 @@ from ece329_workflow.dialogue_state import (
     record_pending_clarification,
     resolved_intent,
 )
-from ece329_workflow.design_state import design_state_snapshot
+from ece329_workflow.design_state import (
+    design_state_snapshot,
+    ensure_design_state,
+    set_pending_action_snapshot,
+)
 from ece329_workflow.engine import WorkflowEngine
 from ece329_workflow.generator import (
     RuleBasedStageGenerator,
@@ -373,6 +377,27 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_stage_advance_clears_both_pending_action_references(self) -> None:
+        session = DesignSession(
+            design_id="advance-clears-pending-references",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        pending = {
+            "action_id": "action_before_advance",
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "subject": Stage.IDEA_BRAINSTORMING.value,
+        }
+        session.model_context["dialogue_state"] = {"pending_action": dict(pending)}
+        set_pending_action_snapshot(session, pending)
+
+        WorkflowEngine._advance(session, Stage.IDEA_BRAINSTORMING)
+
+        self.assertNotIn(
+            "pending_action",
+            session.model_context["dialogue_state"],
+        )
+        self.assertIsNone(ensure_design_state(session)["pending_action"])
+
     def setUp(self) -> None:
         self.engine = WorkflowEngine(generator=RuleBasedStageGenerator())
 

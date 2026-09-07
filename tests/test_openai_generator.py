@@ -1219,6 +1219,41 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertEqual(result["unresolved_content"], [])
         self.assertIn("MODIFY_EMVR_FIELD", transport.requests[1]["instructions"])
         self.assertIn("changed_quantities", transport.requests[1]["instructions"])
+        self.assertIn("reference_condition", transport.requests[1]["instructions"])
+
+    def test_emvr_field_recovery_allows_report_only_stage_fields(self) -> None:
+        message = "用于比较的基准状态改为两球相距2.0 m"
+        transport = FakeTransport(
+            output={
+                "actions": [
+                    {
+                        "type": "MODIFY_STAGE_FIELD",
+                        "target": "reference_condition",
+                        "operation": "REPLACE",
+                        "content": "两球相距2.0 m",
+                        "source_text": message,
+                        "source_start": 0,
+                        "source_end": len(message),
+                        "semantic_key": "reference_distance_2m",
+                        "confidence": 0.99,
+                    }
+                ]
+            }
+        )
+        generator = OpenAIStageGenerator(transport=transport)
+
+        raw, _, _ = generator._recover_emvr_open_answer(
+            json.dumps({"user_message": message}, ensure_ascii=False),
+            {
+                "type": "CONFIRM_STAGE_OR_MODIFY",
+                "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                "answer_fields": ["controlled_conditions", "reference_condition"],
+            },
+        )
+
+        self.assertEqual(raw["dialogue_acts"][0]["target"], "reference_condition")
+        self.assertIn("MODIFY_STAGE_FIELD", transport.requests[0]["instructions"])
+        self.assertIn("reference_condition", transport.requests[0]["instructions"])
 
     def test_compact_recovery_splits_parallel_emvr_objective_edits(self) -> None:
         clauses = [

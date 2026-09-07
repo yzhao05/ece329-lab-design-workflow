@@ -16,7 +16,7 @@ from ece329_workflow.emvr_formula_flow import (
     normalize_topic_analysis,
     score_formula_profiles,
 )
-from ece329_workflow.engine import WorkflowEngine
+from ece329_workflow.engine import WorkflowEngine, _emvr_entry_reference
 from ece329_workflow.emvr_design import apply_emvr_field_updates
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.models import DesignSession, InteractionState, Stage
@@ -24,6 +24,7 @@ from ece329_workflow.reporting import (
     build_emvr_task_report,
     effective_emvr_stage_payload,
     effective_experiment_brief,
+    stage_report_section,
 )
 
 
@@ -305,6 +306,88 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             FORMULA_COMPOSITION_REVIEW,
         )
         self.assertNotIn("semantic_recovery", flow)
+
+    def test_composition_choice_recovers_from_visible_option_during_outage(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究两个电荷",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        handle_emvr_formula_turn(
+            session,
+            "采用库仑定律和叠加原理",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=cards.stage_payload["formula_cards"][0]["option_id"],
+        )
+        failed_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+        output, complete = handle_emvr_formula_turn(
+            session,
+            "组合公式设计一个完整实验。库仑定律描述单个电荷的场，叠加原理描述多个电荷的合场。",
+            failed_intent,
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            EXPERIMENT_METHODS_PRESENTED,
+        )
+
+    def test_formula_selection_details_are_carried_into_experiment_brief(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究两个电荷",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        self.assertTrue(
+            any(
+                card["profile_id"] == "FD02_COULOMB_SUPERPOSITION"
+                for card in cards.stage_payload["formula_cards"]
+            )
+        )
+        composition, _ = handle_emvr_formula_turn(
+            session,
+            "采用库仑定律与叠加原理",
+            _formula_intent(
+                "SELECT_EMVR_FORMULAS",
+                {
+                    "primary_profile_ids": ["FD02_COULOMB_SUPERPOSITION"],
+                    "objects": ["两个点电荷"],
+                    "operations": ["拖拽点电荷改变距离和切换电荷类型"],
+                    "changed_quantities": ["电荷间距离", "电荷类型"],
+                    "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                    "comparison_cases": ["同种电荷", "异种电荷"],
+                },
+            ),
+        )
+        self.assertEqual(
+            composition.stage_payload["emvr_formula_phase"],
+            FORMULA_COMPOSITION_REVIEW,
+        )
+        methods, _ = handle_emvr_formula_turn(
+            session,
+            "组合成一个完整实验",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id="emvr-composition:combined",
+        )
+        method = methods.stage_payload["experiment_methods"][0]
+        review, _ = handle_emvr_formula_turn(
+            session,
+            "采用第一种方法",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=method["option_id"],
+        )
+
+        brief = review.stage_payload["experiment_brief_draft"]
+        self.assertEqual(brief["topic"], _topic_analysis()["topic_description"])
+        self.assertEqual(brief["objects"], ["两个点电荷"])
+        self.assertEqual(brief["observed_quantities"], ["场线的合并、扭曲和重排形态"])
 
     def test_formula_outage_keeps_current_cards_clickable(self) -> None:
         session = self._session()
@@ -705,10 +788,87 @@ class EmvrFormulaFlowTests(unittest.TestCase):
         output = RuleBasedStageGenerator().generate(session, "继续完善Unity对象")
         names = [item["object_name"] for item in output.stage_payload["object_inventory"]]
 
-        self.assertIn("两个可拖动带电球", names)
+        self.assertIn("可拖动带电球 A", names)
+        self.assertIn("可拖动带电球 B", names)
         self.assertNotIn("学生定义的可交互物理源或带电对象", names)
         self.assertTrue(
             all("中间区域电场强度" in item["visual_feedback"] for item in output.stage_payload["object_inventory"][:1])
+        )
+
+    def test_research_question_reference_uses_saved_variables_instead_of_placeholder(self) -> None:
+        reference = _emvr_entry_reference(
+            Stage.RESEARCH_QUESTION,
+            {
+                "research_object": "两个点电荷",
+                "independent_variable": ["电荷间距离", "电荷类型"],
+                "observations": ["场线的合并、扭曲和重排形态"],
+            },
+        )
+
+        rendered = "；".join(reference)
+        self.assertNotIn("当前研究问题", rendered)
+        self.assertIn("电荷间距离", rendered)
+        self.assertIn("场线的合并、扭曲和重排形态", rendered)
+
+    def test_theory_report_separates_inputs_comparisons_controls_and_baseline(self) -> None:
+        session = self._session()
+        session.current_stage_index = list(Stage).index(Stage.THEORETICAL_FRAMEWORK)
+        session.design_context["emvr_design"]["field_state"].update(
+            {
+                "research_question": "距离与极性如何影响场线重排？",
+                "changed_quantities": ["电荷间距离", "电荷类型"],
+                "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                "comparison_cases": ["同种电荷", "异种电荷"],
+            }
+        )
+
+        output = RuleBasedStageGenerator().generate(session, "继续")
+        section = stage_report_section(Stage.THEORETICAL_FRAMEWORK, output.stage_payload)
+        labels = {item["label"] for item in section["items"]}
+
+        self.assertEqual(output.stage_payload["simulation_inputs"], ["电荷间距离", "电荷类型"])
+        self.assertIn("比较情形", labels)
+        self.assertIn("保持不变的控制条件", labels)
+        self.assertIn("用于比较的基准状态", labels)
+
+    def test_setup_report_uses_concrete_interaction_and_omits_raw_constraint_dump(self) -> None:
+        session = self._session()
+        session.current_stage_index = list(Stage).index(Stage.CONCEPTUAL_OR_VR_SETUP)
+        field_state = session.design_context["emvr_design"]["field_state"]
+        field_state.update(
+            {
+                "research_object": "两个点电荷",
+                "required_behaviors": ["拖拽点电荷并切换电荷类型"],
+                "changed_quantities": ["电荷间距离", "电荷类型"],
+                "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                "desktop_interaction_plan": (
+                    "桌面端拖拽点电荷改变距离并单击切换类型；"
+                    "VR端映射为手柄抓取与按钮切换。"
+                ),
+                "hidden_object_lifecycle": "无",
+            }
+        )
+        session.design_context["emvr_design"]["authoritative_experiment_brief"] = {
+            "objects": ["两个点电荷"],
+            "operations": ["拖拽点电荷并切换电荷类型"],
+            "changed_quantities": ["电荷间距离", "电荷类型"],
+            "observed_quantities": ["场线的合并、扭曲和重排形态"],
+        }
+
+        output = RuleBasedStageGenerator().generate(session, "无")
+        section = stage_report_section(Stage.CONCEPTUAL_OR_VR_SETUP, output.stage_payload)
+        labels = {item["label"] for item in section["items"]}
+
+        self.assertIn("桌面端拖拽点电荷", output.stage_payload["user_role"])
+        self.assertNotEqual(output.stage_payload["user_role"], "无")
+        self.assertNotIn("学生明确的设计约束", labels)
+        source_objects = [
+            item for item in output.stage_payload["object_inventory"]
+            if item["object_name"] in {"点电荷 A", "点电荷 B"}
+        ]
+        self.assertEqual(len(source_objects), 2)
+        self.assertTrue(
+            all("桌面端拖拽点电荷" in item["student_interaction"] for item in source_objects)
         )
 
     def test_student_can_explicitly_combine_a_second_profile_as_support(self) -> None:

@@ -2355,8 +2355,10 @@ class OpenAIStageGenerator:
                 "回答开放问题时使用"
                 "ANSWER_PENDING_QUESTION，并把target设为实际规范化字段；若answer_fields有多项，"
                 "按学生表达拆成多个动作。修改通用设计内容使用MODIFY_DESIGN_FIELD或"
-                "MODIFY_STAGE_FIELD；EMVR栏目必须使用MODIFY_EMVR_FIELD，target只能来自："
+                "MODIFY_STAGE_FIELD；仅EMVR结构化需求栏目使用MODIFY_EMVR_FIELD，target只能来自："
                 f"{json.dumps(sorted(EMVR_EDITABLE_FIELDS), ensure_ascii=False)}。"
+                "报告中的阶段专属栏目使用MODIFY_STAGE_FIELD，target只能来自："
+                f"{json.dumps(sorted(STAGE_ACT_FIELDS), ensure_ascii=False)}。"
                 "conceptual_objective、calculation_objective、analysis_objective、"
                 "vr_interaction_objective与observation_objective是彼此独立的目标；学生同时修改"
                 "多项时必须逐项生成动作。字段必须按内容的物理角色归类：changed_quantities是主动"
@@ -2406,7 +2408,7 @@ class OpenAIStageGenerator:
         intent_input: str,
         pending_action: dict[str, Any],
     ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
-        """Recover a concrete EMVR answer with a narrow field-only contract.
+        """Recover a concrete EMVR answer or revision with a field-only contract.
 
         The ordinary turn planner must understand questions, corrections,
         version controls and navigation in addition to design edits.  When all
@@ -2432,11 +2434,18 @@ class OpenAIStageGenerator:
             "instructions": (
                 "你只负责恢复EMVR实验设计开放问题的学生回答，不回答学生。"
                 f"当前问题的主要字段是{json.dumps(answer_fields or [subject], ensure_ascii=False)}，"
+                "如果当前是阶段确认，学生点名某个可见栏目要求修改，也必须把它转换成"
+                "对应的MODIFY_EMVR_FIELD；即使要求是‘更具体’‘精简’等抽象改写，也要结合"
+                "输入中当前提案和已保存字段给出改写后的最终值，不能把修改指令本身当作值。"
+                "学生给出‘改为：……’或引号中的替换文本时，应原样保留实质文本。"
+                "一句话同时修改多个目标时，每个目标分别输出一个动作，不得只处理最后一项。"
                 "但它不是排他的输入槽：同一句中出现的实验对象、操作方式、主动变化量、"
                 "比较情形、观察量、学习目标或其他明确设计内容都必须分别保留。"
-                "把回答当前问题的内容输出为ANSWER_PENDING_QUESTION；额外的明确内容输出为"
-                "MODIFY_EMVR_FIELD。target只能使用下列EMVR规范字段："
+                "把回答当前问题的内容输出为ANSWER_PENDING_QUESTION；额外的EMVR结构化需求输出为"
+                "MODIFY_EMVR_FIELD，target只能使用下列EMVR规范字段："
                 f"{json.dumps(sorted(EMVR_EDITABLE_FIELDS), ensure_ascii=False)}。"
+                "若学生点名修改报告中的阶段专属栏目，则使用MODIFY_STAGE_FIELD，target只能来自："
+                f"{json.dumps(sorted(STAGE_ACT_FIELDS), ensure_ascii=False)}。"
                 "research_object只写物理对象；required_behaviors只写学生动作或系统行为；"
                 "changed_quantities只写主动改变的输入；comparison_cases只写需要比较的情形；"
                 "observed_quantities只写可观察响应；learning_objectives只写完成实验后应形成的"
@@ -3181,13 +3190,9 @@ class OpenAIStageGenerator:
                 "这份绑定只用于解析指代，不能据此写入学生没有修改的其他栏目；"
                 "MODIFY_DESIGN_FIELD的target只能是research_object、course_relationship、"
                 "learning_objective、research_question、theoretical_framework、hypothesis、"
-                "expected_phenomenon、conceptual_structure；MODIFY_STAGE_FIELD的target只能是"
-                "independent_variable、observations、controlled_conditions、procedure_steps、"
-                "visualization_plan、result_interpretation、design_rationale、design_value、limitations、"
-                "unity_objects、interactions、lab_title、lab_id、desktop_interaction_plan、"
-                "room_spatial_requirements、hidden_object_lifecycle、parameter_specifications、"
-                "expected_results、acceptance_criteria、report_questions、"
-                "student_summary。student_summary只用于GUIDED_DESIGN最后由学生亲自写出的总结，"
+                "expected_phenomenon、conceptual_structure；MODIFY_STAGE_FIELD的target只能来自"
+                f"{json.dumps(sorted(STAGE_ACT_FIELDS), ensure_ascii=False)}。"
+                "student_summary只用于GUIDED_DESIGN最后由学生亲自写出的总结，"
                 "不得由模型代写。"
                 "EMVR_DIRECT下修改完整实验方向或其结构化子项时使用MODIFY_EMVR_FIELD；target只能是"
                 "experiment_brief、research_object、direction_summary、research_summary、course_relationship、"
@@ -3230,7 +3235,10 @@ class OpenAIStageGenerator:
                 "局部放入UNRESOLVED，不得重新播放整段入口。"
                 "在FORMULA_CANDIDATES_PRESENTED阶段，学生选择或组合理论关系时返回SELECT_EMVR_FORMULAS；"
                 "content包含primary_profile_ids、supporting_profile_ids、student_rationale，并可包含学生明确"
-                "点名的primary_formula_ids与supporting_formula_ids；公式ID只能来自当前候选卡片。学生只选择"
+                "点名的primary_formula_ids与supporting_formula_ids；如果同一句还明确说明实验对象、操作、"
+                "主动变化量、观察量、比较情形或边界条件，必须分别写入objects、operations、changed_quantities、"
+                "observed_quantities、comparison_cases或boundary_conditions，不能只塞入student_rationale。"
+                "公式ID只能来自当前候选卡片。学生只选择"
                 "一张卡片时，只确认该卡片的主要公式，卡片中的可选辅助公式不能被默认写入；只有学生明确"
                 "选择、组合或说明辅助用途时，才写入supporting_profile_ids或supporting_formula_ids。所有"
                 "profile ID必须来自当前candidate_profile_ids。若formula_selection.student_rationale已有内容，"
@@ -4337,10 +4345,22 @@ class OpenAIStageGenerator:
             repaired_intent = str(raw.get("intent") or "UNCLEAR")
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
-            and pending_type == "ANSWER_EMVR_STAGE_QUESTION"
+            and pending_type
+            in {
+                "ANSWER_EMVR_STAGE_QUESTION",
+                "CONFIRM_STAGE_OR_MODIFY",
+                "CONFIRM_OR_MODIFY",
+            }
             and isinstance(pending_action, dict)
-            and bool(pending_action.get("answer_fields"))
+            and (
+                bool(pending_action.get("answer_fields"))
+                or (
+                    pending_type in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+                    and emvr_candidate_followup
+                )
+            )
             and not has_valid_emvr_state_write
+            and (not has_routable_nonwrite_act or emvr_candidate_followup)
             and (
                 repaired_intent
                 in {
@@ -4352,17 +4372,20 @@ class OpenAIStageGenerator:
             )
         ):
             # EMVR students often answer one narrow prompt with a complete
-            # object–operation–variable–observation description.  If the
-            # general task planner still cannot produce a writable act, use a
-            # field-only semantic pass instead of asking the student to split
-            # and repeat the same valid answer.  Guided mode never enters this
-            # branch.
-            raw, resolved_value, semantic_updates = (
-                self._recover_emvr_open_answer(
-                    intent_input,
-                    pending_action,
+            # object–operation–variable–observation description, or revise a
+            # named row while reviewing a stage. If the general planner still
+            # cannot produce a writable act, use a field-only semantic pass
+            # instead of asking the student to split and repeat it.
+            previous_result = (raw, resolved_value, semantic_updates)
+            try:
+                raw, resolved_value, semantic_updates = (
+                    self._recover_emvr_open_answer(
+                        intent_input,
+                        pending_action,
+                    )
                 )
-            )
+            except (ModelOutputError, ModelServiceError):
+                raw, resolved_value, semantic_updates = previous_result
             raw_dialogue_acts = raw.get("dialogue_acts", [])
             has_executable_dialogue_acts = bool(
                 isinstance(raw_dialogue_acts, list)

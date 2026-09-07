@@ -43,6 +43,7 @@ from ece329_workflow.design_state import (
     ensure_design_state,
     ground_guided_course_relationship,
     set_baseline_comparisons,
+    set_pending_action_snapshot,
 )
 from ece329_workflow.idea_development import (
     build_facet_reference_output,
@@ -6215,7 +6216,48 @@ class DialogueStateTests(unittest.TestCase):
             (
                 InteractionState.EMVR_DIRECT,
                 Stage.CONCEPTUAL_OR_VR_SETUP,
-                {"数据显示": "visualization_plan", "Unity对象": "unity_objects"},
+                {
+                    "Unity对象": "unity_objects",
+                    "物理计算层": "physics_layer",
+                    "数据显示": "measurement_interface",
+                },
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.RESEARCH_QUESTION,
+                {
+                    "VR中可调内容": "changed_quantities",
+                    "VR中可观察内容": "observed_quantities",
+                    "基础比较": "comparison_cases",
+                },
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.THEORETICAL_FRAMEWORK,
+                {
+                    "保持不变的控制条件": "controlled_conditions",
+                    "用于比较的基准状态": "reference_condition",
+                    "理论计算输入": "simulation_inputs",
+                    "理论计算输出": "calculated_outputs",
+                },
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.VARIABLES_AND_CONDITIONS,
+                {
+                    "控制条件": "controlled_conditions",
+                    "基准状态": "reference_condition",
+                    "参数范围": "parameter_specifications",
+                },
+            ),
+            (
+                InteractionState.EMVR_DIRECT,
+                Stage.RESULT_INTERPRETATION,
+                {
+                    "符合预期时": "if_prediction_supported",
+                    "趋势相反时": "if_opposite_trend",
+                    "变化不明显时": "if_no_clear_change",
+                },
             ),
             (
                 InteractionState.GUIDED_DESIGN,
@@ -6230,7 +6272,7 @@ class DialogueStateTests(unittest.TestCase):
             (
                 InteractionState.EMVR_DIRECT,
                 Stage.DESIGN_VALUE_AND_LIMITATIONS,
-                {"VR附加价值": "design_value", "设计局限": "limitations"},
+                {"VR附加价值": "vr_added_value", "设计局限": "limitations"},
             ),
         ):
             with self.subTest(mode=mode.value, stage=stage.value):
@@ -6262,6 +6304,89 @@ class DialogueStateTests(unittest.TestCase):
                 }
                 for visible_label, canonical_field in expected.items():
                     self.assertEqual(bindings[visible_label], canonical_field)
+
+    def test_emvr_control_and_reference_labels_are_not_conflated(self) -> None:
+        session = DesignSession(
+            design_id="distinct_control_and_reference_bindings",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+        )
+        pending = save_pending_action(
+            session,
+            Stage.VARIABLES_AND_CONDITIONS,
+            StepOutput(
+                assistant_message="请核对变量与比较基准。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                        "proposal": {"stage": Stage.VARIABLES_AND_CONDITIONS.value},
+                    }
+                },
+                student_task="如需修改，请指出对应栏目。",
+            ),
+        )
+        bindings = {
+            label: item["canonical_field"]
+            for item in pending["editable_field_bindings"]
+            for label in item["visible_labels"]
+        }
+
+        self.assertEqual(bindings["保持不变的控制条件"], "controlled_conditions")
+        self.assertEqual(bindings["用于比较的基准状态"], "reference_condition")
+        self.assertNotIn("基准条件", bindings)
+
+    def test_hydration_drops_pending_action_from_previous_stage(self) -> None:
+        session = DesignSession(
+            design_id="stale-pending-stage",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+        )
+        stale = {
+            "action_id": "action_previous_stage",
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "stage": Stage.CONCEPTUAL_OR_VR_SETUP.value,
+            "subject": Stage.CONCEPTUAL_OR_VR_SETUP.value,
+            "answer_fields": ["interactions"],
+        }
+        session.model_context["dialogue_state"] = {"pending_action": dict(stale)}
+        set_pending_action_snapshot(session, stale)
+
+        self.assertIsNone(hydrate_pending_action_from_history(session))
+        self.assertIsNone(current_pending_action(session))
+        self.assertIsNone(ensure_design_state(session)["pending_action"])
+
+    def test_hydration_refreshes_emvr_confirmation_bindings(self) -> None:
+        session = DesignSession(
+            design_id="refresh-confirmation-bindings",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+        )
+        session.model_context["dialogue_state"] = {
+            "pending_action": {
+                "action_id": "action_legacy_confirmation",
+                "type": "CONFIRM_STAGE_OR_MODIFY",
+                "stage": Stage.VARIABLES_AND_CONDITIONS.value,
+                "subject": Stage.VARIABLES_AND_CONDITIONS.value,
+                "answer_fields": [
+                    "independent_variable",
+                    "observations",
+                    "controlled_conditions",
+                ],
+                "editable_field_bindings": [],
+            }
+        }
+
+        pending = hydrate_pending_action_from_history(session)
+        bindings = {
+            label: item["canonical_field"]
+            for item in pending["editable_field_bindings"]
+            for label in item["visible_labels"]
+        }
+
+        self.assertIn("reference_condition", pending["answer_fields"])
+        self.assertIn("parameter_specifications", pending["answer_fields"])
+        self.assertEqual(bindings["用于比较的基准状态"], "reference_condition")
 
     def test_emvr_visible_target_phenomenon_supplement_commits_to_both_states(self) -> None:
         supplement = "电场线的空间分布与叠加"

@@ -52,6 +52,35 @@ class BuilderRequirementTests(unittest.TestCase):
         missing = {item["field"] for item in missing_builder_requirements(session)}
         self.assertEqual(missing, {"lab_id", "parameter_specifications"})
 
+    def test_invalid_id_explains_the_exact_format_problem(self) -> None:
+        session = self._session()
+        session.design_context["stage_design_state"] = {
+            **VALID_VALUES,
+            "lab_id": "ece329_charge_field——0",
+        }
+
+        requirement = next_due_builder_requirement(
+            session, Stage.COURSE_MAPPING_AND_DIRECTION
+        )
+
+        self.assertEqual(requirement["field"], "lab_id")
+        self.assertIn("ece329_charge_field——0", requirement["validation_error"])
+        self.assertIn("只能包含小写字母、数字和下划线", requirement["validation_error"])
+
+    def test_chinese_units_and_discrete_options_complete_parameter_requirement(self) -> None:
+        session = self._session()
+        session.design_context["stage_design_state"] = {
+            **VALID_VALUES,
+            "parameter_specifications": (
+                "距离：最小值0.5米，最大值5米，建议步长0.1米；"
+                "电荷类型：（离散选项）同种电荷、异种电荷。"
+            ),
+        }
+
+        missing = {item["field"] for item in missing_builder_requirements(session)}
+
+        self.assertNotIn("parameter_specifications", missing)
+
     def test_placeholder_text_cannot_complete_final_artifact_fields(self) -> None:
         session = self._session()
         values = dict(VALID_VALUES)
