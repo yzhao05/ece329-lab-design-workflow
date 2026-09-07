@@ -6,7 +6,13 @@ from typing import Any
 
 from .design_state import DESIGN_TEXT_FIELDS, ensure_design_state, sync_design_state_to_legacy
 from .dialogue_acts import STAGE_ACT_FIELDS
-from .models import DesignSession
+from .emvr_design import (
+    EMVR_EDITABLE_FIELDS,
+    apply_emvr_field_updates,
+    merge_emvr_structured_requirements,
+)
+from .models import DesignSession, InteractionState
+from .turn_planning import FIELD_LABELS as TURN_FIELD_LABELS
 
 
 _REPORT_FIELD_BINDINGS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -87,9 +93,16 @@ _FIELD_LABELS = {
     "interactions": "VR交互",
 }
 
+for _emvr_field in EMVR_EDITABLE_FIELDS:
+    _FIELD_LABELS.setdefault(
+        _emvr_field,
+        TURN_FIELD_LABELS.get(_emvr_field, _emvr_field),
+    )
+
 
 def _snapshot(session: DesignSession) -> dict[str, Any]:
     return {
+        "interaction_state": session.interaction_state.value,
         "design_state": deepcopy(ensure_design_state(session)),
         "stage_design_state": deepcopy(
             session.design_context.get("stage_design_state", {})
@@ -102,6 +115,11 @@ def _snapshot(session: DesignSession) -> dict[str, Any]:
             else {}
         ),
         "stage_outputs": deepcopy(session.stage_outputs),
+        "emvr_design": deepcopy(
+            session.design_context.get("emvr_design", {})
+            if isinstance(session.design_context.get("emvr_design"), dict)
+            else {}
+        ),
     }
 
 
@@ -110,13 +128,42 @@ def _public_values(snapshot: Any) -> dict[str, Any]:
         return {}
     design = snapshot.get("design_state", {})
     stage = snapshot.get("stage_design_state", {})
+    emvr = snapshot.get("emvr_design", {})
     design = design if isinstance(design, dict) else {}
     stage = stage if isinstance(stage, dict) else {}
-    return {
+    emvr_active = (
+        snapshot.get("interaction_state") == InteractionState.EMVR_DIRECT.value
+    )
+    emvr_values = merge_emvr_structured_requirements(emvr) if emvr_active else {}
+    values = {
         **{field: deepcopy(design.get(field, "")) for field in DESIGN_TEXT_FIELDS},
         "baseline_comparisons": deepcopy(design.get("baseline_comparisons", [])),
         **{field: deepcopy(stage.get(field, "")) for field in STAGE_ACT_FIELDS},
     }
+    cleared = {
+        str(field)
+        for field in emvr.get("explicitly_cleared_fields", [])
+        if str(field) in EMVR_EDITABLE_FIELDS
+    } if emvr_active and isinstance(emvr, dict) and isinstance(
+        emvr.get("explicitly_cleared_fields", []), list
+    ) else set()
+    for field in EMVR_EDITABLE_FIELDS:
+        empty_value: Any = [] if field in {
+            "learning_objectives", "changed_quantities", "observed_quantities",
+            "comparison_cases", "required_behaviors", "object_constraints",
+            "procedure_steps", "visualization_requirements", "design_values",
+            "limitations", "parameter_specifications", "expected_results",
+            "acceptance_criteria", "report_questions",
+        } else ""
+        if field in emvr_values:
+            values[field] = deepcopy(emvr_values[field])
+        elif field in cleared:
+            values[field] = empty_value
+        else:
+            # Do not let an absent EMVR alias erase a populated mode-neutral
+            # field with the same id in guided or migrated sessions.
+            values.setdefault(field, empty_value)
+    return values
 
 
 def _versions(session: DesignSession) -> list[dict[str, Any]]:
@@ -186,7 +233,12 @@ def normalize_version_request(raw: Any) -> dict[str, Any] | None:
     if action not in VERSION_ACTIONS:
         return None
     fields = raw.get("fields", [])
-    valid_fields = {*DESIGN_TEXT_FIELDS, "baseline_comparisons", *STAGE_ACT_FIELDS}
+    valid_fields = {
+        *DESIGN_TEXT_FIELDS,
+        "baseline_comparisons",
+        *STAGE_ACT_FIELDS,
+        *EMVR_EDITABLE_FIELDS,
+    }
     return {
         "action": action,
         "version_id": str(raw.get("version_id") or "").strip()[:40] or None,
@@ -237,13 +289,22 @@ def _restore_snapshot(
     target_stage = target.get("stage_design_state", {})
     if not isinstance(target_design, dict) or not isinstance(target_stage, dict):
         return []
-    chosen = fields or [*DESIGN_TEXT_FIELDS, "baseline_comparisons", *STAGE_ACT_FIELDS]
+    chosen = fields or [
+        *DESIGN_TEXT_FIELDS,
+        "baseline_comparisons",
+        *STAGE_ACT_FIELDS,
+        *EMVR_EDITABLE_FIELDS,
+    ]
     changed: list[str] = []
     design = ensure_design_state(session)
     stage = session.design_context.setdefault("stage_design_state", {})
     if not isinstance(stage, dict):
         stage = {}
         session.design_context["stage_design_state"] = stage
+    emvr = session.design_context.setdefault("emvr_design", {})
+    if not isinstance(emvr, dict):
+        emvr = {}
+        session.design_context["emvr_design"] = emvr
     current_values = _public_values(current)
     target_values = _public_values(target)
     target_outputs = target.get("stage_outputs", {})
@@ -251,10 +312,56 @@ def _restore_snapshot(
     for field in chosen:
         if current_values.get(field) == target_values.get(field):
             continue
-        if field in {*DESIGN_TEXT_FIELDS, "baseline_comparisons"}:
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and field in EMVR_EDITABLE_FIELDS
+        ):
+            target_value = deepcopy(target_values.get(field))
+            apply_emvr_field_updates(
+                emvr,
+                {
+                    "field_updates": [
+                        {
+                            "field_id": field,
+                            "operation": (
+                                "CLEAR"
+                                if target_value in (None, "", [], {})
+                                else "REPLACE"
+                            ),
+                            "value": target_value,
+                        }
+                    ]
+                },
+            )
+            # Shared canonical ids are deliberately mirrored across modes.
+            # Restoring only one side would make the value change again on the
+            # next mode handoff or report projection.
+            if field in DESIGN_TEXT_FIELDS:
+                design[field] = deepcopy(target_value or "")
+            if field in STAGE_ACT_FIELDS:
+                stage[field] = deepcopy(target_value or "")
+        elif field in {*DESIGN_TEXT_FIELDS, "baseline_comparisons"}:
             design[field] = deepcopy(target_design.get(field, "" if field != "baseline_comparisons" else []))
         elif field in STAGE_ACT_FIELDS:
             stage[field] = deepcopy(target_stage.get(field, ""))
+        elif field in EMVR_EDITABLE_FIELDS:
+            target_value = deepcopy(target_values.get(field))
+            apply_emvr_field_updates(
+                emvr,
+                {
+                    "field_updates": [
+                        {
+                            "field_id": field,
+                            "operation": (
+                                "CLEAR"
+                                if target_value in (None, "", [], {})
+                                else "REPLACE"
+                            ),
+                            "value": target_value,
+                        }
+                    ]
+                },
+            )
         changed.append(field)
         binding = _REPORT_FIELD_BINDINGS.get(field)
         if binding is not None:

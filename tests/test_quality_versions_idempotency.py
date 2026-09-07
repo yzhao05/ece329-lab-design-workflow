@@ -9,6 +9,11 @@ from ece329_workflow.design_state import (
     set_baseline_comparisons,
 )
 from ece329_workflow.dialogue_acts import apply_stage_field_updates
+from ece329_workflow.dialogue_state import UserIntent, resolved_intent
+from ece329_workflow.emvr_design import (
+    apply_emvr_field_updates,
+    merge_emvr_structured_requirements,
+)
 from ece329_workflow.design_versions import (
     ensure_initial_version,
     execute_version_request,
@@ -25,6 +30,9 @@ from ece329_workflow.models import (
     TurnRequest,
     WorkflowStatus,
 )
+from ece329_workflow.reporting import effective_emvr_stage_payload
+from ece329_workflow.reporting import effective_experiment_brief
+from ece329_workflow.builder_requirements import builder_requirement_values
 
 
 class DesignQualityTests(unittest.TestCase):
@@ -173,6 +181,33 @@ class DesignQualityTests(unittest.TestCase):
         self.assertIn("学生确认", trace["purpose"])
         self.assertNotEqual(trace["course_item"], trace["design_field_label"])
 
+    def test_emvr_aggregate_objectives_keep_legacy_provenance(self) -> None:
+        session = DesignSession("quality-emvr-objectives", InteractionState.EMVR_DIRECT)
+        session.design_context = {
+            "emvr_design": {
+                "field_state": {
+                    "learning_objectives": ["解释电荷间距如何改变电场线分布"],
+                }
+            },
+            "stage_design_state": {
+                "field_provenance": {
+                    "learning_objectives": [
+                        {"source": "STUDENT_CONFIRMED", "revision": 3}
+                    ]
+                }
+            },
+        }
+
+        review = evaluate_design_quality(session)
+        trace = next(
+            item
+            for item in review["traceability"]
+            if item["design_field"] == "learning_objective"
+        )
+
+        self.assertEqual(trace["course_item"], "解释电荷间距如何改变电场线分布")
+        self.assertEqual(trace["source_type"], "STUDENT_CONFIRMED")
+
     def test_mode_handoff_preserves_design_meaning_and_open_issues(self) -> None:
         session = DesignSession("handoff", InteractionState.GUIDED_DESIGN)
         apply_design_updates(
@@ -200,6 +235,382 @@ class DesignQualityTests(unittest.TestCase):
 
 
 class DesignVersionTests(unittest.TestCase):
+    def test_valid_emvr_parameter_answer_and_advance_moves_forward_once(self) -> None:
+        class ParameterAndAdvanceGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                    confidence=0.99,
+                    source="SEMANTIC_MODEL",
+                    dialogue_acts=[
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "parameter_specifications",
+                            "operation": "REPLACE",
+                            "content": [
+                                "距离：最小值0.5米，最大值5米，步长0.1米",
+                                "电荷类型：离散选项同种电荷、异种电荷",
+                            ],
+                            "confidence": 0.99,
+                        },
+                        {
+                            "type": "CONTROL",
+                            "target": "ADVANCE",
+                            "operation": "EXECUTE",
+                            "content": None,
+                            "confidence": 0.99,
+                        },
+                    ],
+                    actions_authoritative=True,
+                )
+
+        engine = WorkflowEngine(generator=ParameterAndAdvanceGenerator())
+        session = DesignSession(
+            "emvr-parameter-advance",
+            InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={
+                "stage_design_state": {
+                    "lab_title": "点电荷场线实验",
+                    "lab_id": "ece329_charge_field_0",
+                    "desktop_interaction_plan": "鼠标拖拽点电荷；VR手柄抓取点电荷",
+                    "room_spatial_requirements": "学生站在中央，对象位于前方并保留两米空间",
+                    "hidden_object_lifecycle": "无",
+                    "controlled_conditions": "电荷量、介质和观察方式",
+                    "reference_condition": "两球间距2米的同种电荷状态",
+                },
+                "emvr_design": {
+                    "field_state": {
+                        "changed_quantities": ["距离", "电荷类型"],
+                        "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                    }
+                },
+            },
+        )
+        session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value] = {
+            "stage_payload": {
+                "independent_variable": {"name": "距离；电荷类型"},
+                "dependent_variable": {"name": "场线形态"},
+                "controlled_variables": "电荷量、介质和观察方式",
+                "reference_condition": "两球间距2米的同种电荷状态",
+                "awaiting_user_design_input": True,
+            }
+        }
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {
+                "message": (
+                    "距离：最小值0.5米，最大值5米，步长0.1米，单位米。"
+                    "电荷类型：离散选项同种电荷、异种电荷。可以继续。"
+                )
+            },
+        )
+
+        self.assertEqual(
+            result["current_stage"],
+            Stage.CONCEPTUAL_PROCEDURE.value,
+        )
+        self.assertNotIn("参数范围与单位", result["assistant_message"])
+        stored = engine.store.get(session.design_id)
+        self.assertIn(
+            "0.5米",
+            str(
+                stored.design_context["emvr_design"]["stage_inputs"]
+                [Stage.VARIABLES_AND_CONDITIONS.value][-1]["content"]
+            ),
+        )
+        self.assertEqual(
+            stored.completed_stages.count(Stage.VARIABLES_AND_CONDITIONS.value),
+            1,
+        )
+
+    def test_engine_records_emvr_field_edit_in_same_turn(self) -> None:
+        class EmvrEditGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                    confidence=0.99,
+                    source="SEMANTIC_MODEL",
+                    dialogue_acts=[
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "changed_quantities",
+                            "operation": "REPLACE",
+                            "content": ["两球间距"],
+                            "confidence": 0.99,
+                        }
+                    ],
+                    actions_authoritative=True,
+                )
+
+        engine = WorkflowEngine(generator=EmvrEditGenerator())
+        session = DesignSession(
+            "engine-emvr-version",
+            InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={"emvr_design": {}},
+        )
+        engine.store.save(session)
+
+        engine.process_turn(session.design_id, {"message": "变化量改为两球间距"})
+
+        stored = engine.store.get(session.design_id)
+        versions = stored.model_context["design_versions"]
+        self.assertEqual(len(versions), 2)
+        self.assertIn("changed_quantities", versions[-1]["changed_fields"])
+        self.assertEqual(
+            merge_emvr_structured_requirements(
+                stored.design_context["emvr_design"]
+            )["changed_quantities"],
+            ["两球间距"],
+        )
+
+    def test_engine_applies_contentless_emvr_clear_and_versions_it(self) -> None:
+        class EmvrClearGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+                    confidence=0.99,
+                    source="SEMANTIC_MODEL",
+                    dialogue_acts=[
+                        {
+                            "type": "MODIFY_EMVR_FIELD",
+                            "target": "changed_quantities",
+                            "operation": "CLEAR",
+                            "content": None,
+                            "confidence": 0.99,
+                        }
+                    ],
+                    actions_authoritative=True,
+                )
+
+        engine = WorkflowEngine(generator=EmvrClearGenerator())
+        session = DesignSession(
+            "engine-emvr-clear",
+            InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={
+                "emvr_design": {
+                    "structured_requirements": {
+                        Stage.RESEARCH_QUESTION.value: {
+                            "changed_quantities": ["旧距离参数"],
+                        }
+                    },
+                    "field_state": {"changed_quantities": ["旧距离参数"]},
+                }
+            },
+        )
+        engine.store.save(session)
+
+        engine.process_turn(session.design_id, {"message": "删除原来的变化量"})
+
+        stored = engine.store.get(session.design_id)
+        self.assertNotIn(
+            "changed_quantities",
+            merge_emvr_structured_requirements(
+                stored.design_context["emvr_design"]
+            ),
+        )
+        self.assertIn(
+            "changed_quantities",
+            stored.model_context["design_versions"][-1]["changed_fields"],
+        )
+
+    def test_emvr_only_edit_creates_version_and_can_be_undone(self) -> None:
+        session = DesignSession("emvr-versions", InteractionState.EMVR_DIRECT)
+        emvr = session.design_context.setdefault("emvr_design", {})
+        ensure_initial_version(session)
+        apply_emvr_field_updates(
+            emvr,
+            {
+                "field_updates": [
+                    {
+                        "field_id": "changed_quantities",
+                        "operation": "REPLACE",
+                        "value": ["两球间距"],
+                    }
+                ]
+            },
+        )
+
+        version = record_design_version(
+            session,
+            changed_fields=["changed_quantities"],
+            reason="修改EMVR变化量",
+        )
+        result = execute_version_request(
+            session,
+            {"action": "UNDO_LAST", "fields": ["changed_quantities"]},
+        )
+
+        self.assertIsNotNone(version)
+        self.assertEqual(result["changed_fields"], ["changed_quantities"])
+        self.assertNotIn(
+            "changed_quantities",
+            merge_emvr_structured_requirements(emvr),
+        )
+
+    def test_guided_version_diff_ignores_stale_emvr_aliases(self) -> None:
+        session = DesignSession("guided-after-emvr", InteractionState.GUIDED_DESIGN)
+        session.design_context["emvr_design"] = {
+            "field_state": {"limitations": ["旧EMVR局限"]}
+        }
+        ensure_initial_version(session)
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": "limitations",
+                    "operation": "REPLACE",
+                    "value": "新的引导模式局限",
+                }
+            ],
+            stage=Stage.DESIGN_VALUE_AND_LIMITATIONS,
+        )
+
+        version = record_design_version(
+            session,
+            changed_fields=["limitations"],
+            reason="修改引导模式局限",
+        )
+
+        self.assertIsNotNone(version)
+
+    def test_emvr_clear_hides_older_stage_snapshot_and_report_row(self) -> None:
+        session = DesignSession("emvr-clear", InteractionState.EMVR_DIRECT)
+        session.current_stage_index = list(Stage).index(Stage.RESEARCH_QUESTION)
+        session.design_context["emvr_design"] = {
+            "structured_requirements": {
+                Stage.RESEARCH_QUESTION.value: {
+                    "changed_quantities": ["旧距离参数"],
+                }
+            },
+            "field_state": {"changed_quantities": ["旧距离参数"]},
+        }
+        session.stage_outputs[Stage.RESEARCH_QUESTION.value] = {
+            "stage_payload": {"adjustable_quantity_in_vr": ["旧距离参数"]}
+        }
+
+        apply_emvr_field_updates(
+            session.design_context["emvr_design"],
+            {
+                "field_updates": [
+                    {
+                        "field_id": "changed_quantities",
+                        "operation": "CLEAR",
+                        "value": None,
+                    }
+                ]
+            },
+        )
+
+        self.assertNotIn(
+            "changed_quantities",
+            merge_emvr_structured_requirements(
+                session.design_context["emvr_design"]
+            ),
+        )
+        self.assertNotIn(
+            "adjustable_quantity_in_vr",
+            effective_emvr_stage_payload(session, Stage.RESEARCH_QUESTION),
+        )
+
+    def test_emvr_clear_cannot_be_revived_by_formula_brief_or_stage_cache(self) -> None:
+        session = DesignSession("emvr-clear-projections", InteractionState.EMVR_DIRECT)
+        session.design_context["emvr_design"] = {
+            "authoritative_experiment_brief": {
+                "objects": ["两个点电荷"],
+                "operations": ["拖拽点电荷"],
+                "observed_quantities": ["旧场线形态"],
+            },
+            "field_state": {
+                "research_object": "两个点电荷",
+                "required_behaviors": ["拖拽点电荷"],
+                "observed_quantities": ["旧场线形态"],
+                "desktop_interaction_plan": "旧桌面操作",
+            },
+        }
+        session.stage_outputs[Stage.IDEA_BRAINSTORMING.value] = {
+            "stage_payload": {
+                "target_phenomenon": ["旧场线形态"],
+                "possible_vr_interactions": ["拖拽点电荷"],
+            }
+        }
+        session.stage_outputs[Stage.CONCEPTUAL_OR_VR_SETUP.value] = {
+            "stage_payload": {
+                "desktop_interaction_plan": "旧桌面操作",
+                "interactions": ["拖拽点电荷"],
+            }
+        }
+
+        apply_emvr_field_updates(
+            session.design_context["emvr_design"],
+            {
+                "field_updates": [
+                    {"field_id": "research_object", "operation": "CLEAR"},
+                    {"field_id": "required_behaviors", "operation": "CLEAR"},
+                    {"field_id": "observed_quantities", "operation": "CLEAR"},
+                    {"field_id": "desktop_interaction_plan", "operation": "CLEAR"},
+                ]
+            },
+        )
+
+        brief = effective_experiment_brief(session)
+        idea = effective_emvr_stage_payload(session, Stage.IDEA_BRAINSTORMING)
+        setup = effective_emvr_stage_payload(session, Stage.CONCEPTUAL_OR_VR_SETUP)
+
+        self.assertEqual(brief["objects"], [])
+        self.assertEqual(brief["operations"], [])
+        self.assertEqual(brief["observed_quantities"], [])
+        self.assertNotIn("target_phenomenon", idea)
+        self.assertNotIn("possible_vr_interactions", idea)
+        self.assertNotIn("desktop_interaction_plan", setup)
+        self.assertNotIn("interactions", setup)
+
+    def test_cleared_builder_requirement_does_not_fall_back_to_stale_stage_value(self) -> None:
+        session = DesignSession("emvr-clear-builder", InteractionState.EMVR_DIRECT)
+        session.design_context["stage_design_state"] = {
+            "parameter_specifications": "距离0.5米至5米，步长0.1米",
+        }
+        session.design_context["emvr_design"] = {
+            "field_state": {
+                "parameter_specifications": ["距离0.5米至5米，步长0.1米"],
+            }
+        }
+        apply_emvr_field_updates(
+            session.design_context["emvr_design"],
+            {
+                "field_updates": [
+                    {"field_id": "parameter_specifications", "operation": "CLEAR"}
+                ]
+            },
+        )
+
+        self.assertEqual(
+            builder_requirement_values(session)["parameter_specifications"],
+            "",
+        )
+
     def test_field_level_undo_does_not_erase_other_fields(self) -> None:
         session = DesignSession("versions", InteractionState.GUIDED_DESIGN)
         ensure_initial_version(session)

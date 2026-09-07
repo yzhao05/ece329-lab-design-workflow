@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Iterable
 
@@ -254,6 +255,72 @@ EMVR_LIST_FIELDS = frozenset(
 EMVR_EDITABLE_FIELDS = EMVR_SCALAR_FIELDS | EMVR_LIST_FIELDS
 
 
+_EMVR_FIELD_LABELS = {
+    "conceptual_objective": "概念目标",
+    "calculation_objective": "计算目标",
+    "analysis_objective": "分析目标",
+    "vr_interaction_objective": "交互目标",
+    "observation_objective": "观察目标",
+    "research_question": "研究问题",
+}
+
+
+def clean_emvr_field_text(field_id: str, value: Any) -> str:
+    """Remove revision instructions while preserving the actual design value."""
+
+    text = str(value).strip() if isinstance(value, str) else ""
+    if not text:
+        return ""
+    labels = (
+        tuple(_EMVR_FIELD_LABELS.values())
+        if field_id == "learning_objectives"
+        else (_EMVR_FIELD_LABELS.get(field_id),)
+    )
+    for label in (item for item in labels if item):
+        instruction_only = re.fullmatch(
+            rf"(?:{re.escape(label)})?(?:要|需要|建议|应该|应)?(?:再|更)?"
+            r"(?:对应到具体物理内容|具体一些|具体一点|更具体一些|更具体一点)",
+            text.rstrip("。！!"),
+        )
+        if instruction_only:
+            return ""
+        # Semantic extraction may retain a revision preface together with the
+        # replacement value. Keep only content after a real delimiter; a bare
+        # instruction has already been rejected above.
+        text = re.sub(
+            rf"^(?:{re.escape(label)}[：:]?\s*)?"
+            r"(?:方向基本正确[，,]?\s*但\s*)?"
+            rf"(?:{re.escape(label)})?"
+            r"(?:要|需要|建议|应该|应)?"
+            r"(?:对应到具体(?:的)?物理内容|更具体(?:一些|一点)?|明确写出比较(?:关系)?)"
+            r"[：:，,；;]\s*",
+            "",
+            text,
+            count=1,
+        ).strip()
+        text = re.sub(
+            rf"^(?:方向基本正确[，,]?但)?{re.escape(label)}"
+            r"(?:需要|应该|应|要|建议)?[^：:\n]{0,80}[：:]\s*",
+            "",
+            text,
+            count=1,
+        ).strip()
+    if field_id in {"conceptual_objective", "learning_objectives"}:
+        stripped = re.sub(
+            r"^(?:对应到具体(?:的)?物理内容[，,。；;]?\s*)?"
+            r"概念目标(?:应|应该|要)?围绕",
+            "",
+            text,
+            count=1,
+        ).strip()
+        if stripped != text and "来理解" in stripped:
+            anchor, content = stripped.split("来理解", 1)
+            text = f"理解{anchor.strip()}中{content.strip()}"
+        else:
+            text = stripped
+    return text.strip()
+
+
 def emvr_stage_one_readiness(emvr_design: Any) -> dict[str, Any]:
     """Return structural Stage 1 readiness without interpreting raw wording.
 
@@ -297,14 +364,14 @@ def emvr_stage_one_readiness(emvr_design: Any) -> dict[str, Any]:
 
 def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
     if field_id in EMVR_SCALAR_FIELDS:
-        text = str(value).strip()[:1600] if isinstance(value, str) else ""
+        text = clean_emvr_field_text(field_id, value)[:1600]
         return text or None
     values = value if isinstance(value, list) else [value]
     result = list(
         dict.fromkeys(
-            str(item).strip()[:800]
+            clean_emvr_field_text(field_id, item)[:800]
             for item in values
-            if isinstance(item, str) and item.strip()
+            if isinstance(item, str) and clean_emvr_field_text(field_id, item)
         )
     )[:20]
     return result or None
@@ -420,6 +487,11 @@ def apply_emvr_field_updates(
     if not isinstance(field_state, dict):
         field_state = {}
         emvr_design["field_state"] = field_state
+    explicitly_cleared = {
+        str(field)
+        for field in emvr_design.get("explicitly_cleared_fields", [])
+        if str(field) in EMVR_EDITABLE_FIELDS
+    } if isinstance(emvr_design.get("explicitly_cleared_fields", []), list) else set()
 
     previous_objective_values = _objective_values(field_state)
     raw_edits = structured_update.get("field_updates", [])
@@ -511,6 +583,7 @@ def apply_emvr_field_updates(
                 continue
             if value is not None:
                 field_state[field_id] = deepcopy(value)
+                explicitly_cleared.discard(field_id)
                 touched_fields.add(field_id)
 
     for edit in edits:
@@ -523,9 +596,11 @@ def apply_emvr_field_updates(
         value = _nonempty_field_value(field_id, edit.get("value"))
         if operation == "CLEAR":
             field_state.pop(field_id, None)
+            explicitly_cleared.add(field_id)
             touched_fields.add(field_id)
         elif operation == "REPLACE" and value is not None:
             field_state[field_id] = deepcopy(value)
+            explicitly_cleared.discard(field_id)
             touched_fields.add(field_id)
         elif operation == "MERGE" and value is not None:
             if field_id in EMVR_SCALAR_FIELDS:
@@ -538,7 +613,10 @@ def apply_emvr_field_updates(
                 prior_values = field_state.get(field_id, [])
                 prior_values = prior_values if isinstance(prior_values, list) else []
                 field_state[field_id] = list(dict.fromkeys([*prior_values, *value]))
+            explicitly_cleared.discard(field_id)
             touched_fields.add(field_id)
+
+    emvr_design["explicitly_cleared_fields"] = sorted(explicitly_cleared)
 
     if touched_fields & {*EMVR_OBJECTIVE_FIELDS, "learning_objectives"}:
         _sync_learning_objective_summary(field_state, previous_objective_values)
@@ -555,7 +633,6 @@ def apply_emvr_field_updates(
         "changed_quantities",
         "observed_quantities",
         "comparison_cases",
-        "learning_objectives",
     }
     if (
         touched_fields & core_direction_fields
@@ -575,7 +652,6 @@ def apply_emvr_field_updates(
         changed = items("changed_quantities")
         observed = items("observed_quantities")
         comparisons = items("comparison_cases")
-        objectives = items("learning_objectives")
         if research_object and (behaviors or changed) and observed:
             parts = [f"研究对象：{research_object}"]
             if behaviors:
@@ -585,8 +661,6 @@ def apply_emvr_field_updates(
             parts.append(f"观察内容：{'、'.join(observed)}")
             if comparisons:
                 parts.append(f"比较情形：{'、'.join(comparisons)}")
-            if objectives:
-                parts.append(f"学习目标：{'、'.join(objectives)}")
             synthesized = "；".join(parts)
             field_state["experiment_brief"] = synthesized
             emvr_design["experiment_brief"] = synthesized
@@ -701,7 +775,17 @@ def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
         else {}
     )
     if not isinstance(by_stage, dict):
-        return {}
+        # A malformed or legacy per-stage cache must not disconnect the valid
+        # canonical field_state that follows.  Treat the cache as empty and
+        # continue rebuilding the aggregate from authoritative fields.
+        by_stage = {}
+    explicitly_cleared = {
+        str(field)
+        for field in emvr_design.get("explicitly_cleared_fields", [])
+        if str(field) in EMVR_EDITABLE_FIELDS
+    } if isinstance(emvr_design, dict) and isinstance(
+        emvr_design.get("explicitly_cleared_fields", []), list
+    ) else set()
     merged: dict[str, Any] = {}
     for stage in Stage:
         update = by_stage.get(stage.value)
@@ -710,7 +794,7 @@ def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
         for key, value in update.items():
             if key == "field_updates":
                 continue
-            if value not in (None, "", [], {}):
+            if key not in explicitly_cleared and value not in (None, "", [], {}):
                 merged[key] = deepcopy(value)
     field_state = (
         emvr_design.get("field_state", {})
@@ -719,7 +803,11 @@ def merge_emvr_structured_requirements(emvr_design: Any) -> dict[str, Any]:
     )
     if isinstance(field_state, dict):
         for key, value in field_state.items():
-            if key in EMVR_EDITABLE_FIELDS and value not in (None, "", [], {}):
+            if (
+                key in EMVR_EDITABLE_FIELDS
+                and key not in explicitly_cleared
+                and value not in (None, "", [], {})
+            ):
                 merged[key] = deepcopy(value)
     theory_state = (
         emvr_design.get("theory_link_state", {})

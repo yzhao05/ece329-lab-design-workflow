@@ -5,7 +5,7 @@ from typing import Any
 
 from .design_state import design_state_snapshot
 from .dialogue_acts import stage_design_state_snapshot
-from .emvr_design import merge_emvr_structured_requirements
+from .emvr_design import EMVR_EDITABLE_FIELDS, merge_emvr_structured_requirements
 from .emvr_formula_flow import EMVR_FORMULA_ACTION_TYPES
 from .models import DesignSession, InteractionState, Stage
 
@@ -95,6 +95,32 @@ FIELD_LABELS = {
     "student_summary": "学生总结",
     "experiment_brief": "完整实验方向",
 }
+
+FIELD_LABELS.update(
+    {
+        "research_summary": "研究摘要",
+        "direction_summary": "方向摘要",
+        "learning_objectives": "学习目标",
+        "conceptual_objective": "概念目标",
+        "calculation_objective": "计算目标",
+        "analysis_objective": "分析目标",
+        "vr_interaction_objective": "交互目标",
+        "observation_objective": "观察目标",
+        "changed_quantities": "变化量",
+        "observed_quantities": "观察量",
+        "comparison_cases": "比较情形",
+        "required_behaviors": "核心操作",
+        "object_constraints": "对象与模型边界",
+        "visualization_requirements": "可视化要求",
+        "design_values": "设计价值",
+    }
+)
+
+# Every accepted EMVR edit must participate in before/after comparison and
+# version recording.  A future field remains traceable even before a dedicated
+# Chinese label is added, rather than silently disappearing from the turn diff.
+for _emvr_field in EMVR_EDITABLE_FIELDS:
+    FIELD_LABELS.setdefault(_emvr_field, _emvr_field)
 
 
 def build_turn_task_plan(
@@ -471,7 +497,9 @@ def student_change_notice(
             FIELD_LABELS.get(str(field), str(field)) for field in unchanged[:3]
         )
         if interaction_state is InteractionState.EMVR_DIRECT:
-            lines.append(f"这次表述与现有{labels}一致，因此相关设计保持不变。")
+            lines.append(
+                f"已接受本轮输入；其中{labels}与当前记录一致，无需重复写入。"
+            )
         else:
             lines.append(f"你这次补充的内容与现有{labels}一致，这部分保持不变。")
     return "".join(lines)

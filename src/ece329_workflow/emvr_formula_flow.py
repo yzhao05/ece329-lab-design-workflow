@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Iterable
 
@@ -1179,6 +1180,32 @@ def _method_selection_from_option(
     return {"selected_method_ids": [method_id]}
 
 
+def _method_selection_from_visible_reference(
+    message: str,
+    flow: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve exact names or displayed method numbers without topic guessing."""
+
+    methods = [
+        item
+        for item in flow.get("experiment_methods", [])
+        if isinstance(item, dict) and str(item.get("method_id") or "")
+    ]
+    compact = "".join(str(message or "").split()).casefold()
+    if not compact or not methods:
+        return None
+    selected: list[str] = []
+    for index, method in enumerate(methods, start=1):
+        title = "".join(str(method.get("title") or "").split()).casefold()
+        numbered = re.search(rf"(?:方法|设计)0*{index}(?!\d)", compact) is not None
+        named = bool(title and title in compact)
+        if numbered or named:
+            selected.append(str(method["method_id"]))
+    if not selected:
+        return None
+    return {"selected_method_ids": list(dict.fromkeys(selected))}
+
+
 def _build_experiment_brief(
     flow: dict[str, Any],
     method_choice: dict[str, Any],
@@ -1222,19 +1249,41 @@ def _build_experiment_brief(
     comparisons = _unique_text(method_choice.get("comparison_cases")) or _unique_text(
         formula_selection.get("comparison_cases")
     )
-    objects = (
-        _unique_text(method_choice.get("objects"))
-        or _unique_text(formula_selection.get("objects"))
-        or _unique_text(analysis.get("mentioned_objects"))
+    object_candidates = (
+        _unique_text(method_choice.get("objects")),
+        _unique_text(formula_selection.get("objects")),
+        _unique_text(analysis.get("mentioned_objects")),
+    )
+
+    def concrete_objects(values: list[str]) -> list[str]:
+        generic_labels = {
+            "与已确认公式对应的场源、材料或边界对象",
+            "与已确认公式对应的场源、材料或边界对象、可移动测量探针",
+            "可移动测量探针",
+        }
+        return [item for item in values if item not in generic_labels]
+
+    objects = next(
+        (specific for values in object_candidates if (specific := concrete_objects(values))),
+        [],
     )
     if not objects:
-        objects = list(
+        generated_objects = list(
             dict.fromkeys(
                 item
                 for method in selected_methods
                 for item in method.get("objects", [])
             )
         )
+        objects = concrete_objects(generated_objects)
+    if not objects and "coulomb_point_charge" in {
+        *formula_selection.get("primary_formula_ids", []),
+        *formula_selection.get("supporting_formula_ids", []),
+    }:
+        # The canonical formula id already fixes the physical source type; this
+        # is not a guess from user wording.  It prevents a completed point-
+        # charge experiment from reaching Builder as a generic “formula object”.
+        objects = ["两个点电荷"]
     operations = _unique_text(method_choice.get("operations")) or _unique_text(
         formula_selection.get("operations")
     )
@@ -1801,6 +1850,7 @@ def handle_emvr_formula_turn(
         method_choice = (
             _method_selection_from_option(selected_option_id, candidates)
             or _selected_action(turn_intent, "SELECT_EMVR_EXPERIMENT_METHODS")
+            or _method_selection_from_visible_reference(message, flow)
         )
         if method_choice:
             method_choice["selected_method_ids"] = [
@@ -1861,6 +1911,7 @@ def handle_emvr_formula_turn(
         method_choice = (
             _method_selection_from_option(selected_option_id, candidates)
             or _selected_action(turn_intent, "SELECT_EMVR_EXPERIMENT_METHODS")
+            or _method_selection_from_visible_reference(message, flow)
         )
         if method_choice is not None:
             selected_ids = [

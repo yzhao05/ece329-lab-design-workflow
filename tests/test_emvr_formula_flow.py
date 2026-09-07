@@ -17,8 +17,11 @@ from ece329_workflow.emvr_formula_flow import (
     score_formula_profiles,
 )
 from ece329_workflow.engine import WorkflowEngine, _emvr_entry_reference
-from ece329_workflow.emvr_design import apply_emvr_field_updates
-from ece329_workflow.generator import RuleBasedStageGenerator
+from ece329_workflow.emvr_design import (
+    apply_emvr_field_updates,
+    clean_emvr_field_text,
+)
+from ece329_workflow.generator import RuleBasedStageGenerator, _emvr_parameter_axis
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.reporting import (
     build_emvr_task_report,
@@ -131,6 +134,156 @@ class FormulaQuestionPriorityGenerator(FormulaSemanticGenerator):
 
 
 class EmvrFormulaFlowTests(unittest.TestCase):
+    def test_visible_method_numbers_can_select_a_combined_direction(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究两个点电荷",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        handle_emvr_formula_turn(
+            session,
+            "采用第一组公式",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=cards.stage_payload["formula_cards"][0]["option_id"],
+        )
+        methods, _ = handle_emvr_formula_turn(
+            session,
+            "把公式组合成一个实验",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id="emvr-composition:combined",
+        )
+
+        review, complete = handle_emvr_formula_turn(
+            session,
+            "方法1和方法3组合使用：方法1负责正向展示，方法3负责控制变量比较",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+        )
+
+        selected = review.stage_payload["experiment_brief_draft"][
+            "selected_experiment_method_ids"
+        ]
+        self.assertFalse(complete)
+        self.assertEqual(
+            selected,
+            [
+                methods.stage_payload["experiment_methods"][0]["method_id"],
+                methods.stage_payload["experiment_methods"][2]["method_id"],
+            ],
+        )
+
+    def test_revision_prefaces_are_removed_from_emvr_values(self) -> None:
+        self.assertEqual(
+            clean_emvr_field_text(
+                "conceptual_objective",
+                "概念目标要对应到具体物理内容，概念目标应围绕点电荷场来理解场线重排。",
+            ),
+            "理解点电荷场中场线重排。",
+        )
+        self.assertEqual(
+            clean_emvr_field_text("vr_interaction_objective", "交互目标更具体一点"),
+            "",
+        )
+
+    def test_generator_uses_emvr_parameters_for_procedure_and_axes(self) -> None:
+        session = self._session()
+        session.design_context["emvr_design"]["field_state"] = {
+            "experiment_brief": "比较两个点电荷在不同距离和极性下的场线变化",
+            "research_object": "两个点电荷、可移动测量探针",
+            "required_behaviors": ["拖动点电荷并切换同种或异种电荷"],
+            "changed_quantities": ["两个点电荷的距离", "电荷类型"],
+            "observed_quantities": ["场线弯曲、连接和重排形态"],
+            "comparison_cases": ["同种电荷", "异种电荷"],
+            "parameter_specifications": [
+                "两个点电荷的距离：0.5 米到 5 米，步长 0.1 米",
+                "电荷类型：离散选项为同种、异种",
+            ],
+        }
+        generator = RuleBasedStageGenerator()
+        session.current_stage_index = list(Stage).index(Stage.CONCEPTUAL_PROCEDURE)
+        procedure = generator.generate(session, "整理实验步骤")
+        steps_text = "\n".join(procedure.stage_payload["procedure_steps"])
+        self.assertIn("0.5 米到 5 米", steps_text)
+        self.assertIn("同种电荷、异种电荷", steps_text)
+        self.assertIn("场线弯曲、连接和重排形态", steps_text)
+
+        session.current_stage_index = list(Stage).index(
+            Stage.EXPECTED_DATA_VISUALIZATION
+        )
+        visualization = generator.generate(session, "生成显示方案").visualization
+        self.assertEqual(visualization["x_axis"]["label"], "两个点电荷的距离")
+        self.assertEqual(visualization["x_axis"]["unit"], "米")
+        self.assertEqual(
+            visualization["y_axis"]["label"],
+            "场线弯曲、连接和重排形态",
+        )
+        session.current_stage_index = list(Stage).index(Stage.CONCEPTUAL_OR_VR_SETUP)
+        setup = generator.generate(session, "生成Unity对象清单")
+        objects = setup.stage_payload["object_inventory"]
+        self.assertTrue(any(item["object_name"] == "点电荷 A" for item in objects))
+        self.assertTrue(any(item["object_name"] == "点电荷 B" for item in objects))
+        probe = next(item for item in objects if item["object_name"] == "可移动测量探针")
+        self.assertEqual(probe["category"], "观察与测量")
+
+        self.assertEqual(
+            _emvr_parameter_axis(
+                {
+                    "changed_quantities": ["激励频率"],
+                    "observed_quantities": ["驻波幅度"],
+                    "parameter_specifications": ["激励频率：1 kHz 到 10 kHz"],
+                }
+            )[1],
+            "kHz",
+        )
+
+    def test_report_repairs_legacy_generic_coulomb_object_and_long_lists(self) -> None:
+        session = self._session()
+        emvr = session.design_context["emvr_design"]
+        emvr["authoritative_experiment_brief"] = {
+            "topic": "点电荷叠加场",
+            "summary": "学习目标需要更具体；" * 30,
+            "objects": ["研究对象"],
+            "operations": ["拖动并比较"],
+            "changed_quantities": ["距离"],
+            "observed_quantities": ["场线形态"],
+            "primary_formula_ids": ["coulomb_point_charge"],
+        }
+        brief = effective_experiment_brief(session)
+        self.assertEqual(brief["objects"], ["两个点电荷"])
+        self.assertNotIn("学习目标需要更具体", brief["summary"])
+
+        section = stage_report_section(
+            Stage.RESULT_INTERPRETATION,
+            {
+                "expected_results": [
+                    "同种电荷靠近时中间区域场线相斥并弯曲。",
+                    "异种电荷靠近时场线连接并重新排列。",
+                ],
+                "report_questions": [
+                    "距离变化如何影响场线形态？",
+                    "同种与异种电荷的结果有何不同？",
+                    "库仑定律与叠加原理如何解释差异？",
+                ],
+            },
+        )
+        rendered = {item["label"]: item["value"] for item in section["items"]}
+        self.assertIn("\n2. ", rendered["Lab特有预期结果"])
+        self.assertIn("\n3. ", rendered["实验报告问题"])
+
+        scalar_questions = stage_report_section(
+            Stage.RESULT_INTERPRETATION,
+            {
+                "report_questions": (
+                    "距离变化如何影响场线？同种与异种电荷有何不同？"
+                    "叠加原理如何解释该差异？"
+                )
+            },
+        )
+        self.assertIn(
+            "\n3. ",
+            scalar_questions["items"][0]["value"],
+        )
+
     def test_course_question_pauses_formula_progress_and_preserves_selection(self) -> None:
         engine = WorkflowEngine(generator=FormulaQuestionPriorityGenerator())
         first = engine.create_design(

@@ -36,6 +36,7 @@ from .dialogue_state import (
 from .generator import (
     StageGenerator,
     _course_relationships_for_selected_relations,
+    _emvr_reference_output,
     _guided_reference_output,
     guided_stage_entry_output,
 )
@@ -2401,11 +2402,39 @@ def _persist_emvr_stage_input(
         return
     resolved_value = turn_intent.get("resolved_value")
     dialogue_acts = turn_intent.get("dialogue_acts", [])
+    semantic_updates = turn_intent.get("semantic_updates", {})
+    structured_update = (
+        semantic_updates.get("emvr_design_update")
+        if isinstance(semantic_updates, dict)
+        else None
+    )
+    structured_update = (
+        deepcopy(structured_update)
+        if isinstance(structured_update, dict)
+        else {}
+    )
+    has_structured_operations = bool(
+        structured_update.get("field_updates")
+        or structured_update.get("theory_link_updates")
+    )
     structured_content = _substantive_turn_content(turn_intent)
     if isinstance(dialogue_acts, list) and dialogue_acts:
         if structured_content in (None, "", [], {}):
-            return
-        content: Any = structured_content
+            if not has_structured_operations:
+                return
+            # CLEAR/REMOVE actions intentionally carry no replacement text.
+            # Keep a compact audit description so the state operation is not
+            # discarded merely because there is no substantive value string.
+            content: Any = [
+                {
+                    "field_id": str(item.get("field_id") or ""),
+                    "operation": str(item.get("operation") or "").upper(),
+                }
+                for item in structured_update.get("field_updates", [])
+                if isinstance(item, dict)
+            ]
+        else:
+            content = structured_content
     else:
         content = (
             resolved_value
@@ -2433,20 +2462,9 @@ def _persist_emvr_stage_input(
         "intent": intent_name,
         "revision": session.revision + 1,
     }
-    semantic_updates = turn_intent.get("semantic_updates", {})
     dialogue_acts = turn_intent.get("dialogue_acts", [])
     if isinstance(dialogue_acts, list) and dialogue_acts:
         entry["dialogue_acts"] = deepcopy(dialogue_acts)
-    structured_update = (
-        semantic_updates.get("emvr_design_update")
-        if isinstance(semantic_updates, dict)
-        else None
-    )
-    structured_update = (
-        deepcopy(structured_update)
-        if isinstance(structured_update, dict)
-        else {}
-    )
     # NEW_TOPIC_CONTENT and an explicit experiment_brief revision are
     # authoritative actions in their own right.  They are processed before
     # the per-field projection, so mirror that exact action into the update
@@ -2781,10 +2799,74 @@ class WorkflowEngine:
             )
             if scene_recovery is not None:
                 validated = scene_recovery
+            # Typed continue controls stay semantic during normal operation.
+            # If the semantic service explicitly degraded, however, an exact
+            # visible control must not strand a completed stage in a retry
+            # loop. Never use this recovery while an unconfirmed candidate is
+            # waiting, because that could silently accept student content.
+            compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
+            fallback_source = str(validated.get("source") or "").upper()
+            pending_type = (
+                str(pending.get("type") or "")
+                if isinstance(pending, dict)
+                else ""
+            )
+            candidate_waiting = bool(
+                isinstance(pending, dict)
+                and str(pending.get("candidate_answer") or "").strip()
+            )
+            if (
+                compact_control in {"继续", "下一步", "确认并继续"}
+                and validated.get("intent") == UserIntent.UNCLEAR.value
+                and "FALLBACK" in fallback_source
+                and not candidate_waiting
+                and (
+                    not isinstance(pending, dict)
+                    or pending_type
+                    in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+                )
+            ):
+                validated = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ADVANCE_STAGE,
+                        confidence=1.0,
+                        source="DEGRADED_EXACT_CONTROL_RECOVERY",
+                        semantic_updates={"control_actions": ["ADVANCE"]},
+                    ),
+                    pending,
+                )
             return validated, pending
         # Offline/rule-only deployments cannot resolve conversational commands.
-        # Explicit UI actions still arrive through complete_stage above; typed
-        # language remains an answer instead of being guessed from keywords.
+        # Explicit UI actions still arrive through complete_stage above. An
+        # exact visible continue label is also safe when the current pending
+        # item is already a confirmation (never an unanswered content field).
+        compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
+        pending_type = (
+            str(pending.get("type") or "") if isinstance(pending, dict) else ""
+        )
+        candidate_waiting = bool(
+            isinstance(pending, dict)
+            and str(pending.get("candidate_answer") or "").strip()
+        )
+        if (
+            compact_control in {"继续", "下一步", "确认并继续"}
+            and pending_type in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+            and not candidate_waiting
+        ):
+            return (
+                validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.ADVANCE_STAGE,
+                        confidence=1.0,
+                        source="RULE_ONLY_EXACT_CONTROL_RECOVERY",
+                        semantic_updates={"control_actions": ["ADVANCE"]},
+                    ),
+                    pending,
+                ),
+                pending,
+            )
+        # Other typed language remains an answer instead of being guessed from
+        # keywords.
         return (
             validate_resolved_intent(
                 fallback_intent(
@@ -3550,6 +3632,25 @@ class WorkflowEngine:
                 turn_intent["advance_requested"] = True
         if formula_onboarding_output is not None:
             explicit_transition_intent = formula_onboarding_should_complete
+        # Commit EMVR semantic fields before completion validation, turn diff
+        # calculation and version capture.  Previously this happened after all
+        # three, so a "补充并继续" turn could fail validation once, and an
+        # EMVR-only edit was invisible to undo/restore history.
+        if formula_onboarding_output is None and not formula_question_pause:
+            input_stage = session.current_stage
+            _persist_emvr_brief(
+                session,
+                resolved_student_message,
+                content_intent_name,
+                input_stage,
+                turn_intent,
+            )
+            _persist_emvr_stage_input(
+                session,
+                input_stage,
+                resolved_student_message,
+                turn_intent,
+            )
         pre_transition_attempted = bool(
             session.current_stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
             and explicit_transition_intent
@@ -3676,20 +3777,6 @@ class WorkflowEngine:
             "pending_action": deepcopy(pending_action),
             "carried_context": build_carried_context(session),
         }
-        if formula_onboarding_output is None and not formula_question_pause:
-            _persist_emvr_brief(
-                session,
-                resolved_student_message,
-                content_intent_name,
-                content_stage,
-                turn_intent,
-            )
-            _persist_emvr_stage_input(
-                session,
-                content_stage,
-                resolved_student_message,
-                turn_intent,
-            )
         _persist_guided_stage_input(
             session,
             content_stage,
@@ -3924,6 +4011,19 @@ class WorkflowEngine:
                     or reference_payload.get("reference_draft")
                 )
             ) or len(output.assistant_message.strip()) >= 80
+            if (
+                not reference_has_detail
+                and not (
+                    isinstance(pending_action, dict)
+                    and pending_action.get("subject") == "experiment_brief"
+                )
+            ):
+                # A thin generic line such as “已生成窗口规范” does not answer
+                # the student's request for a usable reference. Rebuild it
+                # from confirmed EMVR fields while keeping the open question.
+                output = _emvr_reference_output(session)
+                reference_payload = output.stage_payload
+                reference_has_detail = True
             if (
                 not reference_has_detail
                 and isinstance(pending_action, dict)

@@ -65,6 +65,7 @@ from ece329_workflow.models import (
     Stage,
     StageCompletionError,
     StepOutput,
+    TurnRequest,
 )
 from ece329_workflow.reporting import (
     emvr_stage_completeness_issues,
@@ -377,6 +378,83 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_exact_continue_recovers_only_after_semantic_service_fallback(self) -> None:
+        class DegradedGenerator(RuleBasedStageGenerator):
+            def resolve_intent(
+                self,
+                session,
+                user_message,
+                pending_action,
+                carried_context,
+            ):
+                return resolved_intent(
+                    UserIntent.UNCLEAR,
+                    confidence=0.2,
+                    source="SEMANTIC_SERVICE_FALLBACK",
+                )
+
+        session = DesignSession(
+            design_id="degraded-continue-control",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        intent, _ = WorkflowEngine(generator=DegradedGenerator())._resolve_turn_intent(
+            session,
+            TurnRequest(message="继续"),
+            "继续",
+        )
+
+        self.assertEqual(intent["intent"], UserIntent.ADVANCE_STAGE.value)
+        self.assertEqual(intent["source"], "DEGRADED_EXACT_CONTROL_RECOVERY")
+
+        session.model_context["dialogue_state"] = {
+            "pending_action": {
+                "type": "ANSWER_EMVR_STAGE_QUESTION",
+                "subject": "research_question",
+                "answer_fields": ["research_question"],
+            }
+        }
+        open_answer, _ = WorkflowEngine(generator=DegradedGenerator())._resolve_turn_intent(
+            session,
+            TurnRequest(message="继续"),
+            "继续",
+        )
+        self.assertNotEqual(open_answer["intent"], UserIntent.ADVANCE_STAGE.value)
+
+    def test_rule_only_continue_advances_confirmation_but_not_open_answer(self) -> None:
+        engine = WorkflowEngine(generator=RuleBasedStageGenerator())
+        session = DesignSession(
+            design_id="rule-only-continue-control",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        confirmation = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "subject": Stage.COURSE_MAPPING_AND_DIRECTION.value,
+            "allowed_intents": [UserIntent.ADVANCE_STAGE.value, UserIntent.UNCLEAR.value],
+        }
+        session.model_context["dialogue_state"] = {
+            "pending_action": confirmation,
+        }
+
+        intent, _ = engine._resolve_turn_intent(
+            session,
+            TurnRequest(message="继续"),
+            "继续",
+        )
+        self.assertEqual(intent["intent"], UserIntent.ADVANCE_STAGE.value)
+        self.assertEqual(intent["source"], "RULE_ONLY_EXACT_CONTROL_RECOVERY")
+
+        session.model_context["dialogue_state"]["pending_action"] = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": "research_question",
+            "answer_fields": ["research_question"],
+        }
+        open_answer, _ = engine._resolve_turn_intent(
+            session,
+            TurnRequest(message="继续"),
+            "继续",
+        )
+        self.assertNotEqual(open_answer["intent"], UserIntent.ADVANCE_STAGE.value)
+
     def test_stage_advance_clears_both_pending_action_references(self) -> None:
         session = DesignSession(
             design_id="advance-clears-pending-references",

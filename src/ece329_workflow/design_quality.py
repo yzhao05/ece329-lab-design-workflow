@@ -7,6 +7,7 @@ from typing import Any
 
 from .design_state import design_state_snapshot, ensure_design_state
 from .dialogue_acts import stage_design_state_snapshot
+from .emvr_design import clean_emvr_field_text, merge_emvr_structured_requirements
 from .models import DesignSession, InteractionState, Stage
 from .turn_planning import workflow_design_snapshot
 
@@ -365,6 +366,58 @@ def _provenance_trace(session: DesignSession) -> list[dict[str, Any]]:
     stage_provenance = (
         stage_provenance if isinstance(stage_provenance, dict) else {}
     )
+    canonical_values: dict[str, Any] = {}
+    canonical_sources: dict[str, tuple[str, ...]] = {}
+    if session.interaction_state is InteractionState.EMVR_DIRECT:
+        emvr = session.design_context.get("emvr_design", {})
+        emvr = emvr if isinstance(emvr, dict) else {}
+        requirements = merge_emvr_structured_requirements(emvr)
+        objective_fields = (
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+        )
+        objectives = [
+            clean_emvr_field_text(field, requirements.get(field))
+            for field in objective_fields
+        ]
+        objectives.extend(
+            clean_emvr_field_text("learning_objectives", item)
+            for item in (
+                requirements.get("learning_objectives", [])
+                if isinstance(requirements.get("learning_objectives"), list)
+                else []
+            )
+        )
+        objectives = [item for item in objectives if item]
+        canonical_values = {
+            "research_object": requirements.get("research_object"),
+            "course_relationship": requirements.get("course_relationship"),
+            "learning_objective": objectives,
+            "research_question": clean_emvr_field_text(
+                "research_question", requirements.get("research_question")
+            ),
+            "hypothesis": requirements.get("hypothesis"),
+            "independent_variable": requirements.get("changed_quantities"),
+            "observations": requirements.get("observed_quantities"),
+            "procedure_steps": requirements.get("procedure_steps"),
+            "visualization_plan": requirements.get("visualization_requirements"),
+            "limitations": requirements.get("limitations"),
+        }
+        canonical_sources = {
+            "research_object": ("research_object",),
+            "course_relationship": ("course_relationship",),
+            "learning_objective": (*objective_fields, "learning_objectives"),
+            "research_question": ("research_question",),
+            "hypothesis": ("hypothesis",),
+            "independent_variable": ("changed_quantities",),
+            "observations": ("observed_quantities",),
+            "procedure_steps": ("procedure_steps",),
+            "visualization_plan": ("visualization_requirements",),
+            "limitations": ("limitations",),
+        }
 
     source_labels = {
         "STUDENT": "学生回答",
@@ -377,8 +430,28 @@ def _provenance_trace(session: DesignSession) -> list[dict[str, Any]]:
     }
     trace: list[dict[str, Any]] = []
     for field in _FIELD_LABELS:
-        value = _text(stage_values.get(field) or design_values.get(field))
-        records = stage_provenance.get(field) or provenance.get(field)
+        canonical = canonical_values.get(field)
+        value = _text(
+            canonical
+            if canonical not in (None, "", [], {})
+            else stage_values.get(field) or design_values.get(field)
+        )
+        source_fields = tuple(
+            dict.fromkeys((*canonical_sources.get(field, ()), field))
+        )
+        candidate_records = [
+            record
+            for source_field in source_fields
+            for record in (
+                stage_provenance.get(source_field, [])
+                or provenance.get(source_field, [])
+            )
+            if isinstance(record, dict)
+        ]
+        records = sorted(
+            candidate_records,
+            key=lambda item: int(item.get("revision") or 0),
+        )
         if not value or not isinstance(records, list) or not records:
             continue
         latest = records[-1] if isinstance(records[-1], dict) else {}

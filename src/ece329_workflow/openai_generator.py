@@ -873,14 +873,40 @@ def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
 
     if not isinstance(acts, list):
         return ""
-    intervals = [
-        (int(act.get("source_start")), int(act.get("source_end")))
-        for act in acts
-        if isinstance(act, dict)
-        and isinstance(act.get("source_start"), int)
-        and isinstance(act.get("source_end"), int)
-        and 0 <= int(act["source_start"]) < int(act["source_end"]) <= len(user_message)
-    ]
+    original = str(user_message or "")
+    intervals: list[tuple[int, int]] = []
+    for act in acts:
+        if not isinstance(act, dict):
+            continue
+        start = act.get("source_start")
+        end = act.get("source_end")
+        source_text = str(act.get("source_text") or "")
+        valid_offsets = bool(
+            isinstance(start, int)
+            and isinstance(end, int)
+            and 0 <= start < end <= len(original)
+        )
+        if valid_offsets and (
+            not source_text or original[start:end].strip() == source_text.strip()
+        ):
+            intervals.append((start, end))
+            continue
+        # Model offsets are occasionally one or two characters out of date
+        # after punctuation normalization.  Locate the exact source text
+        # instead of marking the wrong characters as covered; otherwise the
+        # student sees a mutilated fragment such as “向展示…” in the retry.
+        if source_text:
+            locations = [
+                match.start()
+                for match in re.finditer(re.escape(source_text), original)
+            ]
+            if locations:
+                located = (
+                    min(locations, key=lambda item: abs(item - start))
+                    if isinstance(start, int)
+                    else locations[0]
+                )
+                intervals.append((located, located + len(source_text)))
     spans = [
         str(act.get("source_text") or "").strip()
         for act in acts
@@ -888,7 +914,6 @@ def _uncovered_dialogue_text(user_message: str, acts: Any) -> str:
     ]
     if not spans and not intervals:
         return ""
-    original = str(user_message or "")
     if intervals:
         covered = [False] * len(original)
         for start, end in intervals:

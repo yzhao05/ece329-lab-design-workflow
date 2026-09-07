@@ -114,6 +114,57 @@ def retrieved_brainstorm_options(
 
 
 class OpenAIStageGeneratorTests(unittest.TestCase):
+    def test_uncovered_text_uses_exact_source_when_offsets_are_shifted(self) -> None:
+        message = (
+            "方法1负责正向展示场线变化；"
+            "另外请把比较条件设为同种电荷和异种电荷。"
+        )
+        handled = "方法1负责正向展示场线变化"
+        acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "required_behaviors",
+                "operation": "REPLACE",
+                "content": [handled],
+                "source_text": handled,
+                # Simulate a model span shifted by two characters. The exact
+                # source text must win over these stale offsets.
+                "source_start": 2,
+                "source_end": 2 + len(handled),
+                "confidence": 0.98,
+            }
+        ]
+
+        uncovered = _uncovered_dialogue_text(message, acts)
+
+        self.assertNotIn("向展示场线变化", uncovered)
+        self.assertIn("比较条件设为同种电荷和异种电荷", uncovered)
+
+    def test_shifted_duplicate_source_uses_the_nearest_occurrence(self) -> None:
+        repeated = "记录空间中的场线形态"
+        message = (
+            f"这是第一次完整{repeated}；改变距离后再次{repeated}；"
+            "另外还要补充比较同种电荷与异种电荷的明显差异。"
+        )
+        second_start = message.rfind(repeated)
+        acts = [
+            {
+                "type": "MODIFY_EMVR_FIELD",
+                "target": "observed_quantities",
+                "operation": "REPLACE",
+                "content": [repeated],
+                "source_text": repeated,
+                "source_start": second_start + 1,
+                "source_end": second_start + 1 + len(repeated),
+                "confidence": 0.98,
+            }
+        ]
+
+        uncovered = _uncovered_dialogue_text(message, acts)
+
+        self.assertTrue(uncovered.startswith(f"这是第一次完整{repeated}"))
+        self.assertIn("补充比较同种电荷与异种电荷", uncovered)
+
     def test_emvr_formula_topic_uses_phase_specific_semantic_recovery(self) -> None:
         message = "我想做一个静电场实验"
         topic_analysis = {

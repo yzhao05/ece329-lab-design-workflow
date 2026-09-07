@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any, Protocol
 
 from .dialogue_state import UserIntent, build_carried_context
+from .dialogue_acts import stage_design_state_snapshot
 from .design_state import seen_scene_signatures
 from .emvr_design import (
     EMVR_THEORY_RELATIONS,
@@ -483,11 +484,45 @@ def _formula_brief_object_inventory(
             return [value.strip()]
         return []
 
+    generic_object_labels = {
+        "与已确认公式对应的场源、材料或边界对象",
+        "与已确认公式对应的场源、材料或边界对象、可移动测量探针",
+    }
     objects = items(brief.get("objects"))
+    flow = emvr.get("formula_flow", {}) if isinstance(emvr, dict) else {}
+    analysis = flow.get("topic_analysis", {}) if isinstance(flow, dict) else {}
+    mentioned_objects = items(
+        analysis.get("mentioned_objects") if isinstance(analysis, dict) else []
+    )
+    specific_mentions = [
+        item for item in mentioned_objects if item not in generic_object_labels
+    ]
+    if not [item for item in objects if item not in generic_object_labels] and specific_mentions:
+        objects = specific_mentions
+    formula_ids = {
+        str(item)
+        for item in [
+            *brief.get("primary_formula_ids", []),
+            *brief.get("supporting_formula_ids", []),
+        ]
+    }
+    if not [item for item in objects if item not in generic_object_labels] and (
+        "coulomb_point_charge" in formula_ids
+    ):
+        objects = ["两个点电荷"]
     research_object = str(requirements.get("research_object") or "").strip()
     brief_object_summary = "、".join(objects)
-    if research_object and research_object != brief_object_summary:
-        objects = [research_object]
+    if (
+        research_object
+        and research_object not in generic_object_labels
+        and research_object != brief_object_summary
+    ):
+        enumerated = [
+            item.strip()
+            for item in re.split(r"[、；;]+", research_object)
+            if item.strip()
+        ]
+        objects = enumerated if len(enumerated) > 1 else [research_object]
     expanded_objects: list[str] = []
     for name in objects:
         counted = re.fullmatch(r"(?:两个|2个)(.+)", name.strip())
@@ -515,17 +550,28 @@ def _formula_brief_object_inventory(
 
     inventory: list[dict[str, Any]] = []
     for name in objects:
-        inventory.append(
-            {
-                "object_name": name,
-                "category": "实验物理对象",
-                "purpose": f"承载研究对象，并使学生能够改变{changed_text}",
-                "student_interaction": operation_text,
-                "physics_or_data_state": f"保存与{changed_text}有关的当前物理状态",
-                "visual_feedback": f"对象状态变化后同步显示{observed_text}",
-                "required": True,
-            }
-        )
+        observation_tool = any(token in name for token in ("探针", "探测器", "测量"))
+        inventory.append({
+            "object_name": name,
+            "category": "观察与测量" if observation_tool else "实验物理对象",
+            "purpose": (
+                f"在选定位置读取并记录{observed_text}"
+                if observation_tool
+                else f"承载研究对象并作为理论模型中的场源，允许学生改变{changed_text}"
+            ),
+            "student_interaction": (
+                "移动到选定观察位置并记录当前读数或场线形态"
+                if observation_tool
+                else operation_text
+            ),
+            "physics_or_data_state": (
+                "保存采样位置、观察方式和当前理论读数"
+                if observation_tool
+                else f"保存与{changed_text}有关的当前物理状态"
+            ),
+            "visual_feedback": f"对象状态变化后同步显示{observed_text}",
+            "required": True,
+        })
 
     supporting_objects = [
         {
@@ -584,7 +630,12 @@ def _formula_brief_object_inventory(
         },
     ]
     existing = {str(item.get("object_name") or "").casefold() for item in inventory}
+    has_observation_tool = any(
+        item.get("category") == "观察与测量" for item in inventory
+    )
     for item in supporting_objects:
+        if item["object_name"] == "空间观察与测量工具" and has_observation_tool:
+            continue
         if str(item["object_name"]).casefold() not in existing:
             inventory.append(item)
     object_names = [str(item["object_name"]) for item in inventory]
@@ -1075,12 +1126,16 @@ def _visualization(
     emvr: bool,
     *,
     formula_candidates: list[dict[str, Any]] | None = None,
+    x_axis_label: str = "主要自变量",
+    x_axis_unit: str = "由当前设计定义",
+    y_axis_label: str = "主要因变量",
+    y_axis_unit: str = "由当前设计定义",
 ) -> dict[str, Any]:
     return {
         "type": "interactive_line_chart",
         "title": "ECE329理论预测参考窗口",
-        "x_axis": {"label": "主要自变量", "unit": "由当前设计定义"},
-        "y_axis": {"label": "主要因变量", "unit": "由当前设计定义"},
+        "x_axis": {"label": x_axis_label, "unit": x_axis_unit},
+        "y_axis": {"label": y_axis_label, "unit": y_axis_unit},
         "series": [
             {
                 "id": "theory",
@@ -1111,6 +1166,132 @@ def _visualization(
         "measured": False,
         "disclaimer": "该窗口表示理论预测，不是实际测量数据。",
     }
+
+
+def _emvr_parameter_axis(requirements: dict[str, Any]) -> tuple[str, str, str, str]:
+    changed = requirements.get("changed_quantities", [])
+    changed = changed if isinstance(changed, list) else []
+    observed = requirements.get("observed_quantities", [])
+    observed = observed if isinstance(observed, list) else []
+    specifications = requirements.get("parameter_specifications", [])
+    specifications = specifications if isinstance(specifications, list) else []
+    x_label = next((str(item).strip() for item in changed if str(item).strip()), "主要自变量")
+    y_label = next((str(item).strip() for item in observed if str(item).strip()), "主要观察量")
+    matching_spec = next(
+        (str(item) for item in specifications if x_label and x_label in str(item)),
+        str(specifications[0]) if specifications else "",
+    )
+    unit_match = re.search(
+        r"(?:单位\s*)?(毫米|厘米|千米|米|纳秒|微秒|毫秒|秒|赫兹|伏特|安培|库仑|欧姆|特斯拉|韦伯|弧度|度|mm|cm|km|m|ns|ms|GHz|MHz|kHz|Hz|rad|Wb|s|V|A|C|Ω|T)",
+        matching_spec,
+        flags=re.IGNORECASE,
+    )
+    x_unit = unit_match.group(1) if unit_match else "见参数规格"
+    return x_label, x_unit, y_label, "定性形态或归一化指标"
+
+
+def _emvr_reference_condition(
+    requirements: dict[str, Any],
+    stage_state: dict[str, Any],
+) -> str:
+    saved = stage_state.get("reference_condition")
+    if saved not in (None, "", [], {}):
+        return _compact_context_items(saved, limit=4, item_length=180)
+    specifications = requirements.get("parameter_specifications", [])
+    specifications = specifications if isinstance(specifications, list) else []
+    settings: list[str] = []
+    for raw in specifications:
+        text = str(raw).strip()
+        if not text:
+            continue
+        name = re.split(r"[：:]", text, maxsplit=1)[0].strip()
+        minimum = re.search(
+            r"(?:最小值|下限|起点)?\s*([+-]?\d+(?:\.\d+)?)\s*(毫米|厘米|千米|米|纳秒|微秒|毫秒|秒|赫兹|伏特|安培|库仑|欧姆|特斯拉|韦伯|弧度|度|mm|cm|km|m|ns|ms|GHz|MHz|kHz|Hz|rad|Wb|s|V|A|C|Ω|T)?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        discrete = re.search(r"离散选项(?:为|是|：|:)?\s*([^。；;]+)", text)
+        if discrete:
+            first = re.split(r"[、，,/]|或", discrete.group(1))[0].strip()
+            if first:
+                settings.append(f"{name}设为{first}")
+        elif minimum:
+            settings.append(f"{name}设为{minimum.group(1)}{minimum.group(2) or ''}")
+    controls = _compact_context_items(
+        stage_state.get("controlled_conditions"),
+        limit=4,
+        item_length=120,
+    ) or "其余源条件、几何、材料和观察方式"
+    settings_text = "、".join(settings) or "已确认参数范围中的起始状态"
+    return f"每轮比较前恢复同一快照：{settings_text}；同时保持{controls}不变"
+
+
+def _emvr_reference_output(session: DesignSession) -> StepOutput:
+    """Return a concrete, read-only reference for the current EMVR stage."""
+
+    requirements = _emvr_structured_requirements(session)
+    stage_state = stage_design_state_snapshot(session)
+    changed = _compact_context_items(requirements.get("changed_quantities")) or "主要参数"
+    observed = _compact_context_items(requirements.get("observed_quantities")) or "目标响应"
+    comparisons = _compact_context_items(requirements.get("comparison_cases")) or "已确认比较情形"
+    reference = _emvr_reference_condition(requirements, stage_state)
+    x_label, x_unit, y_label, y_unit = _emvr_parameter_axis(requirements)
+    if session.current_stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        examples = [
+            f"横轴或主控制量使用{x_label}（{x_unit}），不同的{comparisons}分别显示",
+            f"纵轴或空间编码显示{y_label}（{y_unit}），不再使用通用占位文字",
+            f"每次改变{changed}后同步刷新数值、曲线和空间场，并标注{observed}是否符合预期",
+        ]
+    elif session.current_stage is Stage.CONCEPTUAL_PROCEDURE:
+        examples = [
+            f"加载基准：{reference}",
+            f"按照参数规格逐级改变{changed}，每次只改变一个输入",
+            f"对{comparisons}分别记录{observed}，最后在相同参数下并排比较并解释差异",
+        ]
+    else:
+        examples = [
+            f"基准状态：{reference}",
+            f"操作与记录：改变{changed}并记录{observed}",
+            f"比较方式：对{comparisons}使用相同控制条件",
+        ]
+    rendered = "\n".join(
+        f"{index}. {item}" for index, item in enumerate(examples, start=1)
+    )
+    pending = session.model_context.get("dialogue_state", {})
+    pending = pending.get("pending_action") if isinstance(pending, dict) else None
+    field = (
+        str(pending.get("subject") or session.current_stage.value)
+        if isinstance(pending, dict)
+        else session.current_stage.value
+    )
+    candidate = (
+        str(pending.get("candidate_answer") or "").strip()
+        if isinstance(pending, dict)
+        else ""
+    )
+    candidate_context = (
+        f"\n当前待确认的候选描述是：{candidate}"
+        if candidate
+        else ""
+    )
+    return StepOutput(
+        assistant_message=(
+            "可以。下面是一版依据当前已确认参数和观察量整理的专业参考，不会自动写入设计：\n"
+            f"{rendered}{candidate_context}\n"
+            "请直接保留、修改或补充其中的具体内容。"
+        ),
+        stage_payload={
+            "reference_only": True,
+            "reference_examples": examples,
+            "reference_scaffold": {
+                "field": field,
+                "example": rendered,
+                "editable": True,
+            },
+            "preserve_pending_action": True,
+        },
+        student_task="请说明采用这版参考，还是指出需要修改的具体内容。",
+    )
 
 
 def _guided_reference_output(session: DesignSession) -> StepOutput:
@@ -1791,6 +1972,7 @@ class RuleBasedStageGenerator:
         stage_inputs = _emvr_stage_input_texts(session, stage)
         latest_stage_input = stage_inputs[-1] if stage_inputs else ""
         structured_requirements = _emvr_structured_requirements(session)
+        stage_state = stage_design_state_snapshot(session)
         theory_relation_ids = structured_requirements.get(
             "theory_relation_ids", []
         )
@@ -1993,13 +2175,13 @@ class RuleBasedStageGenerator:
                         "comparison_cases", []
                     ),
                     "controlled_variables": (
-                        structured_requirements.get("controlled_conditions")
+                        stage_state.get("controlled_conditions")
                         or ["除主动改变量外保持不变的源、几何、材料与边界条件"]
                     ),
-                    "reference_condition": {
-                        "purpose": "用于公平比较的基准状态",
-                        "definition": "每轮改变参数前保存或恢复的同一初始状态",
-                    },
+                    "reference_condition": _emvr_reference_condition(
+                        structured_requirements,
+                        stage_state,
+                    ),
                     "calculated_outputs": structured_requirements.get(
                         "observed_quantities", []
                     ) or ["研究问题中指定的电磁响应"],
@@ -2122,25 +2304,52 @@ class RuleBasedStageGenerator:
                     "student_variable_definition": variable_definition,
                     "independent_variable": {"name": variable_definition or "学生定义的主要变化条件", "unity_control": "与VR对象操作或带单位控件绑定", "range": "；".join(structured_requirements.get("parameter_specifications", [])) or "需要明确范围与单位"},
                     "dependent_variable": {"name": "；".join(saved_observed) or "研究问题中指定的观察响应", "vr_representation": "数值、曲线和空间编码"},
-                    "controlled_variables": ["源条件", "几何条件", "材料或边界中未被选为自变量的参数"],
-                    "reference_condition": {"purpose": "建立比较基线", "unity_action": "Reset/Reference preset"},
+                    "controlled_variables": (
+                        stage_state.get("controlled_conditions")
+                        or ["源条件", "几何条件", "材料或边界中未被选为自变量的参数"]
+                    ),
+                    "reference_condition": _emvr_reference_condition(
+                        structured_requirements,
+                        stage_state,
+                    ),
                     "confounding_factors": ["视觉缩放与真实单位混淆", "多个参数同时变化", "超出模型范围"],
                 },
             )
         if stage is Stage.CONCEPTUAL_PROCEDURE:
             saved_steps = structured_requirements.get("procedure_steps", [])
             saved_steps = saved_steps if isinstance(saved_steps, list) else []
+            changed_text = _compact_context_items(
+                structured_requirements.get("changed_quantities"),
+                limit=5,
+                item_length=120,
+            ) or "主要参数"
+            observed_text = _compact_context_items(
+                structured_requirements.get("observed_quantities"),
+                limit=5,
+                item_length=120,
+            ) or "目标响应"
+            comparison_text = _compact_context_items(
+                structured_requirements.get("comparison_cases"),
+                limit=6,
+                item_length=140,
+            ) or "已确认的各个比较情形"
+            parameter_text = _compact_context_items(
+                structured_requirements.get("parameter_specifications"),
+                limit=6,
+                item_length=180,
+            ) or "已确认的参数范围与步长"
+            reference_text = _emvr_reference_condition(
+                structured_requirements,
+                stage_state,
+            )
             reference_steps = [
-                "进入VR实验并阅读本次学习目标、研究问题与模型适用范围",
-                "检查实验对象、源、探测器和显示面板的初始状态",
-                "加载参考条件并记录基准数值、曲线与空间场表现",
-                "只调整当前研究问题规定的一个主要参数",
-                "等待理论计算与空间可视化同步更新",
-                "在固定观察方式下读取数值、曲线和空间现象",
-                "保存当前参数与结果快照，并恢复或切换到下一比较条件",
-                "完成全部保留情形后并列比较结果",
-                "依据ECE329理论关系解释趋势并检查异常或无效条件",
-                "回到学习目标完成反思，确认哪些结论受模型假设限制",
+                f"在控制面板核对参数规格：{parameter_text}",
+                f"加载并记录基准状态：{reference_text}",
+                f"按已确认的步长逐级改变{changed_text}；每次只改变一个输入",
+                f"等待计算刷新后，在相同观察方式下记录{observed_text}",
+                f"对以下情形分别重复操作并保存快照：{comparison_text}",
+                f"在相同{changed_text}设置下并排比较{observed_text}，标出共同点和差异",
+                "依据报告中已确认的ECE329公式解释差异，并记录超出模型范围或显示不清的情况",
             ]
             return StepOutput(
                 assistant_message="已将实验逻辑整理为单一、可重复的VR学习闭环。",
@@ -2159,6 +2368,9 @@ class RuleBasedStageGenerator:
                 },
             )
         if stage is Stage.EXPECTED_DATA_VISUALIZATION:
+            x_label, x_unit, y_label, y_unit = _emvr_parameter_axis(
+                structured_requirements
+            )
             output = StepOutput(
                 assistant_message="已生成理论预测窗口规范，并给出与Unity参数控制器联动的接口。",
                 stage_payload={
@@ -2172,6 +2384,10 @@ class RuleBasedStageGenerator:
                     formula_candidates=formulas_for_emvr_relations(
                         structured_requirements.get("theory_relation_ids", [])
                     ),
+                    x_axis_label=x_label,
+                    x_axis_unit=x_unit,
+                    y_axis_label=y_label,
+                    y_axis_unit=y_unit,
                 ),
             )
             return output

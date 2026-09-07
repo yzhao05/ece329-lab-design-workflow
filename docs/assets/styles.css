@@ -952,6 +952,7 @@ a:focus-visible {
   color: var(--ink-soft);
   font-size: 0.66rem;
   line-height: 1.5;
+  white-space: pre-line;
 }
 
 .report-download-button {

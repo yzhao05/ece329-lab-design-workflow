@@ -142,11 +142,20 @@ def builder_requirement_values(session: DesignSession) -> dict[str, str]:
     emvr = emvr if isinstance(emvr, dict) else {}
     field_state = emvr.get("field_state", {})
     field_state = field_state if isinstance(field_state, dict) else {}
+    explicitly_cleared = {
+        str(field)
+        for field in emvr.get("explicitly_cleared_fields", [])
+        if str(field) in BUILDER_REQUIREMENT_FIELDS
+    } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
     return {
         # EMVR field_state is the latest field-level source of truth.  A
         # student may revise an earlier Builder item from a later stage; the
         # old stage snapshot must never override that newer correction.
-        field: _text(field_state.get(field) or stage_state.get(field))
+        field: (
+            ""
+            if field in explicitly_cleared
+            else _text(field_state.get(field) or stage_state.get(field))
+        )
         for field in BUILDER_REQUIREMENT_FIELDS
     }
 

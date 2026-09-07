@@ -26,7 +26,11 @@ from .models import DesignSession, InteractionState, Stage, WorkflowStatus
 from .stages import stage_title
 from .design_quality import evaluate_design_quality, public_quality_review
 from .dialogue_acts import stage_design_state_snapshot
-from .emvr_design import EMVR_THEORY_RELATIONS, merge_emvr_structured_requirements
+from .emvr_design import (
+    EMVR_THEORY_RELATIONS,
+    clean_emvr_field_text,
+    merge_emvr_structured_requirements,
+)
 from .emvr_formula_flow import EMVR_DETAIL_DESIGN, formula_support_map_for_selection
 from .knowledge_base import KNOWLEDGE
 from .builder_requirements import (
@@ -246,6 +250,65 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: ("proposal_sections",),
 }
 
+# A report payload starts from the previously stored stage artifact.  Explicit
+# EMVR clears therefore need a reverse projection; otherwise an old visible row
+# survives even though the canonical field was removed.
+_EMVR_CLEAR_REPORT_BINDINGS: dict[Stage, dict[str, tuple[str, ...]]] = {
+    Stage.IDEA_BRAINSTORMING: {
+        "experiment_brief": ("normalized_idea", "formula_direction_summary"),
+        "observed_quantities": ("target_phenomenon",),
+        "required_behaviors": ("possible_vr_interactions",),
+        "object_constraints": ("model_boundary_conditions",),
+    },
+    Stage.COURSE_MAPPING_AND_DIRECTION: {
+        "experiment_brief": ("selected_direction",),
+        "course_relationship": ("course_relationship",),
+        "lab_title": ("lab_title",),
+        "lab_id": ("lab_id",),
+    },
+    Stage.LEARNING_OBJECTIVES: {
+        field: (field,)
+        for field in (
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+        )
+    },
+    Stage.RESEARCH_QUESTION: {
+        "research_question": ("main_research_question",),
+        "changed_quantities": ("adjustable_quantity_in_vr",),
+        "observed_quantities": ("observable_quantity_in_vr",),
+        "comparison_cases": ("comparison_cases",),
+    },
+    Stage.CONCEPTUAL_OR_VR_SETUP: {
+        "required_behaviors": ("interactions",),
+        "desktop_interaction_plan": ("desktop_interaction_plan",),
+        "room_spatial_requirements": ("room_spatial_requirements",),
+        "hidden_object_lifecycle": ("hidden_object_lifecycle",),
+    },
+    Stage.VARIABLES_AND_CONDITIONS: {
+        "changed_quantities": ("independent_variable",),
+        "observed_quantities": ("dependent_variable",),
+        "parameter_specifications": ("parameter_specifications",),
+    },
+    Stage.CONCEPTUAL_PROCEDURE: {
+        "procedure_steps": ("procedure_steps",),
+    },
+    Stage.EXPECTED_DATA_VISUALIZATION: {
+        "visualization_requirements": ("student_visualization_requirements",),
+    },
+    Stage.RESULT_INTERPRETATION: {
+        "expected_results": ("expected_results",),
+        "acceptance_criteria": ("acceptance_criteria",),
+        "report_questions": ("report_questions",),
+    },
+    Stage.DESIGN_VALUE_AND_LIMITATIONS: {
+        "limitations": ("limitations",),
+    },
+}
+
 _LATIN_RUN = re.compile(r"[A-Za-z0-9_./:+()=\-]+(?:\s+[A-Za-z0-9_./:+()=\-]+)*")
 
 
@@ -297,6 +360,70 @@ def _plain(value: Any, *, depth: int = 0) -> str:
     return str(value).strip()
 
 
+def _experiment_brief_overview(brief: dict[str, Any]) -> str:
+    """Render one readable overview from structured fields, not edit history."""
+
+    parts: list[str] = []
+    for label, field in (
+        ("主题", "topic"),
+        ("研究对象", "objects"),
+        ("核心操作", "operations"),
+        ("变化条件", "changed_quantities"),
+        ("观察内容", "observed_quantities"),
+        ("比较情形", "comparison_cases"),
+    ):
+        value = _plain(brief.get(field))
+        if value:
+            parts.append(f"{label}：{value}")
+    return "；".join(parts)
+
+
+_NUMBERED_REPORT_FIELDS = {
+    "procedure_steps",
+    "expected_results",
+    "acceptance_criteria",
+    "report_questions",
+    "student_visualization_requirements",
+}
+
+
+def _readable_report_value(field: str, raw: Any) -> str:
+    """Preserve long student content while presenting it as scannable items."""
+
+    values = raw if isinstance(raw, list) else [raw]
+    items: list[str] = []
+    for value in values:
+        text = _plain(value).strip()
+        if not text:
+            continue
+        if field in _NUMBERED_REPORT_FIELDS:
+            # A model or legacy session may store several questions/results in
+            # one scalar even when the text is shorter than the long-text
+            # threshold. Split on actual sentence endings and visible list
+            # numbers so every requested item remains readable.
+            expanded = re.sub(r"\s+(?=\d+[.、）)]\s*)", "\n", text)
+            sentences = [
+                item.strip()
+                for item in re.split(r"\n+|(?<=[。！？?；;])\s*", expanded)
+                if item.strip()
+            ]
+            items.extend(sentences if len(sentences) > 1 else [text])
+        elif len(text) >= 180:
+            sentences = [
+                item.strip()
+                for item in re.split(r"(?<=[。！？?])\s*", text)
+                if item.strip()
+            ]
+            items.extend(sentences if len(sentences) > 1 else [text])
+        else:
+            items.append(text)
+    if field in _NUMBERED_REPORT_FIELDS and len(items) > 1:
+        return "\n".join(
+            f"{index}. {item}" for index, item in enumerate(items, start=1)
+        )
+    return "；".join(items)
+
+
 def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
     """Return the latest structured EMVR brief used by every final artifact.
 
@@ -311,8 +438,19 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
     stored = emvr.get("authoritative_experiment_brief", {})
     brief = deepcopy(stored) if isinstance(stored, dict) else {}
     requirements = merge_emvr_structured_requirements(emvr)
+    explicitly_cleared = {
+        str(field)
+        for field in emvr.get("explicitly_cleared_fields", [])
+        if str(field)
+    } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
 
     def values(field: str) -> list[str]:
+        # A field-level CLEAR is newer and more authoritative than the
+        # formula-onboarding brief.  Falling back to that brief here used to
+        # resurrect deleted objects, operations, variables and observations in
+        # the task report and Builder inventory.
+        if field in explicitly_cleared:
+            return []
         value = requirements.get(field)
         if isinstance(value, list):
             return list(
@@ -327,13 +465,23 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
             else []
         )
 
-    topic = str(
+    topic_candidates = (
         requirements.get("direction_summary")
-        or requirements.get("research_summary")
-        or brief.get("topic")
-        or ""
-    ).strip()
-    research_object = str(requirements.get("research_object") or "").strip()
+        if "direction_summary" not in explicitly_cleared
+        else None,
+        requirements.get("research_summary")
+        if "research_summary" not in explicitly_cleared
+        else None,
+        brief.get("topic")
+        if not {"direction_summary", "research_summary"} <= explicitly_cleared
+        else None,
+    )
+    topic = str(next((item for item in topic_candidates if item), "")).strip()
+    research_object = (
+        str(requirements.get("research_object") or "").strip()
+        if "research_object" not in explicitly_cleared
+        else ""
+    )
     if topic:
         brief["topic"] = topic
     if research_object:
@@ -350,8 +498,53 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
             if stored_objects and research_object == projected_objects
             else [research_object]
         )
+    elif "research_object" in explicitly_cleared:
+        brief["objects"] = []
     else:
         brief["objects"] = values("objects")
+    generic_objects = {
+        "研究对象",
+        "实验对象",
+        "物理对象",
+        "公式研究对象",
+        "核心研究对象",
+        "与已确认公式对应的场源、材料或边界对象",
+        "与已确认公式对应的场源、材料或边界对象、可移动测量探针",
+        "source object",
+        "research object",
+    }
+    current_objects = [
+        str(item).strip()
+        for item in brief.get("objects", [])
+        if str(item).strip()
+    ]
+    if (
+        "research_object" not in explicitly_cleared
+        and (
+            not current_objects
+            or all(item.lower() in generic_objects for item in current_objects)
+        )
+    ):
+        flow = emvr.get("formula_flow", {})
+        flow = flow if isinstance(flow, dict) else {}
+        topic_analysis = flow.get("topic_analysis", {})
+        topic_analysis = topic_analysis if isinstance(topic_analysis, dict) else {}
+        mentioned = [
+            str(item).strip()
+            for item in topic_analysis.get("mentioned_objects", [])
+            if str(item).strip()
+            and str(item).strip().lower() not in generic_objects
+        ]
+        formula_ids = {
+            str(item).strip()
+            for key in ("primary_formula_ids", "supporting_formula_ids")
+            for item in brief.get(key, [])
+            if str(item).strip()
+        }
+        if mentioned:
+            brief["objects"] = list(dict.fromkeys(mentioned))
+        elif "coulomb_point_charge" in formula_ids:
+            brief["objects"] = ["两个点电荷"]
     for target, source in (
         ("operations", "required_behaviors"),
         ("changed_quantities", "changed_quantities"),
@@ -360,13 +553,35 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
         ("boundary_conditions", "object_constraints"),
     ):
         latest = values(source)
-        if latest:
+        if source in explicitly_cleared:
+            brief[target] = []
+        elif latest:
             brief[target] = latest
         else:
             brief[target] = values(target)
-    summary = str(requirements.get("experiment_brief") or "").strip()
-    if summary:
+    summary = (
+        str(requirements.get("experiment_brief") or "").strip()
+        if "experiment_brief" not in explicitly_cleared
+        else ""
+    )
+    if "experiment_brief" in explicitly_cleared:
+        brief["summary"] = ""
+    elif summary:
         brief["summary"] = summary
+    # Rebuild the display summary from the latest structured causal fields.
+    # This repairs reports created before those fields were separated, whose
+    # saved summary may contain every objective and revision instruction in one
+    # unreadable sentence.
+    structured_summary = _experiment_brief_overview(brief)
+    summary_is_stitched = bool(
+        len(str(brief.get("summary") or "")) > 240
+        or re.search(
+            r"(?:学习目标|概念目标|交互目标|需要明确|应当|更具体)",
+            str(brief.get("summary") or ""),
+        )
+    )
+    if structured_summary and (not brief.get("summary") or summary_is_stitched):
+        brief["summary"] = structured_summary
     return brief
 
 
@@ -382,6 +597,15 @@ def effective_emvr_stage_payload(
     emvr = session.design_context.get("emvr_design", {})
     emvr = emvr if isinstance(emvr, dict) else {}
     requirements = merge_emvr_structured_requirements(emvr)
+    explicitly_cleared = {
+        str(field)
+        for field in emvr.get("explicitly_cleared_fields", [])
+        if str(field)
+    } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
+    clear_bindings = _EMVR_CLEAR_REPORT_BINDINGS.get(stage, {})
+    for canonical_field in explicitly_cleared:
+        for report_field in clear_bindings.get(canonical_field, ()):
+            payload.pop(report_field, None)
     stage_state = stage_design_state_snapshot(session)
     brief = effective_experiment_brief(session)
 
@@ -389,12 +613,29 @@ def effective_emvr_stage_payload(
         if value not in (None, "", [], {}):
             payload[field] = deepcopy(value)
 
+    def set_bound(field: str, canonical_field: str, value: Any) -> None:
+        """Project a canonical field without reviving explicitly cleared data."""
+
+        if canonical_field in explicitly_cleared:
+            payload.pop(field, None)
+            return
+        set_if(field, value)
+
     if stage is Stage.IDEA_BRAINSTORMING:
-        summary = str(brief.get("summary") or emvr.get("brief") or "").strip()
-        set_if("normalized_idea", summary)
-        set_if("formula_direction_summary", summary)
-        set_if("target_phenomenon", brief.get("observed_quantities"))
-        set_if("possible_vr_interactions", brief.get("operations"))
+        summary = _experiment_brief_overview(brief)
+        topic = str(brief.get("topic") or "").strip()
+        set_bound("normalized_idea", "experiment_brief", topic or summary)
+        set_bound("formula_direction_summary", "experiment_brief", summary)
+        set_bound(
+            "target_phenomenon",
+            "observed_quantities",
+            brief.get("observed_quantities"),
+        )
+        set_bound(
+            "possible_vr_interactions",
+            "required_behaviors",
+            brief.get("operations"),
+        )
         formula_ids = list(brief.get("primary_formula_ids", []))
         supporting_ids = list(brief.get("supporting_formula_ids", []))
         formulas = {
@@ -465,12 +706,32 @@ def effective_emvr_stage_payload(
         ]
         set_if("selected_experiment_methods", method_titles)
         set_if("selected_experiment_patterns", pattern_titles)
-        set_if("model_boundary_conditions", brief.get("boundary_conditions"))
+        set_bound(
+            "model_boundary_conditions",
+            "object_constraints",
+            brief.get("boundary_conditions"),
+        )
     elif stage is Stage.COURSE_MAPPING_AND_DIRECTION:
-        set_if("lab_title", stage_state.get("lab_title") or requirements.get("lab_title"))
-        set_if("lab_id", stage_state.get("lab_id") or requirements.get("lab_id"))
-        set_if("selected_direction", requirements.get("experiment_brief"))
-        set_if("course_relationship", requirements.get("course_relationship"))
+        set_bound(
+            "lab_title",
+            "lab_title",
+            stage_state.get("lab_title") or requirements.get("lab_title"),
+        )
+        set_bound(
+            "lab_id",
+            "lab_id",
+            stage_state.get("lab_id") or requirements.get("lab_id"),
+        )
+        set_bound(
+            "selected_direction",
+            "experiment_brief",
+            _experiment_brief_overview(brief),
+        )
+        set_bound(
+            "course_relationship",
+            "course_relationship",
+            requirements.get("course_relationship"),
+        )
     elif stage is Stage.LEARNING_OBJECTIVES:
         for field in (
             "conceptual_objective",
@@ -479,15 +740,28 @@ def effective_emvr_stage_payload(
             "vr_interaction_objective",
             "observation_objective",
         ):
-            set_if(field, requirements.get(field))
+            set_bound(field, field, requirements.get(field))
     elif stage is Stage.RESEARCH_QUESTION:
-        set_if(
+        set_bound(
             "main_research_question",
+            "research_question",
             requirements.get("research_question") or stage_state.get("research_question"),
         )
-        set_if("adjustable_quantity_in_vr", requirements.get("changed_quantities"))
-        set_if("observable_quantity_in_vr", requirements.get("observed_quantities"))
-        set_if("comparison_cases", requirements.get("comparison_cases"))
+        set_bound(
+            "adjustable_quantity_in_vr",
+            "changed_quantities",
+            requirements.get("changed_quantities"),
+        )
+        set_bound(
+            "observable_quantity_in_vr",
+            "observed_quantities",
+            requirements.get("observed_quantities"),
+        )
+        set_bound(
+            "comparison_cases",
+            "comparison_cases",
+            requirements.get("comparison_cases"),
+        )
     elif stage is Stage.THEORETICAL_FRAMEWORK:
         selected_ids = list(
             dict.fromkeys(
@@ -540,19 +814,29 @@ def effective_emvr_stage_payload(
             "room_spatial_requirements",
             "hidden_object_lifecycle",
         ):
-            set_if(field, stage_state.get(field) or requirements.get(field))
+            set_bound(field, field, stage_state.get(field) or requirements.get(field))
         for field in ("physics_layer", "visualization_layer", "measurement_interface"):
             set_if(field, stage_state.get(field))
+        set_bound(
+            "interactions",
+            "required_behaviors",
+            stage_state.get("interactions") or requirements.get("required_behaviors"),
+        )
     elif stage is Stage.VARIABLES_AND_CONDITIONS:
         changed = requirements.get("changed_quantities") or stage_state.get("independent_variable")
         observed = requirements.get("observed_quantities") or stage_state.get("observations")
         controls = stage_state.get("controlled_conditions")
-        if changed:
+        if changed and "changed_quantities" not in explicitly_cleared:
             set_if("independent_variable", {"name": _plain(changed)})
-        if observed:
+        elif "changed_quantities" in explicitly_cleared:
+            payload.pop("independent_variable", None)
+        if observed and "observed_quantities" not in explicitly_cleared:
             set_if("dependent_variable", {"name": _plain(observed)})
+        elif "observed_quantities" in explicitly_cleared:
+            payload.pop("dependent_variable", None)
         set_if("controlled_variables", controls)
-        set_if(
+        set_bound(
+            "parameter_specifications",
             "parameter_specifications",
             stage_state.get("parameter_specifications")
             or requirements.get("parameter_specifications"),
@@ -562,7 +846,7 @@ def effective_emvr_stage_payload(
         latest_steps = requirements.get("procedure_steps")
         latest_steps = latest_steps if isinstance(latest_steps, list) else []
         if len(latest_steps) >= 5:
-            set_if("procedure_steps", latest_steps)
+            set_bound("procedure_steps", "procedure_steps", latest_steps)
         student_steps = stage_state.get("procedure_steps")
         if student_steps:
             # Legacy stage-state revisions are retained as explicit student
@@ -571,8 +855,9 @@ def effective_emvr_stage_payload(
             set_if("student_required_steps", student_steps)
         set_if("comparison_logic", stage_state.get("comparison_logic"))
     elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
-        set_if(
+        set_bound(
             "student_visualization_requirements",
+            "visualization_requirements",
             stage_state.get("visualization_plan")
             or requirements.get("visualization_requirements"),
         )
@@ -580,7 +865,7 @@ def effective_emvr_stage_payload(
         set_if("unity_update_event", stage_state.get("unity_update_event"))
     elif stage is Stage.RESULT_INTERPRETATION:
         for field in ("expected_results", "acceptance_criteria", "report_questions"):
-            set_if(field, stage_state.get(field) or requirements.get(field))
+            set_bound(field, field, stage_state.get(field) or requirements.get(field))
         set_if("student_result_interpretation", stage_state.get("result_interpretation"))
         for field in (
             "if_prediction_supported",
@@ -589,7 +874,11 @@ def effective_emvr_stage_payload(
         ):
             set_if(field, stage_state.get(field))
     elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
-        set_if("limitations", stage_state.get("limitations") or requirements.get("limitations"))
+        set_bound(
+            "limitations",
+            "limitations",
+            stage_state.get("limitations") or requirements.get("limitations"),
+        )
         for field in ("conceptual_feasibility", "teaching_value", "vr_added_value"):
             set_if(field, stage_state.get(field))
     return payload
@@ -694,7 +983,21 @@ def stage_report_section(
                     item["field"] = field
                 items.append(item)
             continue
-        value = _plain(payload.get(field))
+        value = _readable_report_value(field, payload.get(field))
+        if field in {
+            "conceptual_objective",
+            "calculation_objective",
+            "analysis_objective",
+            "vr_interaction_objective",
+            "observation_objective",
+            "main_research_question",
+        }:
+            canonical_field = (
+                "research_question"
+                if field == "main_research_question"
+                else field
+            )
+            value = clean_emvr_field_text(canonical_field, value)
         if value:
             item = {"label": _FIELD_LABELS.get(field, field), "value": value}
             if include_field_ids:
@@ -744,17 +1047,32 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
             sections.append(section)
     idea = session.design_context.get("emvr_design", {})
     effective_brief = effective_experiment_brief(session)
-    brief = str(
-        effective_brief.get("summary")
-        or effective_brief.get("topic")
-        or ""
-    ).strip()
+    brief = str(effective_brief.get("summary") or "").strip()
+    if not brief:
+        brief = _experiment_brief_overview(effective_brief)
     if not brief:
         brief = idea.get("brief", "") if isinstance(idea, dict) else ""
     if not brief:
         original = session.design_context.get("idea", {})
         brief = original.get("current_summary") or original.get("original", "") \
             if isinstance(original, dict) else ""
+    # Avoid repeating the same long stitched brief in several historical stage
+    # rows. Short values may legitimately recur, but a long exact duplicate is
+    # report noise and obscures the fields the student actually specified.
+    seen_long_values = {
+        re.sub(r"\s+", "", str(brief))
+    } if len(str(brief).strip()) >= 80 else set()
+    for section in sections:
+        unique_items: list[dict[str, str]] = []
+        for item in section.get("items", []):
+            normalized = re.sub(r"\s+", "", str(item.get("value") or ""))
+            if len(normalized) >= 80 and normalized in seen_long_values:
+                continue
+            if len(normalized) >= 80:
+                seen_long_values.add(normalized)
+            unique_items.append(item)
+        section["items"] = unique_items
+    sections = [section for section in sections if section.get("items")]
     # The task report is rebuilt after every EMVR turn.  Running a final
     # completeness review while the design is still in progress would persist
     # future-stage omissions into the next prompt and could steer the
