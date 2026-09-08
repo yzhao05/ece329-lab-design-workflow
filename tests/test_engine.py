@@ -13,6 +13,10 @@ from ece329_workflow.builder_input import (
     build_builder_gate1_input,
     validate_builder_gate1_input,
 )
+from ece329_workflow.builder_requirements import (
+    BUILDER_REQUIREMENT_SPECS,
+    builder_requirement_values,
+)
 from ece329_workflow.dialogue_state import (
     UserIntent,
     current_pending_action,
@@ -395,6 +399,249 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
 
 
 class WorkflowEngineTests(unittest.TestCase):
+    def test_every_emvr_builder_field_recovers_a_repeated_exact_answer(self) -> None:
+        for spec_index, spec in enumerate(BUILDER_REQUIREMENT_SPECS):
+            field = str(spec["field"])
+            stage = spec["stage"]
+            with self.subTest(field=field):
+                generator = ContextAwareEMVRGenerator()
+                engine = WorkflowEngine(generator=generator)
+                session = DesignSession(
+                    design_id=f"builder-recovery-{field}",
+                    interaction_state=InteractionState.EMVR_DIRECT,
+                    current_stage_index=list(Stage).index(stage),
+                    design_context={
+                        "stage_design_state": {
+                            str(previous["field"]): BUILDER_REQUIREMENT_ANSWERS[
+                                str(previous["field"])
+                            ]
+                            for previous in BUILDER_REQUIREMENT_SPECS[:spec_index]
+                        }
+                    },
+                )
+                pending = {
+                    "action_id": f"builder-question-{field}",
+                    "type": "ANSWER_EMVR_STAGE_QUESTION",
+                    "interaction_state": InteractionState.EMVR_DIRECT.value,
+                    "stage": stage.value,
+                    "subject": field,
+                    "answer_fields": [field],
+                    "question": str(spec["question"]),
+                    "allowed_intents": [
+                        UserIntent.ANSWER_CURRENT_QUESTION.value,
+                        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                        UserIntent.ADVANCE_STAGE.value,
+                        UserIntent.REQUEST_MORE_EXAMPLES.value,
+                        UserIntent.UNCLEAR.value,
+                    ],
+                }
+                session.model_context["dialogue_state"] = {
+                    "pending_action": pending
+                }
+                session.stage_outputs[stage.value] = {"stage_payload": {}}
+                session.history.append({"handled_stage": stage.value})
+                set_pending_action_snapshot(session, pending)
+                engine.store.save(session)
+                answer = BUILDER_REQUIREMENT_ANSWERS[field]
+
+                generator.next_intent = UserIntent.UNCLEAR
+                first = engine.process_turn(session.design_id, {"message": answer})
+                stored = engine.store.get(session.design_id)
+                if first["stage_payload"].get("clarification_required", False):
+                    retained = current_pending_action(stored)
+                    self.assertEqual(retained["candidate_answer"], answer)
+                    self.assertTrue(retained["candidate_binding_authorized"])
+
+                    generator.next_intent = UserIntent.UNCLEAR
+                    second = engine.process_turn(
+                        session.design_id,
+                        {"message": answer},
+                    )
+                    stored = engine.store.get(session.design_id)
+                    self.assertFalse(
+                        second["stage_payload"].get(
+                            "clarification_required",
+                            False,
+                        )
+                    )
+
+                self.assertEqual(
+                    builder_requirement_values(stored)[field],
+                    answer,
+                )
+                next_pending = current_pending_action(stored)
+                self.assertNotEqual(
+                    str(next_pending.get("subject") or "") if next_pending else "",
+                    field,
+                )
+
+    def test_emvr_builder_multi_parameter_answer_recovers_after_semantic_outage(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="emvr27-parameter-recovery",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={
+                "stage_design_state": {
+                    field: BUILDER_REQUIREMENT_ANSWERS[field]
+                    for field in (
+                        "lab_title",
+                        "lab_id",
+                        "builder_workspace_absolute_path",
+                        "desktop_interaction_plan",
+                        "room_spatial_requirements",
+                        "hidden_object_lifecycle",
+                        "initial_reset_state",
+                    )
+                }
+            },
+        )
+        pending = {
+            "action_id": "parameter-contract-question",
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "stage": Stage.VARIABLES_AND_CONDITIONS.value,
+            "subject": "parameter_specifications",
+            "answer_fields": ["parameter_specifications"],
+            "question": "请逐项列出公式自变量的控件、范围、默认值、单位和步长。",
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context["dialogue_state"] = {"pending_action": pending}
+        session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value] = {
+            "stage_payload": {}
+        }
+        set_pending_action_snapshot(session, pending)
+        engine.store.save(session)
+        answer = (
+            "一个连续变量是距离：控件为滑块，最小值0.5 m、最大值5.0 m、"
+            "默认值2.0 m、步长0.1 m；另一个离散变量是电荷类型：控件为按钮，"
+            "默认选项为同种电荷，全部允许选项为同种电荷、异种电荷。"
+        )
+
+        generator.next_intent = UserIntent.UNCLEAR
+        first = engine.process_turn(session.design_id, {"message": answer})
+        retained = current_pending_action(engine.store.get(session.design_id))
+
+        self.assertTrue(first["stage_payload"].get("clarification_required", False))
+        self.assertEqual(retained["candidate_answer"], answer)
+        self.assertTrue(retained["candidate_binding_authorized"])
+
+        generator.next_intent = UserIntent.UNCLEAR
+        second = engine.process_turn(session.design_id, {"message": answer})
+        stored = engine.store.get(session.design_id)
+
+        self.assertFalse(second["stage_payload"].get("clarification_required", False))
+        self.assertEqual(
+            builder_requirement_values(stored)["parameter_specifications"],
+            answer,
+        )
+        next_pending = current_pending_action(stored)
+        self.assertNotEqual(
+            str(next_pending.get("subject") or "") if next_pending else "",
+            "parameter_specifications",
+        )
+
+    def test_emvr_continue_accepts_authorized_builder_candidate_after_outage(self) -> None:
+        generator = ContextAwareEMVRGenerator()
+        engine = WorkflowEngine(generator=generator)
+        session = DesignSession(
+            design_id="emvr27-parameter-continue-recovery",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.VARIABLES_AND_CONDITIONS),
+            design_context={
+                "stage_design_state": {
+                    field: BUILDER_REQUIREMENT_ANSWERS[field]
+                    for field in (
+                        "lab_title",
+                        "lab_id",
+                        "builder_workspace_absolute_path",
+                        "desktop_interaction_plan",
+                        "room_spatial_requirements",
+                        "hidden_object_lifecycle",
+                        "initial_reset_state",
+                    )
+                }
+            },
+        )
+        pending = {
+            "action_id": "parameter-contract-continue-question",
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "stage": Stage.VARIABLES_AND_CONDITIONS.value,
+            "subject": "parameter_specifications",
+            "answer_fields": ["parameter_specifications"],
+            "question": "请逐项列出公式自变量的控件、范围、默认值、单位和步长。",
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context["dialogue_state"] = {"pending_action": pending}
+        session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value] = {
+            "stage_payload": {}
+        }
+        set_pending_action_snapshot(session, pending)
+        engine.store.save(session)
+        answer = (
+            "连续变量距离使用滑块，最小值0.5 m、最大值5.0 m、默认值2.0 m、"
+            "步长0.1 m；离散变量电荷类型使用按钮，默认同种电荷，可选同种或异种。"
+        )
+
+        generator.next_intent = UserIntent.UNCLEAR
+        engine.process_turn(session.design_id, {"message": answer})
+        generator.next_intent = UserIntent.UNCLEAR
+        result = engine.process_turn(session.design_id, {"message": "继续"})
+        stored = engine.store.get(session.design_id)
+
+        self.assertFalse(result["stage_payload"].get("clarification_required", False))
+        self.assertEqual(
+            builder_requirement_values(stored)["parameter_specifications"],
+            answer,
+        )
+        next_pending = current_pending_action(stored)
+        self.assertNotEqual(
+            str(next_pending.get("subject") or "") if next_pending else "",
+            "parameter_specifications",
+        )
+
+    def test_emvr_explicit_reference_request_bypasses_semantic_outage(self) -> None:
+        session = DesignSession(
+            design_id="emvr-explicit-reference",
+            interaction_state=InteractionState.EMVR_DIRECT,
+        )
+        pending = {
+            "action_id": "parameter-reference-question",
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "subject": "parameter_specifications",
+            "answer_fields": ["parameter_specifications"],
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context["dialogue_state"] = {"pending_action": pending}
+
+        intent, _ = WorkflowEngine()._resolve_turn_intent(
+            session,
+            TurnRequest(message="给个参考"),
+            "给个参考",
+        )
+
+        self.assertEqual(intent["intent"], UserIntent.REQUEST_MORE_EXAMPLES.value)
+        self.assertEqual(intent["source"], "EMVR_EXPLICIT_REFERENCE_REQUEST")
+        self.assertIn(
+            "REQUEST_REFERENCE",
+            intent["semantic_updates"].get("control_actions", []),
+        )
+
     def test_emvr_uncertainty_requests_reference_instead_of_becoming_field_value(self) -> None:
         session = DesignSession(
             design_id="emvr-uncertainty-reference",

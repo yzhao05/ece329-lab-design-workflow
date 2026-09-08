@@ -999,7 +999,13 @@ def recover_repeated_pending_answer(
     if repeat_recovery:
         left = comparable(candidate)
         right = comparable(current)
-        if min(len(left), len(right)) < 8:
+        exact_field = recoverable_pending_field(pending_action)
+        short_exact_builder_answer = bool(
+            exact_field in BUILDER_REQUIREMENT_FIELDS
+            and left
+            and left == right
+        )
+        if min(len(left), len(right)) < 8 and not short_exact_builder_answer:
             return None
         similarity = (
             1.0

@@ -116,6 +116,7 @@ from .reporting import (
 )
 from .builder_input import build_builder_gate1_input, render_builder_gate1_input_pdf
 from .builder_requirements import (
+    BUILDER_REQUIREMENT_FIELDS,
     builder_handoff_status,
     next_due_builder_requirement,
     validate_builder_requirements,
@@ -2684,6 +2685,38 @@ class WorkflowEngine:
             and isinstance(pending, dict)
             and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
             and compact_control
+            in {
+                "给个参考",
+                "请给个参考",
+                "给一份参考",
+                "请给一份参考",
+                "提供参考",
+                "请提供参考",
+                "给个例子",
+                "请给个例子",
+            }
+        ):
+            # This exact control request cannot be meaningful field content.
+            # Resolve it locally so a temporary semantic-parser failure does
+            # not turn the help request into another clarification loop.
+            return (
+                validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.REQUEST_MORE_EXAMPLES,
+                        target=str(pending.get("subject") or "") or None,
+                        confidence=1.0,
+                        source="EMVR_EXPLICIT_REFERENCE_REQUEST",
+                        semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+                    ),
+                    pending,
+                ),
+                pending,
+            )
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and isinstance(pending, dict)
+            and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+            and compact_control
             in {"不确定", "暂时不确定", "我不确定", "不知道", "暂时不知道", "我不知道", "不清楚"}
         ):
             # EMVR questions explicitly offer a professional reference.  An
@@ -2708,11 +2741,15 @@ class WorkflowEngine:
             and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
             and str(pending.get("candidate_answer") or "").strip()
             and pending.get("candidate_binding_authorized") is True
-            and pending.get("candidate_source") == "PROFESSIONAL_REFERENCE"
+            and (
+                pending.get("candidate_source") == "PROFESSIONAL_REFERENCE"
+                or recoverable_pending_field(pending) in BUILDER_REQUIREMENT_FIELDS
+            )
         ):
-            # A visibly presented reference draft is a safely bound candidate.
-            # “继续” accepts it before readiness chooses the next question,
-            # preventing the same open item from being asked indefinitely.
+            # A Builder contract is already bound to one exact requirement;
+            # a professional draft was visibly presented for confirmation.
+            # “继续” can safely accept either before readiness chooses the
+            # next question, without weakening other EMVR write protections.
             return (
                 validate_resolved_intent(
                     resolved_intent(
@@ -3312,7 +3349,15 @@ class WorkflowEngine:
                     InteractionState.EMVR_DIRECT.value
                 )
                 turn_intent["emvr_marker_applied"] = True
-                if turn_intent.get("intent") == UserIntent.UNCLEAR.value:
+                if (
+                    turn_intent.get("intent") == UserIntent.UNCLEAR.value
+                    and session.interaction_state
+                    is not InteractionState.EMVR_DIRECT
+                ):
+                    # Inside EMVR, the marker may be ordinary field content—
+                    # most notably the required Builder workspace path. The
+                    # mode is already correct, so never replace an unresolved
+                    # field answer with a redundant mode-switch intent.
                     turn_intent.update(
                         {
                             "intent": UserIntent.SET_INTERACTION_STATE.value,
@@ -4382,13 +4427,15 @@ class WorkflowEngine:
                 )
                 recoverable_field = recoverable_pending_field(pending_action)
                 recoverable_exact_field = bool(
-                    # The complete EMVR brief is intentionally a free-form
-                    # statement, so retaining the whole answer in that one
-                    # authoritative field is safe. Other prompts name a
-                    # narrower field: a long answer may also contain actions,
-                    # variables and observations, and must be semantically
-                    # split rather than copied wholesale into that field.
-                    recoverable_field == "experiment_brief"
+                    # The complete EMVR brief and Builder requirements are
+                    # self-contained contracts. A Builder answer often lists
+                    # several parameters or readouts, but every clause still
+                    # belongs to the one exact pending field. Retain it for a
+                    # two-turn confirmation fallback when semantic parsing is
+                    # unavailable, rather than making the student split and
+                    # repeat a valid contract forever.
+                    recoverable_field
+                    in {"experiment_brief", *BUILDER_REQUIREMENT_FIELDS}
                     and isinstance(pending_action, dict)
                     and pending_action.get("interaction_state")
                     == InteractionState.EMVR_DIRECT.value
