@@ -102,6 +102,17 @@ class FormulaSelectionOutageGenerator(FormulaSemanticGenerator):
         )
 
 
+class FormulaTopicOutageGenerator(RuleBasedStageGenerator):
+    supports_emvr_formula_flow = True
+
+    def resolve_intent(self, session, user_message, pending_action, carried_context):
+        return resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+
 class FormulaQuestionPriorityGenerator(FormulaSemanticGenerator):
     def resolve_intent(self, session, user_message, pending_action, carried_context):
         flow = carried_context.get("emvr_formula_flow", {})
@@ -587,6 +598,62 @@ class EmvrFormulaFlowTests(unittest.TestCase):
         self.assertNotIn("selected_primary_formula_ids", emvr)
         self.assertEqual(emvr["field_state"], {})
 
+    def test_engine_recovers_emvr_topic_onboarding_during_semantic_outage(self) -> None:
+        engine = WorkflowEngine(generator=FormulaTopicOutageGenerator())
+        created = engine.create_design("还没有确定实验方向")
+
+        mode_entry = engine.process_turn(
+            created["design_id"],
+            {"message": "进入emvr模式"},
+        )
+        stored = engine.store.get(created["design_id"])
+        pending = stored.model_context["dialogue_state"]["pending_action"]
+
+        self.assertEqual(mode_entry["interaction_state"], "EMVR_DIRECT")
+        self.assertEqual(
+            mode_entry["stage_payload"]["emvr_formula_phase"],
+            TOPIC_RECEIVED,
+        )
+        self.assertEqual(pending["type"], "ANSWER_EMVR_FORMULA_TOPIC")
+        self.assertNotIn("semantic_recovery_pending", mode_entry["stage_payload"])
+
+        continued = engine.process_turn(
+            created["design_id"],
+            {"message": "继续"},
+        )
+        stored = engine.store.get(created["design_id"])
+        pending = stored.model_context["dialogue_state"]["pending_action"]
+
+        self.assertEqual(
+            continued["stage_payload"]["emvr_formula_phase"],
+            TOPIC_RECEIVED,
+        )
+        self.assertTrue(continued["stage_payload"]["awaiting_user_design_input"])
+        self.assertEqual(pending["type"], "ANSWER_EMVR_FORMULA_TOPIC")
+        self.assertNotIn("semantic_recovery_pending", continued["stage_payload"])
+
+        topic = engine.process_turn(
+            created["design_id"],
+            {"message": "我想做一个有关静电场的实验"},
+        )
+        stored = engine.store.get(created["design_id"])
+        flow = stored.design_context["emvr_design"]["formula_flow"]
+
+        self.assertEqual(
+            topic["stage_payload"]["emvr_formula_phase"],
+            FORMULA_CANDIDATES_PRESENTED,
+        )
+        self.assertTrue(topic["stage_payload"]["formula_cards"])
+        self.assertEqual(
+            topic["stage_payload"]["formula_cards"][0]["profile_id"],
+            "FD02_COULOMB_SUPERPOSITION",
+        )
+        self.assertEqual(
+            flow["topic_analysis_source"],
+            "CURATED_KNOWLEDGE_FALLBACK",
+        )
+        self.assertNotIn("semantic_recovery", flow)
+
     def test_semantic_outage_preserves_formula_turn_and_next_action_recovers(self) -> None:
         session = self._session()
         failed_intent = resolved_intent(
@@ -695,6 +762,49 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             output.stage_payload["emvr_formula_phase"],
             EXPERIMENT_METHODS_PRESENTED,
         )
+
+    def test_method_choice_recovers_from_visible_number_during_outage(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究两个电荷",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        handle_emvr_formula_turn(
+            session,
+            "采用第一组公式",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=cards.stage_payload["formula_cards"][0]["option_id"],
+        )
+        methods, _ = handle_emvr_formula_turn(
+            session,
+            "组合公式设计一个完整实验",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id="emvr-composition:combined",
+        )
+        failed_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+        output, complete = handle_emvr_formula_turn(
+            session,
+            "采用方法1",
+            failed_intent,
+        )
+        flow = session.design_context["emvr_design"]["formula_flow"]
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            EXPERIMENT_DIRECTION_REVIEW,
+        )
+        self.assertEqual(
+            flow["method_selection"]["selected_method_ids"],
+            [methods.stage_payload["experiment_methods"][0]["method_id"]],
+        )
+        self.assertNotIn("semantic_recovery", flow)
 
     def test_formula_selection_details_are_carried_into_experiment_brief(self) -> None:
         session = self._session()

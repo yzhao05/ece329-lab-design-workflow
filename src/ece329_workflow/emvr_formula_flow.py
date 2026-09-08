@@ -1024,6 +1024,43 @@ def _semantic_service_failed(turn_intent: dict[str, Any]) -> bool:
     )
 
 
+def _recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | None:
+    """Build a non-authoritative topic seed from curated course retrieval.
+
+    This recovery is intentionally limited to the formula-onboarding topic:
+    it may present formula cards for the student to choose from, but it never
+    selects a formula or writes the later experiment design automatically.
+    """
+
+    topic = message.strip()
+    if not topic:
+        return None
+    profiles = KNOWLEDGE.formula_design_references(topic, limit=4)
+    if not profiles:
+        return None
+    course_domain = str(profiles[0].get("course_block") or "").strip()
+    return normalize_topic_analysis(
+        {
+            "course_domain": course_domain,
+            "topic_description": topic,
+            "mentioned_objects": [],
+            "changed_quantities": [],
+            "observed_quantities": [],
+            "explicit_formula_ids": [],
+            "specificity": "BROAD",
+            "profile_evidence": [
+                {
+                    "profile_id": str(profile.get("profile_id") or ""),
+                    "course_concept_match": True,
+                }
+                for profile in profiles
+                if str(profile.get("profile_id") or "")
+            ],
+            "confidence": 0.55,
+        }
+    )
+
+
 def _remember_semantic_recovery(
     flow: dict[str, Any],
     *,
@@ -1439,21 +1476,55 @@ def handle_emvr_formula_turn(
     phase = str(flow.get("phase") or TOPIC_RECEIVED)
     outage_formula_selection: dict[str, Any] | None = None
     outage_composition: dict[str, Any] | None = None
+    outage_method_selection: dict[str, Any] | None = None
+    outage_topic_recovery: dict[str, Any] | None = None
     if _semantic_service_failed(turn_intent):
+        dialogue = session.model_context.get("dialogue_state", {})
+        dialogue = dialogue if isinstance(dialogue, dict) else {}
+        pending = dialogue.get("pending_action", {})
+        formula_topic_pending = bool(
+            isinstance(pending, dict)
+            and pending.get("type") == "ANSWER_EMVR_FORMULA_TOPIC"
+        )
+        recoverable_topic_turn = bool(
+            phase == TOPIC_RECEIVED
+            and (
+                formula_topic_pending
+                or turn_intent.get("emvr_marker_applied") is True
+            )
+        )
         _remember_semantic_recovery(
             flow,
             phase=phase,
             message=message,
             turn_intent=turn_intent,
         )
-        if phase == FORMULA_CANDIDATES_PRESENTED:
+        if formula_topic_pending and not isinstance(
+            flow.get("topic_analysis"), dict
+        ):
+            outage_topic_recovery = _recover_topic_analysis_from_knowledge(message)
+            if outage_topic_recovery is not None:
+                flow["topic_analysis"] = outage_topic_recovery
+                flow["topic_analysis_source"] = "CURATED_KNOWLEDGE_FALLBACK"
+                _clear_semantic_recovery(flow)
+        elif phase == FORMULA_CANDIDATES_PRESENTED:
             outage_formula_selection = _formula_selection_from_visible_card_reference(
                 message,
                 flow,
             )
         elif phase == FORMULA_COMPOSITION_REVIEW:
             outage_composition = _composition_from_visible_option_reference(message)
-        if outage_formula_selection is None and outage_composition is None:
+        elif phase == EXPERIMENT_METHODS_PRESENTED:
+            outage_method_selection = _method_selection_from_visible_reference(
+                message,
+                flow,
+            )
+        if (
+            not recoverable_topic_turn
+            and outage_formula_selection is None
+            and outage_composition is None
+            and outage_method_selection is None
+        ):
             return (
                 StepOutput(
                     assistant_message=(
@@ -1852,7 +1923,8 @@ def handle_emvr_formula_turn(
     if phase == EXPERIMENT_METHODS_PRESENTED:
         candidates = set(flow["method_selection"].get("candidate_method_ids", []))
         method_choice = (
-            _method_selection_from_option(selected_option_id, candidates)
+            outage_method_selection
+            or _method_selection_from_option(selected_option_id, candidates)
             or _selected_action(turn_intent, "SELECT_EMVR_EXPERIMENT_METHODS")
             or _method_selection_from_visible_reference(message, flow)
         )
