@@ -6,7 +6,10 @@ from copy import deepcopy
 from typing import Any
 
 from .design_state import FACET_TO_DESIGN_FIELD
-from .builder_requirements import BUILDER_REQUIREMENT_FIELDS
+from .builder_requirements import (
+    BUILDER_REQUIREMENT_FIELDS,
+    BUILDER_REQUIREMENT_SPECS,
+)
 from .emvr_design import EMVR_EDITABLE_FIELDS, EMVR_LIST_FIELDS
 from .emvr_formula_flow import (
     EMVR_FORMULA_ACTION_TYPES,
@@ -66,15 +69,10 @@ STAGE_ACT_FIELD_ORDER = (
     "limitations",
     "unity_objects",
     "interactions",
-    "lab_title",
-    "lab_id",
-    "desktop_interaction_plan",
-    "room_spatial_requirements",
-    "hidden_object_lifecycle",
-    "parameter_specifications",
-    "expected_results",
-    "acceptance_criteria",
-    "report_questions",
+    # Builder requirements are the single source of truth.  Deriving these
+    # write targets prevents a newly required PDF field from becoming an
+    # unwriteable pending question that repeats indefinitely.
+    *(str(spec["field"]) for spec in BUILDER_REQUIREMENT_SPECS),
     # EMVR report fields that can be the direct subject of an open stage
     # question.  Keeping them writable at field level prevents a clear answer
     # from being stored as an unbound candidate and replayed indefinitely.

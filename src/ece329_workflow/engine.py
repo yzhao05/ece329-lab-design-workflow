@@ -2049,6 +2049,42 @@ def _prepare_emvr_stage_output(
     }
 
 
+_EMVR_COMPLETION_REPAIR_FIELD_BINDINGS = {
+    # Formula-first report rows are projections of a smaller set of canonical
+    # inputs.  Every repair question must name at least one writable field;
+    # otherwise a valid answer cannot change state and the same gap repeats.
+    "topic": "experiment_brief",
+    "primary_formula_ids": "experiment_brief",
+    "selected_experiment_method_ids": "experiment_brief",
+    "objects": "research_object",
+    "operations": "required_behaviors",
+    "boundary_conditions": "object_constraints",
+    "selected_direction": "experiment_brief",
+    "main_research_question": "research_question",
+    "adjustable_quantity_in_vr": "changed_quantities",
+    "observable_quantity_in_vr": "observed_quantities",
+    "physical_mechanism": "physical_mechanism",
+    "core_equations": "theoretical_framework",
+    "formula_support_map": "theoretical_framework",
+    "simulation_inputs": "simulation_inputs",
+    "calculated_outputs": "calculated_outputs",
+    "object_inventory": "unity_objects",
+    "dependent_variable": "observations",
+    "controlled_variables": "controlled_conditions",
+    "reference_condition": "reference_condition",
+    "comparison_logic": "comparison_logic",
+    "visualization_requirements": "visualization_plan",
+    "student_visualization_requirements": "visualization_plan",
+    "if_prediction_supported": "if_prediction_supported",
+    "if_opposite_trend": "if_opposite_trend",
+    "if_no_clear_change": "if_no_clear_change",
+    "conceptual_feasibility": "conceptual_feasibility",
+    "teaching_value": "teaching_value",
+    "vr_added_value": "vr_added_value",
+    "proposal_sections": "student_summary",
+}
+
+
 def _prepare_emvr_completion_repair(
     session: DesignSession,
     stage: Stage,
@@ -2072,45 +2108,28 @@ def _prepare_emvr_completion_repair(
         "label": issue["label"],
     }
     report_field = str(issue["field"])
-    answer_field = {
-        # Report projections use student-facing names.  Bind them back to the
-        # single canonical state field that actually owns the value so a clear
-        # answer cannot be retained as an unbound candidate and asked again.
-        "selected_direction": "experiment_brief",
-        "main_research_question": "research_question",
-        "adjustable_quantity_in_vr": "changed_quantities",
-        "observable_quantity_in_vr": "observed_quantities",
-        "physical_mechanism": "physical_mechanism",
-        "simulation_inputs": "simulation_inputs",
-        "calculated_outputs": "calculated_outputs",
-        "object_inventory": "unity_objects",
-        "dependent_variable": "observations",
-        "controlled_variables": "controlled_conditions",
-        "reference_condition": "reference_condition",
-        "comparison_logic": "comparison_logic",
-        "visualization_requirements": "visualization_plan",
-        "student_visualization_requirements": "visualization_plan",
-        "if_prediction_supported": "if_prediction_supported",
-        "if_opposite_trend": "if_opposite_trend",
-        "if_no_clear_change": "if_no_clear_change",
-        "conceptual_feasibility": "conceptual_feasibility",
-        "teaching_value": "teaching_value",
-        "vr_added_value": "vr_added_value",
-    }.get(report_field, report_field)
+    # Report projections use student-facing names.  Bind them back to the
+    # single canonical state field that actually owns the value so a clear
+    # answer cannot be retained as an unbound candidate and asked again.
+    answer_field = _EMVR_COMPLETION_REPAIR_FIELD_BINDINGS.get(
+        report_field, report_field
+    )
     writable_fields = {
         *DESIGN_ACT_FIELDS,
         *STAGE_ACT_FIELDS,
         *EMVR_EDITABLE_FIELDS,
     }
+    if answer_field not in writable_fields:
+        raise ValueError(
+            "EMVR completion repair has no writable binding for " + report_field
+        )
     output.stage_payload["pending_action"] = {
         "type": "ANSWER_EMVR_STAGE_QUESTION",
         "interaction_state": InteractionState.EMVR_DIRECT.value,
         "subject": stage.value,
-        # Some report fields (for example the object inventory or a formula
-        # support map) are model-built structured artifacts rather than one
-        # directly editable scalar.  The semantic resolver receives the
-        # explicit gap below and may emit all required field-level actions.
-        "answer_fields": [answer_field] if answer_field in writable_fields else [],
+        # Structured report projections bind to their canonical writable
+        # source above, so a valid answer always changes persistent state.
+        "answer_fields": [answer_field],
         "required_report_field": issue["field"],
         "question": question,
         "advance_on_accept": False,

@@ -10,12 +10,16 @@ from ece329_workflow.design_state import (
     topic_lock_snapshot,
 )
 from ece329_workflow.dialogue_acts import (
+    DESIGN_ACT_FIELDS,
+    STAGE_ACT_FIELDS,
     apply_stage_field_updates,
     compile_dialogue_acts,
 )
+from ece329_workflow.emvr_design import EMVR_EDITABLE_FIELDS
 from ece329_workflow.dialogue_state import build_carried_context
 from ece329_workflow.design_quality import evaluate_design_quality
 from ece329_workflow.engine import (
+    _EMVR_COMPLETION_REPAIR_FIELD_BINDINGS,
     _emvr_stage_entry_output,
     _has_structured_stage_content,
     _prepare_emvr_completion_repair,
@@ -34,6 +38,26 @@ from ece329_workflow.turn_planning import (
 
 
 class TurnPlanningTests(unittest.TestCase):
+    def test_every_completion_repair_binding_is_writable(self) -> None:
+        writable = {*DESIGN_ACT_FIELDS, *STAGE_ACT_FIELDS, *EMVR_EDITABLE_FIELDS}
+
+        self.assertTrue(
+            set(_EMVR_COMPLETION_REPAIR_FIELD_BINDINGS.values()) <= writable
+        )
+        for stage in Stage:
+            session = DesignSession(
+                design_id=f"repair-binding-{stage.value}",
+                interaction_state=InteractionState.EMVR_DIRECT,
+                current_stage_index=list(Stage).index(stage),
+            )
+            output = StepOutput(assistant_message="当前草稿")
+            _prepare_emvr_completion_repair(session, stage, output)
+            if "completion_repair" not in output.stage_payload:
+                continue
+            pending = output.stage_payload["pending_action"]
+            self.assertEqual(len(pending["answer_fields"]), 1, stage.value)
+            self.assertIn(pending["answer_fields"][0], writable, stage.value)
+
     def test_emvr_hypothesis_entry_asks_student_instead_of_confirming_placeholder(self) -> None:
         session = DesignSession(
             design_id="emvr-hypothesis-entry",
@@ -41,6 +65,9 @@ class TurnPlanningTests(unittest.TestCase):
             current_stage_index=list(Stage).index(Stage.HYPOTHESIS),
             design_context={
                 "idea": {},
+                "stage_design_state": {
+                    "builder_workspace_absolute_path": r"E:\暑研\EMVR_Blind_BuilderPack",
+                },
                 "emvr_design": {
                     "field_state": {
                         "lab_title": "双电荷场线实验",
@@ -568,7 +595,10 @@ class TurnPlanningTests(unittest.TestCase):
                 {"field": "desktop_interaction_plan", "operation": "REPLACE", "value": "鼠标拖动物体，VR映射为手柄抓取"},
                 {"field": "room_spatial_requirements", "operation": "REPLACE", "value": "对象在前方并保留绕行空间"},
                 {"field": "hidden_object_lifecycle", "operation": "REPLACE", "value": "无"},
-                {"field": "parameter_specifications", "operation": "REPLACE", "value": "距离0.2 m至2.0 m，步长0.1 m"},
+                {"field": "builder_workspace_absolute_path", "operation": "REPLACE", "value": r"E:\暑研\EMVR_Blind_BuilderPack"},
+                {"field": "initial_reset_state", "operation": "REPLACE", "value": "Initial与Reset均恢复同种电荷、距离1.0 m并清除读数。"},
+                {"field": "parameter_specifications", "operation": "REPLACE", "value": "距离为可调公式自变量，默认1.0 m，范围0.2 m至2.0 m，步长0.1 m。"},
+                {"field": "model_constants_and_media", "operation": "REPLACE", "value": "固定真空介电常数epsilon_0=8.8541878128e-12 F/m，介质固定为真空。"},
             ],
             stage=Stage.VARIABLES_AND_CONDITIONS,
         )

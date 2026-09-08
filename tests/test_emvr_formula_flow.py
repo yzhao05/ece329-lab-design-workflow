@@ -269,6 +269,110 @@ class EmvrFormulaFlowTests(unittest.TestCase):
         self.assertIn("均匀线性介质及介电常数", controls)
         self.assertNotIn("源条件", controls)
 
+    def test_emvr_axis_uses_explicit_visualization_requirements(self) -> None:
+        axis = _emvr_parameter_axis(
+            {
+                "changed_quantities": ["距离；电荷类型（同种/异种）"],
+                "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                "parameter_specifications": ["距离：最小值0.5米，最大值5米，步长0.1米"],
+                "visualization_requirements": [
+                    "横轴改为距离，电荷类型用不同颜色曲线区分，纵轴为场线形态指标。"
+                ],
+            }
+        )
+
+        self.assertEqual(axis, ("距离", "米", "场线形态指标", "定性形态指标"))
+
+    def test_numbered_emvr_report_keeps_semantic_items_intact(self) -> None:
+        procedure = stage_report_section(
+            Stage.CONCEPTUAL_PROCEDURE,
+            {
+                "procedure_steps": [
+                    "核对距离范围；核对同号和异号选项",
+                    "加载基准；锁定控制条件",
+                    "保存并比较结果",
+                ],
+            },
+        )["items"][0]["value"]
+        questions = stage_report_section(
+            Stage.RESULT_INTERPRETATION,
+            {
+                "report_questions": [
+                    "同种电荷在远、中、近距离下有什么特征？",
+                    "特别是中间区域的场线密度和方向如何变化？",
+                    "异种电荷在远、中、近距离下有什么特征？",
+                    "特别是中间区域的场线密度和方向如何变化？",
+                    "相同距离下两种配置有哪些关键差异？",
+                    "这些差异如何用叠加原理解释？",
+                ],
+            },
+        )["items"][0]["value"]
+
+        self.assertEqual(procedure.count("\n"), 2)
+        self.assertIn("1. 核对距离范围；核对同号和异号选项", procedure)
+        self.assertEqual(questions.count("\n"), 2)
+        self.assertIn("这些差异如何用叠加原理解释？", questions)
+
+    def test_point_charge_report_is_specific_formal_and_formula_safe(self) -> None:
+        session = self._session()
+        emvr = session.design_context["emvr_design"]
+        emvr["selected_primary_formula_ids"] = ["coulomb_point_charge"]
+        emvr["selected_supporting_formula_ids"] = ["electric_field_superposition"]
+        emvr["authoritative_experiment_brief"] = {
+            "topic": "我想做一个静电场实验",
+            "objects": ["两个点电荷"],
+            "operations": ["拖动点电荷并切换电荷类型"],
+            "changed_quantities": ["距离", "电荷类型（同种/异种）"],
+            "observed_quantities": ["场线的合并、扭曲和重排形态"],
+            "primary_formula_ids": ["coulomb_point_charge"],
+            "supporting_formula_ids": ["electric_field_superposition"],
+        }
+        emvr["field_state"] = {
+            "experiment_brief": "我想做一个静电场实验",
+            "research_question": "距离和电荷类型如何影响场线形态？",
+            "changed_quantities": ["距离", "电荷类型（同种/异种）"],
+            "observed_quantities": ["场线的合并、扭曲和重排形态"],
+            "parameter_specifications": [
+                "距离：最小值0.5米，最大值5米，单位米，建议步长0.1米",
+                "电荷类型：允许选项为同种、异种",
+            ],
+            "visualization_requirements": [
+                "横轴改为距离，电荷类型用不同颜色曲线区分，纵轴为场线形态指标。"
+            ],
+        }
+        generator = RuleBasedStageGenerator()
+        for stage in (
+            Stage.IDEA_BRAINSTORMING,
+            Stage.COURSE_MAPPING_AND_DIRECTION,
+            Stage.LEARNING_OBJECTIVES,
+            Stage.THEORETICAL_FRAMEWORK,
+            Stage.HYPOTHESIS,
+            Stage.CONCEPTUAL_OR_VR_SETUP,
+            Stage.EXPECTED_DATA_VISUALIZATION,
+            Stage.DESIGN_VALUE_AND_LIMITATIONS,
+        ):
+            session.current_stage_index = list(Stage).index(stage)
+            session.stage_outputs[stage.value] = generator.generate(
+                session, "生成该阶段报告"
+            ).to_dict()
+
+        report = build_emvr_task_report(session)
+        rendered = "\n".join(
+            [report["idea"]]
+            + [
+                f"{item['label']}：{item['value']}"
+                for section in report["sections"]
+                for item in section["items"]
+            ]
+        )
+
+        self.assertNotIn("你", rendered)
+        self.assertNotIn("允许学生", rendered)
+        self.assertIn("E(r) = Q(r-r_0)/(4*pi*epsilon_0*|r-r_0|^3)", rendered)
+        self.assertIn("OnChargeMoved", rendered)
+        self.assertIn("1/r^2 奇点", rendered)
+        self.assertIn("Lecture 2", rendered)
+
     def test_legacy_uncertainty_does_not_replace_generated_physical_mechanism(self) -> None:
         session = self._session()
         session.current_stage_index = list(Stage).index(Stage.THEORETICAL_FRAMEWORK)

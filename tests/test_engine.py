@@ -107,6 +107,7 @@ EMVR_STAGE_ANSWERS = {
 BUILDER_REQUIREMENT_ANSWERS = {
     "lab_title": "双电荷电场线交互实验",
     "lab_id": "ece329_charge_field",
+    "builder_workspace_absolute_path": r"E:\暑研\EMVR_Blind_BuilderPack",
     "desktop_interaction_plan": (
         "桌面端单击选择带电体，按住左键拖动其位置，滚轮微调距离；"
         "VR端分别映射为射线选择、手柄抓取移动和摇杆微调。"
@@ -116,8 +117,24 @@ BUILDER_REQUIREMENT_ANSWERS = {
         "结果面板在左侧；四周保留绕行观察空间，采用中性照明和高对比标注。"
     ),
     "hidden_object_lifecycle": "无",
+    "initial_reset_state": (
+        "Initial与Reset均恢复异号电荷：Q1=+1 μC、Q2=-1 μC、距离2.0 m，"
+        "探针在两电荷中点，清除曲线、快照和选择状态。"
+    ),
     "parameter_specifications": (
-        "两带电体间距0.2 m至2.0 m，步长0.1 m；电荷量为±1 μC和±2 μC离散选项。"
+        "距离由拖动和滑块可调：最小0.5 m、最大5.0 m、默认2.0 m、步长0.1 m；"
+        "近/中/远固定采样为0.5 m、2.0 m、5.0 m。Q1和Q2由面板可调，"
+        "离散选项为-2 μC、-1 μC、+1 μC、+2 μC，默认Q1=+1 μC、Q2=-1 μC；"
+        "εr由滑块可调：最小1无量纲、最大10无量纲、默认1、步长0.5。"
+    ),
+    "model_constants_and_media": (
+        "固定真空介电常数ε₀=8.8541878128e-12 F/m；介质介电常数按ε=εrε₀计算，"
+        "εr是可调自变量；点电荷排除半径固定0.05 m。"
+    ),
+    "measurement_specifications": (
+        "纵轴场线形态指标定义为固定32条场线在归一化弧长采样点的平均绝对转角，单位度；"
+        "空间探针显示E_x、E_y、E_z、|E|和方位/俯仰方向，场强单位V/m、方向单位度；"
+        "每次电荷移动、数值或极性变化后重新采样并刷新。"
     ),
     "expected_results": (
         "同种电荷靠近时中间场线向外弯曲，异种电荷靠近时场线跨越两者连接；"
@@ -2084,14 +2101,14 @@ class WorkflowEngineTests(unittest.TestCase):
         while result["workflow_status"] != "complete":
             result = continue_emvr(engine, result)
             turns += 1
-            self.assertLess(turns, 60)
+            self.assertLess(turns, 70)
 
         self.assertTrue(result["report_ready"])
         self.assertTrue(result["report_url"].endswith("/report.pdf"))
         self.assertTrue(result["builder_input_ready"])
         self.assertTrue(result["builder_input_url"].endswith("/builder-gate1-input.pdf"))
         self.assertTrue(result["builder_handoff_status"]["ready"])
-        self.assertEqual(result["builder_handoff_status"]["completed"], 9)
+        self.assertEqual(result["builder_handoff_status"]["completed"], 13)
         self.assertIn("完整设计总结PDF已经生成", result["assistant_message"])
         self.assertIn("Builder Pack Gate 1", result["assistant_message"])
         self.assertIn("右侧“任务报告”", result["assistant_message"])
@@ -2110,6 +2127,20 @@ class WorkflowEngineTests(unittest.TestCase):
         ]["comparison_cases"] = ["导体", "介质"]
         builder_payload = build_builder_gate1_input(completed_session)
         self.assertEqual(builder_payload["document"]["target_gate"], "Gate 1 — Brief confirmed")
+        identity = {item["key"]: item["value"] for item in builder_payload["identity"]}
+        execution = {
+            item["key"]: item["value"] for item in builder_payload["execution_context"]
+        }
+        self.assertEqual(identity["workflow_mode"], "integrated-development")
+        self.assertEqual(identity["experiment_origin"], "original-new-experiment")
+        self.assertEqual(
+            execution["execution.builder_pack_or_host_root_absolute"],
+            r"E:\暑研\EMVR_Blind_BuilderPack",
+        )
+        self.assertEqual(
+            execution["execution.unity_host_project_absolute"],
+            r"E:\暑研\EMVR_Blind_BuilderPack\UnityProject",
+        )
         self.assertGreaterEqual(len(builder_payload["objects"]), 5)
         self.assertGreaterEqual(len(builder_payload["student_tasks"]), 5)
         self.assertTrue(builder_payload["scene"])
@@ -2146,7 +2177,7 @@ class WorkflowEngineTests(unittest.TestCase):
         while result["workflow_status"] != "complete":
             result = continue_emvr(engine, result)
             turns += 1
-            self.assertLess(turns, 60)
+            self.assertLess(turns, 70)
 
         self.assertTrue(result["report_ready"])
         self.assertTrue(result["builder_input_ready"])
@@ -2198,9 +2229,61 @@ class WorkflowEngineTests(unittest.TestCase):
             "operations",
             "changed_quantities",
             "observed_quantities",
+            "comparison_cases",
             "boundary_conditions",
+            "formula_contracts",
+            "selected_formula_adjustable_inputs",
         ):
             self.assertTrue(formula_contract[field], field)
+        self.assertTrue(
+            all(item["expression"] for item in formula_contract["formula_contracts"])
+        )
+        self.assertTrue(
+            all(
+                item["control_role"].startswith("adjustable")
+                for item in formula_contract["selected_formula_adjustable_inputs"]
+            )
+        )
+        builder_text = json.dumps(builder, ensure_ascii=False)
+        self.assertNotIn("unresolved", builder_text.casefold())
+        formula_text = json.dumps(
+            {
+                "formula_driven_experiment": builder["formula_driven_experiment"],
+                "physics": builder["physics"],
+            },
+            ensure_ascii=False,
+        )
+        self.assertNotRegex(formula_text, r"[₀₁₂₃ᵢ⁰¹²³]")
+        reference_condition = completed_session.stage_outputs[
+            Stage.VARIABLES_AND_CONDITIONS.value
+        ]["stage_payload"]["reference_condition"]
+        self.assertIn("Initial", reference_condition)
+        self.assertIn("2.0 m", reference_condition)
+        self.assertNotIn("设为-2 μC", reference_condition)
+        identity = {item["key"]: item["value"] for item in builder["identity"]}
+        self.assertEqual(identity["workflow_mode"], "integrated-development")
+        implementation_section = next(
+            section
+            for section in report["sections"]
+            if section["stage_id"] == "BUILDER_IMPLEMENTATION_CONTRACT"
+        )
+        implementation_text = json.dumps(implementation_section, ensure_ascii=False)
+        self.assertIn("integrated-development", implementation_text)
+        implementation_values = {
+            item["label"]: item["value"] for item in implementation_section["items"]
+        }
+        self.assertEqual(
+            implementation_values["Unity宿主项目绝对路径"],
+            r"E:\暑研\EMVR_Blind_BuilderPack\UnityProject",
+        )
+        self.assertIn("公式自变量可调契约", implementation_text)
+        self.assertIn("指标与空间测量定义", implementation_text)
+        self.assertIn("Initial与Reset确定状态", implementation_text)
+        self.assertIn(
+            "epsilon=epsilon_r * epsilon_0",
+            implementation_values["模型常量、介质与固定输入"],
+        )
+        self.assertNotRegex(implementation_text, r"[₀₁₂₃ᵢ⁰¹²³]")
         self.assertTrue(formula_contract["supporting_formulas"])
         self.assertNotIn(
             "unresolved",

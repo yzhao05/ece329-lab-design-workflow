@@ -3752,7 +3752,10 @@ class DialogueStateTests(unittest.TestCase):
                 "desktop_interaction_plan": "鼠标拖动带电体，VR映射为手柄抓取",
                 "room_spatial_requirements": "对象在前方，面板在两侧并保留操作空间",
                 "hidden_object_lifecycle": "无",
-                "parameter_specifications": "距离0.2 m至2.0 m，步长0.1 m",
+                "builder_workspace_absolute_path": r"E:\暑研\EMVR_Blind_BuilderPack",
+                "initial_reset_state": "Initial与Reset均恢复同种电荷、距离1.0 m并清除读数。",
+                "parameter_specifications": "距离为可调公式自变量，默认1.0 m，范围0.2 m至2.0 m，步长0.1 m。",
+                "model_constants_and_media": "固定真空介电常数epsilon_0=8.8541878128e-12 F/m，介质固定为真空。",
             }
         )
         session.stage_outputs[Stage.VARIABLES_AND_CONDITIONS.value][

@@ -506,6 +506,7 @@ def _formula_brief_object_inventory(
             *brief.get("supporting_formula_ids", []),
         ]
     }
+    point_charge_model = "coulomb_point_charge" in formula_ids
     if not [item for item in objects if item not in generic_object_labels] and (
         "coulomb_point_charge" in formula_ids
     ):
@@ -551,25 +552,44 @@ def _formula_brief_object_inventory(
     inventory: list[dict[str, Any]] = []
     for name in objects:
         observation_tool = any(token in name for token in ("探针", "探测器", "测量"))
+        point_charge_object = point_charge_model and "点电荷" in name
         inventory.append({
             "object_name": name,
             "category": "观察与测量" if observation_tool else "实验物理对象",
             "purpose": (
                 f"在选定位置读取并记录{observed_text}"
                 if observation_tool
-                else f"承载研究对象并作为理论模型中的场源，允许学生改变{changed_text}"
+                else (
+                    "作为库仑点电荷场源参与合场计算；世界坐标决定两源间距，"
+                    "电荷符号决定同号或异号配置"
+                    if point_charge_object
+                    else f"承载研究对象并作为理论模型中的场源，可改变{changed_text}"
+                )
             ),
             "student_interaction": (
                 "移动到选定观察位置并记录当前读数或场线形态"
                 if observation_tool
-                else operation_text
+                else (
+                    "鼠标左键或VR扳机选中并抓取，拖动改变位置；"
+                    "电荷符号通过控制面板的同号/异号按钮切换"
+                    if point_charge_object
+                    else operation_text
+                )
             ),
             "physics_or_data_state": (
                 "保存采样位置、观察方式和当前理论读数"
                 if observation_tool
-                else f"保存与{changed_text}有关的当前物理状态"
+                else (
+                    "保存世界坐标、电荷量（C）、电荷符号（+1/-1）及实时计算的两源间距（m）"
+                    if point_charge_object
+                    else f"保存与{changed_text}有关的当前物理状态"
+                )
             ),
-            "visual_feedback": f"对象状态变化后同步显示{observed_text}",
+            "visual_feedback": (
+                "选中时高亮；拖动时显示实时距离；释放或切换符号后刷新合场箭头、场线和对比曲线"
+                if point_charge_object
+                else f"对象状态变化后同步显示{observed_text}"
+            ),
             "required": True,
         })
 
@@ -639,18 +659,38 @@ def _formula_brief_object_inventory(
         if str(item["object_name"]).casefold() not in existing:
             inventory.append(item)
     object_names = [str(item["object_name"]) for item in inventory]
-    interactions = [
-        {
-            "user_action": operation_text,
-            "physical_meaning": f"改变{changed_text}",
-            "system_response": f"重新计算并更新{observed_text}",
-        },
-        {
-            "user_action": "记录当前设置并与参考状态比较",
-            "physical_meaning": "在其余条件保持一致时比较主要实验情形",
-            "system_response": "保存参数与结果快照，并显示差异",
-        },
-    ]
+    interactions = (
+        [
+            {
+                "user_action": "抓取并拖动点电荷 A 或 B，释放后读取两源间距",
+                "physical_meaning": "只改变两点电荷间距 d，电荷量、介质和显示尺度保持锁定",
+                "system_response": "重算 E_A、E_B 与 E_total，刷新场线、方向箭头、距离读数和形态指标",
+            },
+            {
+                "user_action": "在控制面板选择同号或异号电荷配置",
+                "physical_meaning": "切换两个场源的相对符号，间距和电荷量大小保持不变",
+                "system_response": "刷新场线排斥或连接拓扑，并用固定图例更新对应理论曲线",
+            },
+            {
+                "user_action": "保存同一距离下的两种配置快照并执行并排比较",
+                "physical_meaning": "在相同距离和控制条件下比较同号与异号电荷的矢量叠加结果",
+                "system_response": "锁定统一色标和场线种子密度，显示参数、结果差异与快照编号",
+            },
+        ]
+        if point_charge_model
+        else [
+            {
+                "user_action": operation_text,
+                "physical_meaning": f"改变{changed_text}",
+                "system_response": f"重新计算并更新{observed_text}",
+            },
+            {
+                "user_action": "记录当前设置并与参考状态比较",
+                "physical_meaning": "在其余条件保持一致时比较主要实验情形",
+                "system_response": "保存参数与结果快照，并显示差异",
+            },
+        ]
+    )
     return object_names, inventory, interactions
 
 
@@ -1169,14 +1209,47 @@ def _visualization(
 
 
 def _emvr_parameter_axis(requirements: dict[str, Any]) -> tuple[str, str, str, str]:
-    changed = requirements.get("changed_quantities", [])
-    changed = changed if isinstance(changed, list) else []
-    observed = requirements.get("observed_quantities", [])
-    observed = observed if isinstance(observed, list) else []
+    changed_raw = requirements.get("changed_quantities", [])
+    changed_raw = changed_raw if isinstance(changed_raw, list) else []
+    changed = [
+        part.strip()
+        for item in changed_raw
+        for part in re.split(r"[；;]", str(item))
+        if part.strip()
+    ]
+    observed_raw = requirements.get("observed_quantities", [])
+    observed_raw = observed_raw if isinstance(observed_raw, list) else []
+    observed = [
+        part.strip()
+        for item in observed_raw
+        for part in re.split(r"[；;]", str(item))
+        if part.strip()
+    ]
     specifications = requirements.get("parameter_specifications", [])
     specifications = specifications if isinstance(specifications, list) else []
-    x_label = next((str(item).strip() for item in changed if str(item).strip()), "主要自变量")
-    y_label = next((str(item).strip() for item in observed if str(item).strip()), "主要观察量")
+    visualization_plan = _compact_context_items(
+        requirements.get("visualization_requirements"),
+        limit=6,
+        item_length=300,
+    )
+    x_match = re.search(
+        r"横轴(?:改为|设为|为|[:：])\s*([^，。；;]+)",
+        visualization_plan,
+    )
+    y_match = re.search(
+        r"纵轴(?:改为|设为|为|[:：])\s*([^，。；;]+)",
+        visualization_plan,
+    )
+    x_label = (
+        x_match.group(1).strip()
+        if x_match
+        else next((str(item).strip() for item in changed if str(item).strip()), "主要自变量")
+    )
+    y_label = (
+        y_match.group(1).strip()
+        if y_match
+        else next((str(item).strip() for item in observed if str(item).strip()), "主要观察量")
+    )
     matching_spec = next(
         (str(item) for item in specifications if x_label and x_label in str(item)),
         str(specifications[0]) if specifications else "",
@@ -1187,7 +1260,7 @@ def _emvr_parameter_axis(requirements: dict[str, Any]) -> tuple[str, str, str, s
         flags=re.IGNORECASE,
     )
     x_unit = unit_match.group(1) if unit_match else "见参数规格"
-    return x_label, x_unit, y_label, "定性形态或归一化指标"
+    return x_label, x_unit, y_label, "定性形态指标" if "形态" in y_label else "见观察量定义"
 
 
 def _emvr_controlled_conditions(
@@ -1248,6 +1321,14 @@ def _emvr_reference_condition(
     saved = stage_state.get("reference_condition")
     if saved not in (None, "", [], {}):
         return _compact_context_items(saved, limit=4, item_length=180)
+    reset_state = stage_state.get("initial_reset_state") or requirements.get(
+        "initial_reset_state"
+    )
+    if reset_state not in (None, "", [], {}):
+        return (
+            "每轮比较前恢复已确认的初始状态："
+            + _compact_context_items(reset_state, limit=4, item_length=220)
+        )
     specifications = requirements.get("parameter_specifications", [])
     specifications = specifications if isinstance(specifications, list) else []
     settings: list[str] = []
@@ -2075,6 +2156,33 @@ class RuleBasedStageGenerator:
         latest_stage_input = stage_inputs[-1] if stage_inputs else ""
         structured_requirements = _emvr_structured_requirements(session)
         stage_state = stage_design_state_snapshot(session)
+        current_emvr = session.design_context.get("emvr_design", {})
+        current_emvr = current_emvr if isinstance(current_emvr, dict) else {}
+        current_flow = current_emvr.get("formula_flow", {})
+        current_selection = (
+            current_flow.get("formula_selection", {})
+            if isinstance(current_flow, dict)
+            else {}
+        )
+        selected_formula_id_set = {
+            str(item)
+            for item in [
+                *current_emvr.get("selected_primary_formula_ids", []),
+                *current_emvr.get("selected_supporting_formula_ids", []),
+                *(
+                    current_selection.get("primary_formula_ids", [])
+                    if isinstance(current_selection, dict)
+                    else []
+                ),
+                *(
+                    current_selection.get("supporting_formula_ids", [])
+                    if isinstance(current_selection, dict)
+                    else []
+                ),
+            ]
+            if str(item)
+        }
+        point_charge_model = "coulomb_point_charge" in selected_formula_id_set
         theory_relation_ids = structured_requirements.get(
             "theory_relation_ids", []
         )
@@ -2102,7 +2210,7 @@ class RuleBasedStageGenerator:
                 else []
             )
             return StepOutput(
-                assistant_message="已将你的初步想法整理为Unity VR模拟实验的设计起点。",
+                assistant_message="已将学生提出的初步想法整理为Unity VR模拟实验的设计起点。",
                 stage_payload={
                     "original_idea": experiment_brief,
                     "normalized_idea": experiment_brief,
@@ -2120,7 +2228,7 @@ class RuleBasedStageGenerator:
                         limit=3,
                     ),
                 },
-                assumptions=["暂时以你提出的想法为设计边界，接下来再补充参数和理论模型。"],
+                assumptions=["暂时以学生提出的想法为设计边界，接下来再补充参数和理论模型。"],
             )
         if stage is Stage.COURSE_MAPPING_AND_DIRECTION:
             selected_direction = (
@@ -2146,7 +2254,7 @@ class RuleBasedStageGenerator:
                     "course_relationship": course_relationship,
                     "course_references": _course_references(design_text),
                     "vr_suitability": "参数可调、结果可计算、现象可空间化展示",
-                    "selection_reason": "优先保留你原本的研究意图，并选择能够形成明确输入—输出反馈的方向。",
+                    "selection_reason": "保留学生确认的研究意图，并选择能够形成明确输入—输出反馈的方向。",
                 },
             )
         if stage is Stage.LEARNING_OBJECTIVES:
@@ -2158,6 +2266,12 @@ class RuleBasedStageGenerator:
                 or latest_stage_input
                 or f"解释{topics[0]}中的核心物理机制"
             )
+            changed_text = _compact_context_items(
+                structured_requirements.get("changed_quantities")
+            ) or "已确认的变化量"
+            observed_text = _compact_context_items(
+                structured_requirements.get("observed_quantities")
+            ) or "已确认的观察量"
             return StepOutput(
                 assistant_message="已将课程学习与VR操作组织为一致的学习目标。",
                 stage_payload={
@@ -2165,19 +2279,24 @@ class RuleBasedStageGenerator:
                     "calculation_objective": structured_requirements.get(
                         "calculation_objective"
                     )
-                    or "依据与当前研究问题直接相关的ECE329关系式作出理论预测",
+                    or (
+                        "使用库仑点电荷场公式计算单源电场，并按 E_total=sum_i E_i "
+                        "得到空间采样点的合场矢量"
+                        if point_charge_model
+                        else f"使用已筛选的ECE329关系式由{changed_text}计算{observed_text}"
+                    ),
                     "analysis_objective": structured_requirements.get(
                         "analysis_objective"
                     )
-                    or "比较学生定义的条件变化、理论输出和空间电磁分布",
+                    or f"比较{changed_text}变化前后的{observed_text}与理论输出",
                     "vr_interaction_objective": structured_requirements.get(
                         "vr_interaction_objective"
                     )
-                    or "通过学生定义的VR操作改变具有明确物理意义的模型输入",
+                    or f"通过已确认的VR操作改变{changed_text}，并触发理论输出刷新",
                     "observation_objective": structured_requirements.get(
                         "observation_objective"
                     )
-                    or "从数值和空间表现中判断预期关系是否成立",
+                    or f"根据{observed_text}及对应数值判断研究假设是否成立",
                 },
             )
         if stage is Stage.RESEARCH_QUESTION:
@@ -2263,7 +2382,7 @@ class RuleBasedStageGenerator:
                 assistant_message=(
                     "我已经只保留能直接解释当前变化条件和观察现象的课程关系。"
                     if formulas
-                    else "目前还不能从已确认内容中判断哪些公式会真正参与这个实验；我先不替你堆叠无关公式。"
+                    else "目前还不能从已确认内容中判断哪些公式会真正参与该实验，因此暂不加入未建立直接关系的公式。"
                 ),
                 stage_payload={
                     "physical_mechanism": relation_labels,
@@ -2289,7 +2408,15 @@ class RuleBasedStageGenerator:
                     "calculated_outputs": structured_requirements.get(
                         "observed_quantities", []
                     ) or ["研究问题中指定的电磁响应"],
-                    "visual_only_elements": ["方向箭头", "波前或场线动画", "颜色强度映射"],
+                    "visual_only_elements": (
+                        [
+                            "合场方向箭头：方向取自 E_total 矢量",
+                            "电场线：按固定种子密度从当前合场数值积分生成",
+                            "场强颜色映射：所有比较状态共用 |E_total| 统一色标",
+                        ]
+                        if point_charge_model
+                        else ["方向箭头", "波前或场线动画", "颜色强度映射"]
+                    ),
                     "model_type": "课程层面的解析模型或预计算数据",
                     "research_question_preserved": research_focus,
                 },
@@ -2312,15 +2439,29 @@ class RuleBasedStageGenerator:
                 if str(item).strip()
             ) or "目标响应"
             return StepOutput(
-                assistant_message="这个假设已经对应到你调整参数后能够立即观察的VR反馈。",
+                assistant_message="该假设已经对应到参数调整后能够立即观察的VR反馈。",
                 stage_payload={
                     "research_hypothesis": hypothesis,
                     "null_hypothesis": "在设计范围内，主要自变量变化不会造成可分辨响应。",
                     "expected_trend": (
-                        f"当{changed_text}变化时，{observed_text}应呈现假设所述的方向性响应；"
-                        "具体方向以已确认假设为准。"
+                        "距离由远到近时，同号电荷中间的场线向外弯曲并形成扩大的低密度区；"
+                        "异号电荷的场线由正电荷连接至负电荷，连接密度随距离缩短而增加。"
+                        if point_charge_model
+                        else (
+                            f"当{changed_text}变化时，{observed_text}应呈现假设所述的方向性响应；"
+                            "具体方向以已确认假设为准。"
+                        )
                     ),
-                    "limiting_cases": ["基准条件", "参数下限", "参数上限或模型失效边界"],
+                    "limiting_cases": (
+                        [
+                            "参数端点采用变量章节确认的距离最小值与最大值",
+                            "点电荷可视尺寸必须远小于两电荷间距及采样距离",
+                            "采样点进入电荷排除半径时停止该点计算并提示 1/r^2 奇点",
+                            "只比较静止电荷稳态场，不解释拖动过程中的辐射与瞬态传播",
+                        ]
+                        if point_charge_model
+                        else ["基准条件", "参数下限", "参数上限或模型失效边界"]
+                    ),
                     "vr_feedback_for_trend": ["数值更新", "曲线更新", "空间视觉编码更新"],
                 },
             )
@@ -2333,7 +2474,7 @@ class RuleBasedStageGenerator:
                 _formula_brief_object_inventory(session, structured_requirements)
             )
             return StepOutput(
-                assistant_message="你原有的场景条件已经保留；我在此基础上补全了Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
+                assistant_message="已保留学生确认的场景条件，并在此基础上补全Unity VR模拟实验的对象、交互、物理计算和反馈设计。",
                 stage_payload={
                     "desktop_interaction_plan": structured_requirements.get(
                         "desktop_interaction_plan"
@@ -2345,7 +2486,7 @@ class RuleBasedStageGenerator:
                         "hidden_object_lifecycle"
                     ),
                     "user_original_design": idea,
-                    "existing_context": "保留你已有的场景设定；这一部分不额外改写VR场景。",
+                    "existing_context": "保留学生已经确认的场景设定；这一部分不额外改写VR场景。",
                     "student_constraints": stage_inputs,
                     "user_role": (
                         structured_requirements.get("desktop_interaction_plan")
@@ -2482,8 +2623,21 @@ class RuleBasedStageGenerator:
                 assistant_message="已生成理论预测窗口规范，并给出与Unity参数控制器联动的接口。",
                 stage_payload={
                     "student_visualization_requirements": stage_inputs,
-                    "trend_annotation": "由当前理论模型计算后标注",
-                    "unity_update_event": "OnSimulationParameterChanged",
+                    "trend_annotation": (
+                        "横轴按距离递增，同号与异号配置使用固定颜色；每个点标注场线形态指标和预期状态"
+                        if point_charge_model
+                        else "由当前理论模型计算后标注"
+                    ),
+                    "series_encoding": (
+                        "同号/异号两条理论曲线使用固定图例，面板同步显示参数、预期状态和快照编号"
+                        if point_charge_model
+                        else None
+                    ),
+                    "unity_update_event": (
+                        "OnChargeMoved 或 OnChargeTypeChanged -> RecalculateField -> RefreshFieldLinesAndPlot"
+                        if point_charge_model
+                        else "OnSimulationParameterChanged"
+                    ),
                 },
                 visualization=_visualization(
                     idea,
@@ -2526,7 +2680,17 @@ class RuleBasedStageGenerator:
                         "rating": "可行",
                         "reasoning": "前序阶段已明确参数范围、观察量、控制条件和实验流程，可按课程模型进行实现与验收。",
                     },
-                    "limitations": ["理想化边界条件", "忽略部分损耗或边缘效应", "视觉缩放不等于真实尺度", "VR结果来自模型而非实测"],
+                    "limitations": (
+                        [
+                            "两个电荷按理想点电荷处理，源半径相对间距不可忽略时公式不再适用",
+                            "介质按均匀线性且介电常数固定处理，不模拟材料边界和导体表面电荷重分布",
+                            "拖动结束后显示的是静电场重算，不表示移动电荷辐射或瞬态传播",
+                            "场线密度与颜色属于固定规则的视觉编码，不是粒子轨迹或场强实测值",
+                            "电荷附近设置排除半径，避免 1/r^2 奇点造成无穷大或错误色标",
+                        ]
+                        if point_charge_model
+                        else ["理想化边界条件", "视觉缩放不等于真实尺度", "VR结果来自模型而非实测"]
+                    ),
                     "teaching_value": {"rating": "high_if_aligned", "learning_contribution": "让不可见场量、空间分布和参数关系可观察"},
                     "innovation": {"rating": "context_dependent", "innovative_elements": ["空间探测", "实时参数—理论反馈", "多条件叠加比较"]},
                     "vr_added_value": {"rating": "high_if_spatial", "reasoning": "只有空间观察和交互对理解有贡献时才值得使用VR"},

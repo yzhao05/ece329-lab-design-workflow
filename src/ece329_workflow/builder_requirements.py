@@ -34,6 +34,16 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "field": "builder_workspace_absolute_path",
+        "stage": Stage.COURSE_MAPPING_AND_DIRECTION,
+        "label": "Builder宿主项目绝对路径",
+        "question": (
+            "请给出本次实验实际承载 UnityProject、LabSpecs 和 Tools 的 Builder Pack/宿主集成根目录绝对路径。"
+            "原创新实验与盲重建都必须在最终PDF中写入唯一的绝对实现根目录；原创新实验使用"
+            "integrated-development，并直接使用该宿主根目录，不创建 RebuildWorkspaces 盲重建子副本。"
+        ),
+    },
+    {
         "field": "desktop_interaction_plan",
         "stage": Stage.CONCEPTUAL_OR_VR_SETUP,
         "label": "桌面鼠标操作与VR映射",
@@ -61,12 +71,41 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "field": "initial_reset_state",
+        "stage": Stage.CONCEPTUAL_OR_VR_SETUP,
+        "label": "Initial与Reset确定状态",
+        "question": (
+            "请给出场景首次打开和按下 Reset 后必须恢复的完整状态：对象配置、每个可调参数的默认数值与单位、"
+            "离散选项、探针位置、面板/曲线状态，以及 Reset 后是否清除已保存数据。"
+        ),
+    },
+    {
         "field": "parameter_specifications",
         "stage": Stage.VARIABLES_AND_CONDITIONS,
-        "label": "参数范围与单位",
+        "label": "公式自变量可调契约",
         "question": (
-            "请逐项给出学生可调参数的名称、最小值、最大值、单位和建议步长；"
-            "离散参数请列出允许选项。所有主要自变量都需要明确范围与单位。"
+            "请逐项列出所选公式中作为实验自变量的输入，并确认全部可在桌面与VR中调节。"
+            "每个连续量必须给出控件、最小值、最大值、默认值、单位和步长；离散量必须给出默认选项和全部允许选项。"
+            "如果使用近/中/远等分组，还必须给出每组的准确数值或边界。"
+        ),
+    },
+    {
+        "field": "model_constants_and_media",
+        "stage": Stage.VARIABLES_AND_CONDITIONS,
+        "label": "模型常量、介质与固定输入",
+        "question": (
+            "请逐项给出公式中不作为自变量调节的常量、介质参数和控制量的准确数值、单位及固定理由；"
+            "介电常数或磁导率等材料量需明确采用真空常量、相对参数乘以真空常量，还是直接使用可调绝对值。"
+        ),
+    },
+    {
+        "field": "measurement_specifications",
+        "stage": Stage.EXPECTED_DATA_VISUALIZATION,
+        "label": "指标与空间测量定义",
+        "question": (
+            "请定义最终界面中的每个数值、纵轴指标和空间测量读数：给出物理量或指标名称、计算公式/算法、"
+            "单位（无量纲也需注明）、采样位置或区间、刷新时机；并明确空间探针显示矢量分量、大小、方向、"
+            "相位或本实验需要的其他数据。不适用的项目需明确写出不适用及原因。"
         ),
     },
     {
@@ -165,6 +204,10 @@ def _field_valid(field: str, value: str) -> bool:
         return False
     if field == "lab_id":
         return LAB_ID_PATTERN.fullmatch(value) is not None
+    if field == "builder_workspace_absolute_path":
+        return bool(
+            re.match(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\]+[\\][^\\]+|/)", value)
+        )
     if field == "parameter_specifications":
         # This is content validation, not conversational intent matching: a
         # continuous parameter needs at least one numeric boundary and a unit;
@@ -177,7 +220,36 @@ def _field_valid(field: str, value: str) -> bool:
             flags=re.IGNORECASE,
         ) is not None
         explicitly_discrete = re.search(r"(?:离散|选项)", value) is not None
-        return explicitly_discrete or (has_numeric_boundary and has_unit)
+        has_default = re.search(r"(?:默认|初始|reset)", value, flags=re.IGNORECASE) is not None
+        has_step_or_options = re.search(
+            r"(?:步长|增量|离散|允许选项|全部选项)", value
+        ) is not None
+        adjustable = re.search(r"(?:可调|调节|滑块|旋钮|输入框|拖动)", value) is not None
+        return (
+            has_default
+            and has_step_or_options
+            and adjustable
+            and (explicitly_discrete or (has_numeric_boundary and has_unit))
+        )
+    if field == "model_constants_and_media":
+        has_number = re.search(r"\d", value) is not None
+        has_unit_or_dimensionless = re.search(
+            r"(?:F/m|H/m|C|V|A|Ω|ohm|S/m|T|Hz|rad/s|m/s|kg|无量纲|真空常量|epsilon_0|mu_0|ε₀|μ₀)",
+            value,
+            flags=re.IGNORECASE,
+        ) is not None
+        has_role = re.search(r"(?:固定|常量|控制量|可调|介质)", value) is not None
+        return has_number and has_unit_or_dimensionless and has_role
+    if field == "measurement_specifications":
+        has_definition = re.search(r"(?:计算|定义|公式|算法|不适用)", value) is not None
+        has_unit = re.search(r"(?:单位|无量纲|V/m|A/m|T|W/m|Hz|rad|度)", value) is not None
+        has_readout = re.search(r"(?:探针|读数|测量|采样)", value) is not None
+        return has_definition and has_unit and has_readout
+    if field == "initial_reset_state":
+        has_initial = re.search(r"(?:Initial|初始|首次打开)", value, flags=re.IGNORECASE) is not None
+        has_reset = re.search(r"(?:Reset|重置)", value, flags=re.IGNORECASE) is not None
+        has_concrete_state = re.search(r"(?:\d|同种|异种|同号|异号|开|关|空|清除)", value) is not None
+        return has_initial and has_reset and has_concrete_state
     return True
 
 
@@ -192,9 +264,17 @@ def _validation_error(field: str, value: str) -> str | None:
         )
     if field == "parameter_specifications":
         return (
-            f"当前输入“{shown}”还不能形成可执行参数规格：连续参数需包含数值范围、"
-            "单位和步长，离散参数需明确列出允许选项。"
+            f"当前输入“{shown}”还不能形成可执行公式自变量契约：每个自变量都需明确可调控件和默认值；"
+            "连续参数还需包含数值范围、单位和步长，离散参数需列出全部允许选项。"
         )
+    if field == "builder_workspace_absolute_path":
+        return f"当前输入“{shown}”不是绝对路径；请提供盘符路径、UNC路径或POSIX绝对路径。"
+    if field == "model_constants_and_media":
+        return f"当前输入“{shown}”仍缺少常量/介质的准确数值、单位或固定/可调角色。"
+    if field == "measurement_specifications":
+        return f"当前输入“{shown}”仍缺少指标计算方法、单位或空间探针/采样读数定义。"
+    if field == "initial_reset_state":
+        return f"当前输入“{shown}”仍未同时定义 Initial 与 Reset 的具体对象和参数状态。"
     return None
 
 
