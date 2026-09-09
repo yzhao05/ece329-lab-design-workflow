@@ -253,6 +253,12 @@ def _field_valid(field: str, value: str) -> bool:
     return True
 
 
+def builder_requirement_value_is_valid(field: str, value: Any) -> bool:
+    """Validate one explicitly requested Builder field for direct submission."""
+
+    return field in BUILDER_REQUIREMENT_FIELDS and _field_valid(field, _text(value))
+
+
 def _validation_error(field: str, value: str) -> str | None:
     if not is_resolved_design_value(value) or _field_valid(field, value):
         return None

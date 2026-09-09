@@ -289,9 +289,14 @@ def _emvr_stage_output_projection(session: DesignSession) -> dict[str, Any]:
     """
 
     def payload(stage: Stage) -> dict[str, Any]:
-        stored = session.stage_outputs.get(stage.value, {})
-        value = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
-        return value if isinstance(value, dict) else {}
+        # Import lazily because reporting imports this quality module.  The
+        # effective projection restores canonical EMVR values and deterministic
+        # stage defaults that a later confirmation-only output may not repeat.
+        # Reading the raw latest stage payload here used to report those already
+        # confirmed values as missing and strand the final stage in a retry loop.
+        from .reporting import effective_emvr_stage_payload
+
+        return effective_emvr_stage_payload(session, stage)
 
     objectives = payload(Stage.LEARNING_OBJECTIVES)
     variables = payload(Stage.VARIABLES_AND_CONDITIONS)
@@ -529,7 +534,9 @@ def evaluate_design_quality(
     visualization = _text(snapshot.get("visualization_plan"))
     controls = _text(snapshot.get("controlled_conditions"))
     comparisons = ensure_design_state(session).get("baseline_comparisons", [])
-    comparison_text = _comparison_summary(comparisons)
+    comparison_text = _comparison_summary(comparisons) or _text(
+        snapshot.get("comparison_logic")
+    )
 
     if question and (not independent or not observations):
         absent = "自变量" if not independent else "观察量"

@@ -155,6 +155,7 @@ class TurnPlanningTests(unittest.TestCase):
             "main_research_question": "research_question",
             "adjustable_quantity_in_vr": "changed_quantities",
             "object_inventory": "unity_objects",
+            "baseline_comparisons": "comparison_logic",
             "visualization_requirements": "visualization_plan",
             "if_prediction_supported": "if_prediction_supported",
         }
@@ -178,6 +179,62 @@ class TurnPlanningTests(unittest.TestCase):
                     output.stage_payload["pending_action"]["answer_fields"],
                     [expected_field],
                 )
+
+    def test_comparison_logic_satisfies_final_quality_baseline_check(self) -> None:
+        session = DesignSession(
+            design_id="emvr-comparison-logic-quality",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(
+                Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            ),
+        )
+        apply_design_updates(
+            session,
+            [
+                {
+                    "field": field,
+                    "operation": "REPLACE",
+                    "value": value,
+                }
+                for field, value in {
+                    "research_object": "两个点电荷",
+                    "course_relationship": "库仑场的矢量叠加",
+                    "learning_objective": "解释距离变化如何改变合场",
+                    "research_question": "距离变化时中点场强如何变化？",
+                    "hypothesis": "距离减小时中点场强增大",
+                }.items()
+            ],
+        )
+        apply_stage_field_updates(
+            session,
+            [
+                {
+                    "field": field,
+                    "operation": "REPLACE",
+                    "value": value,
+                }
+                for field, value in {
+                    "independent_variable": "两电荷间距",
+                    "observations": "中点合场强度",
+                    "controlled_conditions": "电荷量和介质保持不变",
+                    "procedure_steps": "改变间距并记录合场",
+                    "visualization_plan": "显示场强曲线和矢量箭头",
+                    "result_interpretation": "比较实测趋势与理论预测",
+                    "limitations": "仅适用于点电荷近似",
+                    "comparison_logic": "以间距 1.0 m 为基准状态",
+                }.items()
+            ],
+            stage=Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
+        )
+
+        review = evaluate_design_quality(session, final_review=True)
+
+        self.assertFalse(
+            any(
+                "baseline_comparisons" in issue.get("fields", [])
+                for issue in review["issues"]
+            )
+        )
 
     def test_emvr_overlapping_stage_edit_uses_typed_emvr_state(self) -> None:
         compiled = compile_dialogue_acts(

@@ -4,7 +4,7 @@ import re
 from copy import deepcopy
 from typing import Any, Iterable
 
-from .emvr_design import merge_emvr_structured_requirements
+from .emvr_design import merge_emvr_structured_requirements, recover_explicit_emvr_edits
 from .knowledge_base import KNOWLEDGE
 from .models import DesignSession, InteractionState, Stage, StepOutput
 
@@ -1017,11 +1017,10 @@ def _selected_action(turn_intent: dict[str, Any], act_type: str) -> dict[str, An
 
 
 def _semantic_service_failed(turn_intent: dict[str, Any]) -> bool:
-    """Identify an explicit resolver outage without interpreting user words."""
+    """Identify resolver-unavailable fallbacks without interpreting user words."""
 
-    return str(turn_intent.get("source") or "").startswith(
-        "SEMANTIC_SERVICE_FALLBACK"
-    )
+    source = str(turn_intent.get("source") or "").upper()
+    return "FALLBACK" in source
 
 
 def _recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | None:
@@ -1477,6 +1476,7 @@ def handle_emvr_formula_turn(
     outage_formula_selection: dict[str, Any] | None = None
     outage_composition: dict[str, Any] | None = None
     outage_method_selection: dict[str, Any] | None = None
+    outage_direction_revision: dict[str, Any] | None = None
     outage_topic_recovery: dict[str, Any] | None = None
     if _semantic_service_failed(turn_intent):
         dialogue = session.model_context.get("dialogue_state", {})
@@ -1519,11 +1519,33 @@ def handle_emvr_formula_turn(
                 message,
                 flow,
             )
+        elif phase == EXPERIMENT_DIRECTION_REVIEW:
+            recovered_updates = recover_explicit_emvr_edits(
+                message,
+                flow.get("experiment_brief", {}),
+            )
+            brief_updates = {
+                field: update
+                for field, update in recovered_updates.items()
+                if field
+                in {
+                    "topic",
+                    "objects",
+                    "operations",
+                    "changed_quantities",
+                    "observed_quantities",
+                    "comparison_cases",
+                    "boundary_conditions",
+                }
+            }
+            if brief_updates:
+                outage_direction_revision = {"brief_updates": brief_updates}
         if (
             not recoverable_topic_turn
             and outage_formula_selection is None
             and outage_composition is None
             and outage_method_selection is None
+            and outage_direction_revision is None
         ):
             return (
                 StepOutput(
@@ -2025,7 +2047,10 @@ def handle_emvr_formula_turn(
                     ),
                     False,
                 )
-        revise_action = _selected_action(turn_intent, "REVISE_EMVR_DIRECTION")
+        revise_action = (
+            outage_direction_revision
+            or _selected_action(turn_intent, "REVISE_EMVR_DIRECTION")
+        )
         lock_action = _selected_action(turn_intent, "LOCK_EMVR_DIRECTION")
         semantic_updates = turn_intent.get("semantic_updates", {})
         controls = set(semantic_updates.get("control_actions", [])) \

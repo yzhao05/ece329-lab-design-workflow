@@ -806,6 +806,81 @@ class EmvrFormulaFlowTests(unittest.TestCase):
         )
         self.assertNotIn("semantic_recovery", flow)
 
+    def test_direction_revision_is_applied_during_semantic_outage(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想研究两个电荷",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        handle_emvr_formula_turn(
+            session,
+            "采用第一组公式",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=cards.stage_payload["formula_cards"][0]["option_id"],
+        )
+        methods, _ = handle_emvr_formula_turn(
+            session,
+            "组合公式设计一个完整实验",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id="emvr-composition:combined",
+        )
+        handle_emvr_formula_turn(
+            session,
+            "采用方法1",
+            resolved_intent(UserIntent.ANSWER_CURRENT_QUESTION),
+            selected_option_id=methods.stage_payload["experiment_methods"][0]["option_id"],
+        )
+        failed_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+        output, complete = handle_emvr_formula_turn(
+            session,
+            (
+                "主动变化只保留距离和电荷类型（同种/异种），"
+                "观察只保留场线的合并、扭曲和重排形态"
+            ),
+            failed_intent,
+        )
+        flow = session.design_context["emvr_design"]["formula_flow"]
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            EXPERIMENT_DIRECTION_REVIEW,
+        )
+        self.assertEqual(
+            flow["experiment_brief"]["changed_quantities"],
+            ["距离", "电荷类型（同种/异种）"],
+        )
+        self.assertEqual(
+            flow["experiment_brief"]["observed_quantities"],
+            ["场线的合并、扭曲和重排形态"],
+        )
+        self.assertNotIn("semantic_recovery", flow)
+
+        rule_only_fallback = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.5,
+            source="CONSERVATIVE_FALLBACK",
+        )
+        output, complete = handle_emvr_formula_turn(
+            session,
+            "主动变化只保留距离，观察只保留场线形态",
+            rule_only_fallback,
+        )
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            output.stage_payload["emvr_formula_phase"],
+            EXPERIMENT_DIRECTION_REVIEW,
+        )
+        self.assertEqual(flow["experiment_brief"]["changed_quantities"], ["距离"])
+        self.assertEqual(flow["experiment_brief"]["observed_quantities"], ["场线形态"])
+
     def test_formula_selection_details_are_carried_into_experiment_brief(self) -> None:
         session = self._session()
         cards, _ = handle_emvr_formula_turn(

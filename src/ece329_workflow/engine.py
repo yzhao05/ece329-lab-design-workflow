@@ -45,6 +45,7 @@ from .emvr_design import (
     apply_emvr_field_updates,
     emvr_stage_one_readiness,
     merge_emvr_structured_requirements,
+    recover_explicit_emvr_edits,
 )
 from .emvr_formula_flow import (
     EMVR_DETAIL_DESIGN,
@@ -118,6 +119,7 @@ from .builder_input import build_builder_gate1_input, render_builder_gate1_input
 from .builder_requirements import (
     BUILDER_REQUIREMENT_FIELDS,
     builder_handoff_status,
+    builder_requirement_value_is_valid,
     next_due_builder_requirement,
     validate_builder_requirements,
 )
@@ -571,6 +573,172 @@ _STUDENT_FIELD_LABELS = {
     "vr_added_value": "VR附加价值",
     "student_summary": "学生总结",
 }
+
+_EXPLICIT_EMVR_CONFIRMATIONS = frozenset(
+    {
+        "继续",
+        "下一步",
+        "确认",
+        "确认继续",
+        "确认并继续",
+        "确认进入下一阶段",
+        "确认并进入下一阶段",
+        "确认方向",
+        "准确",
+        "准确继续",
+        "准确并继续",
+        "内容准确",
+        "内容准确继续",
+        "草稿准确",
+        "草稿准确继续",
+        "好的",
+        "可以",
+        "没问题",
+        "没有问题",
+        "同意",
+        "采用",
+        "采用当前草稿",
+        "按这版继续",
+        "就按这版",
+        "保留这部分并继续",
+        "沿用这部分并继续",
+        "保持这部分并继续",
+        "沿用刚才的表述",
+    }
+)
+
+_DIRECT_BUILDER_FALLBACK_FIELDS = frozenset(
+    {
+        "lab_title",
+        "lab_id",
+        "builder_workspace_absolute_path",
+        "hidden_object_lifecycle",
+    }
+)
+
+
+def _compact_control_text(message: str) -> str:
+    return re.sub(r"[\s，,。；;！!？?：:]+", "", str(message or ""))
+
+
+def _is_explicit_emvr_confirmation(compact_message: str) -> bool:
+    if compact_message in _EXPLICIT_EMVR_CONFIRMATIONS:
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?:(?:研究问题|实验方向|学习目标|理论关系|理论框架|假设|当前设计|这部分))?"
+            r"(?:确认|沿用|保留|采用|保持)"
+            r"(?:这份|这版|当前|刚才的)?"
+            r"(?:设计|草稿|修改|目标|内容|方向|部分|表述)?"
+            r"(?:并)?(?:继续|进入下一阶段|继续下一阶段)",
+            compact_message,
+        )
+    )
+
+
+def _has_persistent_turn_updates(turn_intent: dict[str, Any]) -> bool:
+    updates = turn_intent.get("semantic_updates", {})
+    if not isinstance(updates, dict):
+        return False
+    return bool(
+        updates.get("design_updates")
+        or updates.get("stage_field_updates")
+        or updates.get("comparison_updates")
+        or updates.get("facet_updates")
+        or updates.get("emvr_formula_actions")
+        or (
+            isinstance(updates.get("emvr_design_update"), dict)
+            and (
+                updates["emvr_design_update"].get("field_updates")
+                or updates["emvr_design_update"].get("theory_link_updates")
+            )
+        )
+    )
+
+
+def _explicit_emvr_edit_intent(
+    session: DesignSession,
+    message: str,
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if session.interaction_state is not InteractionState.EMVR_DIRECT:
+        return None
+    current = merge_emvr_structured_requirements(
+        session.design_context.get("emvr_design", {})
+    )
+    edits = recover_explicit_emvr_edits(message, current)
+    if not edits:
+        return None
+    acts = [
+        {
+            "type": "MODIFY_EMVR_FIELD",
+            "target": field,
+            "operation": str(update.get("operation") or "REPLACE"),
+            "content": deepcopy(update.get("value")),
+            "confidence": 1.0,
+            "semantic_key": f"explicit_emvr_edit:{field}",
+        }
+        for field, update in edits.items()
+    ]
+    return validate_resolved_intent(
+        resolved_intent(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            target=(
+                str(pending_action.get("subject") or "") or None
+                if isinstance(pending_action, dict)
+                else None
+            ),
+            confidence=1.0,
+            source="SEMANTIC_STRUCTURAL_EMVR_RECOVERY",
+            dialogue_acts=acts,
+            actions_authoritative=True,
+        ),
+        pending_action,
+    )
+
+
+def _direct_builder_answer_intent(
+    session: DesignSession,
+    message: str,
+    pending_action: dict[str, Any] | None,
+    turn_intent: dict[str, Any],
+) -> dict[str, Any] | None:
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or not isinstance(pending_action, dict)
+        or pending_action.get("type") != "ANSWER_EMVR_STAGE_QUESTION"
+        or "FALLBACK" not in str(turn_intent.get("source") or "").upper()
+        or _has_persistent_turn_updates(turn_intent)
+    ):
+        return None
+    field = recoverable_pending_field(pending_action)
+    if field not in _DIRECT_BUILDER_FALLBACK_FIELDS:
+        return None
+    answer = str(message or "").strip()
+    if not builder_requirement_value_is_valid(field, answer):
+        return None
+    return validate_resolved_intent(
+        resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=field,
+            resolved_value=answer,
+            confidence=1.0,
+            source="SEMANTIC_EXACT_BUILDER_FALLBACK",
+            semantic_updates={"pending_answer_status": "CLEAR"},
+            dialogue_acts=[
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": field,
+                    "operation": "REPLACE",
+                    "content": answer,
+                    "confidence": 1.0,
+                    "semantic_key": f"exact_builder_fallback:{field}",
+                }
+            ],
+            actions_authoritative=True,
+        ),
+        pending_action,
+    )
 
 
 def _multi_act_student_notice(
@@ -1591,22 +1759,48 @@ def _emvr_entry_reference(
         text = text[:240]
         return text or fallback
 
+    requirements = context.get("emvr_merged_requirements", {})
+    requirements = requirements if isinstance(requirements, dict) else {}
     research_focus = compact(
-        context.get("research_object") or context.get("research_question"),
+        requirements.get("research_object")
+        or context.get("research_object")
+        or context.get("research_question"),
         "当前电磁现象",
     )
+    course_relationship = compact(
+        requirements.get("course_relationship")
+        or context.get("course_relationships"),
+        "已确认的ECE329理论关系",
+    )
     objective = compact(context.get("learning_objective"), "解释核心物理关系")
-    variable = compact(context.get("independent_variable"), "主要可调参数")
-    observations = compact(context.get("observations"), "目标场量或响应")
+    variable = compact(
+        requirements.get("changed_quantities")
+        or context.get("independent_variable"),
+        "主要可调参数",
+    )
+    observations = compact(
+        requirements.get("observed_quantities") or context.get("observations"),
+        "目标场量或响应",
+    )
+    comparisons = compact(
+        requirements.get("comparison_cases"),
+        "不同条件",
+    )
     saved_question = compact(context.get("research_question"), "")
     question = saved_question or f"当{variable}改变时，{observations}将如何变化"
     controls = compact(context.get("controlled_conditions"), "其余物理条件")
     hypothesis = compact(context.get("hypothesis"), "预期变化趋势")
     references: dict[Stage, list[str]] = {
         Stage.LEARNING_OBJECTIVES: [
-            f"概念目标：能够用ECE329关系解释{research_focus}",
-            f"比较目标：能够根据可视化结果判断不同条件下的差异",
-            "交互目标：能够通过VR操作建立参数变化与理论响应之间的对应",
+            (
+                f"概念目标：能够解释{course_relationship}如何决定{research_focus}周围的"
+                f"{observations}随{variable}发生变化"
+            ),
+            f"比较目标：能够依据{observations}判断{comparisons}之间的物理差异",
+            (
+                f"交互目标：能够在VR中调节{variable}并实时观察{observations}，"
+                f"把操作结果与{course_relationship}的预测对应"
+            ),
         ],
         Stage.RESEARCH_QUESTION: [
             f"问题主线：围绕“{question}”组织可调条件与观察响应",
@@ -2074,6 +2268,11 @@ _EMVR_COMPLETION_REPAIR_FIELD_BINDINGS = {
     "controlled_variables": "controlled_conditions",
     "reference_condition": "reference_condition",
     "comparison_logic": "comparison_logic",
+    # Quality review represents canonical comparison bundles with this report
+    # field.  A free-text repair answer cannot safely construct collection
+    # records, so retain the student's chosen baseline in the writable
+    # comparison rationale used by the same readiness check.
+    "baseline_comparisons": "comparison_logic",
     "visualization_requirements": "visualization_plan",
     "student_visualization_requirements": "visualization_plan",
     "if_prediction_supported": "if_prediction_supported",
@@ -2094,6 +2293,27 @@ def _prepare_emvr_completion_repair(
     """Keep a failed EMVR completion attempt actionable and stage-local."""
 
     issues = emvr_stage_completeness_issues(session, stage)
+    if not issues and stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+        quality_review = evaluate_design_quality(session, final_review=True)
+        priority = quality_review.get("priority_issue")
+        if isinstance(priority, dict):
+            fields = priority.get("fields", [])
+            repair_field = (
+                str(fields[0])
+                if isinstance(fields, list) and fields and str(fields[0])
+                else "student_summary"
+            )
+            issues = [
+                {
+                    "field": repair_field,
+                    "label": _STUDENT_FIELD_LABELS.get(
+                        repair_field,
+                        "最终设计一致性",
+                    ),
+                    "question": str(priority.get("student_question") or "").strip()
+                    or "请补充这一项如何服务当前研究问题。",
+                }
+            ]
     if not issues:
         return
     issue = issues[0]
@@ -2736,7 +2956,7 @@ class WorkflowEngine:
             )
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
-            and compact_control in {"继续", "下一步", "确认并继续"}
+            and _is_explicit_emvr_confirmation(compact_control)
             and isinstance(pending, dict)
             and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
             and str(pending.get("candidate_answer") or "").strip()
@@ -2902,12 +3122,34 @@ class WorkflowEngine:
             )
             if scene_recovery is not None:
                 validated = scene_recovery
+            direct_builder_answer = _direct_builder_answer_intent(
+                session,
+                message,
+                pending,
+                validated,
+            )
+            if direct_builder_answer is not None:
+                validated = direct_builder_answer
+            if (
+                not _has_persistent_turn_updates(validated)
+                and not (
+                    self._emvr_formula_first_enabled()
+                    and emvr_formula_flow_active(session)
+                )
+            ):
+                explicit_edit = _explicit_emvr_edit_intent(
+                    session,
+                    message,
+                    pending,
+                )
+                if explicit_edit is not None:
+                    validated = explicit_edit
             # Typed continue controls stay semantic during normal operation.
             # If the semantic service explicitly degraded, however, an exact
             # visible control must not strand a completed stage in a retry
             # loop. Never use this recovery while an unconfirmed candidate is
             # waiting, because that could silently accept student content.
-            compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
+            compact_control = _compact_control_text(message)
             fallback_source = str(validated.get("source") or "").upper()
             pending_type = (
                 str(pending.get("type") or "")
@@ -2919,7 +3161,36 @@ class WorkflowEngine:
                 and str(pending.get("candidate_answer") or "").strip()
             )
             if (
-                compact_control in {"继续", "下一步", "确认并继续"}
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and validated.get("intent")
+                in {
+                    UserIntent.ADVANCE_STAGE.value,
+                    UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                }
+                and pending_type in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
+                and not _is_explicit_emvr_confirmation(compact_control)
+                and not _has_persistent_turn_updates(validated)
+            ):
+                # A model-level control label is insufficient evidence when
+                # the actual turn is not a short confirmation and contains no
+                # executable edit.  Advancing here would silently discard the
+                # student's correction and make the next stage look as if it
+                # had been ignored.
+                validated = validate_resolved_intent(
+                    resolved_intent(
+                        UserIntent.UNCLEAR,
+                        target=(
+                            str(pending.get("subject") or "") or None
+                            if isinstance(pending, dict)
+                            else None
+                        ),
+                        confidence=1.0,
+                        source="SEMANTIC_UNBACKED_CONTROL_REJECTED",
+                    ),
+                    pending,
+                )
+            if (
+                _is_explicit_emvr_confirmation(compact_control)
                 and validated.get("intent") == UserIntent.UNCLEAR.value
                 and "FALLBACK" in fallback_source
                 and not candidate_waiting
@@ -2943,7 +3214,7 @@ class WorkflowEngine:
         # Explicit UI actions still arrive through complete_stage above. An
         # exact visible continue label is also safe when the current pending
         # item is already a confirmation (never an unanswered content field).
-        compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
+        compact_control = _compact_control_text(message)
         pending_type = (
             str(pending.get("type") or "") if isinstance(pending, dict) else ""
         )
@@ -2952,7 +3223,7 @@ class WorkflowEngine:
             and str(pending.get("candidate_answer") or "").strip()
         )
         if (
-            compact_control in {"继续", "下一步", "确认并继续"}
+            _is_explicit_emvr_confirmation(compact_control)
             and pending_type in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
             and not candidate_waiting
         ):
@@ -2969,18 +3240,40 @@ class WorkflowEngine:
                 pending,
             )
         # Other typed language remains an answer instead of being guessed from
-        # keywords.
-        return (
-            validate_resolved_intent(
-                fallback_intent(
-                    message,
-                    pending,
-                    interaction_state=session.interaction_state,
-                ),
+        # topic keywords.  Exact Builder fields and explicitly labelled EMVR
+        # edits use the same narrow recovery as a semantic-service outage, so a
+        # rule-only deployment does not reintroduce the confirmation loop.
+        validated = validate_resolved_intent(
+            fallback_intent(
+                message,
                 pending,
+                interaction_state=session.interaction_state,
             ),
             pending,
         )
+        direct_builder_answer = _direct_builder_answer_intent(
+            session,
+            message,
+            pending,
+            validated,
+        )
+        if direct_builder_answer is not None:
+            validated = direct_builder_answer
+        if (
+            not _has_persistent_turn_updates(validated)
+            and not (
+                self._emvr_formula_first_enabled()
+                and emvr_formula_flow_active(session)
+            )
+        ):
+            explicit_edit = _explicit_emvr_edit_intent(
+                session,
+                message,
+                pending,
+            )
+            if explicit_edit is not None:
+                validated = explicit_edit
+        return validated, pending
 
     @staticmethod
     def _interaction_state_from_intent(
@@ -3991,7 +4284,7 @@ class WorkflowEngine:
             and handled_stage in _EMVR_INTERACTIVE_ENTRY_STAGES
             and (
                 transitioned_from_stage is not None
-                or not handled_stage_seen
+                or (not handled_stage_seen and not has_structured_turn_updates)
                 or interaction_state_changed
             )
         )

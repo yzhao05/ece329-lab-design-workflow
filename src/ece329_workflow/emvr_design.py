@@ -282,6 +282,175 @@ _EMVR_RETAIN_VALUE_LABELS = {
 }
 
 
+def recover_explicit_emvr_edits(
+    message: str,
+    current_values: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Recover narrowly labelled EMVR edits without semantic inference.
+
+    This fallback is intentionally limited to text that names the visible
+    field and an unambiguous operation (for example ``主动变化只保留…`` or
+    ``电荷数量不是可调内容``).  It never assigns an unlabeled sentence to a
+    design field.  A sentence introduced by ``理论关系是`` is likewise bound
+    only to the named course-relationship field.  Objective-detail requests
+    are materialized only from values already confirmed in the current design.
+    """
+
+    text = str(message or "").strip()
+    current = current_values if isinstance(current_values, dict) else {}
+    if not text:
+        return {}
+
+    edits: dict[str, dict[str, Any]] = {}
+    label_patterns = {
+        "changed_quantities": r"(?:主动变化|主动改变|可调内容|可调参数|变化量|自变量)",
+        "observed_quantities": r"(?:观察内容|观察量|观察响应|响应量|观察)",
+    }
+    all_labels = "|".join(label_patterns.values())
+
+    def cleaned_value(raw: str) -> str:
+        return raw.strip().rstrip("，,。；;！!？?").strip()
+
+    for field, label_pattern in label_patterns.items():
+        match = re.search(
+            rf"{label_pattern}[：:]?\s*(?:只|仅)保留(?:为|成)?[：:]?\s*"
+            rf"(?P<value>.+?)(?=(?:[，,；;。]\s*(?:{all_labels})[：:]?\s*"
+            r"(?:只|仅)保留)|[。；;！!？?]*$)",
+            text,
+        )
+        if not match:
+            continue
+        value = cleaned_value(match.group("value"))
+        if not value:
+            continue
+        values = (
+            [
+                cleaned_value(item)
+                for item in re.split(r"[、；;]|(?:和|与)", value)
+                if cleaned_value(item)
+            ]
+            if field == "changed_quantities"
+            else [value]
+        )
+        if values:
+            edits[field] = {"operation": "REPLACE", "value": values}
+
+    excluded = re.search(
+        r"(?P<value>[\u3400-\u9fffA-Za-z0-9_（）()/+\-]{1,30}?)\s*"
+        r"(?:不是|不作为|不应作为)(?:可调内容|可调参数|自变量|变化量)",
+        text,
+    )
+    if excluded:
+        target = cleaned_value(excluded.group("value"))
+        raw_values = current.get("changed_quantities", [])
+        existing = (
+            [str(item).strip() for item in raw_values if str(item).strip()]
+            if isinstance(raw_values, list)
+            else [str(raw_values).strip()] if str(raw_values or "").strip() else []
+        )
+        retained: list[str] = []
+        removed = False
+        for item in existing:
+            parts = [
+                part.strip()
+                for part in re.split(r"[、，,；;]", item)
+                if part.strip()
+            ]
+            next_parts: list[str] = []
+            for part in parts:
+                if target == part or target in part:
+                    subparts = [
+                        subpart.strip()
+                        for subpart in re.split(r"(?:和|与)", part)
+                        if subpart.strip()
+                    ]
+                    kept_subparts = [
+                        subpart
+                        for subpart in subparts
+                        if target != subpart and target not in subpart
+                    ]
+                    if len(kept_subparts) != len(subparts):
+                        removed = True
+                        next_parts.extend(kept_subparts)
+                        continue
+                next_parts.append(part)
+            retained.extend(next_parts)
+        if removed:
+            edits["changed_quantities"] = {
+                "operation": "REPLACE" if retained else "CLEAR",
+                "value": list(dict.fromkeys(retained)),
+            }
+
+    theory_relation = re.search(
+        r"(?:最直接的)?理论关系(?:是|为)[：:]?\s*(?P<value>.+)$",
+        text,
+    )
+    if theory_relation:
+        value = cleaned_value(theory_relation.group("value"))
+        if value:
+            edits["course_relationship"] = {
+                "operation": "REPLACE",
+                "value": value,
+            }
+
+    objective_block = re.search(
+        r"(?:保留|采用|调整为|改为)?(?:这)?(?:四|五)?类?(?:学习)?目标[：:]\s*"
+        r"(?P<value>.+)$",
+        text,
+    )
+    if objective_block:
+        objective_values = [
+            cleaned_value(item)
+            for item in re.split(r"[；;，,]", objective_block.group("value"))
+            if cleaned_value(item)
+        ]
+        if objective_values:
+            edits["learning_objectives"] = {
+                "operation": "REPLACE",
+                "value": objective_values,
+            }
+
+    def joined(field: str, fallback: str) -> str:
+        value = current.get(field)
+        if isinstance(value, list):
+            rendered = "、".join(
+                dict.fromkeys(str(item).strip() for item in value if str(item).strip())
+            )
+        else:
+            rendered = str(value or "").strip()
+        return rendered or fallback
+
+    asks_concept_detail = bool(
+        re.search(r"概念目标[^。；;]{0,40}(?:具体物理|更具体|具体一点|具体一些)", text)
+        or ("对应到具体物理内容" in text and "概念目标" in text)
+    )
+    asks_interaction_detail = bool(
+        re.search(r"(?:交互目标|VR交互目标)[^。；;]{0,40}(?:更具体|具体一点|具体一些|明确)", text)
+    )
+    if asks_concept_detail or asks_interaction_detail:
+        relation = joined("course_relationship", "已确认的ECE329理论关系")
+        research_object = joined("research_object", "实验对象")
+        changed = joined("changed_quantities", "已确认的可调参数")
+        observed = joined("observed_quantities", "已确认的观察响应")
+        if asks_concept_detail:
+            edits["conceptual_objective"] = {
+                "operation": "REPLACE",
+                "value": (
+                    f"解释{relation}如何决定{research_object}周围的{observed}"
+                    f"随{changed}发生变化"
+                ),
+            }
+        if asks_interaction_detail:
+            edits["vr_interaction_objective"] = {
+                "operation": "REPLACE",
+                "value": (
+                    f"在VR中通过控件或直接操作调节{changed}，实时观察{observed}，"
+                    f"并把交互结果与{relation}的预测对应"
+                ),
+            }
+    return edits
+
+
 def clean_emvr_field_text(field_id: str, value: Any) -> str:
     """Remove revision instructions while preserving the actual design value."""
 
