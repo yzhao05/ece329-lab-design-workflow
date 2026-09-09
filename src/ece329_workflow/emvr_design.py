@@ -335,6 +335,42 @@ def recover_explicit_emvr_edits(
         if values:
             edits[field] = {"operation": "REPLACE", "value": values}
 
+    scalar_label_patterns = {
+        "research_question": r"(?:研究问题|问题主线)",
+        "hypothesis": r"(?:研究假设|假设|预测)",
+    }
+    scalar_labels = "|".join(scalar_label_patterns.values())
+    for field, label_pattern in scalar_label_patterns.items():
+        match = re.search(
+            rf"{label_pattern}\s*(?:(?:改成|改为|调整为|设为|是|为)\s*[：:]?|[：:])\s*"
+            rf"(?P<value>.+?)(?=(?:[；;]\s*(?:{scalar_labels})\s*"
+            r"(?:(?:改成|改为|调整为|设为|是|为)\s*[：:]?|[：:]))|$)",
+            text,
+        )
+        if not match:
+            continue
+        raw_value = match.group("value").strip()
+        value = (
+            raw_value.rstrip("，,。；;！!").strip()
+            if field == "research_question"
+            else cleaned_value(raw_value)
+        )
+        question_probe = value.rstrip("？?").strip()
+        if question_probe in {
+            "什么",
+            "是什么",
+            "为什么",
+            "怎么写",
+            "如何表述",
+            "哪些",
+        }:
+            # A question about the field is not the field's replacement value.
+            # Leave it for the student-question path instead of committing a
+            # placeholder such as “研究问题=什么”.
+            continue
+        if value:
+            edits[field] = {"operation": "REPLACE", "value": value}
+
     excluded = re.search(
         r"(?P<value>[\u3400-\u9fffA-Za-z0-9_（）()/+\-]{1,30}?)\s*"
         r"(?:不是|不作为|不应作为)(?:可调内容|可调参数|自变量|变化量)",
@@ -427,6 +463,13 @@ def recover_explicit_emvr_edits(
     asks_interaction_detail = bool(
         re.search(r"(?:交互目标|VR交互目标)[^。；;]{0,40}(?:更具体|具体一点|具体一些|明确)", text)
     )
+    asks_research_question_detail = bool(
+        re.search(
+            r"(?:研究问题|问题主线)[^。；;]{0,40}"
+            r"(?:更具体|具体些|具体一点|具体一些|更明确|明确些)",
+            text,
+        )
+    )
     if asks_concept_detail or asks_interaction_detail:
         relation = joined("course_relationship", "已确认的ECE329理论关系")
         research_object = joined("research_object", "实验对象")
@@ -447,6 +490,16 @@ def recover_explicit_emvr_edits(
                     f"在VR中通过控件或直接操作调节{changed}，实时观察{observed}，"
                     f"并把交互结果与{relation}的预测对应"
                 ),
+            }
+    if asks_research_question_detail and "research_question" not in edits:
+        research_object = joined("research_object", "")
+        changed = joined("changed_quantities", "")
+        observed = joined("observed_quantities", "")
+        if changed and observed:
+            object_clause = f"{research_object}的" if research_object else ""
+            edits["research_question"] = {
+                "operation": "REPLACE",
+                "value": f"当{changed}改变时，{object_clause}{observed}如何变化？",
             }
     return edits
 

@@ -881,6 +881,41 @@ class EmvrFormulaFlowTests(unittest.TestCase):
         self.assertEqual(flow["experiment_brief"]["changed_quantities"], ["距离"])
         self.assertEqual(flow["experiment_brief"]["observed_quantities"], ["场线形态"])
 
+        output, complete = handle_emvr_formula_turn(
+            session,
+            "准确，可以继续",
+            rule_only_fallback,
+        )
+
+        self.assertTrue(complete)
+        self.assertEqual(output.stage_payload["emvr_formula_phase"], EMVR_DETAIL_DESIGN)
+
+    def test_formula_group_number_is_resolved_during_semantic_outage(self) -> None:
+        session = self._session()
+        cards, _ = handle_emvr_formula_turn(
+            session,
+            "我想做一个静电场实验",
+            _formula_intent("SET_EMVR_TOPIC", _topic_analysis()),
+        )
+        failed_intent = resolved_intent(
+            UserIntent.UNCLEAR,
+            confidence=0.62,
+            source="SEMANTIC_SERVICE_FALLBACK_LOCAL_CLARIFICATION",
+        )
+
+        output, _ = handle_emvr_formula_turn(
+            session,
+            "我选第一组，主要研究两个点电荷的场线如何随距离和极性变化",
+            failed_intent,
+        )
+        flow = session.design_context["emvr_design"]["formula_flow"]
+
+        self.assertNotIn("这次课程理解服务没有完成解析", output.assistant_message)
+        self.assertEqual(
+            flow["formula_selection"]["primary_profile_ids"],
+            [cards.stage_payload["formula_cards"][0]["profile_id"]],
+        )
+
     def test_formula_selection_details_are_carried_into_experiment_brief(self) -> None:
         session = self._session()
         cards, _ = handle_emvr_formula_turn(

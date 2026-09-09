@@ -586,6 +586,7 @@ _EXPLICIT_EMVR_CONFIRMATIONS = frozenset(
         "确认方向",
         "准确",
         "准确继续",
+        "准确可以继续",
         "准确并继续",
         "内容准确",
         "内容准确继续",
@@ -653,6 +654,17 @@ def _has_persistent_turn_updates(turn_intent: dict[str, Any]) -> bool:
                 or updates["emvr_design_update"].get("theory_link_updates")
             )
         )
+    )
+
+
+def _has_user_question_or_feedback(turn_intent: dict[str, Any]) -> bool:
+    updates = turn_intent.get("semantic_updates", {})
+    if not isinstance(updates, dict):
+        return False
+    return any(
+        isinstance(updates.get(key), list)
+        and any(str(item).strip() for item in updates[key])
+        for key in ("student_questions", "feedback_items")
     )
 
 
@@ -739,6 +751,202 @@ def _direct_builder_answer_intent(
         ),
         pending_action,
     )
+
+
+def _looks_like_student_question(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"(?:为什么|怎么|如何理解|什么是|请问|请解释|"
+            r"能否|可否|是否意味着|有什么区别|是什么)[^。！!]*[？?]?$",
+            text,
+        )
+    )
+
+
+def _explicit_student_question_intent(
+    session: DesignSession,
+    message: str,
+    pending_action: dict[str, Any] | None,
+    turn_intent: dict[str, Any],
+) -> dict[str, Any] | None:
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or turn_intent.get("intent") != UserIntent.UNCLEAR.value
+        or "FALLBACK" not in str(turn_intent.get("source") or "").upper()
+        or _has_persistent_turn_updates(turn_intent)
+        or not _looks_like_student_question(message)
+    ):
+        return None
+    return validate_resolved_intent(
+        resolved_intent(
+            UserIntent.ASK_COURSE_QUESTION,
+            target=(
+                str(pending_action.get("subject") or "") or None
+                if isinstance(pending_action, dict)
+                else None
+            ),
+            confidence=1.0,
+            source="SEMANTIC_STRUCTURAL_STUDENT_QUESTION_RECOVERY",
+            semantic_updates={"student_questions": [message.strip()]},
+        ),
+        pending_action,
+    )
+
+
+def _direct_emvr_pending_answer_intent(
+    session: DesignSession,
+    message: str,
+    pending_action: dict[str, Any] | None,
+    turn_intent: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Bind an outage answer only for a narrowly safe single-field prompt."""
+
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or "FALLBACK" not in str(turn_intent.get("source") or "").upper()
+        or _has_persistent_turn_updates(turn_intent)
+        or _looks_like_student_question(message)
+    ):
+        return None
+    field = recoverable_pending_field(pending_action)
+    completion_repair = bool(
+        isinstance(pending_action, dict)
+        and str(pending_action.get("required_report_field") or "").strip()
+    )
+    if field not in {"hypothesis", "research_hypothesis"} and not completion_repair:
+        return None
+    answer = str(message or "").strip()
+    if len(answer) < 8 or _is_explicit_emvr_confirmation(_compact_control_text(answer)):
+        return None
+    return validate_resolved_intent(
+        resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=field,
+            resolved_value=answer,
+            confidence=1.0,
+            source="SEMANTIC_STRUCTURAL_SINGLE_FIELD_ANSWER_RECOVERY",
+            semantic_updates={"pending_answer_status": "CLEAR"},
+            dialogue_acts=[
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": field,
+                    "operation": "REPLACE",
+                    "content": answer,
+                    "confidence": 1.0,
+                    "semantic_key": f"single_field_fallback:{field}",
+                }
+            ],
+            actions_authoritative=True,
+        ),
+        pending_action,
+    )
+
+
+def _recover_confirmed_unbound_emvr_candidate(
+    session: DesignSession,
+    message: str,
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Reparse a pre-fix retained candidate after an explicit confirmation."""
+
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or not isinstance(pending_action, dict)
+        or pending_action.get("candidate_binding_authorized") is True
+        or not _is_explicit_emvr_confirmation(_compact_control_text(message))
+    ):
+        return None
+    candidate = str(pending_action.get("candidate_answer") or "").strip()
+    if not candidate:
+        return None
+    recovered = _explicit_emvr_edit_intent(session, candidate, pending_action)
+    if recovered is None:
+        recovered = _direct_emvr_pending_answer_intent(
+            session,
+            candidate,
+            pending_action,
+            resolved_intent(
+                UserIntent.UNCLEAR,
+                confidence=0.62,
+                source="SEMANTIC_SERVICE_FALLBACK_RETAINED_CANDIDATE",
+            ),
+        )
+    if recovered is None:
+        return None
+    updates = recovered.setdefault("semantic_updates", {})
+    if not isinstance(updates, dict):
+        updates = {}
+        recovered["semantic_updates"] = updates
+    controls = updates.get("control_actions", [])
+    controls = list(controls) if isinstance(controls, list) else []
+    if "ADVANCE" not in controls:
+        controls.append("ADVANCE")
+    updates["control_actions"] = controls
+    recovered["advance_requested"] = True
+    recovered["source"] = "SEMANTIC_RECOVERED_RETAINED_EMVR_CANDIDATE"
+    return recovered
+
+
+def _explicit_emvr_advance_requested(message: str) -> bool:
+    compact = _compact_control_text(message)
+    if re.search(
+        r"(?:不可以|不能|不要|先不|暂不|别)(?:继续|进入下一阶段)",
+        compact,
+    ):
+        return False
+    return _is_explicit_emvr_confirmation(compact) or bool(
+        re.search(
+            r"(?:可以继续|并继续|然后继续|后继续|同时继续|进入下一阶段)",
+            compact,
+        )
+    )
+
+
+def _prioritize_emvr_content_before_transition(
+    turn_intent: dict[str, Any],
+    message: str,
+) -> None:
+    """Prevent inferred controls from skipping a correction or student question."""
+
+    updates = turn_intent.get("semantic_updates", {})
+    if not isinstance(updates, dict):
+        return
+    questions = updates.get("student_questions", [])
+    has_questions = bool(
+        isinstance(questions, list) and any(str(item).strip() for item in questions)
+    )
+    feedback = updates.get("feedback_items", [])
+    has_feedback = bool(
+        isinstance(feedback, list) and any(str(item).strip() for item in feedback)
+    )
+    has_edits = _has_persistent_turn_updates(turn_intent)
+    if not has_questions and not has_feedback and (
+        not has_edits or _explicit_emvr_advance_requested(message)
+    ):
+        return
+    controls = updates.get("control_actions", [])
+    if isinstance(controls, list):
+        updates["control_actions"] = [
+            item for item in controls if item not in {"ADVANCE", "ACCEPT"}
+        ]
+    turn_intent.pop("advance_requested", None)
+    if not has_edits and has_questions:
+        turn_intent["intent"] = UserIntent.ASK_COURSE_QUESTION.value
+        turn_intent["source"] = "SEMANTIC_EMVR_QUESTION_BEFORE_TRANSITION"
+        turn_intent["resolved_value"] = None
+    elif not has_edits and has_feedback:
+        turn_intent["intent"] = UserIntent.PROVIDE_FEEDBACK.value
+        turn_intent["source"] = "SEMANTIC_EMVR_FEEDBACK_BEFORE_TRANSITION"
+        turn_intent["resolved_value"] = None
+    if has_edits and turn_intent.get("intent") in {
+        UserIntent.ADVANCE_STAGE.value,
+        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+    }:
+        turn_intent["intent"] = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+        turn_intent["source"] = "SEMANTIC_EMVR_CONTENT_BEFORE_TRANSITION"
 
 
 def _multi_act_student_notice(
@@ -2982,6 +3190,13 @@ class WorkflowEngine:
                 ),
                 pending,
             )
+        recovered_candidate = _recover_confirmed_unbound_emvr_candidate(
+            session,
+            message,
+            pending,
+        )
+        if recovered_candidate is not None:
+            return recovered_candidate, pending
         direct = deterministic_intent(
             message,
             pending,
@@ -3144,6 +3359,23 @@ class WorkflowEngine:
                 )
                 if explicit_edit is not None:
                     validated = explicit_edit
+            question_recovery = _explicit_student_question_intent(
+                session,
+                message,
+                pending,
+                validated,
+            )
+            if question_recovery is not None:
+                validated = question_recovery
+            elif not _has_persistent_turn_updates(validated):
+                direct_pending_answer = _direct_emvr_pending_answer_intent(
+                    session,
+                    message,
+                    pending,
+                    validated,
+                )
+                if direct_pending_answer is not None:
+                    validated = direct_pending_answer
             # Typed continue controls stay semantic during normal operation.
             # If the semantic service explicitly degraded, however, an exact
             # visible control must not strand a completed stage in a retry
@@ -3170,6 +3402,7 @@ class WorkflowEngine:
                 and pending_type in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
                 and not _is_explicit_emvr_confirmation(compact_control)
                 and not _has_persistent_turn_updates(validated)
+                and not _has_user_question_or_feedback(validated)
             ):
                 # A model-level control label is insufficient evidence when
                 # the actual turn is not a short confirmation and contains no
@@ -3273,6 +3506,23 @@ class WorkflowEngine:
             )
             if explicit_edit is not None:
                 validated = explicit_edit
+        question_recovery = _explicit_student_question_intent(
+            session,
+            message,
+            pending,
+            validated,
+        )
+        if question_recovery is not None:
+            validated = question_recovery
+        elif not _has_persistent_turn_updates(validated):
+            direct_pending_answer = _direct_emvr_pending_answer_intent(
+                session,
+                message,
+                pending,
+                validated,
+            )
+            if direct_pending_answer is not None:
+                validated = direct_pending_answer
         return validated, pending
 
     @staticmethod
@@ -3521,6 +3771,8 @@ class WorkflowEngine:
                 request,
                 message,
             )
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            _prioritize_emvr_content_before_transition(turn_intent, message)
         idea_for_direction_lock = session.design_context.get("idea", {})
         semantic_for_direction_lock = turn_intent.get("semantic_updates", {})
         if (
@@ -3718,11 +3970,12 @@ class WorkflowEngine:
         formula_onboarding_output: StepOutput | None = None
         formula_onboarding_should_complete = False
         formula_semantic = turn_intent.get("semantic_updates", {})
-        formula_questions = (
-            formula_semantic.get("student_questions", [])
-            if isinstance(formula_semantic, dict)
-            else []
-        )
+        formula_questions: list[Any] = []
+        if isinstance(formula_semantic, dict):
+            for key in ("student_questions", "feedback_items"):
+                values = formula_semantic.get(key, [])
+                if isinstance(values, list):
+                    formula_questions.extend(values)
         formula_question_pause = bool(
             isinstance(formula_questions, list)
             and any(str(item).strip() for item in formula_questions)

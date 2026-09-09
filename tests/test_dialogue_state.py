@@ -5485,6 +5485,79 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(intent["intent"], UserIntent.ADVANCE_STAGE.value)
         self.assertEqual(intent["source"], "DEGRADED_EXACT_CONTROL_RECOVERY")
 
+    def test_confirmation_recovers_a_legacy_unbound_research_question(self) -> None:
+        candidate = "研究问题改成：当距离改变时，两个点电荷的场线形态如何变化？"
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.RESEARCH_QUESTION.value,
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+            "allowed_intents": [
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session = DesignSession(
+            design_id="emvr_legacy_research_question_candidate",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+            model_context={"dialogue_state": {"pending_action": pending}},
+        )
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+
+        intent, _ = engine._resolve_turn_intent(
+            session,
+            TurnRequest(message="保留这部分并继续"),
+            "保留这部分并继续",
+        )
+
+        updates = intent["semantic_updates"]["emvr_design_update"]["field_updates"]
+        self.assertEqual(intent["intent"], UserIntent.MODIFY_PREVIOUS_PROPOSAL.value)
+        self.assertEqual(intent["source"], "SEMANTIC_RECOVERED_RETAINED_EMVR_CANDIDATE")
+        self.assertEqual(updates[0]["field_id"], "research_question")
+        self.assertEqual(
+            updates[0]["value"],
+            "当距离改变时，两个点电荷的场线形态如何变化？",
+        )
+        self.assertEqual(intent["semantic_updates"]["control_actions"], ["ADVANCE"])
+
+    def test_confirmation_recovers_a_legacy_unbound_hypothesis(self) -> None:
+        candidate = "距离减小时场线弯曲程度增大，异种电荷之间的场线连接更集中。"
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": "research_hypothesis",
+            "answer_fields": ["research_hypothesis"],
+            "candidate_answer": candidate,
+            "candidate_binding_authorized": False,
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session = DesignSession(
+            design_id="emvr_legacy_hypothesis_candidate",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.HYPOTHESIS),
+            model_context={"dialogue_state": {"pending_action": pending}},
+        )
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+
+        intent, _ = engine._resolve_turn_intent(
+            session,
+            TurnRequest(message="保留这部分并继续"),
+            "保留这部分并继续",
+        )
+
+        self.assertEqual(intent["intent"], UserIntent.ANSWER_CURRENT_QUESTION.value)
+        self.assertEqual(intent["target"], "research_hypothesis")
+        self.assertEqual(intent["resolved_value"], candidate)
+        self.assertEqual(intent["source"], "SEMANTIC_RECOVERED_RETAINED_EMVR_CANDIDATE")
+        self.assertEqual(intent["semantic_updates"]["control_actions"], ["ADVANCE"])
+
     def test_labelled_theory_relationship_is_committed_during_outage(self) -> None:
         session = DesignSession(
             design_id="emvr_theory_relationship_outage",
@@ -5541,6 +5614,373 @@ class DialogueStateTests(unittest.TestCase):
         self.assertEqual(stored.current_stage, Stage.THEORETICAL_FRAMEWORK)
         self.assertIn("空间任一点的总电场", values["course_relationship"])
         self.assertIn("距离和电荷类型变化", values["course_relationship"])
+
+    def test_research_question_refinement_is_applied_without_advancing(self) -> None:
+        session = DesignSession(
+            design_id="emvr_research_question_refinement",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+            design_context={
+                "emvr_design": {
+                    "field_state": {
+                        "research_object": "两个点电荷",
+                        "research_question": "我想做一个静电场实验",
+                        "changed_quantities": ["距离", "电荷类型（同种/异种）"],
+                        "observed_quantities": ["场线的合并、扭曲和重排形态"],
+                    }
+                }
+            },
+        )
+        save_pending_action(
+            session,
+            Stage.RESEARCH_QUESTION,
+            StepOutput(
+                assistant_message="请检查研究问题。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.RESEARCH_QUESTION.value,
+                        "question": "这份研究问题是否准确？",
+                        "allowed_intents": [
+                            UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                            UserIntent.ADVANCE_STAGE.value,
+                            UserIntent.UNCLEAR.value,
+                        ],
+                    }
+                },
+            ),
+        )
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "研究问题也更具体些"},
+        )
+        stored = engine.store.get(session.design_id)
+        values = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+
+        self.assertEqual(stored.current_stage, Stage.RESEARCH_QUESTION)
+        self.assertEqual(
+            values["research_question"],
+            (
+                "当距离、电荷类型（同种/异种）改变时，两个点电荷的"
+                "场线的合并、扭曲和重排形态如何变化？"
+            ),
+        )
+        self.assertFalse(result["stage_payload"].get("clarification_required", False))
+
+    def test_labelled_research_question_replaces_only_that_field(self) -> None:
+        session = DesignSession(
+            design_id="emvr_labelled_research_question",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+            design_context={
+                "emvr_design": {
+                    "field_state": {
+                        "research_question": "旧问题",
+                        "changed_quantities": ["距离"],
+                        "observed_quantities": ["场线形态"],
+                    }
+                }
+            },
+        )
+        save_pending_action(
+            session,
+            Stage.RESEARCH_QUESTION,
+            StepOutput(
+                assistant_message="请检查研究问题。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.RESEARCH_QUESTION.value,
+                        "allowed_intents": [
+                            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                            UserIntent.ADVANCE_STAGE.value,
+                            UserIntent.UNCLEAR.value,
+                        ],
+                    }
+                },
+            ),
+        )
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+        engine.store.save(session)
+        expected = "当距离改变时，两个点电荷的场线形态如何变化？"
+
+        engine.process_turn(
+            session.design_id,
+            {"message": f"研究问题改成：{expected}"},
+        )
+        stored = engine.store.get(session.design_id)
+        values = merge_emvr_structured_requirements(
+            stored.design_context["emvr_design"]
+        )
+
+        self.assertEqual(stored.current_stage, Stage.RESEARCH_QUESTION)
+        self.assertEqual(values["research_question"], expected)
+        self.assertEqual(values["changed_quantities"], ["距离"])
+
+    def test_hypothesis_answer_is_committed_during_outage_without_repetition(self) -> None:
+        session = DesignSession(
+            design_id="emvr_hypothesis_outage_answer",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.HYPOTHESIS),
+            design_context={
+                "emvr_design": {
+                    "field_state": {
+                        "research_object": "两个点电荷",
+                        "course_relationship": "库仑定律与叠加原理",
+                        "changed_quantities": ["距离", "电荷类型"],
+                        "observed_quantities": ["场线形态"],
+                    }
+                }
+            },
+        )
+        save_pending_action(
+            session,
+            Stage.HYPOTHESIS,
+            StepOutput(
+                assistant_message="请给出方向性假设。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "ANSWER_EMVR_STAGE_QUESTION",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": "research_hypothesis",
+                        "answer_fields": ["research_hypothesis"],
+                        "question": "主要条件改变时预计出现什么趋势？",
+                        "allowed_intents": [
+                            UserIntent.ANSWER_CURRENT_QUESTION.value,
+                            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                            UserIntent.UNCLEAR.value,
+                        ],
+                    }
+                },
+            ),
+        )
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+        engine.store.save(session)
+        answer = (
+            "距离减小时，场线的弯曲和扭曲程度增大；同种电荷中间形成空白区，"
+            "异种电荷的场线弯曲相连。"
+        )
+
+        result = engine.process_turn(session.design_id, {"message": answer})
+        stored = engine.store.get(session.design_id)
+
+        self.assertEqual(stored.current_stage, Stage.HYPOTHESIS)
+        self.assertEqual(
+            stage_design_state_snapshot(stored)["research_hypothesis"],
+            answer,
+        )
+        self.assertEqual(result["stage_payload"]["research_hypothesis"], answer)
+        self.assertFalse(result["stage_payload"].get("clarification_required", False))
+
+    def test_emvr_edit_is_shown_before_an_inferred_advance(self) -> None:
+        session = DesignSession(
+            design_id="emvr_edit_before_advance",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.LEARNING_OBJECTIVES),
+            design_context={"emvr_design": {"field_state": {}}},
+        )
+        save_pending_action(
+            session,
+            Stage.LEARNING_OBJECTIVES,
+            StepOutput(
+                assistant_message="请检查学习目标。",
+                stage_payload={
+                    "pending_action": {
+                        "type": "CONFIRM_STAGE_OR_MODIFY",
+                        "interaction_state": InteractionState.EMVR_DIRECT.value,
+                        "subject": Stage.LEARNING_OBJECTIVES.value,
+                        "allowed_intents": [
+                            UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                            UserIntent.ADVANCE_STAGE.value,
+                            UserIntent.UNCLEAR.value,
+                        ],
+                    }
+                },
+            ),
+        )
+        generator = ScriptedSemanticGenerator(
+            UserIntent.MODIFY_PREVIOUS_PROPOSAL,
+            semantic_updates={
+                "control_actions": ["ADVANCE"],
+                "emvr_design_update": {
+                    "field_updates": [
+                        {
+                            "field_id": "conceptual_objective",
+                            "operation": "REPLACE",
+                            "value": "解释点电荷合场的矢量叠加",
+                        }
+                    ]
+                },
+            },
+        )
+        engine = WorkflowEngine(generator=generator)
+        engine.store.save(session)
+
+        engine.process_turn(
+            session.design_id,
+            {"message": "这个问题没处理好，不可以继续，概念目标更具体些"},
+        )
+        stored = engine.store.get(session.design_id)
+
+        self.assertEqual(stored.current_stage, Stage.LEARNING_OBJECTIVES)
+        self.assertEqual(
+            merge_emvr_structured_requirements(
+                stored.design_context["emvr_design"]
+            )["conceptual_objective"],
+            "解释点电荷合场的矢量叠加",
+        )
+
+    def test_student_question_is_answered_without_advancing_emvr_stage(self) -> None:
+        session = DesignSession(
+            design_id="emvr_question_before_advance",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.LEARNING_OBJECTIVES),
+            design_context={"emvr_design": {"field_state": {}}},
+        )
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.LEARNING_OBJECTIVES.value,
+            "allowed_intents": [
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context = {"dialogue_state": {"pending_action": pending}}
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "为什么这里要使用电场叠加原理？"},
+        )
+        stored = engine.store.get(session.design_id)
+
+        self.assertEqual(stored.current_stage, Stage.LEARNING_OBJECTIVES)
+        self.assertEqual(
+            result["stage_payload"]["answered_student_questions"],
+            ["为什么这里要使用电场叠加原理？"],
+        )
+        self.assertTrue(result["stage_payload"]["preserve_pending_action"])
+
+    def test_semantic_student_question_overrides_model_advance_signal(self) -> None:
+        session = DesignSession(
+            design_id="emvr_semantic_question_before_advance",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.LEARNING_OBJECTIVES),
+            design_context={"emvr_design": {"field_state": {}}},
+        )
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.LEARNING_OBJECTIVES.value,
+            "allowed_intents": [
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context = {"dialogue_state": {"pending_action": pending}}
+        question = "为什么这里要使用电场叠加原理？"
+        engine = WorkflowEngine(
+            generator=ScriptedSemanticGenerator(
+                UserIntent.ADVANCE_STAGE,
+                semantic_updates={
+                    "student_questions": [question],
+                    "control_actions": ["ADVANCE"],
+                },
+            )
+        )
+        engine.store.save(session)
+
+        result = engine.process_turn(session.design_id, {"message": question})
+        stored = engine.store.get(session.design_id)
+
+        self.assertEqual(stored.current_stage, Stage.LEARNING_OBJECTIVES)
+        self.assertEqual(result["stage_payload"]["answered_student_questions"], [question])
+        self.assertTrue(result["stage_payload"]["preserve_pending_action"])
+
+    def test_question_about_research_question_is_not_committed_as_its_value(self) -> None:
+        session = DesignSession(
+            design_id="emvr_question_about_research_question",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.RESEARCH_QUESTION),
+            design_context={
+                "emvr_design": {"field_state": {"research_question": "已确认的研究问题"}}
+            },
+        )
+        pending = {
+            "type": "CONFIRM_STAGE_OR_MODIFY",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.RESEARCH_QUESTION.value,
+            "allowed_intents": [
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ADVANCE_STAGE.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context = {"dialogue_state": {"pending_action": pending}}
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+        engine.store.save(session)
+
+        result = engine.process_turn(
+            session.design_id,
+            {"message": "研究问题是什么？"},
+        )
+        stored = engine.store.get(session.design_id)
+
+        self.assertEqual(
+            merge_emvr_structured_requirements(
+                stored.design_context["emvr_design"]
+            )["research_question"],
+            "已确认的研究问题",
+        )
+        self.assertEqual(
+            result["stage_payload"]["answered_student_questions"],
+            ["研究问题是什么？"],
+        )
+
+    def test_completion_repair_answer_commits_during_semantic_outage(self) -> None:
+        session = DesignSession(
+            design_id="emvr_completion_repair_outage",
+            interaction_state=InteractionState.EMVR_DIRECT,
+            current_stage_index=list(Stage).index(Stage.EXPECTED_DATA_VISUALIZATION),
+            design_context={"emvr_design": {"field_state": {}}},
+        )
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": Stage.EXPECTED_DATA_VISUALIZATION.value,
+            "answer_fields": ["visualization_plan"],
+            "required_report_field": "visualization_requirements",
+            "question": "请明确显示方式。",
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        session.model_context = {"dialogue_state": {"pending_action": pending}}
+        engine = WorkflowEngine(generator=SemanticOutageGenerator())
+        engine.store.save(session)
+        answer = "用统一色标的场强颜色图和合场矢量箭头同步显示。"
+
+        engine.process_turn(session.design_id, {"message": answer})
+        stored = engine.store.get(session.design_id)
+
+        self.assertEqual(
+            stage_design_state_snapshot(stored)["visualization_plan"],
+            answer,
+        )
 
     def test_confirmation_question_recovers_a_substantive_revision_by_context(self) -> None:
         supplement = (

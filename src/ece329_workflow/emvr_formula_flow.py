@@ -1023,6 +1023,23 @@ def _semantic_service_failed(turn_intent: dict[str, Any]) -> bool:
     return "FALLBACK" in source
 
 
+def _is_direction_confirmation(message: str) -> bool:
+    compact = re.sub(r"[\s，,。；;！!？?：:]+", "", str(message or ""))
+    return compact in {
+        "继续",
+        "确认",
+        "确认继续",
+        "确认并继续",
+        "准确",
+        "准确继续",
+        "准确可以继续",
+        "准确并继续",
+        "保留这部分并继续",
+        "沿用这部分并继续",
+        "按这版继续",
+    }
+
+
 def _recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | None:
     """Build a non-authoritative topic seed from curated course retrieval.
 
@@ -1117,14 +1134,33 @@ def _formula_selection_from_visible_card_reference(
         )
         if str(item)
     )
-    matches = [
-        str(card.get("profile_id") or "")
-        for card in flow.get("formula_cards", [])
-        if isinstance(card, dict)
-        and str(card.get("profile_id") or "") in candidates
-        and (title := "".join(str(card.get("title") or "").split()).casefold())
-        and title in compact_message
-    ]
+    numeral_by_index = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六"}
+    matches = []
+    for index, card in enumerate(flow.get("formula_cards", []), start=1):
+        if not isinstance(card, dict):
+            continue
+        profile_id = str(card.get("profile_id") or "")
+        if profile_id not in candidates:
+            continue
+        title = "".join(str(card.get("title") or "").split()).casefold()
+        ordinal_tokens = {
+            f"第{index}组",
+            f"选第{index}组",
+            f"选择第{index}组",
+        }
+        if index in numeral_by_index:
+            numeral = numeral_by_index[index]
+            ordinal_tokens.update(
+                {
+                    f"第{numeral}组",
+                    f"选第{numeral}组",
+                    f"选择第{numeral}组",
+                }
+            )
+        if (title and title in compact_message) or any(
+            token in compact_message for token in ordinal_tokens
+        ):
+            matches.append(profile_id)
     matches = list(dict.fromkeys(item for item in matches if item))
     if len(matches) != 1:
         return None
@@ -1477,6 +1513,7 @@ def handle_emvr_formula_turn(
     outage_composition: dict[str, Any] | None = None
     outage_method_selection: dict[str, Any] | None = None
     outage_direction_revision: dict[str, Any] | None = None
+    outage_direction_lock: dict[str, Any] | None = None
     outage_topic_recovery: dict[str, Any] | None = None
     if _semantic_service_failed(turn_intent):
         dialogue = session.model_context.get("dialogue_state", {})
@@ -1520,6 +1557,8 @@ def handle_emvr_formula_turn(
                 flow,
             )
         elif phase == EXPERIMENT_DIRECTION_REVIEW:
+            if _is_direction_confirmation(message):
+                outage_direction_lock = {}
             recovered_updates = recover_explicit_emvr_edits(
                 message,
                 flow.get("experiment_brief", {}),
@@ -1546,6 +1585,7 @@ def handle_emvr_formula_turn(
             and outage_composition is None
             and outage_method_selection is None
             and outage_direction_revision is None
+            and outage_direction_lock is None
         ):
             return (
                 StepOutput(
@@ -2051,7 +2091,11 @@ def handle_emvr_formula_turn(
             outage_direction_revision
             or _selected_action(turn_intent, "REVISE_EMVR_DIRECTION")
         )
-        lock_action = _selected_action(turn_intent, "LOCK_EMVR_DIRECTION")
+        lock_action = (
+            outage_direction_lock
+            if outage_direction_lock is not None
+            else _selected_action(turn_intent, "LOCK_EMVR_DIRECTION")
+        )
         semantic_updates = turn_intent.get("semantic_updates", {})
         controls = set(semantic_updates.get("control_actions", [])) \
             if isinstance(semantic_updates, dict) and isinstance(semantic_updates.get("control_actions"), list) \

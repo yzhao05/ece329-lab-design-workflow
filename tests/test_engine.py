@@ -2174,7 +2174,7 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertNotIn(supplement, refined["stage_payload"]["original_idea"])
         self.assertNotIn(second_supplement, refined["stage_payload"]["original_idea"])
 
-    def test_modify_and_advance_keeps_emvr_revision_in_the_stage_it_modified(self) -> None:
+    def test_model_only_advance_does_not_skip_emvr_revision_review(self) -> None:
         generator = ContextAwareEMVRGenerator()
         engine = WorkflowEngine(generator=generator)
         result = engine.create_design(
@@ -2219,7 +2219,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
         self.assertEqual(
             advanced["current_stage"],
-            Stage.COURSE_MAPPING_AND_DIRECTION.value,
+            Stage.IDEA_BRAINSTORMING.value,
         )
         stored = engine.store.get(result["design_id"])
         stage_inputs = stored.design_context["emvr_design"]["stage_inputs"]
