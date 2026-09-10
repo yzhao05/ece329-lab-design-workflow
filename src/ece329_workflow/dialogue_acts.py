@@ -793,6 +793,18 @@ def apply_stage_field_updates(
     if not isinstance(field_provenance, dict):
         field_provenance = {}
         state["field_provenance"] = field_provenance
+    explicitly_cleared = {
+        str(item)
+        for item in state.get("explicitly_cleared_fields", [])
+        if str(item) in STAGE_ACT_FIELDS
+    } if isinstance(state.get("explicitly_cleared_fields", []), list) else set()
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    emvr_explicitly_cleared = {
+        str(item)
+        for item in emvr.get("explicitly_cleared_fields", [])
+        if str(item)
+    } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
     changed: list[str] = []
     for item in updates:
         if not isinstance(item, dict):
@@ -805,7 +817,11 @@ def apply_stage_field_updates(
             "CLEAR",
         }:
             continue
-        value = "" if operation == "CLEAR" else _text(item.get("value"))[:4000]
+        # The approved implementation is a complete document, not a short
+        # conversational field. Truncating it silently discarded its tail.
+        value = "" if operation == "CLEAR" else _text(item.get("value"))
+        if field not in BUILDER_REQUIREMENT_FIELDS and field != "procedure_steps":
+            value = value[:4000]
         if operation != "CLEAR" and not value:
             continue
         update_id = str(item.get("update_id") or "").strip() or _act_identity(
@@ -815,8 +831,25 @@ def apply_stage_field_updates(
             value,
         )
         if update_id in known_ids:
-            continue
-        previous = _text(state.get(field))
+            already_matches_current_state = (
+                operation == "CLEAR" and field in explicitly_cleared
+            ) or (
+                operation != "CLEAR"
+                and field not in explicitly_cleared
+                and field not in emvr_explicitly_cleared
+                and (
+                    _text(state.get(field)) == value
+                    or (
+                        operation == "MERGE"
+                        and value.replace(" ", "") in _text(state.get(field)).replace(" ", "")
+                    )
+                )
+            )
+            if already_matches_current_state:
+                continue
+        previous = "" if field in emvr_explicitly_cleared else _text(state.get(field))
+        was_explicitly_cleared = field in explicitly_cleared
+        was_emvr_explicitly_cleared = field in emvr_explicitly_cleared
         signature = str(item.get("semantic_key") or "").strip().casefold()
         if not signature:
             signature = "".join(value.split()).casefold()
@@ -828,17 +861,32 @@ def apply_stage_field_updates(
         )
         if operation == "CLEAR":
             next_value = ""
+            explicitly_cleared.add(field)
         elif operation == "REPLACE" or not previous:
             next_value = value
+            explicitly_cleared.discard(field)
+            emvr_explicitly_cleared.discard(field)
         elif signature and signature in known_signatures:
             next_value = previous
+            explicitly_cleared.discard(field)
+            emvr_explicitly_cleared.discard(field)
         elif not value or value.replace(" ", "") in previous.replace(" ", ""):
             next_value = previous
+            explicitly_cleared.discard(field)
+            emvr_explicitly_cleared.discard(field)
         else:
             next_value = f"{previous}；补充：{value}"
+            explicitly_cleared.discard(field)
+            emvr_explicitly_cleared.discard(field)
         known_ids.add(update_id)
         applied_ids.append(update_id)
-        if next_value != previous:
+        clear_marker_changed = was_explicitly_cleared != (
+            field in explicitly_cleared
+        )
+        emvr_clear_marker_changed = was_emvr_explicitly_cleared != (
+            field in emvr_explicitly_cleared
+        )
+        if next_value != previous or clear_marker_changed or emvr_clear_marker_changed:
             state[field] = next_value
             changed.append(field)
             records = field_provenance.get(field, [])
@@ -865,6 +913,9 @@ def apply_stage_field_updates(
         state["last_updated_stage"] = stage.value
     state["applied_update_ids"] = applied_ids[-240:]
     state["semantic_signatures"] = semantic_signatures
+    state["explicitly_cleared_fields"] = sorted(explicitly_cleared)
+    if emvr:
+        emvr["explicitly_cleared_fields"] = sorted(emvr_explicitly_cleared)
     return list(dict.fromkeys(changed))
 
 
@@ -873,3 +924,32 @@ def stage_design_state_snapshot(session: DesignSession) -> dict[str, str]:
     if not isinstance(state, dict):
         return {field: "" for field in STAGE_ACT_FIELD_ORDER}
     return {field: _text(state.get(field)) for field in STAGE_ACT_FIELD_ORDER}
+
+
+def reconcile_stage_clear_markers(
+    session: DesignSession,
+    updates: Any,
+) -> None:
+    """Let a later canonical EMVR write supersede an older stage-field clear."""
+
+    if not isinstance(updates, list):
+        return
+    state = session.design_context.get("stage_design_state", {})
+    if not isinstance(state, dict):
+        return
+    cleared = state.get("explicitly_cleared_fields", [])
+    if not isinstance(cleared, list):
+        return
+    cleared_fields = {str(item) for item in cleared if str(item)}
+    for item in updates:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field_id") or item.get("field") or "")
+        operation = str(item.get("operation") or "").upper()
+        if (
+            field in cleared_fields
+            and operation in {"REPLACE", "MERGE"}
+            and item.get("value") not in (None, "", [], {})
+        ):
+            cleared_fields.discard(field)
+    state["explicitly_cleared_fields"] = sorted(cleared_fields)

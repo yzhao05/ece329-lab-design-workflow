@@ -38,6 +38,11 @@ from .builder_requirements import (
     is_resolved_design_value,
     validate_builder_requirements,
 )
+from .builder_defaults import (
+    IMPLEMENTATION_DEFAULTS_FIELD,
+    measurement_disables_probe,
+    measurement_is_qualitative_only,
+)
 
 
 _FIELD_LABELS = {
@@ -115,6 +120,7 @@ _FIELD_LABELS = {
     "unity_update_event": "Unity更新触发",
     "series_encoding": "系列区分与面板联动",
     "measurement_specifications": "指标与空间测量定义",
+    "numerical_model_specifications": "数值算法与边界契约",
     "if_prediction_supported": "符合预期时",
     "if_opposite_trend": "趋势相反时",
     "if_no_clear_change": "变化不明显时",
@@ -238,6 +244,7 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.EXPECTED_DATA_VISUALIZATION: (
         "student_visualization_requirements",
         "measurement_specifications",
+        "numerical_model_specifications",
         "trend_annotation",
         "series_encoding",
         "unity_update_event",
@@ -296,35 +303,90 @@ _EMVR_CLEAR_REPORT_BINDINGS: dict[Stage, dict[str, tuple[str, ...]]] = {
         "observed_quantities": ("observable_quantity_in_vr",),
         "comparison_cases": ("comparison_cases",),
     },
+    Stage.THEORETICAL_FRAMEWORK: {
+        field: (field,)
+        for field in (
+            "physical_mechanism",
+            "simulation_inputs",
+            "calculated_outputs",
+            "reference_condition",
+        )
+    },
+    Stage.HYPOTHESIS: {
+        "hypothesis": ("research_hypothesis",),
+        "research_hypothesis": ("research_hypothesis",),
+        "expected_trend": ("expected_trend",),
+        "limiting_cases": ("limiting_cases",),
+    },
     Stage.CONCEPTUAL_OR_VR_SETUP: {
         "required_behaviors": ("interactions",),
         "desktop_interaction_plan": ("desktop_interaction_plan",),
         "room_spatial_requirements": ("room_spatial_requirements",),
         "hidden_object_lifecycle": ("hidden_object_lifecycle",),
         "initial_reset_state": ("initial_reset_state",),
+        "physics_layer": ("physics_layer",),
+        "visualization_layer": ("visualization_layer",),
+        "measurement_interface": ("measurement_interface",),
     },
     Stage.VARIABLES_AND_CONDITIONS: {
         "changed_quantities": ("independent_variable",),
+        "independent_variable": ("independent_variable",),
         "observed_quantities": ("dependent_variable",),
+        "observations": ("dependent_variable",),
+        "controlled_conditions": ("controlled_variables",),
         "parameter_specifications": ("parameter_specifications",),
         "model_constants_and_media": ("model_constants_and_media",),
+        "reference_condition": ("reference_condition",),
     },
     Stage.CONCEPTUAL_PROCEDURE: {
         "procedure_steps": ("procedure_steps",),
+        "comparison_logic": ("comparison_logic",),
     },
     Stage.EXPECTED_DATA_VISUALIZATION: {
         "visualization_requirements": ("student_visualization_requirements",),
+        "visualization_plan": ("student_visualization_requirements",),
         "measurement_specifications": ("measurement_specifications",),
+        "numerical_model_specifications": ("numerical_model_specifications",),
+        "trend_annotation": ("trend_annotation",),
+        "unity_update_event": ("unity_update_event",),
     },
     Stage.RESULT_INTERPRETATION: {
         "expected_results": ("expected_results",),
         "acceptance_criteria": ("acceptance_criteria",),
         "report_questions": ("report_questions",),
+        "result_interpretation": ("student_result_interpretation",),
+        "if_prediction_supported": ("if_prediction_supported",),
+        "if_opposite_trend": ("if_opposite_trend",),
+        "if_no_clear_change": ("if_no_clear_change",),
     },
     Stage.DESIGN_VALUE_AND_LIMITATIONS: {
         "limitations": ("limitations",),
+        "conceptual_feasibility": ("conceptual_feasibility",),
+        "teaching_value": ("teaching_value",),
+        "vr_added_value": ("vr_added_value",),
     },
 }
+
+# These fields describe a previous workflow response, not the experiment.  A
+# stored stage payload may contain them because the engine decorates each turn
+# before persistence.  Carrying them into a later report projection can embed
+# an obsolete report inside the new report and make removed values appear to
+# survive through that nested snapshot.
+_TRANSIENT_REPORT_PAYLOAD_FIELDS = frozenset(
+    {
+        "emvr_report_section",
+        "builder_handoff_status",
+        "quality_review",
+        "design_version",
+        "design_state",
+        "stage_design_state",
+        "pending_action",
+        "decision_options",
+        "awaiting_user_design_input",
+        "builder_requirement_field",
+        "default_implementation_contract",
+    }
+)
 
 _LATIN_RUN = re.compile(
     r"[A-Za-z0-9_./:+()=\-*'|^<>]+(?:\s+[A-Za-z0-9_./:+()=\-*'|^<>]+)*"
@@ -387,6 +449,19 @@ def _pdf_safe_formula_text(value: Any) -> str:
     """Replace formula glyphs that CID fonts render unreliably."""
 
     text = str(value or "")
+    superscript_translation = str.maketrans(
+        "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻",
+        "0123456789+-",
+    )
+    text = re.sub(
+        r"[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+",
+        lambda match: (
+            f"^{match.group(0).translate(superscript_translation)}"
+            if len(match.group(0)) == 1 and match.group(0).isdigit()
+            else f"^({match.group(0).translate(superscript_translation)})"
+        ),
+        text,
+    )
     for source, target in _FORMULA_CHARACTER_REPLACEMENTS.items():
         text = text.replace(source, target)
     return text
@@ -607,6 +682,13 @@ def effective_experiment_brief(session: DesignSession) -> dict[str, Any]:
         for field in emvr.get("explicitly_cleared_fields", [])
         if str(field)
     } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
+    raw_stage_state = session.design_context.get("stage_design_state", {})
+    raw_stage_state = raw_stage_state if isinstance(raw_stage_state, dict) else {}
+    stage_explicitly_cleared = raw_stage_state.get("explicitly_cleared_fields", [])
+    if isinstance(stage_explicitly_cleared, list):
+        explicitly_cleared.update(
+            str(field) for field in stage_explicitly_cleared if str(field)
+        )
 
     def values(field: str) -> list[str]:
         # A field-level CLEAR is newer and more authoritative than the
@@ -826,6 +908,8 @@ def effective_emvr_stage_payload(
     stored = session.stage_outputs.get(stage.value, {})
     payload = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
     payload = deepcopy(payload) if isinstance(payload, dict) else {}
+    for transient_field in _TRANSIENT_REPORT_PAYLOAD_FIELDS:
+        payload.pop(transient_field, None)
     emvr = session.design_context.get("emvr_design", {})
     emvr = emvr if isinstance(emvr, dict) else {}
     requirements = merge_emvr_structured_requirements(emvr)
@@ -834,6 +918,13 @@ def effective_emvr_stage_payload(
         for field in emvr.get("explicitly_cleared_fields", [])
         if str(field)
     } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
+    raw_stage_state = session.design_context.get("stage_design_state", {})
+    raw_stage_state = raw_stage_state if isinstance(raw_stage_state, dict) else {}
+    stage_explicitly_cleared = raw_stage_state.get("explicitly_cleared_fields", [])
+    if isinstance(stage_explicitly_cleared, list):
+        explicitly_cleared.update(
+            str(field) for field in stage_explicitly_cleared if str(field)
+        )
     clear_bindings = _EMVR_CLEAR_REPORT_BINDINGS.get(stage, {})
     for canonical_field in explicitly_cleared:
         for report_field in clear_bindings.get(canonical_field, ()):
@@ -996,10 +1087,14 @@ def effective_emvr_stage_payload(
         if context["point_charge"]:
             payload["primary_topic"] = "Static electric fields - Coulomb's and Gauss's laws"
             payload["secondary_topics"] = ["Coulomb field", "Electric-field superposition"]
-            payload["course_relationship"] = (
-                "ECE329 Lecture 2 的库仑点电荷场给出单个场源贡献，矢量叠加原理将两个"
-                "场源贡献合成为 E_total；合场的空间方向直接决定场线弯曲、连接与中间低密度区。"
-            )
+            if (
+                "course_relationship" not in explicitly_cleared
+                and not _plain(payload.get("course_relationship"))
+            ):
+                payload["course_relationship"] = (
+                    "ECE329 Lecture 2 的库仑点电荷场给出单个场源贡献，矢量叠加原理将两个"
+                    "场源贡献合成为 E_total；合场的空间方向直接决定场线弯曲、连接与中间低密度区。"
+                )
             payload["selection_reason"] = (
                 f"以{changed}作为模型输入，分别计算两个点电荷的库仑场并进行矢量叠加，"
                 f"再用{observed}检验同号与异号配置的空间差异。"
@@ -1043,6 +1138,8 @@ def effective_emvr_stage_payload(
                 ),
             }
             for field, replacement in replacements.items():
+                if field in explicitly_cleared:
+                    continue
                 current = _plain(payload.get(field))
                 if not current or any(
                     marker in current
@@ -1149,7 +1246,10 @@ def effective_emvr_stage_payload(
         # than copying the hypothesis into both final-report rows.
         set_if("expected_trend", expected_trend)
         set_if("limiting_cases", stage_state.get("limiting_cases"))
-        if "具体方向以已确认假设为准" in _plain(payload.get("expected_trend")):
+        if (
+            "expected_trend" not in explicitly_cleared
+            and "具体方向以已确认假设为准" in _plain(payload.get("expected_trend"))
+        ):
             payload["expected_trend"] = (
                 "距离由远到近时，同号电荷中间的场线向外弯曲并形成扩大的低密度区；"
                 "异号电荷的场线由正电荷连接至负电荷，连接密度随距离缩短而增加。"
@@ -1159,7 +1259,7 @@ def effective_emvr_stage_payload(
                     "逐项比较的方向性变化。"
                 )
             )
-        if context["point_charge"] and (
+        if context["point_charge"] and "limiting_cases" not in explicitly_cleared and (
             not payload.get("limiting_cases")
             or _plain(payload.get("limiting_cases"))
             in {"基准条件；参数下限；参数上限或模型失效边界", "基准条件;参数下限;参数上限或模型失效边界"}
@@ -1182,33 +1282,87 @@ def effective_emvr_stage_payload(
             or payload.get("interactions")
             or requirements.get("required_behaviors"),
         )
+        measurement_contract = (
+            stage_state.get("measurement_specifications")
+            or requirements.get("measurement_specifications")
+        )
         if context["point_charge"]:
-            payload["physics_layer"] = {
-                "user_inputs": "两点电荷世界坐标、电荷量大小、电荷符号配置与由坐标计算的间距 d",
-                "calculated_outputs": "规则采样点上的 E_A、E_B、E_total=E_A+E_B、|E_total| 及由合场方向积分得到的场线",
-                "model_type": "库仑点电荷场逐点计算与矢量叠加；场线仅由当前合场数值积分生成",
-                "real_time_updates": "点电荷释放或符号切换后重算场网格、场线、方向箭头、统一色标和对比曲线",
-                "parameter_limits": context["specifications"] or "使用变量章节确认的距离范围、单位和离散电荷配置",
-                "invalid_conditions": "采样点进入电荷排除半径或间距超界时停止该点计算，保留上一有效状态并显示原因",
-            }
-            payload["visualization_layer"] = [
-                {
-                    "visual_element": "电场线与箭头",
-                    "physical_quantity": "E_total 的局部方向及同号排斥、异号连接的拓扑形态",
-                    "calculated_or_illustrative": "由同一组库仑场采样值实时生成；场线种子数量固定",
-                },
-                {
-                    "visual_element": "统一颜色标尺",
-                    "physical_quantity": "|E_total| 的归一化强度区间",
-                    "calculated_or_illustrative": "同号/异号及远/中/近距离共用同一量程，避免自动缩放造成假差异",
-                },
-            ]
-            payload["measurement_interface"] = [
-                "当前距离 d（米）与电荷配置（同号/异号）",
-                "选定采样点的 E_x、E_y、E_z 与 |E_total|",
-                "远、中、近距离快照及同一距离下的同号/异号并排比较",
-                "场线形态指标、预期状态、模型有效性与重置状态",
-            ]
+            physics_cleared = "physics_layer" in explicitly_cleared
+            visualization_cleared = "visualization_layer" in explicitly_cleared
+            measurement_interface_cleared = (
+                "measurement_interface" in explicitly_cleared
+            )
+            if not physics_cleared:
+                payload.setdefault(
+                    "physics_layer",
+                    {
+                        "user_inputs": "两点电荷世界坐标、电荷量大小、电荷符号配置与由坐标计算的间距 d",
+                        "calculated_outputs": "规则采样点上的 E_A、E_B、E_total=E_A+E_B、|E_total| 及由合场方向积分得到的场线",
+                        "model_type": "库仑点电荷场逐点计算与矢量叠加；场线仅由当前合场数值积分生成",
+                        "real_time_updates": "点电荷释放或符号切换后重算场网格、场线、方向箭头、统一色标和对比曲线",
+                        "parameter_limits": context["specifications"] or "使用变量章节确认的距离范围、单位和离散电荷配置",
+                        "invalid_conditions": "采样点进入电荷排除半径或间距超界时停止该点计算，保留上一有效状态并显示原因",
+                    },
+                )
+            if not visualization_cleared:
+                payload.setdefault(
+                    "visualization_layer",
+                    [
+                        {
+                            "visual_element": "电场线与箭头",
+                            "physical_quantity": "E_total 的局部方向及同号排斥、异号连接的拓扑形态",
+                            "calculated_or_illustrative": "由同一组库仑场采样值实时生成；场线种子数量固定",
+                        },
+                        {
+                            "visual_element": "统一颜色标尺",
+                            "physical_quantity": "|E_total| 的归一化强度区间",
+                            "calculated_or_illustrative": "同号/异号及远/中/近距离共用同一量程，避免自动缩放造成假差异",
+                        },
+                    ],
+                )
+            if (
+                measurement_is_qualitative_only(measurement_contract)
+                and not visualization_cleared
+            ):
+                payload["visualization_layer"] = [
+                    {
+                        "visual_element": "统一视角的电场线与方向箭头",
+                        "physical_quantity": "E_total 的方向和空间拓扑",
+                        "calculated_or_illustrative": (
+                            "由同一组库仑场采样值生成；固定场线种子数、色标和视角，"
+                            "只按已确认类别作定性比较"
+                        ),
+                    },
+                    {
+                        "visual_element": "定性快照比较面板",
+                        "physical_quantity": "连接、弯曲、发散或低密度区等已确认分类",
+                        "calculated_or_illustrative": "不创建数值纵轴、形态指标或理论曲线",
+                    },
+                ]
+                physics_layer = payload.get("physics_layer")
+                if isinstance(physics_layer, dict):
+                    physics_layer["real_time_updates"] = (
+                        "点电荷释放或符号切换后重算场网格、场线、方向箭头、统一色标和结果面板"
+                    )
+            if (
+                measurement_disables_probe(measurement_contract)
+                and not measurement_interface_cleared
+            ):
+                payload["measurement_interface"] = [
+                    "当前自变量、比较配置、快照编号与模型有效性状态",
+                    "不创建或显示空间探针及点场强读数；面板明确标注该测量不适用",
+                    "按已确认的定性判据比较统一视图中的空间形态",
+                ]
+            elif (
+                not measurement_interface_cleared
+                and not _plain(payload.get("measurement_interface"))
+            ):
+                payload["measurement_interface"] = [
+                    "当前距离 d（米）与电荷配置（同号/异号）",
+                    "选定采样点的 E_x、E_y、E_z 与 |E_total|",
+                    "远、中、近距离快照及同一距离下的同号/异号并排比较",
+                    "场线形态指标、预期状态、模型有效性与重置状态",
+                ]
     elif stage is Stage.VARIABLES_AND_CONDITIONS:
         changed = requirements.get("changed_quantities") or stage_state.get("independent_variable")
         observed = requirements.get("observed_quantities") or stage_state.get("observations")
@@ -1238,7 +1392,7 @@ def effective_emvr_stage_payload(
     elif stage is Stage.CONCEPTUAL_PROCEDURE:
         latest_steps = requirements.get("procedure_steps")
         latest_steps = latest_steps if isinstance(latest_steps, list) else []
-        if len(latest_steps) >= 5:
+        if latest_steps:
             set_bound("procedure_steps", "procedure_steps", latest_steps)
         student_steps = stage_state.get("procedure_steps")
         if student_steps:
@@ -1261,19 +1415,53 @@ def effective_emvr_stage_payload(
             stage_state.get("measurement_specifications")
             or requirements.get("measurement_specifications"),
         )
+        set_bound(
+            "numerical_model_specifications",
+            "numerical_model_specifications",
+            stage_state.get("numerical_model_specifications"),
+        )
         set_if("unity_update_event", stage_state.get("unity_update_event"))
         if context["point_charge"]:
-            payload["trend_annotation"] = (
-                "横轴按距离 d（米）递增；同号与异号配置使用固定且可辨识的两种颜色。"
-                "每个采样点标注场线形态指标和假设中的预期状态，并保持纵轴与色标范围不变。"
+            measurement_contract = (
+                stage_state.get("measurement_specifications")
+                or requirements.get("measurement_specifications")
             )
-            payload["series_encoding"] = (
-                "同号/异号两条理论曲线使用固定图例；面板同步显示当前距离、电荷配置、"
-                "场线形态指标、预期状态以及当前快照编号。"
-            )
-            payload["unity_update_event"] = (
-                "OnChargeMoved 或 OnChargeTypeChanged -> RecalculateField -> RefreshFieldLinesAndPlot"
-            )
+            qualitative_only = measurement_is_qualitative_only(measurement_contract)
+            if qualitative_only:
+                qualitative_annotation = _plain(stage_state.get("trend_annotation"))
+                if "trend_annotation" not in explicitly_cleared:
+                    payload["trend_annotation"] = (
+                        qualitative_annotation
+                        if qualitative_annotation
+                        and re.search(
+                            r"(?:定性|不生成|不设置|无)(?:[^。；]{0,20})(?:纵轴|曲线|指标)",
+                            qualitative_annotation,
+                        )
+                        else (
+                            "该观察量只作定性分类，不设置数值纵轴或理论曲线；所有快照使用相同视角、"
+                            "场线种子数和色标，并按已确认判据比较。"
+                        )
+                    )
+                payload["series_encoding"] = (
+                    "不生成曲线；Results 面板按比较配置列出快照编号、定性类别和判定依据。"
+                )
+            else:
+                if "trend_annotation" not in explicitly_cleared:
+                    payload.setdefault(
+                        "trend_annotation",
+                        "横轴按距离 d（米）递增；同号与异号配置使用固定且可辨识的两种颜色。"
+                        "每个采样点标注已定义的数值观察量，并保持纵轴与色标范围不变。",
+                    )
+                payload.setdefault(
+                    "series_encoding",
+                    "同号/异号两条理论曲线使用固定图例；面板同步显示当前距离、电荷配置、"
+                    "数值观察量、预期状态以及当前快照编号。",
+                )
+            if "unity_update_event" not in explicitly_cleared:
+                payload.setdefault(
+                    "unity_update_event",
+                    "OnChargeMoved 或 OnChargeTypeChanged -> RecalculateField -> RefreshFieldLinesAndResults",
+                )
     elif stage is Stage.RESULT_INTERPRETATION:
         for field in ("expected_results", "acceptance_criteria", "report_questions"):
             set_bound(field, field, stage_state.get(field) or requirements.get(field))
@@ -1286,20 +1474,36 @@ def effective_emvr_stage_payload(
             set_if(field, stage_state.get(field))
         hypothesis = _plain(requirements.get("hypothesis"))
         observed = str(context["observed"])
-        payload["if_prediction_supported"] = (
-            f"若各距离和电荷配置下的{observed}与 Lab 特有预期结果一致，"
-            f"则当前结果支持研究假设“{hypothesis}”。"
-            if hypothesis
-            else f"若各比较情形下的{observed}与 Lab 特有预期结果一致，则支持已确认的理论机制。"
-        )
-        payload["if_opposite_trend"] = (
-            "依次核对电荷正负号、两点间距的坐标换算、E_A 与 E_B 的矢量相加方向、"
-            "场线积分方向以及同号/异号颜色图例；在同一参数快照下重新计算后再比较。"
-        )
-        payload["if_no_clear_change"] = (
-            "固定场线种子数量、观察尺度和颜色量程，确认距离覆盖近/中/远三个区间；"
-            "若 |E_total| 已变化而场线形态不明显，则归为显示灵敏度问题，不作为物理趋势缺失。"
-        )
+        if "if_prediction_supported" not in explicitly_cleared:
+            payload.setdefault(
+                "if_prediction_supported",
+                (
+                    f"若各比较情形下的{observed}与 Lab 特有预期结果一致，"
+                    f"则当前结果支持研究假设“{hypothesis}”。"
+                    if hypothesis
+                    else f"若各比较情形下的{observed}与 Lab 特有预期结果一致，则支持已确认的理论机制。"
+                ),
+            )
+        if "if_opposite_trend" not in explicitly_cleared:
+            payload.setdefault(
+                "if_opposite_trend",
+                (
+                    "依次核对电荷正负号、两点间距的坐标换算、E_A 与 E_B 的矢量相加方向、"
+                    "场线积分方向以及同号/异号颜色图例；在同一参数快照下重新计算后再比较。"
+                    if context["point_charge"] else
+                    "依次核对输入单位、公式符号、边界条件、数值算法与可视化映射；在同一参数快照下重算后比较。"
+                ),
+            )
+        if "if_no_clear_change" not in explicitly_cleared:
+            payload.setdefault(
+                "if_no_clear_change",
+                (
+                    "固定场线种子数量、观察尺度和颜色量程，确认距离覆盖近/中/远三个区间；"
+                    "若 |E_total| 已变化而场线形态不明显，则归为显示灵敏度问题，不作为物理趋势缺失。"
+                    if context["point_charge"] else
+                    "核对参数是否覆盖已确认比较范围、输出采样和显示量程；区分模型输出未变化与显示灵敏度不足。"
+                ),
+            )
     elif stage is Stage.DESIGN_VALUE_AND_LIMITATIONS:
         set_bound(
             "limitations",
@@ -1308,41 +1512,65 @@ def effective_emvr_stage_payload(
         )
         for field in ("conceptual_feasibility", "teaching_value", "vr_added_value"):
             set_if(field, stage_state.get(field))
-        payload["limitations"] = _specific_emvr_limitations(context)
+        if (
+            "limitations" not in explicitly_cleared
+            and not _plain(payload.get("limitations"))
+        ):
+            payload["limitations"] = _specific_emvr_limitations(context)
         if context["point_charge"]:
-            payload["conceptual_feasibility"] = {
-                "rating": "可行",
-                "reasoning": (
-                    "距离可在已确认范围内独立调节，电荷符号配置可离散切换；每种状态均可由"
-                    "库仑点电荷场与矢量叠加重算，并通过场线拓扑、方向箭头和快照比较验收。"
-                ),
-            }
-            payload["teaching_value"] = {
-                "rating": "高",
-                "learning_contribution": (
-                    "把同号电荷中间低密度区、异号电荷连接场线以及距离缩短后的形态增强"
-                    "与 E_total=E_A+E_B 的矢量叠加逐项对应。"
-                ),
-            }
+            measurement_contract = (
+                stage_state.get("measurement_specifications")
+                or requirements.get("measurement_specifications")
+            )
+            qualitative_only = measurement_is_qualitative_only(measurement_contract)
+            if "conceptual_feasibility" not in explicitly_cleared and not payload.get("conceptual_feasibility"):
+                payload["conceptual_feasibility"] = {
+                    "rating": "可行",
+                    "reasoning": (
+                        "距离可在已确认范围内独立调节，电荷符号配置可离散切换；每种状态均可由"
+                        "库仑点电荷场与矢量叠加重算，并通过场线拓扑、方向箭头和快照比较验收。"
+                    ),
+                }
+            if "teaching_value" not in explicitly_cleared and not payload.get("teaching_value"):
+                payload["teaching_value"] = {
+                    "rating": "高",
+                    "learning_contribution": (
+                        "把同号电荷中间低密度区、异号电荷连接场线以及距离缩短后的形态增强"
+                        "与 E_total=E_A+E_B 的矢量叠加逐项对应。"
+                    ),
+                }
             payload["innovation"] = {
                 "rating": "由具体功能定义",
-                "innovative_elements": [
-                    "同一距离下同号/异号场线并排比较",
-                    "抓取结束后同步更新三维场线与二维形态指标曲线",
-                    "保存远/中/近快照并保持统一场线种子密度和颜色量程",
-                ],
-            }
-            payload["vr_added_value"] = {
-                "rating": "高",
-                "reasoning": (
-                    "可从不同视角检查三维合场的方向连续性和场线连接关系，并通过直接抓取"
-                    "建立点电荷位置、间距数值与空间场重排之间的即时因果联系。"
+                "innovative_elements": (
+                    [
+                        "同一距离下同号/异号场线并排比较",
+                        "抓取结束后同步更新三维场线与定性分类结果",
+                        "保存远/中/近快照并保持统一场线种子密度、颜色量程和观察视角",
+                    ]
+                    if qualitative_only
+                    else [
+                        "同一距离下同号/异号场线并排比较",
+                        "抓取结束后同步更新三维场线与已定义数值指标曲线",
+                        "保存远/中/近快照并保持统一场线种子密度和颜色量程",
+                    ]
                 ),
             }
+            if "vr_added_value" not in explicitly_cleared and not payload.get("vr_added_value"):
+                payload["vr_added_value"] = {
+                    "rating": "高",
+                    "reasoning": (
+                        "可从不同视角检查三维合场的方向连续性和场线连接关系，并通过直接抓取"
+                        "建立点电荷位置、间距数值与空间场重排之间的即时因果联系。"
+                    ),
+                }
             payload["recommended_improvements"] = [
                 "在场景中固定显示距离标尺、统一色标及同号/异号图例",
                 "为点电荷设置排除半径和参数越界提示，避免奇点附近的误读",
-                "记录每次比较的电荷配置、距离、场线形态指标与场快照，保证结果可追溯",
+                (
+                    "记录每次比较的电荷配置、距离、定性类别、判定依据与场快照，保证结果可追溯"
+                    if qualitative_only
+                    else "记录每次比较的电荷配置、距离、已定义数值指标与场快照，保证结果可追溯"
+                ),
             ]
     return payload
 
@@ -1566,6 +1794,16 @@ def _effective_emvr_visualization(
     requirements = merge_emvr_structured_requirements(
         session.design_context.get("emvr_design", {})
     )
+    stage_state = stage_design_state_snapshot(session)
+    measurement_contract = (
+        stage_state.get("measurement_specifications")
+        or requirements.get("measurement_specifications")
+    )
+    if measurement_is_qualitative_only(measurement_contract):
+        return {
+            "display_mode": "qualitative_snapshot_comparison",
+            "data_status": "定性分类；不生成数值纵轴或理论曲线",
+        }
     plan = _plain(requirements.get("visualization_requirements"))
     changed = [
         part.strip()
@@ -1774,6 +2012,25 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
     if session.status is WorkflowStatus.COMPLETE:
         builder_values = builder_requirement_values(session)
         builder_root = builder_values.get("builder_workspace_absolute_path", "")
+        implementation_items = []
+        for index, line in enumerate(
+            builder_values.get(IMPLEMENTATION_DEFAULTS_FIELD, "").splitlines(),
+            start=1,
+        ):
+            text = line.strip()
+            if not text:
+                continue
+            label, separator, value = text.partition("：")
+            implementation_items.append(
+                {
+                    "label": (
+                        f"默认实现 {label.strip()}"
+                        if separator
+                        else f"默认实现条目 {index}"
+                    ),
+                    "value": _formal_report_text(value.strip() if separator else text),
+                }
+            )
         sections.append(
             {
                 "stage_id": "BUILDER_IMPLEMENTATION_CONTRACT",
@@ -1834,6 +2091,7 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
                             builder_values.get("initial_reset_state", "")
                         ),
                     },
+                    *implementation_items,
                 ],
             }
         )
@@ -1962,7 +2220,10 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
                 ]
             )
         if rows:
-            table = Table(rows, colWidths=[34 * mm, 124 * mm], hAlign="LEFT", repeatRows=0)
+            table = Table(
+                rows, colWidths=[34 * mm, 124 * mm], hAlign="LEFT",
+                repeatRows=0, splitInRow=1,
+            )
             table.setStyle(
                 TableStyle(
                     [

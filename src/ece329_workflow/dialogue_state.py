@@ -1697,6 +1697,18 @@ def _normalize_pending_action(
     interaction_state = str(raw.get("interaction_state") or "").strip()
     if interaction_state in {item.value for item in InteractionState}:
         normalized["interaction_state"] = interaction_state
+    required_report_field = str(raw.get("required_report_field") or "").strip()
+    if required_report_field in STAGE_ACT_FIELDS:
+        normalized["required_report_field"] = required_report_field
+    default_proposal_value = str(raw.get("default_proposal_value") or "").strip()
+    if default_proposal_value and required_report_field:
+        normalized["default_proposal_value"] = default_proposal_value
+        default_contract = raw.get("default_contract")
+        if isinstance(default_contract, dict):
+            normalized["default_contract"] = deepcopy(default_contract)
+        default_option_id = str(raw.get("default_option_id") or "").strip()
+        if default_option_id:
+            normalized["default_option_id"] = default_option_id[:160]
     return normalized
 
 

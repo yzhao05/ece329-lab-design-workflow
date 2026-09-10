@@ -135,10 +135,18 @@ def _public_values(snapshot: Any) -> dict[str, Any]:
         snapshot.get("interaction_state") == InteractionState.EMVR_DIRECT.value
     )
     emvr_values = merge_emvr_structured_requirements(emvr) if emvr_active else {}
+    stage_cleared = {
+        str(field)
+        for field in stage.get("explicitly_cleared_fields", [])
+        if str(field) in STAGE_ACT_FIELDS
+    } if isinstance(stage.get("explicitly_cleared_fields", []), list) else set()
     values = {
         **{field: deepcopy(design.get(field, "")) for field in DESIGN_TEXT_FIELDS},
         "baseline_comparisons": deepcopy(design.get("baseline_comparisons", [])),
-        **{field: deepcopy(stage.get(field, "")) for field in STAGE_ACT_FIELDS},
+        **{
+            field: "" if field in stage_cleared else deepcopy(stage.get(field, ""))
+            for field in STAGE_ACT_FIELDS
+        },
     }
     cleared = {
         str(field)
@@ -309,6 +317,16 @@ def _restore_snapshot(
     target_values = _public_values(target)
     target_outputs = target.get("stage_outputs", {})
     target_outputs = target_outputs if isinstance(target_outputs, dict) else {}
+    restored_stage_clears = {
+        str(field)
+        for field in stage.get("explicitly_cleared_fields", [])
+        if str(field) in STAGE_ACT_FIELDS
+    } if isinstance(stage.get("explicitly_cleared_fields", []), list) else set()
+    target_stage_clears = {
+        str(field)
+        for field in target_stage.get("explicitly_cleared_fields", [])
+        if str(field) in STAGE_ACT_FIELDS
+    } if isinstance(target_stage.get("explicitly_cleared_fields", []), list) else set()
     for field in chosen:
         if current_values.get(field) == target_values.get(field):
             continue
@@ -386,6 +404,12 @@ def _restore_snapshot(
                         )
                     else:
                         destination_payload.pop(payload_field, None)
+    for field in set(chosen) & STAGE_ACT_FIELDS:
+        if field in target_stage_clears:
+            restored_stage_clears.add(field)
+        else:
+            restored_stage_clears.discard(field)
+    stage["explicitly_cleared_fields"] = sorted(restored_stage_clears)
     if changed:
         design["revision"] = int(design.get("revision") or 0) + 1
         sync_design_state_to_legacy(session)

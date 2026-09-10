@@ -26,3 +26,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 ece329_workflow = ["knowledge/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -20,6 +20,11 @@ from .builder_requirements import (
     is_resolved_design_value,
     validate_builder_requirements,
 )
+from .builder_defaults import (
+    IMPLEMENTATION_DEFAULTS_FIELD,
+    measurement_disables_probe,
+    measurement_is_qualitative_only,
+)
 from .models import DesignSession, InteractionState, Stage
 from .knowledge_base import KNOWLEDGE
 from .reporting import (
@@ -130,6 +135,7 @@ def _object_rows(inventory: Any, desktop_plan: str) -> list[dict[str, str]]:
         if not isinstance(item, dict):
             continue
         name = _first_value(item.get("object_name"), f"object_{index}")
+        object_action = _text(item.get("student_interaction")) or "仅观察，不直接操作"
         rows.append(
             {
                 "object_id": f"OBJ_{index:02d}",
@@ -137,8 +143,8 @@ def _object_rows(inventory: Any, desktop_plan: str) -> list[dict[str, str]]:
                 "object_type": _text(item.get("category")) or "unresolved",
                 "role": _text(item.get("purpose")) or "unresolved",
                 "initial_state": _text(item.get("physics_or_data_state")) or "unresolved",
-                "desktop_interaction": desktop_plan,
-                "xr_interaction": _text(item.get("student_interaction")) or "unresolved",
+                "desktop_interaction": f"{desktop_plan}；本对象：{object_action}",
+                "xr_interaction": object_action,
                 "visible_feedback": _text(item.get("visual_feedback")) or "unresolved",
                 "required": _text(item.get("required")) or "unresolved",
                 "status": "confirmed-from-design-session",
@@ -213,8 +219,9 @@ def _builder_formula_contracts(
 def _selected_formula_adjustable_inputs(
     formula_flow: dict[str, Any],
     experiment_brief: dict[str, Any],
+    parameter_contract: str,
 ) -> list[dict[str, Any]]:
-    """Expose the catalog input families covered by the selected formulas."""
+    """Expose only the inputs actually selected as experiment variables."""
 
     selection = formula_flow.get("formula_selection", {})
     selection = selection if isinstance(selection, dict) else {}
@@ -226,39 +233,148 @@ def _selected_formula_adjustable_inputs(
         ]
         if str(item)
     }
-    rows: list[dict[str, Any]] = []
+    variations: list[dict[str, Any]] = []
     for profile in KNOWLEDGE.public_formula_design_profiles():
         if str(profile.get("profile_id") or "") not in selected_profile_ids:
             continue
         for item in profile.get("supported_variations", []):
             if not isinstance(item, dict) or not item.get("quantity"):
                 continue
-            rows.append(
-                {
-                    "quantity": _text(item.get("quantity")),
-                    "symbols": [
-                        _formula_expression_for_report(value)
-                        for value in item.get("symbols", [])
-                    ],
-                    "units": [
-                        _formula_expression_for_report(value)
-                        for value in item.get("units", [])
-                    ],
-                    "control_role": "adjustable when selected as an experiment independent variable",
-                }
-            )
-    if rows:
-        return rows
-    return [
-        {
-            "quantity": item,
-            "symbols": [],
-            "units": [],
-            "control_role": "adjustable experiment independent variable",
+            variations.append(item)
+
+    def match_variation(quantity: str) -> dict[str, Any] | None:
+        tokens = {
+            token.casefold()
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_]*|[\u4e00-\u9fff]{2,}", quantity)
+            if len(token) >= 2
         }
-        for item in experiment_brief.get("changed_quantities", [])
-        if str(item).strip()
-    ]
+        ranked = []
+        for variation in variations:
+            candidate = _text(variation.get("quantity"))
+            lowered = candidate.casefold()
+            score = sum(token in lowered or lowered in token for token in tokens)
+            if quantity.casefold() in lowered or lowered in quantity.casefold():
+                score += 3
+            ranked.append((score, variation))
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        return ranked[0][1] if ranked and ranked[0][0] > 0 else None
+
+    rows: list[dict[str, Any]] = []
+    for raw in experiment_brief.get("changed_quantities", []):
+        quantity = _text(raw)
+        if not quantity:
+            continue
+        variation = match_variation(quantity)
+        symbols = [
+            _formula_expression_for_report(value)
+            for value in (variation or {}).get("symbols", [])
+            if _text(value)
+        ]
+        units = [
+            _formula_expression_for_report(value)
+            for value in (variation or {}).get("units", [])
+            if _text(value)
+        ]
+        discrete = bool(re.search(r"(?:符号|配置|类型|极性|方向|模式|材料)", quantity))
+        rows.append(
+            {
+                "quantity": quantity,
+                "symbols": symbols or ["defined in the confirmed formula contract"],
+                "units": units or (["dimensionless/categorical"] if discrete else ["defined in the confirmed parameter contract"]),
+                "control_role": "adjustable experiment independent variable",
+                "control_specification": parameter_contract,
+            }
+        )
+    return rows
+
+
+def _student_task_contracts(
+    steps: list[str],
+    measurement_contract: str,
+) -> list[dict[str, str]]:
+    """Turn each confirmed procedure line into an implementable Unity transition."""
+
+    rows: list[dict[str, str]] = []
+    previous_state = "READY"
+    for index, step in enumerate(steps, start=1):
+        # "每轮比较前恢复基准" and "比较情形" name context, not a
+        # request to enter comparison before any snapshots exist.
+        compare_requested = re.search(
+            r"(?:并排|(?:比较|对照)(?!前|条件|配置|组|情形|方案|案例|实验|过程|逻辑|目的))",
+            step,
+        ) is not None
+        if re.search(r"(?:Reset|重置|加载.*基准|恢复.*初始|建立.*基准)", step, flags=re.IGNORECASE):
+            action = "activate Reset or load the confirmed baseline preset"
+            response = "ResetController restores all confirmed defaults; model and UI refresh once"
+            evidence = "Parameters and Status match the Initial/Reset contract"
+            exit_state = "VALID"
+        elif re.search(r"(?:调节|改变|拖动|移动|切换|选择|设置)", step):
+            action = "change exactly the named independent-variable control"
+            response = "ParameterController validates the value, then triggers one model and visualization refresh"
+            evidence = f"Status shows the accepted value and Results follows: {measurement_contract}"
+            exit_state = "VALID"
+        elif re.search(r"(?:解释|分析|判断|总结|回答)", step):
+            action = "submit the stated interpretation using the displayed evidence"
+            response = "LabFlowController checks that required comparisons exist and marks the task complete"
+            evidence = "Completion status cites the snapshot IDs and the confirmed acceptance criterion"
+            exit_state = "COMPLETE"
+        elif compare_requested:
+            action = "select the saved cases named in this step and start comparison"
+            response = "LabFlowController locks a shared view/scale and presents the cases together"
+            evidence = "Every compared case shows its parameters, result, and shared visual encoding"
+            exit_state = "COMPARING"
+        elif re.search(r"(?:记录|Capture|保存|快照)", step, flags=re.IGNORECASE):
+            action = "press Capture after the current state becomes VALID"
+            response = "SnapshotStore records parameters, outputs, comparison label, and screenshot ID"
+            evidence = "Results shows a new unique snapshot ID with the current parameter set"
+            exit_state = "CAPTURED"
+        else:
+            action = "perform the named observation and wait for the calculation-complete status"
+            response = "MeasurementController refreshes the confirmed readout or qualitative comparison"
+            evidence = f"Results visibly reports: {measurement_contract}"
+            exit_state = "VALID"
+        # A single confirmed line can contain several actions. Retain its
+        # full instruction and append capture/comparison after a parameter or
+        # baseline action instead of losing the latter half to the first match.
+        if exit_state in {"VALID", "READY"} and re.search(
+            r"(?:记录|Capture|保存|快照)", step, flags=re.IGNORECASE
+        ):
+            action += "; then explicitly Capture the valid result"
+            response += "; Common SnapshotStore saves one snapshot after calculation succeeds"
+            evidence += "; Results lists its unique snapshot ID"
+            exit_state = "CAPTURED"
+        if exit_state in {"VALID", "CAPTURED"} and compare_requested:
+            action += "; compare the named saved snapshots"
+            response += "; display cases with the same scale and view"
+            exit_state = "COMPARING"
+        if exit_state == "COMPLETE" and index < len(steps):
+            exit_state = "VALID"
+            response = "Record this step's interpretation; continue to the next required step"
+        rows.append(
+            {
+                "step_id": f"S{index}",
+                "goal": step,
+                "entry_state": previous_state,
+                "expected_action": f"{step}；Unity操作映射：{action}",
+                "unity_response": response,
+                "observable_evidence": evidence,
+                "success_criteria": f"Only advance when {evidence}; satisfy the complete stated step, then advance the Common runner once",
+                "exit_state": exit_state,
+                "status": "confirmed-from-design-session",
+            }
+        )
+        previous_state = exit_state
+    return rows
+
+
+def _contract_parts(value: str, *, limit: int = 900) -> list[str]:
+    parts: list[str] = []
+    for line in str(value or "").splitlines() or [str(value or "")]:
+        text = line.strip()
+        while text:
+            parts.append(text[:limit])
+            text = text[limit:]
+    return parts
 
 
 def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
@@ -363,6 +479,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
     measurement_contract = _formula_expression_for_report(
         builder_values["measurement_specifications"]
     )
+    implementation_defaults = builder_values[IMPLEMENTATION_DEFAULTS_FIELD]
     initial_reset_state = _formula_expression_for_report(
         builder_values["initial_reset_state"]
     )
@@ -382,12 +499,42 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
     objects = _object_rows(
         setup.get("object_inventory"), builder_values["desktop_interaction_plan"]
     )
+    if measurement_disables_probe(measurement_contract):
+        objects = [
+            item
+            for item in objects
+            if not re.search(r"(?:探针|空间观察与测量工具)", item["display_name"])
+        ]
     first_action = steps[0] if steps else _UNRESOLVED
     builder_root = builder_values["builder_workspace_absolute_path"]
     unity_project_path = _unity_project_absolute_path(builder_root)
     formula_contracts = _builder_formula_contracts(experiment_brief, theory)
     formula_adjustable_inputs = _selected_formula_adjustable_inputs(
-        formula_flow, experiment_brief
+        formula_flow, experiment_brief, parameter_contract
+    )
+    student_tasks = _student_task_contracts(steps, measurement_contract)
+    visualization_layer = (
+        "定性空间比较：固定视角、种子数、色标和快照布局；不创建数值纵轴或理论曲线。"
+        if measurement_is_qualitative_only(measurement_contract)
+        else setup.get("visualization_layer")
+    )
+    implementation_rows = [
+        _field(
+            f"implementation_defaults.approved_contract_part_{index:02d}",
+            part,
+            status="approved-before-export",
+        )
+        for index, part in enumerate(_contract_parts(implementation_defaults), start=1)
+    ]
+    implementation_rows.append(
+        _field(
+            "implementation_defaults.revision_rule",
+            (
+                "Any later change to the experiment variables, measurements, procedure, UI, or Unity mapping "
+                "invalidates this approval and requires a regenerated proposal before export."
+            ),
+            status="workflow-invariant",
+        )
     )
     primary_formulas = [
         f"{item['name']}: {item['expression']}"
@@ -510,18 +657,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("limiting_cases", hypothesis.get("limiting_cases")),
         ],
         "learning_goals": learning_goals,
-        "student_tasks": [
-            {
-                "step_id": f"S{index}",
-                "goal": step,
-                "expected_action": "observe_or_interact",
-                "success_criteria": (
-                    "完成该步骤，并在设计指定的数值、曲线或空间可视化中保留可比较结果。"
-                ),
-                "status": "confirmed-from-design-session",
-            }
-            for index, step in enumerate(steps, start=1)
-        ],
+        "student_tasks": student_tasks,
         "physics": {
             "mechanism": _text(theory.get("physical_mechanism")) or _UNRESOLVED,
             "formulas": formula_contracts,
@@ -535,6 +671,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             ),
             "input_parameter_contract": parameter_contract,
             "constants_and_media": constants_and_media,
+            "numerical_model": builder_values["numerical_model_specifications"],
             "assumptions": (
                 _as_list(theory.get("assumptions"))
                 + _as_list(value_limits.get("limitations"))
@@ -547,7 +684,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("interaction_modes.xr_device_simulator", "required", status="builder-policy-reference"),
             _field("interaction_modes.real_vr", "required", status="builder-policy-reference"),
             _field("interaction_modes.xr_actions", setup.get("interactions")),
-            _field("interaction_modes.measurement_interface", setup.get("measurement_interface")),
+            _field("interaction_modes.measurement_interface", measurement_contract),
             _field("interaction_modes.mouse_to_vr_mapping", builder_values["desktop_interaction_plan"]),
         ],
         "visualization": [
@@ -558,7 +695,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             ),
             _field("visualization.trend_annotation", visualization.get("trend_annotation")),
             _field("visualization.update_event", visualization.get("unity_update_event")),
-            _field("visualization.layer", setup.get("visualization_layer")),
+            _field("visualization.layer", visualization_layer),
             _field("visualization.metric_and_probe_definitions", measurement_contract),
             _field("visualization.data_status", "theoretical_prediction; measured=false"),
         ],
@@ -611,10 +748,11 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("scene.language", "English", status="builder-template-reference"),
             _field(
                 "scene.required_visible_regions",
-                ["instruction", "experiment", "status", "result"],
+                ["instruction", "experiment", "parameters", "status", "result"],
                 status="builder-policy-reference",
             ),
         ],
+        "implementation_defaults": implementation_rows,
         "initial_and_action_states": [
             _field(
                 "initial_and_action_states.authored_initial_state",
@@ -660,7 +798,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         "builder_runtime_constraints": [
             _field("current_editor_state.builder_root_absolute", builder_root, status="confirmed-from-design-session"),
             _field("current_editor_state.unity_project_absolute", unity_project_path, status="confirmed-from-design-session"),
-            _field("current_editor_state.unity_version", "2022.3.62f3c1", status="builder-template-reference"),
+            _field("current_editor_state.unity_version", "Read the confirmed host UnityProject/ProjectSettings/ProjectVersion.txt; use its locked Editor version", status="builder-runtime-check"),
             _field("current_editor_state.unity_open", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
             _field("current_editor_state.compiling", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
             _field("current_editor_state.play_mode", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
@@ -701,6 +839,7 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         "presets",
         "reuse_requirements",
         "scene",
+        "implementation_defaults",
         "initial_and_action_states",
         "acceptance_and_evidence",
         "builder_runtime_constraints",
@@ -758,7 +897,7 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     ):
         raise ValueError("Builder Gate 1 formula contracts are incomplete")
     if any(
-        re.search(r"[₀₁₂₃ᵢ⁰¹²³]", str(item.get("expression") or ""))
+        re.search(r"[₀₁₂₃ᵢ⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]", str(item.get("expression") or ""))
         for item in formula_contracts
         if isinstance(item, dict)
     ):
@@ -767,6 +906,9 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     if any(
         not isinstance(item, dict)
         or not item.get("quantity")
+        or not item.get("symbols")
+        or not item.get("units")
+        or not item.get("control_specification")
         or not str(item.get("control_role") or "").startswith("adjustable")
         for item in adjustable_inputs
     ):
@@ -835,6 +977,24 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         raise ValueError("Builder Gate 1 requires the four EMVR learning goals")
     if len(payload.get("student_tasks", [])) < 5:
         raise ValueError("Builder Gate 1 requires a complete ordered student flow")
+    required_task_fields = {
+        "step_id",
+        "goal",
+        "entry_state",
+        "expected_action",
+        "unity_response",
+        "observable_evidence",
+        "success_criteria",
+        "exit_state",
+        "status",
+    }
+    if any(
+        not isinstance(task, dict)
+        or any(task.get(field) in (None, "", [], {}) for field in required_task_fields)
+        or task.get("expected_action") == "observe_or_interact"
+        for task in payload.get("student_tasks", [])
+    ):
+        raise ValueError("Builder Gate 1 student tasks lack implementable state transitions")
     physics = payload.get("physics", {})
     if not isinstance(physics, dict) or any(
         physics.get(field) in (None, "", [], {})
@@ -847,6 +1007,7 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
             "formula_input_policy",
             "input_parameter_contract",
             "constants_and_media",
+            "numerical_model",
             "expected_results",
         )
     ):
@@ -907,6 +1068,51 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     ]
     if not object_ids or len(object_ids) != len(set(object_ids)):
         raise ValueError("Builder Gate 1 object IDs must be present and unique")
+    required_object_fields = {
+        "object_id",
+        "display_name",
+        "object_type",
+        "role",
+        "initial_state",
+        "desktop_interaction",
+        "xr_interaction",
+        "visible_feedback",
+        "required",
+        "status",
+    }
+    if any(
+        not isinstance(item, dict)
+        or any(item.get(field) in (None, "", [], {}, "unresolved") for field in required_object_fields)
+        for item in payload.get("objects", [])
+    ):
+        raise ValueError("Builder Gate 1 object inventory contains blank implementation fields")
+    measurement_definition = row_value(
+        "visualization", "visualization.metric_and_probe_definitions"
+    )
+    if measurement_disables_probe(measurement_definition) and any(
+        re.search(r"(?:探针|空间观察与测量工具)", str(item.get("display_name") or ""))
+        for item in payload.get("objects", [])
+        if isinstance(item, dict)
+    ):
+        raise ValueError("Builder Gate 1 disables the probe but still requires a probe object")
+
+    table_sections = {
+        section
+        for section in required_sections
+        if isinstance(payload.get(section), list)
+        and section not in {"learning_goals", "student_tasks", "objects", "handoff_notes"}
+    }
+    blank_rows = [
+        f"{section}[{index}]"
+        for section in table_sections
+        for index, row in enumerate(payload.get(section, []))
+        if not isinstance(row, dict)
+        or any(row.get(field) in (None, "", [], {}) for field in ("key", "value", "status"))
+    ]
+    if blank_rows:
+        raise ValueError(
+            "Builder Gate 1 contains blank PDF table rows: " + ", ".join(blank_rows[:8])
+        )
 
     required_contract_rows = {
         "execution_context": (
@@ -933,6 +1139,10 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
             "initial_and_action_states.hidden_templates_or_loaders",
             "initial_and_action_states.first_required_action",
             "initial_and_action_states.expected_visible_after_action",
+        ),
+        "implementation_defaults": (
+            "implementation_defaults.approved_contract_part_01",
+            "implementation_defaults.revision_rule",
         ),
         "acceptance_and_evidence": (
             "acceptance.core_flow",
@@ -1043,7 +1253,10 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
             table_rows.append(
                 [p(row["key"], key_style), p(value), p(row["status"], key_style)]
             )
-        table = Table(table_rows, colWidths=[48 * mm, 92 * mm, 40 * mm], repeatRows=1)
+        table = Table(
+            table_rows, colWidths=[48 * mm, 92 * mm, 40 * mm],
+            repeatRows=1, splitInRow=1,
+        )
         table.setStyle(
             TableStyle(
                 [
@@ -1079,6 +1292,7 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
                 "builder-runtime-check 表示由 Builder 在实际 Unity 工作区中核对。",
                 small_style,
             ),
+            p("长表格跨页时空白的字段名或状态单元格表示承接上一页同一行，并非该设计内容缺失。", small_style),
         ]
     )
 
@@ -1107,8 +1321,10 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
             [
                 _field(
                     f"student_tasks[{task['step_id']}]",
-                    f"goal={task['goal']}；expected_action={task['expected_action']}；"
-                    f"success_criteria={task['success_criteria']}",
+                    f"goal={task['goal']}；entry_state={task['entry_state']}；"
+                    f"expected_action={task['expected_action']}；unity_response={task['unity_response']}；"
+                    f"observable_evidence={task['observable_evidence']}；"
+                    f"success_criteria={task['success_criteria']}；exit_state={task['exit_state']}",
                     status=task["status"],
                 )
                 for task in data["student_tasks"]
@@ -1126,6 +1342,7 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
                 _field("physics.formula_input_policy", data["physics"]["formula_input_policy"]),
                 _field("physics.input_parameter_contract", data["physics"]["input_parameter_contract"]),
                 _field("physics.constants_and_media", data["physics"]["constants_and_media"]),
+                _field("physics.numerical_model", data["physics"]["numerical_model"]),
                 _field("physics.assumptions", data["physics"]["assumptions"]),
                 _field("physics.expected_results", data["physics"]["expected_results"]),
             ],
@@ -1147,15 +1364,16 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
         ("13. Environment and Game View", data["environment"]),
         ("14. Reuse requirements", data["reuse_requirements"]),
         ("15. Scene", data["scene"]),
-        ("16. Initial and post-action states", data["initial_and_action_states"]),
-        ("17. Acceptance and evidence", data["acceptance_and_evidence"]),
-        ("18. Builder runtime constraints", data["builder_runtime_constraints"]),
+        ("16. Approved UI, flow, and Unity defaults", data["implementation_defaults"]),
+        ("17. Initial and post-action states", data["initial_and_action_states"]),
+        ("18. Acceptance and evidence", data["acceptance_and_evidence"]),
+        ("19. Builder runtime constraints", data["builder_runtime_constraints"]),
     ]
     for heading, rows in sections:
         story.append(p(heading, heading_style))
         story.append(field_table(rows or [_field(f"{heading}.content", _UNRESOLVED)]))
 
-    story.append(p("19. Handoff instructions", heading_style))
+    story.append(p("20. Handoff instructions", heading_style))
     for note in data["handoff_notes"]:
         story.append(p(f"• {note}"))
 

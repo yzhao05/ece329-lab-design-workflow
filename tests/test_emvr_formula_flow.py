@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from ece329_workflow.dialogue_acts import apply_stage_field_updates
 from ece329_workflow.dialogue_state import UserIntent, resolved_intent
 from ece329_workflow.emvr_formula_flow import (
     EMVR_DETAIL_DESIGN,
@@ -25,6 +26,7 @@ from ece329_workflow.emvr_design import (
 from ece329_workflow.generator import RuleBasedStageGenerator, _emvr_parameter_axis
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.reporting import (
+    _pdf_safe_formula_text,
     build_emvr_task_report,
     effective_emvr_stage_payload,
     effective_experiment_brief,
@@ -146,6 +148,12 @@ class FormulaQuestionPriorityGenerator(FormulaSemanticGenerator):
 
 
 class EmvrFormulaFlowTests(unittest.TestCase):
+    def test_pdf_formula_normalization_preserves_signed_superscript_runs(self) -> None:
+        self.assertEqual(
+            _pdf_safe_formula_text("epsilon0=8.854x10⁻¹² F/m; r³"),
+            "epsilon0=8.854x10^(-12) F/m; r^3",
+        )
+
     def test_visible_method_numbers_can_select_a_combined_direction(self) -> None:
         session = self._session()
         cards, _ = handle_emvr_formula_turn(
@@ -1336,6 +1344,55 @@ class EmvrFormulaFlowTests(unittest.TestCase):
             report_view["research_hypothesis"],
             report_view["expected_trend"],
         )
+
+    def test_explicit_clears_are_not_revived_by_point_charge_report_defaults(self) -> None:
+        session = self._session()
+        emvr = session.design_context["emvr_design"]
+        emvr["selected_primary_formula_ids"] = ["coulomb_point_charge"]
+        emvr["explicitly_cleared_fields"] = [
+            "course_relationship",
+            "conceptual_objective",
+            "limitations",
+        ]
+        session.stage_outputs[Stage.COURSE_MAPPING_AND_DIRECTION.value] = {
+            "stage_payload": {"course_relationship": "旧课程关系"}
+        }
+        session.stage_outputs[Stage.LEARNING_OBJECTIVES.value] = {
+            "stage_payload": {"conceptual_objective": "旧概念目标"}
+        }
+        session.stage_outputs[Stage.DESIGN_VALUE_AND_LIMITATIONS.value] = {
+            "stage_payload": {"limitations": "旧局限"}
+        }
+
+        course = effective_emvr_stage_payload(
+            session, Stage.COURSE_MAPPING_AND_DIRECTION
+        )
+        objectives = effective_emvr_stage_payload(session, Stage.LEARNING_OBJECTIVES)
+        limits = effective_emvr_stage_payload(
+            session, Stage.DESIGN_VALUE_AND_LIMITATIONS
+        )
+
+        self.assertNotIn("course_relationship", course)
+        self.assertNotIn("conceptual_objective", objectives)
+        self.assertNotIn("limitations", limits)
+
+    def test_stage_clear_prevents_optional_point_charge_default_from_reappearing(self) -> None:
+        session = self._session()
+        session.design_context["emvr_design"]["selected_primary_formula_ids"] = [
+            "coulomb_point_charge"
+        ]
+        session.stage_outputs[Stage.HYPOTHESIS.value] = {
+            "stage_payload": {"limiting_cases": ["旧边界"]}
+        }
+        apply_stage_field_updates(
+            session,
+            [{"field": "limiting_cases", "operation": "CLEAR"}],
+            stage=Stage.HYPOTHESIS,
+        )
+
+        report_view = effective_emvr_stage_payload(session, Stage.HYPOTHESIS)
+
+        self.assertNotIn("limiting_cases", report_view)
 
     def test_unity_inventory_uses_locked_objects_instead_of_generic_placeholders(self) -> None:
         session = self._session()

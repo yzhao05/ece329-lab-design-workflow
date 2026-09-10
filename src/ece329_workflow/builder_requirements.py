@@ -4,6 +4,13 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from .builder_defaults import (
+    IMPLEMENTATION_DEFAULTS_FIELD,
+    build_implementation_defaults,
+    format_implementation_defaults,
+    implementation_defaults_approval_valid,
+    measurement_disables_probe,
+)
 from .models import STAGE_SEQUENCE, DesignSession, InteractionState, Stage
 
 
@@ -109,6 +116,17 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "field": "numerical_model_specifications",
+        "stage": Stage.EXPECTED_DATA_VISUALIZATION,
+        "label": "数值算法与边界契约",
+        "question": (
+            "请明确所选公式怎样计算和显示：直接代数求值或具体数值算法、计算域及坐标/单位、"
+            "采样点或网格、步长、误差/收敛容差、最大迭代或积分步数、奇点/边界/零场处理及刷新时机。"
+            "若只需直接公式且不积分，请明确无需迭代及采样方式；若显示场线或轨迹，仍需给出积分方法、"
+            "种子位置/数量、步长和终止条件。这些数值需先在设计中确认，再写入最终PDF。"
+        ),
+    },
+    {
         "field": "expected_results",
         "stage": Stage.RESULT_INTERPRETATION,
         "label": "Lab特有预期结果",
@@ -134,6 +152,16 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
             "请给出学生完成实验后需要回答的Lab特有报告问题。问题应直接检验研究问题、"
             "理论解释和比较结果；通用报告格式不需要在这里定义。"
         ),
+    },
+    {
+        "field": IMPLEMENTATION_DEFAULTS_FIELD,
+        "stage": Stage.DESIGN_VALUE_AND_LIMITATIONS,
+        "label": "Builder默认界面、流程与Unity实现契约",
+        "question": (
+            "请审阅系统根据当前实验生成的默认界面、完整学生流程、Unity状态机、事件链、组件职责、"
+            "测量策略、日志和帮助方案。回复“批准默认方案”即可采用；如需修改，请给出完整替代契约。"
+        ),
+        "default_proposal": True,
     },
 )
 
@@ -186,7 +214,14 @@ def builder_requirement_values(session: DesignSession) -> dict[str, str]:
         for field in emvr.get("explicitly_cleared_fields", [])
         if str(field) in BUILDER_REQUIREMENT_FIELDS
     } if isinstance(emvr.get("explicitly_cleared_fields", []), list) else set()
-    return {
+    stage_cleared = stage_state.get("explicitly_cleared_fields", [])
+    if isinstance(stage_cleared, list):
+        explicitly_cleared.update(
+            str(field)
+            for field in stage_cleared
+            if str(field) in BUILDER_REQUIREMENT_FIELDS
+        )
+    values = {
         # EMVR field_state is the latest field-level source of truth.  A
         # student may revise an earlier Builder item from a later stage; the
         # old stage snapshot must never override that newer correction.
@@ -196,6 +231,25 @@ def builder_requirement_values(session: DesignSession) -> dict[str, str]:
             else _text(field_state.get(field) or stage_state.get(field))
         )
         for field in BUILDER_REQUIREMENT_FIELDS
+    }
+    if not implementation_defaults_approval_valid(session):
+        values[IMPLEMENTATION_DEFAULTS_FIELD] = ""
+    return values
+
+
+def builder_requirement_default_proposal(
+    session: DesignSession,
+    field: str,
+) -> dict[str, Any] | None:
+    """Return a complete deterministic proposal for a defaulted requirement."""
+
+    if field != IMPLEMENTATION_DEFAULTS_FIELD:
+        return None
+    contract = build_implementation_defaults(session)
+    return {
+        "contract": contract,
+        "value": format_implementation_defaults(contract),
+        "option_id": "approve-builder-implementation-defaults",
     }
 
 
@@ -245,12 +299,135 @@ def _field_valid(field: str, value: str) -> bool:
         has_unit = re.search(r"(?:单位|无量纲|V/m|A/m|T|W/m|Hz|rad|度)", value) is not None
         has_readout = re.search(r"(?:探针|读数|测量|采样)", value) is not None
         return has_definition and has_unit and has_readout
+    if field == "numerical_model_specifications":
+        return all(re.search(pattern, value, re.IGNORECASE) for pattern in (
+            r"直接|代数|算法|Euler|RK4|Runge|积分|有限差分|有限元",
+            r"采样|网格|计算域|空间域",
+            r"边界|奇点|零场|无效|NaN",
+            r"无需迭代|不迭代|最大.*(?:步|迭代)|上限|终止",
+            r"容差|误差|精度",
+        ))
     if field == "initial_reset_state":
         has_initial = re.search(r"(?:Initial|初始|首次打开)", value, flags=re.IGNORECASE) is not None
         has_reset = re.search(r"(?:Reset|重置)", value, flags=re.IGNORECASE) is not None
         has_concrete_state = re.search(r"(?:\d|同种|异种|同号|异号|开|关|空|清除)", value) is not None
         return has_initial and has_reset and has_concrete_state
+    if field == IMPLEMENTATION_DEFAULTS_FIELD:
+        required_markers = (
+            ("Start", "开始页"),
+            ("Lab", "实验页"),
+            ("Back", "返回"),
+            ("Capture", "保存快照"),
+            ("Restore", "恢复快照"),
+            ("Reset", "重置"),
+            ("Unity",),
+            ("事件", "event"),
+            ("帮助", "help"),
+            ("English", "中文", "language"),
+        )
+        lowered = value.casefold()
+        return all(
+            any(marker.casefold() in lowered for marker in alternatives)
+            for alternatives in required_markers
+        )
     return True
+
+
+def _uses_named_distance_bands(session: DesignSession) -> bool:
+    context = _active_requirement_context(session)
+    if re.search(r"近\s*[/、，,]\s*中\s*[/、，,]\s*远", context):
+        return True
+    return bool(
+        re.search(
+            r"(?:近距离|近场|近区)[^。；;]{0,80}"
+            r"(?:中距离|中场|中区)[^。；;]{0,80}"
+            r"(?:远距离|远场|远区)",
+            context,
+        )
+    )
+
+
+def _active_requirement_context(session: DesignSession) -> str:
+    """Do not let audit history or a superseded default create new blockers."""
+
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    fields = emvr.get("field_state", {})
+    fields = fields if isinstance(fields, dict) else {}
+    stage_state = session.design_context.get("stage_design_state", {})
+    stage_state = stage_state if isinstance(stage_state, dict) else {}
+    cleared = set(emvr.get("explicitly_cleared_fields", []) or []) | set(
+        stage_state.get("explicitly_cleared_fields", []) or []
+    )
+    relevant = {
+        "procedure_steps", "comparison_cases", "limiting_cases", "object_constraints",
+        "parameter_specifications", "model_constants_and_media", "measurement_specifications",
+    }
+    current = {
+        field: _text(fields.get(field) or stage_state.get(field))
+        for field in relevant if field not in cleared
+    }
+    stored_values = []
+    for output in session.stage_outputs.values():
+        payload = output.get("stage_payload", {}) if isinstance(output, dict) else {}
+        if isinstance(payload, dict):
+            stored_values.extend(
+                _text(value) for field, value in payload.items()
+                if field in relevant and field not in cleared and not current.get(field)
+            )
+    return "；".join([*current.values(), *stored_values])
+
+
+def _defines_named_distance_bands(value: str) -> bool:
+    combined = re.search(r"近\s*[/、]\s*中\s*[/、]\s*远", value) is not None
+    separate = all(
+        re.search(rf"{label}[^。；;]{{0,24}}\d", value) is not None
+        for label in ("近", "中", "远")
+    )
+    return bool(
+        separate
+        or (
+            combined
+            and len(re.findall(r"[-+]?\d+(?:\.\d+)?", value)) >= 3
+        )
+    )
+
+
+def _cross_field_validation_error(
+    session: DesignSession,
+    field: str,
+    values: dict[str, str],
+) -> str | None:
+    if field == "parameter_specifications" and _uses_named_distance_bands(session):
+        if not _defines_named_distance_bands(values.get(field, "")):
+            return "实验流程使用了近/中/远分组，但参数契约没有分别给出三组的准确数值或边界。"
+    if field == "model_constants_and_media":
+        context = _active_requirement_context(session)
+        if "排除半径" in context and re.search(
+            r"排除半径[^。；;]{0,30}\d", values.get(field, "")
+        ) is None:
+            return "模型使用了源附近排除半径，但固定输入契约没有给出排除半径的准确数值和单位。"
+    if field == "initial_reset_state" and measurement_disables_probe(
+        values.get("measurement_specifications", "")
+    ):
+        if any(re.search(
+            r"探针[^。；;]{0,40}(?:位于|置于|放在|在|位置|坐标|初始)",
+            clause,
+        ) and not re.search(r"不适用|不设置|不使用|取消|无需|无探针", clause)
+            for clause in re.split(r"[。；;]", values.get(field, ""))):
+            return "测量契约明确不使用空间探针，但 Initial/Reset 仍保留探针位置；请删除旧探针状态。"
+    return None
+
+
+def _requirement_valid(
+    session: DesignSession,
+    field: str,
+    value: str,
+    values: dict[str, str],
+) -> bool:
+    return _field_valid(field, value) and _cross_field_validation_error(
+        session, field, values
+    ) is None
 
 
 def builder_requirement_value_is_valid(field: str, value: Any) -> bool:
@@ -279,6 +456,8 @@ def _validation_error(field: str, value: str) -> str | None:
         return f"当前输入“{shown}”仍缺少常量/介质的准确数值、单位或固定/可调角色。"
     if field == "measurement_specifications":
         return f"当前输入“{shown}”仍缺少指标计算方法、单位或空间探针/采样读数定义。"
+    if field == "numerical_model_specifications":
+        return "数值契约仍缺少算法、采样域、误差/精度、边界处理或有界终止条件；请补充缺少部分。"
     if field == "initial_reset_state":
         return f"当前输入“{shown}”仍未同时定义 Initial 与 Reset 的具体对象和参数状态。"
     return None
@@ -296,10 +475,27 @@ def missing_builder_requirements(
     for spec in BUILDER_REQUIREMENT_SPECS:
         field = str(spec["field"])
         value = values.get(field, "")
-        if (stage is not None and spec["stage"] is not stage) or _field_valid(field, value):
+        if (stage is not None and spec["stage"] is not stage) or _requirement_valid(
+            session, field, value, values
+        ):
             continue
         item = deepcopy(spec)
-        error = _validation_error(field, value)
+        error = _cross_field_validation_error(session, field, values) or _validation_error(
+            field, value
+        )
+        if field == IMPLEMENTATION_DEFAULTS_FIELD:
+            proposal = builder_requirement_default_proposal(session, field)
+            if proposal is not None:
+                item["default_contract"] = proposal["contract"]
+                item["default_value"] = proposal["value"]
+                item["default_option_id"] = proposal["option_id"]
+            stage_state = session.design_context.get("stage_design_state", {})
+            if (
+                isinstance(stage_state, dict)
+                and _text(stage_state.get(field))
+                and not implementation_defaults_approval_valid(session)
+            ):
+                error = "实验内容已更新，先前批准的默认实现契约已失效；下面已按最新设计重新生成。"
         if error:
             item["validation_error"] = error
         missing.append(item)
@@ -342,8 +538,11 @@ def builder_handoff_status(session: DesignSession) -> dict[str, Any]:
         {
             "field": str(spec["field"]),
             "label": str(spec["label"]),
-            "complete": _field_valid(
-                str(spec["field"]), values.get(str(spec["field"]), "")
+            "complete": _requirement_valid(
+                session,
+                str(spec["field"]),
+                values.get(str(spec["field"]), ""),
+                values,
             ),
         }
         for spec in BUILDER_REQUIREMENT_SPECS

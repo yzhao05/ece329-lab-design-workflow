@@ -707,6 +707,50 @@ class DesignVersionTests(unittest.TestCase):
             "旧研究问题",
         )
 
+    def test_version_restore_preserves_stage_clear_tombstones(self) -> None:
+        session = DesignSession("stage-clear-restore", InteractionState.EMVR_DIRECT)
+        session.design_context["stage_design_state"] = {
+            "expected_results": "旧的已确认预期结果。"
+        }
+        ensure_initial_version(session)
+        apply_stage_field_updates(
+            session,
+            [{"field": "expected_results", "operation": "CLEAR"}],
+            stage=Stage.RESULT_INTERPRETATION,
+        )
+        cleared_version = record_design_version(
+            session,
+            changed_fields=["expected_results"],
+            reason="清空预期结果",
+        )
+
+        execute_version_request(
+            session,
+            {"action": "RESTORE", "version_id": "v0001", "fields": ["expected_results"]},
+        )
+        self.assertEqual(
+            builder_requirement_values(session)["expected_results"],
+            "旧的已确认预期结果。",
+        )
+        self.assertNotIn(
+            "expected_results",
+            session.design_context["stage_design_state"]["explicitly_cleared_fields"],
+        )
+
+        execute_version_request(
+            session,
+            {
+                "action": "RESTORE",
+                "version_id": cleared_version["version_id"],
+                "fields": ["expected_results"],
+            },
+        )
+        self.assertEqual(builder_requirement_values(session)["expected_results"], "")
+        self.assertIn(
+            "expected_results",
+            session.design_context["stage_design_state"]["explicitly_cleared_fields"],
+        )
+
 
 class ReliabilityTests(unittest.TestCase):
     def setUp(self) -> None:

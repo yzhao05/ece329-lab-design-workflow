@@ -636,13 +636,22 @@ def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
         text = clean_emvr_field_text(field_id, value)[:1600]
         return text or None
     values = value if isinstance(value, list) else [value]
+    # These lists are implementation contracts, not summaries. Dropping the
+    # end of a parameter or a later procedure step silently changes the design.
+    full_contract = field_id in {
+        "parameter_specifications", "procedure_steps", "expected_results",
+        "acceptance_criteria", "report_questions", "object_constraints",
+    }
     result = list(
         dict.fromkeys(
-            clean_emvr_field_text(field_id, item)[:800]
+            (clean_emvr_field_text(field_id, item) if full_contract
+             else clean_emvr_field_text(field_id, item)[:800])
             for item in values
             if isinstance(item, str) and clean_emvr_field_text(field_id, item)
         )
-    )[:20]
+    )
+    if not full_contract:
+        result = result[:20]
     return result or None
 
 

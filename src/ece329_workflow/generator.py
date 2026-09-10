@@ -586,7 +586,7 @@ def _formula_brief_object_inventory(
                 )
             ),
             "visual_feedback": (
-                "选中时高亮；拖动时显示实时距离；释放或切换符号后刷新合场箭头、场线和对比曲线"
+                "选中时高亮；拖动时显示实时距离；释放或切换符号后刷新合场箭头、场线和结果面板"
                 if point_charge_object
                 else f"对象状态变化后同步显示{observed_text}"
             ),
@@ -622,12 +622,12 @@ def _formula_brief_object_inventory(
             "required": True,
         },
         {
-            "object_name": "空间观察与测量工具",
+            "object_name": "测量与观察控制器",
             "category": "观察与测量",
-            "purpose": f"在指定位置、路径或区域读取{observed_text}",
-            "student_interaction": "移动观察工具、选择采样位置或切换已确认的观察方式",
-            "physics_or_data_state": "保存采样位置、观察方式和当前理论读数",
-            "visual_feedback": f"以数值、单位和空间标记呈现{observed_text}",
+            "purpose": f"严格按最终测量契约读取或分类{observed_text}",
+            "student_interaction": "不默认创建可移动探针；只执行最终测量契约明确允许的采样或定性比较",
+            "physics_or_data_state": "保存测量方式、适用性状态及最终契约要求的读数或分类",
+            "visual_feedback": f"按最终契约以数值和单位或定性判据呈现{observed_text}",
             "required": True,
         },
         {

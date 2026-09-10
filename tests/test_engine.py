@@ -4,6 +4,7 @@ import io
 import json
 import time
 import unittest
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
@@ -16,6 +17,11 @@ from ece329_workflow.builder_input import (
 from ece329_workflow.builder_requirements import (
     BUILDER_REQUIREMENT_SPECS,
     builder_requirement_values,
+)
+from ece329_workflow.builder_defaults import (
+    build_implementation_defaults,
+    format_implementation_defaults,
+    record_implementation_defaults_approval,
 )
 from ece329_workflow.dialogue_state import (
     UserIntent,
@@ -72,6 +78,7 @@ from ece329_workflow.models import (
     TurnRequest,
 )
 from ece329_workflow.reporting import (
+    effective_emvr_stage_payload,
     emvr_stage_completeness_issues,
     stage_report_section,
 )
@@ -140,6 +147,11 @@ BUILDER_REQUIREMENT_ANSWERS = {
         "空间探针显示E_x、E_y、E_z、|E|和方位/俯仰方向，场强单位V/m、方向单位度；"
         "每次电荷移动、数值或极性变化后重新采样并刷新。"
     ),
+    "numerical_model_specifications": (
+        "直接计算库仑场；计算域[-3,3] m，采样21^3网格；场线以RK4积分，"
+        "每正电荷32个均匀球面种子，步长0.02 m，最大2048步；"
+        "零场与0.05 m排除区及边界停止，误差容差1e-5；参数释放后刷新。"
+    ),
     "expected_results": (
         "同种电荷靠近时中间场线向外弯曲，异种电荷靠近时场线跨越两者连接；"
         "距离减小时局部场强变化更加明显。"
@@ -150,6 +162,10 @@ BUILDER_REQUIREMENT_ANSWERS = {
     ),
     "report_questions": (
         "距离减小时两种极性配置的中间区域场线如何变化？这些差异怎样由叠加原理解释？"
+    ),
+    "implementation_defaults": (
+        "Start -> Lab -> Back；Lab固定提供Capture、Restore、Reset；Unity状态机和事件链逐步执行；"
+        "界面提供帮助并使用English；测量、日志及桌面与XR映射均按已确认实验契约实现。"
     ),
 }
 
@@ -383,7 +399,9 @@ def continue_emvr(engine: WorkflowEngine, result: dict) -> dict:
             str(pending.get("subject") or "") if isinstance(pending, dict) else ""
         )
         message = (
-            BUILDER_REQUIREMENT_ANSWERS[requirement]
+            "批准默认方案"
+            if requirement == "implementation_defaults"
+            else BUILDER_REQUIREMENT_ANSWERS[requirement]
             if requirement
             else EMVR_STAGE_ONE_FIELD_ANSWERS[pending_subject]
             if pending_subject in EMVR_STAGE_ONE_FIELD_ANSWERS
@@ -2355,7 +2373,10 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(result["builder_input_ready"])
         self.assertTrue(result["builder_input_url"].endswith("/builder-gate1-input.pdf"))
         self.assertTrue(result["builder_handoff_status"]["ready"])
-        self.assertEqual(result["builder_handoff_status"]["completed"], 13)
+        self.assertEqual(
+            result["builder_handoff_status"]["completed"],
+            len(BUILDER_REQUIREMENT_SPECS),
+        )
         self.assertIn("完整设计总结PDF已经生成", result["assistant_message"])
         self.assertIn("Builder Pack Gate 1", result["assistant_message"])
         self.assertIn("右侧“任务报告”", result["assistant_message"])
@@ -2466,6 +2487,36 @@ class WorkflowEngineTests(unittest.TestCase):
                 stage.value,
             )
         formula_contract = builder["formula_driven_experiment"]
+        self.assertTrue(builder["implementation_defaults"])
+        self.assertTrue(
+            all(
+                task.get(field)
+                for task in builder["student_tasks"]
+                for field in (
+                    "entry_state",
+                    "expected_action",
+                    "unity_response",
+                    "observable_evidence",
+                    "success_criteria",
+                    "exit_state",
+                )
+            )
+        )
+        self.assertTrue(
+            all(
+                row.get("key") and row.get("value") and row.get("status")
+                for section in (
+                    "identity",
+                    "execution_context",
+                    "interaction_modes",
+                    "visualization",
+                    "scene",
+                    "implementation_defaults",
+                    "initial_and_action_states",
+                )
+                for row in builder[section]
+            )
+        )
         for field in (
             "topic",
             "summary",
@@ -2488,6 +2539,7 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertTrue(
             all(
                 item["control_role"].startswith("adjustable")
+                and item["control_specification"]
                 for item in formula_contract["selected_formula_adjustable_inputs"]
             )
         )
@@ -2540,6 +2592,36 @@ class WorkflowEngineTests(unittest.TestCase):
         disconnected_builder.pop("visualization")
         with self.assertRaisesRegex(ValueError, "missing sections: visualization"):
             validate_builder_gate1_input(disconnected_builder)
+
+        no_probe_session = deepcopy(completed_session)
+        no_probe_state = no_probe_session.design_context["stage_design_state"]
+        no_probe_state["measurement_specifications"] = (
+            "场线形态按连接、弯曲和发散类别作定性定义，不涉及数值计算，单位不适用；"
+            "不使用空间探针，读数与采样不适用；不生成曲线。"
+        )
+        no_probe_state["initial_reset_state"] = (
+            "Initial与Reset均恢复Q1=+1 μC、Q2=-1 μC、距离2.0 m，并清除快照和定性分类。"
+        )
+        no_probe_state["implementation_defaults"] = format_implementation_defaults(
+            build_implementation_defaults(no_probe_session)
+        )
+        record_implementation_defaults_approval(no_probe_session, source="TEST")
+        no_probe_builder = build_builder_gate1_input(no_probe_session)
+        self.assertFalse(
+            any("探针" in item["display_name"] for item in no_probe_builder["objects"])
+        )
+        visualization_text = json.dumps(
+            no_probe_builder["visualization"], ensure_ascii=False
+        )
+        self.assertIn("不创建数值纵轴", visualization_text)
+        self.assertNotIn("theoretical curve", visualization_text.casefold())
+        no_probe_limits = effective_emvr_stage_payload(
+            no_probe_session,
+            Stage.DESIGN_VALUE_AND_LIMITATIONS,
+        )
+        no_probe_limits_text = json.dumps(no_probe_limits, ensure_ascii=False)
+        self.assertIn("定性类别", no_probe_limits_text)
+        self.assertNotIn("场线形态指标", no_probe_limits_text)
         self.assertTrue(engine.render_report_pdf(result["design_id"]).startswith(b"%PDF"))
         self.assertTrue(
             engine.render_builder_input_pdf(result["design_id"]).startswith(b"%PDF")

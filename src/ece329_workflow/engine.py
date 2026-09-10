@@ -58,6 +58,7 @@ from .dialogue_acts import (
     DESIGN_ACT_FIELDS,
     STAGE_ACT_FIELDS,
     apply_stage_field_updates,
+    reconcile_stage_clear_markers,
     stage_design_state_snapshot,
 )
 from .design_state import (
@@ -116,6 +117,12 @@ from .reporting import (
     validate_emvr_report_completeness,
 )
 from .builder_input import build_builder_gate1_input, render_builder_gate1_input_pdf
+from .builder_defaults import (
+    IMPLEMENTATION_DEFAULTS_FIELD,
+    build_implementation_defaults,
+    format_implementation_defaults,
+    record_implementation_defaults_approval,
+)
 from .builder_requirements import (
     BUILDER_REQUIREMENT_FIELDS,
     builder_handoff_status,
@@ -605,6 +612,10 @@ _EXPLICIT_EMVR_CONFIRMATIONS = frozenset(
         "沿用这部分并继续",
         "保持这部分并继续",
         "沿用刚才的表述",
+        "批准默认方案",
+        "确认默认方案",
+        "采用默认方案",
+        "批准并继续",
     }
 )
 
@@ -745,6 +756,72 @@ def _direct_builder_answer_intent(
                     "content": answer,
                     "confidence": 1.0,
                     "semantic_key": f"exact_builder_fallback:{field}",
+                }
+            ],
+            actions_authoritative=True,
+        ),
+        pending_action,
+    )
+
+
+def _implementation_defaults_approval_intent(
+    session: DesignSession,
+    request: TurnRequest,
+    message: str,
+    pending_action: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Commit the exact default contract that was visibly offered."""
+
+    if (
+        session.interaction_state is not InteractionState.EMVR_DIRECT
+        or not isinstance(pending_action, dict)
+        or pending_action.get("type") != "ANSWER_EMVR_STAGE_QUESTION"
+        or str(pending_action.get("subject") or "")
+        != IMPLEMENTATION_DEFAULTS_FIELD
+    ):
+        return None
+    default_value = str(pending_action.get("default_proposal_value") or "").strip()
+    option_id = str(pending_action.get("default_option_id") or "").strip()
+    selected = str(request.selected_option_id or "").strip()
+    explicit_approval = _compact_control_text(message) in {
+        "批准默认方案",
+        "确认默认方案",
+        "采用默认方案",
+        "批准并继续",
+    }
+    if not default_value or not (
+        explicit_approval or (option_id and selected == option_id)
+    ):
+        return None
+    # A selected button can accompany a question or revision. Only a plain
+    # approval takes this shortcut; substantive text goes through the resolver.
+    if message.strip() and not explicit_approval and not _is_explicit_emvr_confirmation(
+        _compact_control_text(message)
+    ):
+        return None
+    if default_value != format_implementation_defaults(build_implementation_defaults(session)):
+        # A stale displayed proposal cannot approve the latest design.
+        return resolved_intent(
+            UserIntent.UNCLEAR,
+            source="STALE_IMPLEMENTATION_DEFAULTS",
+            confidence=1.0,
+        )
+    return validate_resolved_intent(
+        resolved_intent(
+            UserIntent.ANSWER_CURRENT_QUESTION,
+            target=IMPLEMENTATION_DEFAULTS_FIELD,
+            resolved_value=default_value,
+            confidence=1.0,
+            source="SEMANTIC_APPROVED_EMVR_IMPLEMENTATION_DEFAULTS",
+            semantic_updates={"pending_answer_status": "CLEAR"},
+            dialogue_acts=[
+                {
+                    "type": "ANSWER_PENDING_QUESTION",
+                    "target": IMPLEMENTATION_DEFAULTS_FIELD,
+                    "operation": "REPLACE",
+                    "content": default_value,
+                    "confidence": 1.0,
+                    "semantic_key": "approved_builder_implementation_defaults",
                 }
             ],
             actions_authoritative=True,
@@ -2061,32 +2138,63 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         field = str(requirement["field"])
         question = str(requirement["question"])
         validation_error = str(requirement.get("validation_error") or "").strip()
+        default_value = str(requirement.get("default_value") or "").strip()
+        default_contract = deepcopy(requirement.get("default_contract", {}))
+        default_option_id = str(requirement.get("default_option_id") or "").strip()
+        pending = {
+            "type": "ANSWER_EMVR_STAGE_QUESTION",
+            "interaction_state": InteractionState.EMVR_DIRECT.value,
+            "subject": field,
+            "answer_fields": [field],
+            "question": question,
+            "advance_on_accept": False,
+            "allowed_intents": [
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+                UserIntent.REQUEST_MORE_EXAMPLES.value,
+                UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+                UserIntent.UNCLEAR.value,
+            ],
+        }
+        if default_value:
+            pending.update(
+                {
+                    "default_proposal_value": default_value,
+                    "default_contract": default_contract,
+                    "default_option_id": default_option_id,
+                    "required_report_field": field,
+                }
+            )
         return StepOutput(
             assistant_message=(
                 f"为了让这份设计可以直接交给 EMVR Builder 使用，"
                 f"现在先明确{requirement['label']}。"
                 + (f"\n\n{validation_error}" if validation_error else "")
+                + (
+                    f"\n\n以下是按当前实验生成的完整默认方案：\n{default_value}"
+                    if default_value
+                    else ""
+                )
             ),
             stage_payload={
                 "emvr_guided_entry": True,
                 "awaiting_user_design_input": True,
                 "builder_requirement_field": field,
                 "builder_handoff_status": builder_handoff_status(session),
-                "pending_action": {
-                    "type": "ANSWER_EMVR_STAGE_QUESTION",
-                    "interaction_state": InteractionState.EMVR_DIRECT.value,
-                    "subject": field,
-                    "answer_fields": [field],
-                    "question": question,
-                    "advance_on_accept": False,
-                    "allowed_intents": [
-                        UserIntent.ANSWER_CURRENT_QUESTION.value,
-                        UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
-                        UserIntent.REQUEST_MORE_EXAMPLES.value,
-                        UserIntent.RETURN_TO_PREVIOUS_POINT.value,
-                        UserIntent.UNCLEAR.value,
-                    ],
-                },
+                "default_implementation_contract": default_contract,
+                "decision_options": (
+                    [
+                        {
+                            "option_id": default_option_id,
+                            "label": "批准默认方案",
+                            "action": "APPROVE_DEFAULT_IMPLEMENTATION",
+                        }
+                    ]
+                    if default_value
+                    else []
+                ),
+                "pending_action": pending,
             },
             student_task=question,
         )
@@ -2382,9 +2490,17 @@ def _prepare_emvr_stage_output(
         task = str(requirement["question"])
         existing_message = output.assistant_message.rstrip()
         validation_error = str(requirement.get("validation_error") or "").strip()
+        default_value = str(requirement.get("default_value") or "").strip()
+        default_contract = deepcopy(requirement.get("default_contract", {}))
+        default_option_id = str(requirement.get("default_option_id") or "").strip()
         requirement_message = (
             f"这部分还需要明确{requirement['label']}，确认后才会进入 Builder 交接文档。"
             + (f" {validation_error}" if validation_error else "")
+            + (
+                f"\n\n以下是按当前实验生成的完整默认方案：\n{default_value}"
+                if default_value
+                else ""
+            )
         )
         output.assistant_message = (
             f"{existing_message}\n\n{requirement_message}"
@@ -2394,7 +2510,19 @@ def _prepare_emvr_stage_output(
         output.student_task = task
         output.stage_payload["awaiting_user_design_input"] = True
         output.stage_payload["builder_requirement_field"] = field
-        output.stage_payload["pending_action"] = {
+        output.stage_payload["default_implementation_contract"] = default_contract
+        output.stage_payload["decision_options"] = (
+            [
+                {
+                    "option_id": default_option_id,
+                    "label": "批准默认方案",
+                    "action": "APPROVE_DEFAULT_IMPLEMENTATION",
+                }
+            ]
+            if default_value
+            else []
+        )
+        pending = {
             "type": "ANSWER_EMVR_STAGE_QUESTION",
             "interaction_state": InteractionState.EMVR_DIRECT.value,
             "subject": field,
@@ -2404,11 +2532,22 @@ def _prepare_emvr_stage_output(
             "allowed_intents": [
                 UserIntent.ANSWER_CURRENT_QUESTION.value,
                 UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+                UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
                 UserIntent.REQUEST_MORE_EXAMPLES.value,
                 UserIntent.RETURN_TO_PREVIOUS_POINT.value,
                 UserIntent.UNCLEAR.value,
             ],
         }
+        if default_value:
+            pending.update(
+                {
+                    "default_proposal_value": default_value,
+                    "default_contract": default_contract,
+                    "default_option_id": default_option_id,
+                    "required_report_field": field,
+                }
+            )
+        output.stage_payload["pending_action"] = pending
         return
 
     if stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
@@ -3001,6 +3140,10 @@ def _persist_emvr_stage_input(
         # requirements such as an already confirmed learning objective.
         structured_requirements[stage.value] = deepcopy(structured_update)
         apply_emvr_field_updates(emvr_design, structured_update)
+        reconcile_stage_clear_markers(
+            session,
+            structured_update.get("field_updates", []),
+        )
     if not entries or entries[-1].get("content") != entry["content"]:
         entries.append(entry)
         del entries[:-8]
@@ -3097,6 +3240,14 @@ class WorkflowEngine:
         message: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = hydrate_pending_action_from_history(session)
+        approved_defaults = _implementation_defaults_approval_intent(
+            session,
+            request,
+            message,
+            pending,
+        )
+        if approved_defaults is not None:
+            return approved_defaults, pending
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and isinstance(pending, dict)
@@ -3689,6 +3840,23 @@ class WorkflowEngine:
         cached_response = _cached_turn_response(session, request)
         if cached_response is not None:
             return cached_response
+        reopened_handoff = bool(
+            session.status is WorkflowStatus.COMPLETE
+            and session.interaction_state is InteractionState.EMVR_DIRECT
+            and next_due_builder_requirement(session, Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT)
+        )
+        if reopened_handoff:
+            # An older completed design may lack a newly required contract or
+            # carry an obsolete default approval. Keep its design, but allow
+            # normal question/edit handling to repair the handoff on this turn.
+            session.status = WorkflowStatus.ACTIVE
+            session.current_stage_index = STAGE_SEQUENCE.index(Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT)
+            session.completed_stages = [
+                item for item in session.completed_stages
+                if item != Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value
+            ]
+            dialogue_state(session)["pending_action"] = None
+            set_pending_action_snapshot(session, None)
         if session.status is WorkflowStatus.COMPLETE:
             response = {
                 "design_id": session.design_id,
@@ -3854,6 +4022,13 @@ class WorkflowEngine:
                 or emvr_design_before_turn.get("brief")
                 or ""
             ).strip()
+            and any(
+                isinstance(update, dict)
+                and update.get("field") == IMPLEMENTATION_DEFAULTS_FIELD
+                and update.get("operation") in {"REPLACE", "MERGE"}
+                and update.get("value")
+                for update in turn_intent.get("semantic_updates", {}).get("stage_field_updates", [])
+            )
         )
         emvr_topic_action = any(
             isinstance(act, dict)
@@ -4105,6 +4280,31 @@ class WorkflowEngine:
         ]
         apply_resolved_intent(session, turn_intent, pending_action, message)
         intent_name = str(turn_intent.get("intent") or UserIntent.UNCLEAR.value)
+        if (
+            isinstance(pending_action, dict)
+            and str(pending_action.get("subject") or "")
+            == IMPLEMENTATION_DEFAULTS_FIELD
+            and intent_name
+            in {
+                UserIntent.ANSWER_CURRENT_QUESTION.value,
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL.value,
+            }
+            and str(
+                stage_design_state_snapshot(session).get(
+                    IMPLEMENTATION_DEFAULTS_FIELD,
+                    "",
+                )
+            ).strip()
+        ):
+            record_implementation_defaults_approval(
+                session,
+                source=(
+                    "DEFAULT"
+                    if turn_intent.get("source")
+                    == "SEMANTIC_APPROVED_EMVR_IMPLEMENTATION_DEFAULTS"
+                    else "CUSTOM"
+                ),
+            )
         resolved_value = turn_intent.get("resolved_value")
         resolved_student_message = (
             resolved_value.strip()
@@ -4127,6 +4327,16 @@ class WorkflowEngine:
             )
             else message
         )
+        if (
+            isinstance(pending_action, dict)
+            and str(pending_action.get("subject") or "")
+            == IMPLEMENTATION_DEFAULTS_FIELD
+        ):
+            # This field is an implementation contract, not the student's
+            # design-value/limitations prose. It has already been persisted by
+            # its bound dialogue act and must not be fed back through the stage
+            # generator as if it were new experimental content.
+            resolved_student_message = ""
         semantic_updates = (
             deepcopy(turn_intent.get("semantic_updates", {}))
             if (
@@ -4593,6 +4803,14 @@ class WorkflowEngine:
             output = formula_onboarding_output
             session.turn_context = {}
             completion_error = None
+        elif turn_intent.get("source") == "STALE_IMPLEMENTATION_DEFAULTS":
+            output = _emvr_stage_entry_output(session, handled_stage)
+            output.assistant_message = (
+                "实验或实现规范已更新，下面展示最新方案，确认后再导出。\n\n"
+                + output.assistant_message
+            )
+            session.turn_context = {}
+            completion_error = None
         elif version_only_turn:
             output = StepOutput(
                 assistant_message="\n\n".join(
@@ -5039,6 +5257,12 @@ class WorkflowEngine:
             finally:
                 session.turn_context = {}
             _project_committed_stage_fields(session, handled_stage, output)
+            if (
+                isinstance(pending_action, dict)
+                and str(pending_action.get("subject") or "")
+                == IMPLEMENTATION_DEFAULTS_FIELD
+            ):
+                output.stage_payload.pop("student_value_and_limit_notes", None)
             _reconcile_guided_stage_readiness(session, handled_stage, output)
             if session.interaction_state is InteractionState.EMVR_DIRECT:
                 _prepare_emvr_stage_output(session, handled_stage, output)
@@ -5409,6 +5633,11 @@ class WorkflowEngine:
 
         next_stage = session.next_stage.value if session.next_stage else None
         response_message = output.assistant_message
+        if reopened_handoff:
+            response_message = (
+                "现有设计已保留；新版 Builder 交接规范需要补充确认，已重新开放最终检查。\n\n"
+                + response_message
+            )
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and session.status is WorkflowStatus.COMPLETE
