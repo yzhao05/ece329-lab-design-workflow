@@ -44,6 +44,7 @@ from .builder_defaults import (
     IMPLEMENTATION_DEFAULTS_FIELD,
     measurement_disables_probe,
     measurement_is_qualitative_only,
+    measurement_disables_chart,
     project_derived_contract_text,
 )
 
@@ -1285,8 +1286,8 @@ def effective_emvr_stage_payload(
             and "具体方向以已确认假设为准" in _plain(payload.get("expected_trend"))
         ):
             payload["expected_trend"] = (
-                "距离由远到近时，同号电荷中间的场线向外弯曲并形成扩大的低密度区；"
-                "异号电荷的场线由正电荷连接至负电荷，连接密度随距离缩短而增加。"
+                "在固定种子、视角和显示尺度下，比较同号电荷间的场线弯曲与异号电荷间的连接形态；"
+                "场线空白不等于整片零场，不能仅凭距离变化断言空白面积或连接密度必然增大。"
                 if context["point_charge"]
                 else (
                     f"当{context['changed']}变化时，{context['observed']}应出现可与基准状态"
@@ -1574,7 +1575,7 @@ def effective_emvr_stage_payload(
                 payload["teaching_value"] = {
                     "rating": "高",
                     "learning_contribution": (
-                        "把同号电荷中间低密度区、异号电荷连接场线以及距离缩短后的形态增强"
+                        "把同号电荷间的场线弯曲、异号电荷连接场线以及不同距离下的实际形态差异"
                         "与 E_total=E_A+E_B 的矢量叠加逐项对应。"
                     ),
                 }
@@ -1848,6 +1849,11 @@ def _effective_emvr_visualization(
         return {
             "display_mode": "qualitative_snapshot_comparison",
             "data_status": "定性分类；不生成数值纵轴或理论曲线",
+        }
+    if measurement_disables_chart(measurement_contract):
+        return {
+            "display_mode": "numeric_readouts_and_snapshots",
+            "data_status": "保留测量契约的数值读数、单位与快照；不生成曲线",
         }
     plan = _plain(requirements.get("visualization_requirements"))
     changed = [

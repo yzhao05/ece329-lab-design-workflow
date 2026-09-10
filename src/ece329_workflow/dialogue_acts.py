@@ -820,6 +820,8 @@ def apply_stage_field_updates(
         # The approved implementation is a complete document, not a short
         # conversational field. Truncating it silently discarded its tail.
         value = "" if operation == "CLEAR" else _text(item.get("value"))
+        if field == "procedure_steps" and operation != "CLEAR" and isinstance(item.get("value"), list):
+            value = "\n".join(_text(step) for step in item["value"] if _text(step))
         if operation != "CLEAR" and not value:
             continue
         update_id = str(item.get("update_id") or "").strip() or _act_identity(
@@ -926,13 +928,13 @@ def apply_stage_field_updates(
         # Both write paths can revise Builder fields. Mirror a newer stage
         # write into the canonical store so report, validation and Builder
         # cannot disagree based on which storage path received the edit.
-        shared = [field for field in changed if field in BUILDER_REQUIREMENT_FIELDS and field in EMVR_EDITABLE_FIELDS]
+        shared = [field for field in changed if (field in BUILDER_REQUIREMENT_FIELDS or field == "procedure_steps") and field in EMVR_EDITABLE_FIELDS]
         if shared:
             if not isinstance(session.design_context.get("emvr_design"), dict):
                 session.design_context["emvr_design"] = {}
             apply_emvr_field_updates(session.design_context["emvr_design"], {"field_updates": [
                 {"field_id": field, "operation": "CLEAR" if field in explicitly_cleared else "REPLACE",
-                 "value": state.get(field, "")}
+                 "value": (state.get(field, "").splitlines() if field == "procedure_steps" else state.get(field, ""))}
                 for field in shared
             ]})
     return list(dict.fromkeys(changed))

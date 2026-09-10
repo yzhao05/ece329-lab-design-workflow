@@ -180,6 +180,35 @@ class LectureKnowledgeBase:
         scored.sort(key=lambda item: (-item[0], item[1]["supplemental_concept_id"]))
         return [item for _, item in scored[:limit]]
 
+    def topic_domain_evidence(self, text: str) -> dict[str, Any]:
+        """Broad catalog topic labels are not classified by an overview lecture's number.
+
+        This is a candidate-retrieval guard, never a formula selection or a
+        substitute for semantic parsing of objects, variables and conditions.
+        Overlapping labels use the longest span; explicit rejected topics do
+        not become positive evidence. Multiple positive blocks stay ambiguous.
+        """
+        normalized = text.casefold()
+        matches = []
+        for block in self.concept_data["overview"]["course_blocks"]:
+            for alias in block.get("topic_aliases", []):
+                term = alias.casefold()
+                pattern = re.escape(term)
+                if re.search(r"[a-z]", term):
+                    pattern = r"(?<![a-z0-9])" + pattern + r"(?![a-z0-9])"
+                for match in re.finditer(pattern, normalized):
+                    matches.append((match.start(), match.end(), block["id"]))
+        longest = [item for item in matches if not any(
+            other[0] <= item[0] and other[1] >= item[1] and other[:2] != item[:2]
+            for other in matches
+        )]
+        positive, rejected = set(), set()
+        for start, _, domain in longest:
+            prefix = normalized[max(0, start - 20):start]
+            negated = re.search(r"(?:不是|不要|不想(?:做|研究)?|不(?:做|研究|需要)|排除|而非|\bnot|\bno)\s*$", prefix)
+            (rejected if negated else positive).add(domain)
+        return {"domains": sorted(positive), "rejected_domains": sorted(rejected), "matched": bool(matches)}
+
     def course_domain_for_text(self, text: str) -> str | None:
         """Return the course block of the strongest catalog-grounded match.
 
@@ -190,6 +219,10 @@ class LectureKnowledgeBase:
         it does not maintain a second topic-word routing table in code.
         """
 
+        topic_evidence = self.topic_domain_evidence(text)
+        if topic_evidence["matched"]:
+            domains = topic_evidence["domains"]
+            return domains[0] if len(domains) == 1 else None
         normalized = text.casefold()
         ranked_lectures: list[tuple[int, int, dict[str, Any]]] = []
         for lecture in self.lectures:
@@ -919,6 +952,10 @@ class LectureKnowledgeBase:
 
         if limit <= 0:
             return []
+        domain_evidence = self.topic_domain_evidence(text)
+        domain = self.course_domain_for_text(text)
+        if domain_evidence["matched"] and not domain_evidence["domains"]:
+            return []
         ranked_concept_ids = [
             str(item.get("id") or "")
             for item in self.match_concepts(text, limit=8)
@@ -932,6 +969,9 @@ class LectureKnowledgeBase:
                     if str(item).strip()
                 )
         normalized_text = text.casefold()
+
+        broad_terms = {term.casefold() for block in self.concept_data["overview"]["course_blocks"]
+                       for alias in block.get("topic_aliases", []) for term in [alias, *alias.split()]}
 
         def profile_evidence_score(profile: dict[str, Any]) -> int:
             """Rank catalog descriptors without maintaining routing keywords.
@@ -970,6 +1010,7 @@ class LectureKnowledgeBase:
                 # profile phrase; broad topics keep the catalog's curated
                 # default ordering.
                 if len(re.sub(r"[\W_]", "", chunk, flags=re.UNICODE)) >= 4
+                and chunk.strip().casefold() not in broad_terms
             }
             return sum(
                 max(2, len(re.sub(r"\s+", "", term)))
@@ -981,12 +1022,13 @@ class LectureKnowledgeBase:
             str(profile.get("profile_id") or ""): profile_evidence_score(profile)
             for profile in self.formula_design_profiles
         }
-        if not ranked_concept_ids and not any(direct_profile_scores.values()):
+        if not ranked_concept_ids and not any(direct_profile_scores.values()) and not domain:
             return []
 
         concept_rank = {
             concept_id: index
             for index, concept_id in enumerate(dict.fromkeys(ranked_concept_ids))
+            if not domain or self._course_block_for_lecture(int(self._lecture_by_id[concept_id]["lecture"])) == domain
         }
         block_rank = {
             self._course_block_for_lecture(
@@ -995,8 +1037,12 @@ class LectureKnowledgeBase:
             for index, concept_id in enumerate(dict.fromkeys(ranked_concept_ids))
             if concept_id in self._lecture_by_id
         }
+        if domain:
+            block_rank = {domain: 0}
         ranked: list[tuple[int, int, dict[str, Any]]] = []
         for order, profile in enumerate(self.formula_design_profiles):
+            if domain and profile.get("course_block") != domain:
+                continue
             primary_ids = profile.get("primary_formula_ids", [])
             supporting_ids = profile.get("supporting_formula_ids", [])
             primary_concepts = {
@@ -1163,6 +1209,9 @@ class LectureKnowledgeBase:
             profile_ids.add(profile_id)
             if profile.get("course_block") not in valid_course_blocks:
                 errors.append(f"formula design profile {profile_id} has invalid course block")
+            related_blocks = profile.get("related_course_blocks", [])
+            if not isinstance(related_blocks, list) or any(block not in valid_course_blocks for block in related_blocks):
+                errors.append(f"formula design profile {profile_id} has invalid related course blocks")
             primary_ids = profile.get("primary_formula_ids")
             supporting_ids = profile.get("supporting_formula_ids")
             if not isinstance(primary_ids, list) or not primary_ids:

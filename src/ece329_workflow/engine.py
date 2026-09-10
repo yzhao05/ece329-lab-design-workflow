@@ -3613,11 +3613,13 @@ class WorkflowEngine:
                 carried_context["emvr_formula_flow"] = public_formula_flow_state(
                     session
                 )
+                carried_context["topic_domain_evidence"] = KNOWLEDGE.topic_domain_evidence(message)
                 carried_context["formula_profile_catalog"] = [
                     {
                         "profile_id": profile.get("profile_id"),
                         "title": profile.get("title_zh"),
                         "course_domain": profile.get("course_block"),
+                        "related_course_domains": profile.get("related_course_blocks", []),
                         "primary_formula_ids": profile.get("primary_formula_ids", []),
                         "supporting_formula_ids": profile.get(
                             "supporting_formula_ids", []

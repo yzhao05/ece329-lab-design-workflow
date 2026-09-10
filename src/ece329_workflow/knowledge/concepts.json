@@ -3,9 +3,9 @@
   "overview": {
     "pages": [10, 11, 12],
     "course_blocks": [
-      {"id": "electrostatics", "label": "Electrostatics", "lectures": "1-11"},
-      {"id": "magnetism", "label": "Magnetism and magneto-quasi-statics", "lectures": "12-15"},
-      {"id": "electromagnetics", "label": "Electromagnetics, waves, and transmission lines", "lectures": "16-39"}
+      {"id": "electrostatics", "label": "Electrostatics", "lectures": "1-11", "topic_aliases": ["静电", "静电场", "电场", "electrostatics", "electrostatic", "electric field"]},
+      {"id": "magnetism", "label": "Magnetism and magneto-quasi-statics", "lectures": "12-15", "topic_aliases": ["磁场", "磁学", "静磁", "静磁场", "磁静态", "电磁感应", "magnetic field", "magnetism", "magnetostatic", "magnetostatics", "electromagnetic induction"]},
+      {"id": "electromagnetics", "label": "Electromagnetics, waves, and transmission lines", "lectures": "16-39", "topic_aliases": ["电磁场", "电磁波", "传输线", "洛伦兹力", "electromagnetic field", "electromagnetic wave", "electromagnetic waves", "transmission line", "transmission lines", "lorentz force"]}
     ],
     "explicitly_out_of_scope_or_barely_covered": ["radiation and antennas", "dispersion in material media"]
   },

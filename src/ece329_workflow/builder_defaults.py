@@ -8,10 +8,11 @@ from typing import Any
 
 from .models import DesignSession, Stage
 from .unity_blueprint import CONSTRUCTION_LABELS, construction_defaults
+from .physics_blueprint import selected_physics_guidance
 
 
 IMPLEMENTATION_DEFAULTS_FIELD = "implementation_defaults"
-IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v4"
+IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v5"
 _IMPLEMENTATION_INPUT_FIELDS = frozenset(
     {
         "lab_title",
@@ -80,8 +81,15 @@ def measurement_disables_probe(value: Any) -> bool:
 def measurement_is_qualitative_only(value: Any) -> bool:
     text = _text(value)
     return bool(
-        re.search(r"(?:定性(?:描述|判断)|不涉及数值计算|无定量纵轴|不生成(?:定量)?曲线)", text)
+        re.search(r"(?:仅(?:作|做|进行)?定性|只(?:作|做)定性|不涉及数值计算|无定量(?:读数|指标))", text)
+        or (re.search(r"定性(?:描述|判断)", text) and not re.search(r"(?:读数|显示|测量)[^。；]{0,45}(?:Bz|Bx|By|分量|大小|数值)", text, re.I))
     )
+
+
+def measurement_disables_chart(value: Any) -> bool:
+    return measurement_is_qualitative_only(value) or bool(re.search(
+        r"不(?:生成|设置|使用|显示)(?:数值|定量|理论)?曲线|无(?:数值|定量|理论)?曲线", _text(value)
+    ))
 
 
 def project_derived_contract_text(session: DesignSession, value: Any) -> Any:
@@ -132,7 +140,7 @@ def project_derived_contract_text(session: DesignSession, value: Any) -> Any:
     if measurement_disables_probe(measurements):
         text = text.replace("相机或探针设置", "相机设置")
         text = re.sub(r"(?:空间)?探针(?:初始)?(?:位于|置于|放在|在)[^。；;\n]*(?:[。；;]|$)", "", text)
-    if measurement_is_qualitative_only(measurements):
+    if measurement_disables_chart(measurements):
         for old, new in (
             ("对比曲线同步重算", "定性比较面板同步刷新"),
             ("曲线和场图", "场图"),
@@ -197,6 +205,8 @@ def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:
     chart_mode = (
         "不生成伪定量纵轴曲线；使用统一视图、快照和文字判据完成定性比较"
         if measurement_is_qualitative_only(measurements)
+        else "不生成曲线；按测量契约保留数值读数、单位、方向与比较快照"
+        if measurement_disables_chart(measurements)
         else "按测量契约生成带单位坐标轴、固定图例和统一量程的结果图"
     )
     return {
@@ -242,6 +252,7 @@ def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:
         ),
         "desktop_xr_mapping": desktop_xr,
         **construction_defaults(lab_id),
+        "selected_physics_implementation": selected_physics_guidance(session),
         "numerical_model": _latest_value(session, "numerical_model_specifications"),
     }
 
@@ -260,6 +271,7 @@ def format_implementation_defaults(contract: dict[str, Any]) -> str:
         ("logging_help_language", "日志、帮助与语言"),
         ("desktop_xr_mapping", "桌面与XR映射"),
         *CONSTRUCTION_LABELS,
+        ("selected_physics_implementation", "所选公式的计算实现与独立基准"),
         ("numerical_model", "本实验数值算法与边界"),
     )
     return "\n".join(

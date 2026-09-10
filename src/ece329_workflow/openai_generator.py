@@ -46,6 +46,8 @@ from .emvr_formula_flow import (
     FORMULA_COMPOSITION_REVIEW,
     TOPIC_RECEIVED,
     normalize_formula_flow_action,
+    recover_topic_analysis_from_knowledge,
+    recover_formula_topic_correction,
 )
 from .design_state import seen_scene_signatures
 from .generator import (
@@ -2550,6 +2552,11 @@ class OpenAIStageGenerator:
                 f"当前阶段是{phase}，允许推进的动作是{required_action}。"
                 "必须结合输入中的user_message、previous_question、pending_action、"
                 "emvr_formula_flow、公式档案和实验方法候选理解整句话，不能按关键词匹配。"
+                "任何未锁定入口阶段，用户指出当前公式与主题不符或要求换一组时，允许SET_EMVR_TOPIC重新匹配，"
+                "不得强迫从被否定的候选中选择。SET_EMVR_TOPIC的content包含course_domain（使用formula_profile_catalog的course_domain值）、"
+                "topic_description、mentioned_objects、changed_quantities、observed_quantities、explicit_formula_ids、"
+                "specificity（BROAD/PARTIALLY_DEFINED/SPECIFIC）、profile_evidence和confidence。粗略主题的未知列表填[]，"
+                "不能虚构对象或参数。磁场主题使用magnetism相关理论；课程第一讲同时介绍E和B，讲次不能用来判定静电。"
                 "学生给出宽泛或具体课程主题时也属于有效主题；不要因为没有同时给出对象、变量、"
                 "观察量和公式而拒绝SET_EMVR_TOPIC。选择、组合、修改或确认必须只引用当前状态中"
                 "真实存在的稳定ID。若学生在方向审阅中同时修改多个部分，分别写进brief_updates；"
@@ -2598,6 +2605,7 @@ class OpenAIStageGenerator:
             if phase == EXPERIMENT_DIRECTION_REVIEW
             else {required_action}
         )
+        allowed.add("SET_EMVR_TOPIC")
         if not any(
             str(act.get("type") or "").upper() in allowed
             for act in normalized
@@ -2621,12 +2629,12 @@ class OpenAIStageGenerator:
         therefore safely retain the topic and present formula *candidates*
         instead of replaying the entry question forever.
 
-        This is intentionally limited to ``TOPIC_RECEIVED``.  Later phases
-        contain consequential choices among formulas, composition strategies,
-        methods, or briefs and must never be guessed by a catalog fallback.
+        Initial topics and explicit rejection of an unconfirmed formula batch
+        may refresh candidates. Selection, composition, methods and approval
+        must never be guessed by a catalog fallback.
         """
 
-        if phase != TOPIC_RECEIVED:
+        if phase not in {TOPIC_RECEIVED, FORMULA_CANDIDATES_PRESENTED}:
             return None
         try:
             turn_context = json.loads(intent_input)
@@ -2637,20 +2645,15 @@ class OpenAIStageGenerator:
         user_message = str(turn_context.get("user_message") or "").strip()
         if not user_message:
             return None
-        course_domain = KNOWLEDGE.course_domain_for_text(user_message)
-        if not course_domain:
+        flow = turn_context.get("carried_context", {}).get("emvr_formula_flow", {})
+        flow = flow if isinstance(flow, dict) else {}
+        topic_analysis = (
+            recover_topic_analysis_from_knowledge(user_message) if phase == TOPIC_RECEIVED
+            else recover_formula_topic_correction(user_message, {**flow, "phase": phase})
+        )
+        if not topic_analysis:
             return None
-        topic_analysis = {
-            "course_domain": course_domain,
-            "topic_description": user_message[:1200],
-            "mentioned_objects": [],
-            "changed_quantities": [],
-            "observed_quantities": [],
-            "explicit_formula_ids": [],
-            "specificity": "BROAD",
-            "profile_evidence": [],
-            "confidence": 0.82,
-        }
+        course_domain = topic_analysis["course_domain"]
         action = {
             "type": "SET_EMVR_TOPIC",
             "target": "emvr_formula_topic",
@@ -3264,6 +3267,10 @@ class OpenAIStageGenerator:
                 "合法profile_id，并分别给出course_concept_match、variation_match、observation_match、"
                 "object_geometry_match、boundary_match和condition_conflict布尔值。这里按整句物理含义映射，"
                 "不能因出现某个词就直接选择公式，也不能把候选公式视为学生已经确认。"
+                "只说磁场实验是有效BROAD主题，不要求先补齐物体和变量；未知列表用[]。磁场不等于静电，"
+                "必须按物理量和理论含义选magnetism相关候选，不能因第一讲介绍过磁场就归到electrostatics。"
+                "用户说这组公式与主题无关、换一组时返回SET_EMVR_TOPIC重新检索，保留原始研究意图并修正领域；"
+                "这不是选择错误候选，也不是无法解析。只有真正选择当前卡片才返回SELECT_EMVR_FORMULAS。"
                 "如果emvr_formula_flow.topic_seed存在，它是从另一模式交接来的既有研究含义；学生确认"
                 "沿用时，SET_EMVR_TOPIC应以topic_seed与本轮补充共同完成结构化主题分析，不能把‘沿用’"
                 "本身当作topic_description，也不能要求学生重新输入原方向。"
@@ -4153,6 +4160,8 @@ class OpenAIStageGenerator:
                 "LOCK_EMVR_DIRECTION",
             },
         }.get(formula_phase, set())
+        if required_formula_actions:
+            required_formula_actions.add("SET_EMVR_TOPIC")
         if formula_phase == EXPERIMENT_DIRECTION_REVIEW:
             projected_revision = _formula_direction_revision_from_field_acts(
                 normalized_emvr_acts

@@ -145,7 +145,7 @@ def _builder_formula_contracts(
         for formula_id in formula_ids:
             formula = formula_by_id.get(formula_id)
             if not formula:
-                continue
+                raise ValueError(f"Builder selected formula reference is unknown: {formula_id}")
             contracts.append(
                 {
                     "formula_id": formula_id,
@@ -269,6 +269,14 @@ def _student_task_contracts(
     rows: list[dict[str, str]] = []
     previous_state = "READY"
     for index, step in enumerate(steps, start=1):
+        # A snapshot noun is not a Capture command: Restore, clearing and
+        # inspecting saved evidence must never create fresh evidence.
+        capture_requested = bool(re.search(
+            r"(?<![A-Za-z])Capture(?![A-Za-z])|(?:保存|记录)(?!的|过)[^。；;,，]{0,24}(?:快照|结果|读数|基准)|等待[^。；;]{0,35}记录", step, re.I
+        ))
+        if re.search(r"(?:不|无需|禁止)(?:要|再|进行|点击)?\s*(?:Capture|保存|记录)", step, re.I):
+            capture_requested = False
+        restore_requested = bool(re.search(r"(?<![A-Za-z])Restore(?![A-Za-z])|恢复(?:最近|已保存|所选|指定|第\S+张)?快照", step, re.I))
         # "每轮比较前恢复基准" and "比较情形" name context, not a
         # request to enter comparison before any snapshots exist.
         compare_requested = re.search(
@@ -285,7 +293,12 @@ def _student_task_contracts(
             response = "ResetController restores all confirmed defaults; model and UI refresh once"
             evidence = "Parameters and Status match the Initial/Reset contract"
             exit_state = "VALID"
-        elif re.search(r"(?:调节|改变|拖动|移动|切换|选择|设置)", step):
+        elif restore_requested:
+            action = "activate Restore for the named saved snapshot"
+            response = "Common SnapshotStore restores all saved inputs and object states; recalculate once; preserve snapshots and never Capture implicitly"
+            evidence = "Restored parameters and readouts match the selected snapshot; no additional snapshot ID exists"
+            exit_state = "VALID"
+        elif re.search(r"(?:调节|改变|拖动|移动|切换|选择|设置|设为)", step):
             action = "change exactly the named independent-variable control"
             response = "ParameterController validates the value, then triggers one model and visualization refresh"
             evidence = f"Status shows the accepted value and Results follows: {measurement_contract}"
@@ -300,7 +313,7 @@ def _student_task_contracts(
             response = "Require at least two valid compatible snapshots; then lock a shared view/scale and present the cases together"
             evidence = "At least two valid compatible snapshots show their IDs, parameters, results, and shared visual encoding"
             exit_state = "COMPARING"
-        elif re.search(r"(?:记录|Capture|保存|快照)", step, flags=re.IGNORECASE):
+        elif capture_requested:
             action = "press Capture after the current state becomes VALID"
             response = "SnapshotStore records parameters, outputs, comparison label, and screenshot ID"
             evidence = "Results shows a new unique snapshot ID with the current parameter set"
@@ -313,9 +326,7 @@ def _student_task_contracts(
         # A single confirmed line can contain several actions. Retain its
         # full instruction and append capture/comparison after a parameter or
         # baseline action instead of losing the latter half to the first match.
-        if exit_state in {"VALID", "READY"} and re.search(
-            r"(?:记录|Capture|保存|快照)", step, flags=re.IGNORECASE
-        ):
+        if exit_state in {"VALID", "READY"} and capture_requested:
             action += "; then explicitly Capture the valid result"
             response += "; Common SnapshotStore saves one snapshot after calculation succeeds"
             evidence += "; Results lists its unique snapshot ID"
@@ -328,6 +339,19 @@ def _student_task_contracts(
         if exit_state == "COMPLETE" and index < len(steps):
             exit_state = "VALID"
             response = "Record this step's interpretation; continue to the next required step"
+        if restore_requested:
+            # Preserve earlier comparisons/interpretation in mixed steps;
+            # the final Restore must not be replaced by automatic Capture.
+            action += "; perform every stated comparison/interpretation and Restore in the written order"
+            response += "; after Restore recompute once from the saved input state without adding a snapshot"
+            evidence += "; restored readouts match the saved inputs"
+            if not capture_requested:
+                exit_state = "VALID"
+        if re.search(r"(?<![A-Za-z])Back(?![A-Za-z])|返回(?:开始页|Start)", step, re.I):
+            action += "; finish the preceding stated checks, then Back to Start"
+            response += "; cancel pending work and leave the Lab without starting another computation"
+            evidence += "; Start is visible and no stale result is committed"
+            exit_state = "START"
         rows.append(
             {
                 "step_id": f"S{index}",
@@ -420,6 +444,10 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         for item in formula_flow.get("experiment_methods", [])
         if isinstance(item, dict)
     }
+    if isinstance(authoritative_formula_brief, dict) and authoritative_formula_brief:
+        missing_methods = set(experiment_brief.get("selected_experiment_method_ids", [])) - set(method_by_id)
+        if missing_methods:
+            raise ValueError("Builder selected method references are unknown: " + ", ".join(sorted(missing_methods)))
     selected_methods = [
         {
             "method_id": method_id,
@@ -900,6 +928,11 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         for item in formula_contracts
     ):
         raise ValueError("Builder Gate 1 formula contracts are incomplete")
+    formula_ids = [item["formula_id"] for item in formula_contracts]
+    if len(formula_ids) != len(set(formula_ids)):
+        raise ValueError("Builder formula references must be unique across primary and supporting roles")
+    if payload.get("physics", {}).get("formulas") != formula_contracts:
+        raise ValueError("Builder physics and selected formula contracts are disconnected")
     if any(
         re.search(r"[₀₁₂₃ᵢ⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]", str(item.get("expression") or ""))
         for item in formula_contracts

@@ -79,6 +79,14 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "场景生成器检查缺失引用、重复 ID、丢失脚本、缺房顶/地板/墙、摄像机及 EventSystem；"
             "失败时给出对象路径并停止保存成功标记，不能用 Find 循环等待引用出现。"
         ),
+        "physical_coordinate_convention": (
+            "纯模型采用右手SI坐标：+x向右、+y向上、+z朝向观察者；显示映射 P(x,y,z)=(x,y,-z)，"
+            "场景位置=实验中心+s*P(物理位置-物理中心)，其中s为统一显示缩放；读回参数必须使用逆变换。"
+            "物理叉积使用分量定义(a_y*b_z-a_z*b_y, a_z*b_x-a_x*b_z, a_x*b_y-a_y*b_x)。"
+            "先在物理坐标求B、力和回路法向，再以P映射方向箭头；不能直接用显示坐标叉积替代物理计算。"
+            "验证物理+x叉乘+y得到+z，投影到场景为-Z；正向电流、磁场箭头和绕行方向应满足同一右手约定。"
+            "场线积分使用物理弧长；时间演化另用秒与时间步长，禁止混用显示缩放、弧长步长和Time.deltaTime。"
+        ),
         "solver_and_termination": (
             "模型为无 Unity 依赖的纯计算函数：输入是完整 SI 参数快照，输出包含数值、单位、有效性和错误原因。"
             "直接公式逐项求值；迭代/积分必须明确算法、步长、停止条件和上限后实施。"
@@ -122,6 +130,7 @@ CONSTRUCTION_LABELS = (
     ("common_wiring", "公共组件连接表"),
     ("room_and_coordinates", "房间、坐标和界面布局"),
     ("reference_and_event_checks", "对象引用与事件检查"),
+    ("physical_coordinate_convention", "物理坐标、方向与显示变换"),
     ("solver_and_termination", "计算契约与终止条件"),
     ("snapshot_schema", "快照数据与生命周期"),
     ("verification_recipe", "从零构建验证步骤"),

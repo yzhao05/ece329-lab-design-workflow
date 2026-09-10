@@ -77,9 +77,15 @@ def normalize_topic_analysis(raw: Any) -> dict[str, Any] | None:
     domain = str(raw.get("course_domain") or "").strip().casefold()
     if not topic or domain not in _COURSE_DOMAINS:
         return None
+    domain_evidence = KNOWLEDGE.topic_domain_evidence(topic)
+    topic_domains = domain_evidence["domains"]
+    if len(topic_domains) == 1:
+        domain = topic_domains[0]
     specificity = str(raw.get("specificity") or "BROAD").strip().upper()
     if specificity not in _SPECIFICITY:
         specificity = "BROAD"
+    if domain_evidence["matched"] and (not topic_domains or (specificity == "BROAD" and len(topic_domains) != 1)):
+        return None
     explicit_formula_ids = [
         formula_id
         for formula_id in dict.fromkeys(
@@ -587,10 +593,18 @@ def _apply_brief_updates(brief: dict[str, Any], updates: Any) -> None:
                 brief[field_id] = values
 
 
-def score_formula_profiles(topic_analysis: dict[str, Any], *, limit: int = 4) -> list[dict[str, Any]]:
+def score_formula_profiles(topic_analysis: dict[str, Any], *, limit: int = 4, exclude_profile_ids: Iterable[str] = ()) -> list[dict[str, Any]]:
     """Rank legal knowledge profiles from semantic evidence and stable IDs only."""
 
     domain = str(topic_analysis.get("course_domain") or "")
+    topic = str(topic_analysis.get("topic_description") or "")
+    domains = KNOWLEDGE.topic_domain_evidence(topic)["domains"]
+    if len(domains) == 1:
+        domain = domains[0]
+    excluded = set(exclude_profile_ids)
+    retrieval_order = {profile["profile_id"]: index for index, profile in enumerate(
+        KNOWLEDGE.formula_design_references(topic, limit=len(_PROFILE_IDS))
+    )}
     explicit_formula_ids = set(topic_analysis.get("explicit_formula_ids", []))
     evidence = {
         str(item.get("profile_id") or ""): item
@@ -605,6 +619,23 @@ def score_formula_profiles(topic_analysis: dict[str, Any], *, limit: int = 4) ->
             *profile.get("supporting_formula_ids", []),
         }
         item = evidence.get(profile_id, {})
+        if profile_id in excluded or item.get("condition_conflict") is True:
+            continue
+        if profile.get("course_block") != domain and not (
+            (explicit_formula_ids.intersection(profile_formula_ids)
+             and (domain in profile.get("related_course_blocks", []) or any(
+                 formula["id"] in explicit_formula_ids.intersection(profile_formula_ids)
+                 and (formula["id"].casefold() in topic.casefold()
+                      or str(formula.get("name") or "").casefold() in topic.casefold())
+                 for formula in KNOWLEDGE.formulas
+             )))
+            or (domain in profile.get("related_course_blocks", [])
+                and topic_analysis.get("specificity") != "BROAD"
+                and item.get("course_concept_match") is True
+                and item.get("variation_match") is True
+                and item.get("observation_match") is True)
+        ):
+            continue
         breakdown = {
             "course_concept": 30
             if item.get("course_concept_match") is True
@@ -620,7 +651,7 @@ def score_formula_profiles(topic_analysis: dict[str, Any], *, limit: int = 4) ->
         score = sum(breakdown.values())
         if score <= 0:
             continue
-        ranked.append((score, -order, profile, breakdown))
+        ranked.append((score, -retrieval_order.get(profile_id, len(_PROFILE_IDS) + order), profile, breakdown))
     ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return [
         {**deepcopy(profile), "match_score": score, "score_breakdown": breakdown}
@@ -1040,7 +1071,7 @@ def _is_direction_confirmation(message: str) -> bool:
     }
 
 
-def _recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | None:
+def recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | None:
     """Build a non-authoritative topic seed from curated course retrieval.
 
     This recovery is intentionally limited to the formula-onboarding topic:
@@ -1051,10 +1082,13 @@ def _recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | Non
     topic = message.strip()
     if not topic:
         return None
+    domain_evidence = KNOWLEDGE.topic_domain_evidence(topic)
+    if domain_evidence["matched"] and len(domain_evidence["domains"]) != 1:
+        return None
     profiles = KNOWLEDGE.formula_design_references(topic, limit=4)
     if not profiles:
         return None
-    course_domain = str(profiles[0].get("course_block") or "").strip()
+    course_domain = KNOWLEDGE.course_domain_for_text(topic) or str(profiles[0].get("course_block") or "").strip()
     return normalize_topic_analysis(
         {
             "course_domain": course_domain,
@@ -1075,6 +1109,50 @@ def _recover_topic_analysis_from_knowledge(message: str) -> dict[str, Any] | Non
             "confidence": 0.55,
         }
     )
+
+
+def formula_candidates_rejected(message: str) -> bool:
+    """Recognize rejection of a displayed candidate batch, never select a formula."""
+    return bool(re.search(
+        r"换(?:一|另|几)?组|重新(?:匹配|推荐|找).{0,10}公式|"
+        r"(?:这些|这几|这四|公式|候选).{0,25}(?:不对|不相关|没关系|无关)|"
+        r"(?:不是|而非).{0,12}(?:电场|磁场)|"
+        r"(?:wrong|unrelated)\s+(?:formulas?|options?)|different\s+(?:formulas?|set)", message, re.I
+    ))
+
+
+def recover_formula_topic_correction(message: str, flow: dict[str, Any]) -> dict[str, Any] | None:
+    if flow.get("phase") != FORMULA_CANDIDATES_PRESENTED:
+        return None
+    evidence = KNOWLEDGE.topic_domain_evidence(message)
+    explicit_change = len(evidence["domains"]) == 1 and bool(re.search(
+        r"我(?:想|要)|改(?:做|为|成)|\b(?:instead|want)\b", message, re.I
+    ))
+    if not formula_candidates_rejected(message) and not explicit_change:
+        return None
+    previous = flow.get("topic_analysis", {})
+    previous_topic = str(previous.get("topic_description") or flow.get("topic_seed") or "")
+    if evidence["matched"]:
+        if not evidence["domains"] and re.search(r"这些|这几|这四|你给的|给出的|你推荐|推荐的|显示的", message):
+            # Negation may describe the bad cards ("these aren't magnetic
+            # formulas"), not reject the student's original magnetic topic.
+            return recover_topic_analysis_from_knowledge(previous_topic)
+        recovered = recover_topic_analysis_from_knowledge(message)
+        if recovered and KNOWLEDGE.course_domain_for_text(previous_topic) == recovered["course_domain"]:
+            # "Those four have nothing to do with magnetism" corrects our
+            # recommendations; it is not a new experiment title or procedure.
+            if not re.search(r"我想|我要|改做|改为|instead|want", message, re.I):
+                return recover_topic_analysis_from_knowledge(previous_topic)
+        return recovered
+    return recover_topic_analysis_from_knowledge(previous_topic)
+
+
+def _topic_scope(analysis: dict[str, Any]) -> tuple[str, ...]:
+    """Only substantive topic changes reset the finite rejected-candidate set."""
+    return tuple(str(analysis.get(key) or "").strip().casefold() for key in (
+        "course_domain", "topic_description", "mentioned_objects", "changed_quantities",
+        "observed_quantities", "explicit_formula_ids",
+    ))
 
 
 def _remember_semantic_recovery(
@@ -1503,19 +1581,42 @@ def handle_emvr_formula_turn(
         isinstance(deferred_actions, list)
         and deferred_actions
         and not (isinstance(current_actions, list) and current_actions)
+        and (_is_direction_confirmation(message) or message.strip() == "继续当前选择")
+        and not selected_option_id
     ):
         if not isinstance(semantic_updates, dict):
             semantic_updates = {}
             turn_intent["semantic_updates"] = semantic_updates
         semantic_updates["emvr_formula_actions"] = deepcopy(deferred_actions)
     phase = str(flow.get("phase") or TOPIC_RECEIVED)
+    topic_action = _selected_action(turn_intent, "SET_EMVR_TOPIC")
+    if phase == TOPIC_RECEIVED and flow.get("excluded_profile_ids") and _is_direction_confirmation(message):
+        # A model paraphrase on a content-free retry is not a new scope and
+        # cannot reopen a batch the student has already rejected.
+        topic_action = None
+    corrected_topic = recover_formula_topic_correction(message, flow)
+    rejected_candidates = phase == FORMULA_CANDIDATES_PRESENTED and formula_candidates_rejected(message)
+    if corrected_topic is not None and not topic_action:
+        topic_action = corrected_topic
+    if topic_action:
+        actual_domains = KNOWLEDGE.topic_domain_evidence(message)["domains"]
+        if len(actual_domains) == 1 and topic_action.get("course_domain") != actual_domains[0]:
+            topic_action = recover_topic_analysis_from_knowledge(message) or topic_action
+    if rejected_candidates:
+        excluded = list(dict.fromkeys([*flow.get("excluded_profile_ids", []),
+            *flow["formula_selection"].get("candidate_profile_ids", [])]))
+        _reset_formula_choices(flow)
+        flow["excluded_profile_ids"] = excluded
+        flow.pop("topic_analysis", None)
+        flow["phase"] = TOPIC_RECEIVED
+        phase = TOPIC_RECEIVED
     outage_formula_selection: dict[str, Any] | None = None
     outage_composition: dict[str, Any] | None = None
     outage_method_selection: dict[str, Any] | None = None
     outage_direction_revision: dict[str, Any] | None = None
     outage_direction_lock: dict[str, Any] | None = None
     outage_topic_recovery: dict[str, Any] | None = None
-    if _semantic_service_failed(turn_intent):
+    if _semantic_service_failed(turn_intent) and not topic_action and not rejected_candidates:
         dialogue = session.model_context.get("dialogue_state", {})
         dialogue = dialogue if isinstance(dialogue, dict) else {}
         pending = dialogue.get("pending_action", {})
@@ -1536,10 +1637,8 @@ def handle_emvr_formula_turn(
             message=message,
             turn_intent=turn_intent,
         )
-        if formula_topic_pending and not isinstance(
-            flow.get("topic_analysis"), dict
-        ):
-            outage_topic_recovery = _recover_topic_analysis_from_knowledge(message)
+        if recoverable_topic_turn:
+            outage_topic_recovery = recover_topic_analysis_from_knowledge(message)
             if outage_topic_recovery is not None:
                 flow["topic_analysis"] = outage_topic_recovery
                 flow["topic_analysis_source"] = "CURATED_KNOWLEDGE_FALLBACK"
@@ -1601,10 +1700,11 @@ def handle_emvr_formula_turn(
                 ),
                 False,
             )
-    topic_action = _selected_action(turn_intent, "SET_EMVR_TOPIC")
     if topic_action:
         _clear_semantic_recovery(flow)
         _reset_formula_choices(flow)
+        if not rejected_candidates and _topic_scope(topic_action) != _topic_scope(flow.get("topic_analysis", {})):
+            flow.pop("excluded_profile_ids", None)
         flow["topic_analysis"] = topic_action
         flow["phase"] = TOPIC_RECEIVED
         phase = TOPIC_RECEIVED
@@ -1700,12 +1800,15 @@ def handle_emvr_formula_turn(
                 ),
                 False,
             )
-        profiles = score_formula_profiles(analysis, limit=4)
+        profiles = score_formula_profiles(analysis, limit=4, exclude_profile_ids=flow.get("excluded_profile_ids", []))
         if not profiles:
             return (
                 StepOutput(
                     assistant_message=(
-                        "这个主题目前还没有和一条可验证的 ECE329 公式建立可靠联系，所以我不会随意填入相邻公式。"
+                        ("该主题下尚未被否定的相关公式候选已经用尽；不会再次展示刚才被否定的选项。"
+                         if flow.get("excluded_profile_ids") else
+                         "这个主题目前还没有和一条可验证的 ECE329 公式建立可靠联系，所以我不会随意填入相邻公式。")
+                        +
                         "请再补充你想改变的量或想观察的结果，我会据此缩小理论范围。"
                     ),
                     stage_payload={
@@ -1767,7 +1870,7 @@ def handle_emvr_formula_turn(
                 _clear_semantic_recovery(flow)
                 candidate_profiles = [
                     profile
-                    for profile_id in candidates
+                    for profile_id in [*primary_profiles, *supporting_profiles]
                     for profile in [_profile_by_id(profile_id)]
                     if profile is not None
                 ]

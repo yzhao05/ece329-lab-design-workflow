@@ -14,6 +14,7 @@
       "profile_id": "FD01_FIELD_FOUNDATIONS",
       "title_zh": "电磁场基本方程与准静态边界",
       "course_block": "electromagnetics",
+      "related_course_blocks": ["electrostatics", "magnetism"],
       "primary_formula_ids": ["maxwell_free_space"],
       "supporting_formula_ids": ["lorentz_force", "quasi_static_condition", "divergence_definition", "curl_definition"],
       "supported_variations": [
@@ -324,7 +325,7 @@
       "title_zh": "法拉第感应与运动电动势",
       "course_block": "magnetism",
       "primary_formula_ids": ["faraday_differential", "faraday_generalized_emf"],
-      "supporting_formula_ids": ["lorentz_force", "stokes_theorem_e"],
+      "supporting_formula_ids": ["lorentz_force"],
       "supported_variations": [
         {"quantity": "磁通量变化率", "symbols": ["dΦ_B/dt"], "units": ["Wb/s"]},
         {"quantity": "磁场大小、方向或变化频率", "symbols": ["B", "f"]},
