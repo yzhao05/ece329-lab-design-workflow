@@ -11,7 +11,7 @@ from .unity_blueprint import CONSTRUCTION_LABELS, construction_defaults
 
 
 IMPLEMENTATION_DEFAULTS_FIELD = "implementation_defaults"
-IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v2"
+IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v4"
 _IMPLEMENTATION_INPUT_FIELDS = frozenset(
     {
         "lab_title",
@@ -84,9 +84,64 @@ def measurement_is_qualitative_only(value: Any) -> bool:
     )
 
 
-def _compact(value: Any, fallback: str, *, limit: int = 520) -> str:
-    text = " ".join(_text(value).split())
-    return (text[: limit - 1] + "…") if len(text) > limit else (text or fallback)
+def project_derived_contract_text(session: DesignSession, value: Any) -> Any:
+    """Refresh generated copies without rewriting the user's canonical fields.
+
+    Baseline paragraphs used to embed a complete Initial/Reset snapshot.
+    Refer to its owning contract instead, so later corrections cannot leave
+    an obsolete copy in procedure, theory or implementation output.
+    """
+    if isinstance(value, list):
+        return [project_derived_contract_text(session, item) for item in value]
+    if isinstance(value, dict):
+        return {key: project_derived_contract_text(session, item) for key, item in value.items()}
+    if not isinstance(value, str):
+        return value
+    measurements = _latest_value(session, "measurement_specifications")
+    text = value
+    text = re.sub(
+        r"在相同[^。；;\n]+设置下并排比较([^。；;\n]+)，标出共同点和差异",
+        r"并排比较\1；只改变待比较条件，其他输入及观察方式保持一致，标出共同点和差异",
+        text,
+    )
+    baseline_prefixes = (
+        "每轮比较前恢复已确认的初始状态：", "每轮比较前恢复同一快照：",
+        "使用最新 Initial 契约的参数与对象配置作为比较基准：",
+    )
+    if text.startswith(baseline_prefixes) and _latest_value(session, "initial_reset_state"):
+        return (
+            "使用最新 Initial 契约的参数与对象配置作为比较基准："
+            + project_derived_contract_text(session, _latest_value(session, "initial_reset_state"))
+            + " 保持已确认控制条件一致。"
+            "比较过程中保留已保存快照，只有显式 Reset 才按 Reset 契约清理记录。"
+        )
+    # Replace complete embedded snapshots using their stored field identity,
+    # before any display-policy transformations alter the matching text.
+    previous_references = []
+    state = session.design_context.get("stage_design_state", {})
+    if isinstance(state, dict):
+        previous_references.append(state.get("reference_condition"))
+    for output in session.stage_outputs.values():
+        payload = output.get("stage_payload", {}) if isinstance(output, dict) else {}
+        if isinstance(payload, dict):
+            previous_references.append(payload.get("reference_condition"))
+    for previous in previous_references:
+        if (_latest_value(session, "initial_reset_state") and isinstance(previous, str)
+                and previous.startswith(baseline_prefixes) and previous in text):
+            text = text.replace(previous, project_derived_contract_text(session, previous))
+    if measurement_disables_probe(measurements):
+        text = text.replace("相机或探针设置", "相机设置")
+        text = re.sub(r"(?:空间)?探针(?:初始)?(?:位于|置于|放在|在)[^。；;\n]*(?:[。；;]|$)", "", text)
+    if measurement_is_qualitative_only(measurements):
+        for old, new in (
+            ("对比曲线同步重算", "定性比较面板同步刷新"),
+            ("曲线和场图", "场图"),
+            ("曲线与场图", "场图"),
+            ("刷新数值、曲线和空间场", "刷新参数读数、定性比较和空间场"),
+            ("RefreshFieldLinesAndPlot", "RefreshFieldLinesAndResults"),
+        ):
+            text = text.replace(old, new)
+    return text
 
 
 def _procedure_steps(session: DesignSession) -> list[str]:
@@ -109,7 +164,7 @@ def _procedure_steps(session: DesignSession) -> list[str]:
         payload = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
         raw = payload.get("procedure_steps", []) if isinstance(payload, dict) else []
     return [
-        _text(item)
+        _text(project_derived_contract_text(session, item))
         for item in raw
         if _text(item)
     ] if isinstance(raw, list) else []
@@ -120,9 +175,6 @@ def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:
 
     lab_id = _latest_value(session, "lab_id") or "confirmed_lab_id"
     title = _latest_value(session, "lab_title") or "已确认实验"
-    parameters = _text(
-        _latest_value(session, "parameter_specifications"),
-    ) or "使用已确认自变量的控件、范围、单位、默认值与步长"
     measurements = _text(
         _latest_value(session, "measurement_specifications"),
     ) or "显示已确认的物理输出、单位、采样位置与有效性状态"
@@ -132,6 +184,7 @@ def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:
     desktop_xr = _text(
         _latest_value(session, "desktop_interaction_plan"),
     ) or "桌面鼠标操作与 XR 射线/抓取逐项对应"
+    hidden_lifecycle = _latest_value(session, "hidden_object_lifecycle") or "无"
     steps = _procedure_steps(session)
     step_text = "；".join(
         f"S{index} {step}" for index, step in enumerate(steps, start=1)
@@ -150,15 +203,16 @@ def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:
         "contract_version": IMPLEMENTATION_DEFAULTS_VERSION,
         "scene": (
             f"实验“{title}”输出到 Assets/Scenes/{lab_id}.unity；场景层级固定为 "
-            "Environment、XR、Experiment、Systems、UI，不依赖隐藏模板启动实验。"
+            f"Environment、XR、Experiment、Systems、UI。初始隐藏对象和触发要求：{hidden_lifecycle}。"
         ),
         "navigation": (
             "采用 Start -> Lab -> Back 页面流；Lab 页面固定提供 Capture、Restore、Reset。"
-            "Back 只返回 Start，Reset 恢复基准并清除临时快照，Restore 恢复最近一次 Capture。"
+            "Back 只返回 Start，Restore 恢复最近一次 Capture；Reset 的记录清理行为严格采用本契约 Initial/Reset 字段。"
         ),
         "ui_regions": (
             "Game View 固定保留 Instruction、Experiment、Parameters、Status、Results 五个区域；"
-            f"Parameters 显示：{parameters}；Results 显示：{measurements}。"
+            "Instruction 提供当前任务；Experiment 显示实验对象；Parameters 按参数契约提供带单位的控件；"
+            "Status 显示计算有效性与操作反馈；Results 按测量契约显示结果和比较快照。"
         ),
         "experiment_flow": step_text,
         "state_machine": (
@@ -181,7 +235,7 @@ def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:
             "ResetController 恢复已确认状态；DesktopXRAdapter 统一鼠标、模拟器与真机事件。"
         ),
         "measurement_and_chart_policy": f"{probe_mode}；{chart_mode}。",
-        "initial_reset": initial_reset,
+        "initial_reset": project_derived_contract_text(session, initial_reset),
         "logging_help_language": (
             "界面语言默认 English；状态栏记录参数变更、计算完成、Capture、Restore、Reset 与无效条件；"
             "键鼠和 XR 关键操作提供上下文帮助，错误提示必须说明原因及恢复动作。"
@@ -248,6 +302,7 @@ def implementation_defaults_fingerprint(session: DesignSession) -> str:
         "authoritative_experiment_brief": deepcopy(
             emvr.get("authoritative_experiment_brief", {})
         ),
+        "embedded_reference_material": deepcopy(session.design_context.get("builder_reference_material", [])),
     }
     encoded = json.dumps(
         material,

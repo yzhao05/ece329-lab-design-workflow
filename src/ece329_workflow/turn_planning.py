@@ -156,7 +156,9 @@ def build_turn_task_plan(
         )
         if act_type in STATE_ACT_TYPES or correction_has_updates:
             phase = "COMMIT_DESIGN"
-        elif act_type in SERVICE_ACT_TYPES:
+        elif act_type in SERVICE_ACT_TYPES or (
+            act_type == "CONTROL" and target in {"REQUEST_REFERENCE", "REQUEST_SUMMARY"}
+        ):
             phase = "RESPOND_TO_REQUEST"
         elif act_type in {"CONTROL", "REQUEST_NEW_TOPIC"}:
             phase = "NAVIGATE"
@@ -198,8 +200,8 @@ def build_turn_task_plan(
     execution_order = {
         "COMMIT_DESIGN": 0,
         "RESPOND_TO_REQUEST": 1,
-        "NAVIGATE": 2,
-        "CLARIFY": 3,
+        "CLARIFY": 2,
+        "NAVIGATE": 3,
     }
     ordered_ids = [
         task["task_id"]
@@ -375,6 +377,8 @@ def finalize_turn_task_plan(
     response_generated: bool,
     transition_requested: bool,
     transition_completed: bool,
+    completed_response_types: set[str] | None = None,
+    navigation_deferred: bool = False,
 ) -> dict[str, Any]:
     """Attach per-task outcomes after state commit and response planning."""
 
@@ -413,9 +417,16 @@ def finalize_turn_task_plan(
             else:
                 task["status"] = "PRESERVED"
         elif phase == "RESPOND_TO_REQUEST":
-            task["status"] = "COMPLETED" if response_generated else "READY"
+            response_type = target if task.get("type") == "CONTROL" else task.get("type")
+            completed = response_generated and (
+                completed_response_types is None
+                or response_type in completed_response_types
+            )
+            task["status"] = "COMPLETED" if completed else "READY"
         elif phase == "NAVIGATE":
-            if not transition_requested:
+            if navigation_deferred and target in {"ADVANCE", "ACCEPT", "RETURN"}:
+                task["status"] = "BLOCKED"
+            elif not transition_requested:
                 task["status"] = "COMPLETED"
             else:
                 task["status"] = (

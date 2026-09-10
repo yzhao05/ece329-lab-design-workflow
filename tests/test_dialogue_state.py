@@ -5838,7 +5838,7 @@ class DialogueStateTests(unittest.TestCase):
             "解释点电荷合场的矢量叠加",
         )
 
-    def test_student_question_is_answered_without_advancing_emvr_stage(self) -> None:
+    def test_student_question_stays_pending_without_advancing_during_outage(self) -> None:
         session = DesignSession(
             design_id="emvr_question_before_advance",
             interaction_state=InteractionState.EMVR_DIRECT,
@@ -5867,7 +5867,7 @@ class DialogueStateTests(unittest.TestCase):
 
         self.assertEqual(stored.current_stage, Stage.LEARNING_OBJECTIVES)
         self.assertEqual(
-            result["stage_payload"]["answered_student_questions"],
+            result["stage_payload"]["pending_student_questions"],
             ["为什么这里要使用电场叠加原理？"],
         )
         self.assertTrue(result["stage_payload"]["preserve_pending_action"])
@@ -5906,7 +5906,8 @@ class DialogueStateTests(unittest.TestCase):
         stored = engine.store.get(session.design_id)
 
         self.assertEqual(stored.current_stage, Stage.LEARNING_OBJECTIVES)
-        self.assertEqual(result["stage_payload"]["answered_student_questions"], [question])
+        self.assertEqual(result["stage_payload"]["pending_student_questions"], [question])
+        self.assertNotIn("answered_student_questions", result["stage_payload"])
         self.assertTrue(result["stage_payload"]["preserve_pending_action"])
 
     def test_question_about_research_question_is_not_committed_as_its_value(self) -> None:
@@ -5945,7 +5946,7 @@ class DialogueStateTests(unittest.TestCase):
             "已确认的研究问题",
         )
         self.assertEqual(
-            result["stage_payload"]["answered_student_questions"],
+            result["stage_payload"]["pending_student_questions"],
             ["研究问题是什么？"],
         )
 

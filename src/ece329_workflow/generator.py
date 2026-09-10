@@ -4,7 +4,9 @@ import re
 from copy import deepcopy
 from typing import Any, Protocol
 
-from .dialogue_state import UserIntent, build_carried_context
+from .dialogue_state import UserIntent, build_carried_context, current_pending_action, recoverable_pending_field
+from .builder_references import builder_field_reference
+from .builder_defaults import project_derived_contract_text
 from .dialogue_acts import stage_design_state_snapshot
 from .design_state import seen_scene_signatures
 from .emvr_design import (
@@ -832,6 +834,27 @@ def _emvr_stage_input_texts(session: DesignSession, stage: Stage) -> list[str]:
     return values
 
 
+def _emvr_stage_design_texts(session: DesignSession, stage: Stage) -> list[str]:
+    """Report field values, never the conversation's stage-wide audit log."""
+
+    fields = {
+        Stage.COURSE_MAPPING_AND_DIRECTION: ("experiment_brief", "direction_summary", "research_summary"),
+        Stage.CONCEPTUAL_OR_VR_SETUP: ("object_constraints",),
+        Stage.VARIABLES_AND_CONDITIONS: ("changed_quantities", "independent_variable"),
+        Stage.CONCEPTUAL_PROCEDURE: ("procedure_steps",),
+        Stage.EXPECTED_DATA_VISUALIZATION: ("visualization_requirements", "visualization_plan"),
+        Stage.DESIGN_VALUE_AND_LIMITATIONS: ("design_value", "limitations"),
+    }.get(stage)
+    if fields is None:
+        return _emvr_stage_input_texts(session, stage)
+    requirements = _emvr_structured_requirements(session)
+    stage_state = stage_design_state_snapshot(session)
+    return list(dict.fromkeys(
+        text for field in fields
+        if (text := _emvr_content_text(requirements.get(field) or stage_state.get(field)))
+    ))
+
+
 def _emvr_latest_stage_input(session: DesignSession, stage: Stage) -> str:
     values = _emvr_stage_input_texts(session, stage)
     return values[-1] if values else ""
@@ -1320,15 +1343,12 @@ def _emvr_reference_condition(
 ) -> str:
     saved = stage_state.get("reference_condition")
     if saved not in (None, "", [], {}):
-        return _compact_context_items(saved, limit=4, item_length=180)
+        return _emvr_content_text(project_derived_contract_text(session, saved))
     reset_state = stage_state.get("initial_reset_state") or requirements.get(
         "initial_reset_state"
     )
     if reset_state not in (None, "", [], {}):
-        return (
-            "每轮比较前恢复已确认的初始状态："
-            + _compact_context_items(reset_state, limit=4, item_length=220)
-        )
+        return project_derived_contract_text(session, "每轮比较前恢复已确认的初始状态：" + _emvr_content_text(reset_state))
     specifications = requirements.get("parameter_specifications", [])
     specifications = specifications if isinstance(specifications, list) else []
     settings: list[str] = []
@@ -1360,6 +1380,27 @@ def _emvr_reference_condition(
 
 def _emvr_reference_output(session: DesignSession) -> StepOutput:
     """Return a concrete, read-only reference for the current EMVR stage."""
+
+    pending = current_pending_action(session)
+    field = recoverable_pending_field(pending) if isinstance(pending, dict) else ""
+    field_reference = builder_field_reference(session, field)
+    if field_reference is not None:
+        return StepOutput(
+            assistant_message=(
+                f"下面只针对“{field_reference['label']}”给出参考，尚未写入设计：\n\n"
+                + field_reference["value"]
+            ),
+            stage_payload={
+                "reference_only": True,
+                "reference_examples": [field_reference["value"]],
+                "reference_scaffold": {"field": field, "example": field_reference["value"], "editable": True},
+                **({"reference_draft": {"field": field, "value": field_reference["value"]}}
+                   if field_reference["adoptable"] else {}),
+                "preserve_pending_action": True,
+            },
+            student_task=("可直接采用这份参考，或指出需要调整的内容。" if field_reference["adoptable"]
+                          else "请补充参考中仍未确定的值。"),
+        )
 
     requirements = _emvr_structured_requirements(session)
     stage_state = stage_design_state_snapshot(session)
@@ -1649,6 +1690,17 @@ class RuleBasedStageGenerator:
     def generate(self, session: DesignSession, user_message: str) -> StepOutput:
         if classify_stage_one_input(user_message) == UNREASONABLE_REQUEST:
             return self._unreasonable_request_output(session)
+        if session.turn_context.get("response_task") == "COURSE_QUESTION":
+            # The deterministic generator produces design templates, not
+            # arbitrary course explanations. Never pass a template off as an
+            # answered question when the semantic/generative service is down.
+            return StepOutput(
+                assistant_message=(
+                    "这个问题我暂时还不能可靠地解释。你的提问和当前设计进度会保留，"
+                    "请稍后重试这条问题，我们先不推进后面的内容。"
+                ),
+                stage_payload={"request_response_incomplete": True},
+            )
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             return self._generate_emvr(session, user_message)
         resolved = session.turn_context.get("resolved_intent", {})
@@ -2152,7 +2204,7 @@ class RuleBasedStageGenerator:
         idea = _idea(session, user_message)
         design_text = _emvr_context_text(session, idea)
         topics = _focused_emvr_topics(design_text)
-        stage_inputs = _emvr_stage_input_texts(session, stage)
+        stage_inputs = _emvr_stage_design_texts(session, stage)
         latest_stage_input = stage_inputs[-1] if stage_inputs else ""
         structured_requirements = _emvr_structured_requirements(session)
         stage_state = stage_design_state_snapshot(session)
@@ -2596,7 +2648,7 @@ class RuleBasedStageGenerator:
                 f"按已确认的步长逐级改变{changed_text}；每次只改变一个输入",
                 f"等待计算刷新后，在相同观察方式下记录{observed_text}",
                 f"对以下情形分别重复操作并保存快照：{comparison_text}",
-                f"在相同{changed_text}设置下并排比较{observed_text}，标出共同点和差异",
+                f"并排比较{observed_text}；比较组只改变待比较条件，其他输入及观察方式保持一致，标出共同点和差异",
                 "依据报告中已确认的ECE329公式解释差异，并记录超出模型范围或显示不清的情况",
             ]
             return StepOutput(
@@ -2709,7 +2761,15 @@ class RuleBasedStageGenerator:
                     "结果解释", "教学价值与模型局限", "VR附加价值与扩展",
                 ],
                 "source_stage_outputs": list(session.stage_outputs.keys()),
-                "final_design": {"idea": idea, "course_topic": topics[0], "stage_outputs": session.stage_outputs},
+                # A final-stage retry must not embed its previous final report
+                # (which embeds another report). Keep references, not snapshots
+                # of the mutable response/history graph.
+                "final_design": {
+                    "idea": deepcopy(idea), "course_topic": topics[0],
+                    "source_stage_ids": [key for key in session.stage_outputs
+                                         if key != Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value],
+                    "source": "current committed design fields; report rebuilt at export",
+                },
                 "builder_pack_handoff": {
                     "purpose": "供EMVR_Blind_BuilderPack的Brief与Design阶段人工审阅，不自动启动或批准任何Gate。",
                     "lab_identity": {

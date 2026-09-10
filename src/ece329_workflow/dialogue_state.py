@@ -838,7 +838,7 @@ def record_pending_clarification(
             not str(pending.get("candidate_answer") or "").strip()
             or exact_field_binding
         ):
-            pending["candidate_answer"] = normalized_candidate[:2000]
+            pending["candidate_answer"] = normalized_candidate
             # A failed parse normally cannot authorize a field write.  The one
             # safe exception is an open question whose pending contract names
             # exactly one canonical field. The candidate is still not written
@@ -1656,7 +1656,7 @@ def _normalize_pending_action(
         )
     candidate_answer = raw.get("candidate_answer")
     if isinstance(candidate_answer, str) and candidate_answer.strip():
-        normalized["candidate_answer"] = candidate_answer.strip()[:2000]
+        normalized["candidate_answer"] = candidate_answer.strip()
         normalized["candidate_binding_authorized"] = bool(
             # Legacy sessions did not distinguish a system-authored reference
             # from raw text retained after a failed parse.  Defaulting legacy

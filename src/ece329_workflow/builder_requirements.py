@@ -12,6 +12,7 @@ from .builder_defaults import (
     measurement_disables_probe,
 )
 from .models import STAGE_SEQUENCE, DesignSession, InteractionState, Stage
+from .builder_portability import PACK_NAME, ROOT_DISCOVERY, embed_supplied_references, validate_portable_content
 
 
 LAB_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
@@ -43,12 +44,8 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
     {
         "field": "builder_workspace_absolute_path",
         "stage": Stage.COURSE_MAPPING_AND_DIRECTION,
-        "label": "Builder宿主项目绝对路径",
-        "question": (
-            "请给出本次实验实际承载 UnityProject、LabSpecs 和 Tools 的 Builder Pack/宿主集成根目录绝对路径。"
-            "原创新实验与盲重建都必须在最终PDF中写入唯一的绝对实现根目录；原创新实验使用"
-            "integrated-development，并直接使用该宿主根目录，不创建 RebuildWorkspaces 盲重建子副本。"
-        ),
+        "label": "本机BuilderPack定位规则",
+        "question": ROOT_DISCOVERY,
     },
     {
         "field": "desktop_interaction_plan",
@@ -57,6 +54,7 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
         "question": (
             "请说明桌面端具体用鼠标怎样操作哪些对象，并写清每项桌面操作对应的VR操作；"
             "例如单击选择对象、拖动改变位置，对应VR射线选择与手柄抓取。"
+            "若拖动只允许改变距离，请明确固定轴/中点、自由度、吸附步长及越界反馈；不要引入额外自变量。"
         ),
     },
     {
@@ -83,7 +81,9 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
         "label": "Initial与Reset确定状态",
         "question": (
             "请给出场景首次打开和按下 Reset 后必须恢复的完整状态：对象配置、每个可调参数的默认数值与单位、"
-            "离散选项、探针位置、面板/曲线状态，以及 Reset 后是否清除已保存数据。"
+            "离散选项、已采用的测量对象与显示状态，以及 Reset 后是否清除已保存数据；"
+            "只有明确使用探针或曲线时才填写对应状态。"
+            "若有多情形记录，请分别定义基准加载、Restore和Reset，避免基准加载清空之前的比较证据。"
         ),
     },
     {
@@ -103,6 +103,7 @@ BUILDER_REQUIREMENT_SPECS: tuple[dict[str, Any], ...] = (
         "question": (
             "请逐项给出公式中不作为自变量调节的常量、介质参数和控制量的准确数值、单位及固定理由；"
             "介电常数或磁导率等材料量需明确采用真空常量、相对参数乘以真空常量，还是直接使用可调绝对值。"
+            "带符号的源要写明每个对象的符号约定；只有绝对值和同号/异号标签不足以确定初态。"
         ),
     },
     {
@@ -234,6 +235,10 @@ def builder_requirement_values(session: DesignSession) -> dict[str, str]:
     }
     if not implementation_defaults_approval_valid(session):
         values[IMPLEMENTATION_DEFAULTS_FIELD] = ""
+    # Legacy storage key remains readable for old sessions. Machine-specific
+    # locations are runtime context, never a student requirement or PDF fact.
+    if session.interaction_state is InteractionState.EMVR_DIRECT:
+        values["builder_workspace_absolute_path"] = PACK_NAME
     return values
 
 
@@ -259,9 +264,7 @@ def _field_valid(field: str, value: str) -> bool:
     if field == "lab_id":
         return LAB_ID_PATTERN.fullmatch(value) is not None
     if field == "builder_workspace_absolute_path":
-        return bool(
-            re.match(r"^(?:[A-Za-z]:[\\/]|\\\\[^\\]+[\\][^\\]+|/)", value)
-        )
+        return value == PACK_NAME or bool(re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", value))
     if field == "parameter_specifications":
         # This is content validation, not conversational intent matching: a
         # continuous parameter needs at least one numeric boundary and a unit;
@@ -335,16 +338,10 @@ def _field_valid(field: str, value: str) -> bool:
 
 def _uses_named_distance_bands(session: DesignSession) -> bool:
     context = _active_requirement_context(session)
-    if re.search(r"近\s*[/、，,]\s*中\s*[/、，,]\s*远", context):
-        return True
-    return bool(
-        re.search(
-            r"(?:近距离|近场|近区)[^。；;]{0,80}"
-            r"(?:中距离|中场|中区)[^。；;]{0,80}"
-            r"(?:远距离|远场|远区)",
-            context,
-        )
-    )
+    for match in re.finditer(r"([近中远])\s*[/、，,]\s*([近中远])\s*[/、，,]\s*([近中远])", context):
+        if set(match.groups()) == {"近", "中", "远"}:
+            return True
+    return all(re.search(rf"{label}(?:距离|区|场)", context) for label in ("近", "中", "远"))
 
 
 def _active_requirement_context(session: DesignSession) -> str:
@@ -362,6 +359,7 @@ def _active_requirement_context(session: DesignSession) -> str:
     relevant = {
         "procedure_steps", "comparison_cases", "limiting_cases", "object_constraints",
         "parameter_specifications", "model_constants_and_media", "measurement_specifications",
+        "expected_results", "acceptance_criteria", "report_questions",
     }
     current = {
         field: _text(fields.get(field) or stage_state.get(field))
@@ -388,7 +386,11 @@ def _defines_named_distance_bands(value: str) -> bool:
         separate
         or (
             combined
-            and len(re.findall(r"[-+]?\d+(?:\.\d+)?", value)) >= 3
+            and any(
+                re.search(r"近\s*[/、]\s*中\s*[/、]\s*远", clause)
+                and len(re.findall(r"[-+]?\d+(?:\.\d+)?", clause)) >= 3
+                for clause in re.split(r"[。；;\n]", value)
+            )
         )
     )
 
@@ -398,6 +400,43 @@ def _cross_field_validation_error(
     field: str,
     values: dict[str, str],
 ) -> str | None:
+    if field != "builder_workspace_absolute_path":
+        try:
+            content, _ = embed_supplied_references(
+                values.get(field, ""), session.design_context.get("builder_reference_material", [])
+            )
+            validate_portable_content(content, field)
+        except ValueError as exc:
+            return "这项交付内容引用越界或参考副本不完整：" + str(exc) + "。请将必要内容复制到本字段，或提供带内容的内嵌参考；不要只保留包外路径。"
+    if field == "numerical_model_specifications":
+        numerical = values.get(field, "")
+        integrates = bool(re.search(r"RK4|龙格", numerical, re.I)) or any(
+            re.search(r"积分|trajectory", clause, re.I)
+            and not re.search(r"无需|不(?:进行|需要|使用|做)|无积分", clause)
+            for clause in re.split(r"[。；;\n]", numerical)
+        )
+        if integrates and not re.search(
+            r"(?:容差|误差(?:上限|阈值)|收敛(?:阈值|精度)|tolerance)[^。；;\n]{0,45}\d", numerical, re.I
+        ):
+            return "数值积分给出了步长，但没有可检验的误差/收敛容差；步长和最大步数不能代替精度验收值。"
+    if field == "model_constants_and_media":
+        constants = values.get(field, "")
+        if "绝对值" in constants and re.search(r"两(?:个|个点)?电荷|两源", constants):
+            signed_context = "；".join(values.get(key, "") for key in (
+                "model_constants_and_media", "parameter_specifications", "initial_reset_state"
+            ))
+            named_signs = re.findall(
+                r"(Q[_ ]?[12AB]|电荷\s*[AB甲乙]|\b[AB])\s*(?:=|：|为|固定为?)?\s*[+−±-]\s*\d",
+                signed_context, re.I,
+            )
+            verbal_convention = re.search(r"(?:A|Q1|第一|一个)[^。；;]{0,20}正[^。；;]{0,50}(?:B|Q2|第二|另一)[^。；;]{0,25}(?:负|同号|异号)", signed_context)
+            names = {re.sub(r"电荷|Q|[_\s]", "", name.upper()).translate(str.maketrans({"1": "A", "2": "B", "甲": "A", "乙": "B"})) for name in named_signs}
+            if len(names) < 2 and not verbal_convention:
+                return "两源只给出了电荷量绝对值；请补充每个源的带符号初值及同号/异号切换约定，不能由Builder猜测。"
+    if field in {"expected_results", "acceptance_criteria"}:
+        for clause in re.split(r"[。；;\n]", values.get(field, "")):
+            if "场线" in clause and re.search(r"空白[^。；;]{0,40}(?:显著扩大|必然扩大|一定扩大)", clause) and not re.search(r"不|不能|不得|无需", clause):
+                return "场线绘制的空白不能作为零场区域或固定扩大的硬判据；请按公式、统一视图和实际形态定义验收。"
     if field == "parameter_specifications" and _uses_named_distance_bands(session):
         if not _defines_named_distance_bands(values.get(field, "")):
             return "实验流程使用了近/中/远分组，但参数契约没有分别给出三组的准确数值或边界。"
@@ -451,7 +490,7 @@ def _validation_error(field: str, value: str) -> str | None:
             "连续参数还需包含数值范围、单位和步长，离散参数需列出全部允许选项。"
         )
     if field == "builder_workspace_absolute_path":
-        return f"当前输入“{shown}”不是绝对路径；请提供盘符路径、UNC路径或POSIX绝对路径。"
+        return "BuilderPack由实际运行电脑定位，不需要填写机器绝对路径。"
     if field == "model_constants_and_media":
         return f"当前输入“{shown}”仍缺少常量/介质的准确数值、单位或固定/可调角色。"
     if field == "measurement_specifications":
@@ -498,6 +537,10 @@ def missing_builder_requirements(
                 error = "实验内容已更新，先前批准的默认实现契约已失效；下面已按最新设计重新生成。"
         if error:
             item["validation_error"] = error
+            # Keep the visible task and pending field about the same gap.
+            # Repeating the full initial questionnaire hides what is missing.
+            if field != IMPLEMENTATION_DEFAULTS_FIELD:
+                item["question"] = error + " 已有内容保留；只需补充或修正这一项，也可以先索取参考。"
         missing.append(item)
     return missing
 

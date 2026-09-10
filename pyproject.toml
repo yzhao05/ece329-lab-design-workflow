@@ -14,6 +14,7 @@ dependencies = ["reportlab>=4.2,<5"]
 
 [project.optional-dependencies]
 production = ["gunicorn>=23"]
+test = ["pytest>=8,<10", "pdfplumber>=0.11,<1"]
 
 [project.scripts]
 ece329-workflow = "ece329_workflow.api:main"

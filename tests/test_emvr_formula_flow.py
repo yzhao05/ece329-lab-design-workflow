@@ -24,7 +24,7 @@ from ece329_workflow.emvr_design import (
     merge_emvr_structured_requirements,
 )
 from ece329_workflow.generator import RuleBasedStageGenerator, _emvr_parameter_axis
-from ece329_workflow.models import DesignSession, InteractionState, Stage
+from ece329_workflow.models import DesignSession, InteractionState, Stage, StepOutput
 from ece329_workflow.reporting import (
     _pdf_safe_formula_text,
     build_emvr_task_report,
@@ -116,6 +116,13 @@ class FormulaTopicOutageGenerator(RuleBasedStageGenerator):
 
 
 class FormulaQuestionPriorityGenerator(FormulaSemanticGenerator):
+    def generate(self, session, user_message):
+        if session.turn_context.get("response_task") == "COURSE_QUESTION":
+            return StepOutput(
+                assistant_message="库仑定律联系电量、距离与电场，叠加原理用于比较两个电荷的合场。",
+            )
+        return super().generate(session, user_message)
+
     def resolve_intent(self, session, user_message, pending_action, carried_context):
         flow = carried_context.get("emvr_formula_flow", {})
         if flow.get("phase") == TOPIC_RECEIVED:

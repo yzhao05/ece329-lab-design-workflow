@@ -485,7 +485,7 @@ class WorkflowEngineTests(unittest.TestCase):
 
                 self.assertEqual(
                     builder_requirement_values(stored)[field],
-                    answer,
+                    "EMVR_Blind_BuilderPack" if field == "builder_workspace_absolute_path" else answer,
                 )
                 next_pending = current_pending_action(stored)
                 self.assertNotEqual(
@@ -2402,12 +2402,12 @@ class WorkflowEngineTests(unittest.TestCase):
         self.assertEqual(identity["workflow_mode"], "integrated-development")
         self.assertEqual(identity["experiment_origin"], "original-new-experiment")
         self.assertEqual(
-            execution["execution.builder_pack_or_host_root_absolute"],
-            r"E:\暑研\EMVR_Blind_BuilderPack",
+            execution["execution.builder_pack_root"],
+            "EMVR_Blind_BuilderPack",
         )
         self.assertEqual(
-            execution["execution.unity_host_project_absolute"],
-            r"E:\暑研\EMVR_Blind_BuilderPack\UnityProject",
+            execution["execution.unity_project_relative"],
+            "UnityProject",
         )
         self.assertGreaterEqual(len(builder_payload["objects"]), 5)
         self.assertGreaterEqual(len(builder_payload["student_tasks"]), 5)
@@ -2572,8 +2572,8 @@ class WorkflowEngineTests(unittest.TestCase):
             item["label"]: item["value"] for item in implementation_section["items"]
         }
         self.assertEqual(
-            implementation_values["Unity宿主项目绝对路径"],
-            r"E:\暑研\EMVR_Blind_BuilderPack\UnityProject",
+            implementation_values["Unity项目相对路径"],
+            "UnityProject",
         )
         self.assertIn("公式自变量可调契约", implementation_text)
         self.assertIn("指标与空间测量定义", implementation_text)
@@ -3494,7 +3494,8 @@ class WorkflowEngineTests(unittest.TestCase):
         packet = self.engine.get_prompt_packet(first["design_id"], "给我一些方向")
 
         self.assertEqual(packet["context"]["current_stage"], Stage.IDEA_BRAINSTORMING.value)
-        self.assertIn("任何一次回复只能处理current_stage", packet["system"])
+        self.assertIn("自动推进和阶段草稿以current_stage为界", packet["system"])
+        self.assertIn("课内问题、修改、解释、参考或总结请求优先于阶段流程", packet["system"])
         self.assertIn("Lecture Notes定义课程范围", packet["system"])
         self.assertIn("不把Lecture Notes当成唯一参考答案", packet["system"])
         self.assertIn("给出一套可修改的参考结构", packet["system"])

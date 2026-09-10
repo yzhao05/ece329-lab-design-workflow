@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .builder_portability import PACK_NAME, ROOT_DISCOVERY, UNITY_PROJECT
+
 import html
 import re
 from copy import deepcopy
@@ -42,6 +44,7 @@ from .builder_defaults import (
     IMPLEMENTATION_DEFAULTS_FIELD,
     measurement_disables_probe,
     measurement_is_qualitative_only,
+    project_derived_contract_text,
 )
 
 
@@ -66,7 +69,7 @@ _FIELD_LABELS = {
     "vr_suitability": "适合VR的原因",
     "lab_title": "实验名称",
     "lab_id": "Builder实验ID",
-    "builder_workspace_absolute_path": "Builder宿主项目绝对路径",
+    "builder_workspace_absolute_path": "本机BuilderPack定位规则",
     "conceptual_objective": "概念目标",
     "calculation_objective": "计算目标",
     "analysis_objective": "分析目标",
@@ -899,6 +902,34 @@ def _specific_emvr_limitations(context: dict[str, Any]) -> list[str]:
     ]
 
 
+def _display_requirements_only(value: Any, builder_values: dict[str, str]) -> Any:
+    """Remove identifiable misfiled legacy entries, retaining genuine prose.
+
+    Older sessions stored a list of whole turns here. Do not throw out a
+    student's only surviving display requirement merely because it predates
+    field binding. Filter complete items, never substrings inside a design.
+    """
+    other_contracts = {text for text in builder_values.values() if text}
+    values = value if isinstance(value, list) else [value]
+    retained = []
+    for item in values:
+        text = _plain(item).strip()
+        control = re.sub(r"[\s，,。；;！!]+", "", text)
+        if not text or control in {"采用", "继续", "采用继续", "采用并继续", "准确", "确认", "沿用刚才的表述"}:
+            continue
+        if text in other_contracts:
+            continue
+        if re.match(r"^(?:场景首次打开|首次打开|Initial)[：:，,时\s]", text, re.IGNORECASE) and re.search(r"Reset|重置", text, re.IGNORECASE):
+            continue
+        if re.match(r"^(?:算法|数值算法|采样域)[：:]", text):
+            continue
+        if item not in retained:
+            retained.append(deepcopy(item))
+    if isinstance(value, list):
+        return retained
+    return retained[0] if retained else ""
+
+
 def effective_emvr_stage_payload(
     session: DesignSession,
     stage: Stage,
@@ -930,6 +961,9 @@ def effective_emvr_stage_payload(
         for report_field in clear_bindings.get(canonical_field, ()):
             payload.pop(report_field, None)
     stage_state = stage_design_state_snapshot(session)
+    # Use the same field precedence as Builder validation/export. Otherwise
+    # an old stage scalar can hide a later canonical list revision in the PDF.
+    stage_state.update(builder_requirement_values(session))
     brief = effective_experiment_brief(session)
     context = _emvr_report_context(session, requirements)
 
@@ -1053,9 +1087,9 @@ def effective_emvr_stage_payload(
         set_bound(
             "builder_workspace_absolute_path",
             "builder_workspace_absolute_path",
-            stage_state.get("builder_workspace_absolute_path")
-            or requirements.get("builder_workspace_absolute_path"),
+            PACK_NAME,
         )
+        payload["builder_workspace_absolute_path"] = PACK_NAME
         set_bound(
             "selected_direction",
             "experiment_brief",
@@ -1402,11 +1436,16 @@ def effective_emvr_stage_payload(
             set_if("student_required_steps", student_steps)
         set_if("comparison_logic", stage_state.get("comparison_logic"))
     elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
+        # A legacy draft may have copied every utterance in this stage into
+        # this row, including Reset revisions, algorithms and "采用". Only
+        # the latest bound display field is a source for display requirements.
+        legacy_display = payload.pop("student_visualization_requirements", None)
         set_bound(
             "student_visualization_requirements",
             "visualization_requirements",
             stage_state.get("visualization_plan")
-            or requirements.get("visualization_requirements"),
+            or requirements.get("visualization_requirements")
+            or _display_requirements_only(legacy_display, builder_requirement_values(session)),
         )
         set_if("trend_annotation", stage_state.get("trend_annotation"))
         set_bound(
@@ -1572,6 +1611,12 @@ def effective_emvr_stage_payload(
                     else "记录每次比较的电荷配置、距离、已定义数值指标与场快照，保证结果可追溯"
                 ),
             ]
+    for field in (
+        "reference_condition", "controlled_variables", "procedure_steps", "student_required_steps",
+        "vr_suitability", "physics_layer", "unity_update_event",
+    ):
+        if field in payload:
+            payload[field] = project_derived_contract_text(session, payload[field])
     return payload
 
 
@@ -1796,7 +1841,7 @@ def _effective_emvr_visualization(
     )
     stage_state = stage_design_state_snapshot(session)
     measurement_contract = (
-        stage_state.get("measurement_specifications")
+        builder_requirement_values(session).get("measurement_specifications")
         or requirements.get("measurement_specifications")
     )
     if measurement_is_qualitative_only(measurement_contract):
@@ -2045,19 +2090,17 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
                         "value": "integrated-development",
                     },
                     {
-                        "label": "唯一绝对实现根目录",
+                        "label": "本机BuilderPack",
                         "value": builder_root,
                     },
                     {
-                        "label": "Unity宿主项目绝对路径",
-                        "value": _unity_project_absolute_path(builder_root),
+                        "label": "Unity项目相对路径",
+                        "value": UNITY_PROJECT,
                     },
                     {
                         "label": "路径规则",
                         "value": (
-                            "原创新实验与盲重建采用相同的绝对路径交接要求：最终PDF必须给出唯一、已确认的"
-                            "实现根目录。原创新实验直接在该宿主集成根目录运行 integrated-development，"
-                            "不得创建或切换到 RebuildWorkspaces 盲重建子副本，也不得再次请求另一宿主路径。"
+                            ROOT_DISCOVERY
                         ),
                     },
                     {
@@ -2318,8 +2361,8 @@ def emvr_stage_completeness_issues(
         require("lab_id", "Builder实验ID", "请确定符合格式要求的 Builder 实验ID。")
         require(
             "builder_workspace_absolute_path",
-            "Builder宿主项目绝对路径",
-            "请给出承载 UnityProject、LabSpecs 和 Tools 的宿主集成根目录绝对路径。",
+            "本机BuilderPack定位规则",
+            ROOT_DISCOVERY,
         )
         require("selected_direction", "设计方向", "请确认本实验最终采用的设计方向。")
         require("course_relationship", "课程关系", "请说明相关 ECE329 概念具体支持实验中的哪部分。")

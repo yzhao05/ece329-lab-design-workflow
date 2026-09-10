@@ -50,7 +50,7 @@ brainstorm_options中的catalog_scene_id和catalog_scene_number只用于内部�
 想法探索不得要求学生在形成方向前确定具体自变量、因变量、公式、研究问题、假设、装置或实验流程；收敛时应把核心现象、已选课程关系、基础对照和观察重点整理为experiment_outline_seed实验大纲雏形。大纲形成后，课程映射、学习目标、研究问题、理论依据、预期趋势和概念实验结构成为同一阶段的动态完整性清单：每轮重新判断已明确项与缺失项，一次只引导当前最关键缺口，学生一条回复可以同时明确多项，不得按固定小点顺序推进。
 课程映射和理论依据由助手根据已核对的课程资料主动检索并展示；不得再次要求学生选择课程方向或凭记忆指定公式。
 讲义明确标为未覆盖或仅略微覆盖的内容，不得主动推荐；学生明确提出时要标明讲义覆盖有限。
-任何一次回复只能处理current_stage，禁止生成其他阶段内容。
+自动推进和阶段草稿以current_stage为界；学生明确提出的课内问题、修改、解释、参考或总结请求优先于阶段流程，可以涉及已完成或尚未进入的阶段。先处理这些请求并保留设计进度，不能以“不属于当前阶段”为由跳过。请求中尚未明确的部分先澄清，再恢复流程。
 GUIDED_DESIGN状态下以提问和反馈引导学生，student_task最多一个。
 除阶段1的广度图景发散外，assistant_message与student_task合起来最多只能包含一个要求学生回答的
 问题或任务；参考框架只能作为陈述，不能先让学生决定保留删改，再另外提出第二个问题。
@@ -72,6 +72,7 @@ GUIDED_DESIGN的语气应像教师与学生共同推敲想法：先回应学生�
 每轮先服从context.resolved_intent，并结合context.pending_action与context.carried_context承接上一轮：接受、修改或拒绝上一轮提议时直接执行已经解析出的决定，不得重复阶段入口；进入新阶段时继承已经确认的方向、变量、观察量、控制条件和流程草案，不得让学生从头复述。这些结构只供内部推理，绝不能出现在学生可见文字中。若resolved_intent为UNCLEAR，只提出一个简短澄清问题，不得重新显示整段阶段入口。
 context.resolved_intent.dialogue_acts可能包含同一轮的多个并行动作。必须分别回应：先承接已经提交的字段修改，再回答student_questions中的课程问题，再处理feedback_items指出的理解偏差；不得把课程问题、纠错文字或会话控制语句写入实验设计。pending_action只是当前仍待明确的内容，不限制学生只能回答它。若unresolved_content非空，已经明确的动作仍然有效，回复只对尚未理解的一小段提出一个简短澄清，不得重播整个预设问题。
 context.resolved_intent.task_plan是本轮内部任务编排结果：先采用已经提交的设计修改，再完成课程解释、参考或总结请求，最后执行推进或返回。不得向学生显示task_plan、动作名称或执行状态。若一轮只完成部分任务，应先自然说明已经处理的内容，再只询问一个尚未明确的片段。
+此优先级同时适用于GUIDED_DESIGN与EMVR_DIRECT。workflow_navigation_deferred=true时，本轮用于处理用户请求，不能把下一阶段入口、预设问题或最终完成提示代替回答；不要附加新的流程任务。课内问题与参考同时出现时两者都要回应，不能只处理主意图便声称全部完成。
 context.quality_review是对提交后统一设计状态的审阅结果。必须区分结构性缺失与物理语义冲突：不能因为字段存在就宣称设计合理，也不能凭空否定学生方案。发现研究问题、学习目标、自变量、观察量、控制条件、假设、流程、显示或结果解释不匹配时，应说明具体冲突、它为什么影响结论，并只提出一个最值得先处理的问题。因果分析要明确“改变什么→观察什么→哪条物理关系解释变化→怎样形成比较证据”。可行性只判断概念上能否独立改变、显示、记录和公平比较，不生成Unity代码或宣称完成实验。
 若quality_review包含boundary_cases或traceability，应把边界情形作为检验研究关系的提醒，而不是额外堆砌要求；课程概念或公式必须说明具体支持哪一个变化量、观察量、边界条件或结果解释。必须区分STUDENT、AGENT_SUGGESTION、COURSE和EXTENSION来源，不得把助手参考写成学生已经决定的内容。
 若resolved_intent.semantic_updates.guidance_need存在，应按该深度提供帮助：BRIEF_HINT只给一句启发；CONCRETE_EXAMPLE给一个贴合当前主题的物理例子；REFERENCE_DRAFT给一套可修改草稿；FORMULA_EXPLANATION先解释公式与当前观察的关系；DESIGN_REVIEW分析合理性；OPTION_COMPARISON按可观察性、课程联系、可控性、VR适配、区分度和额外假设比较。不要每轮都默认输出最长草稿。
@@ -131,6 +132,20 @@ def _stage_output_contract(
     session: DesignSession,
     stage_one_preclassification: str | None = None,
 ) -> str:
+    response_task = session.turn_context.get("response_task")
+    if response_task in {"COURSE_QUESTION", "REFERENCE"}:
+        return (
+            "本轮先完成用户的课内请求，暂停阶段产物生成。回答必须依据当前已保存设计及检索资料，"
+            "不要生成当前或下一阶段的整套草稿、就绪声明、最终报告或新的流程任务。"
+            "student_task和visualization_json为null；stage_payload_json可以只含实际使用的"
+            "course_references或formula_references，不要求当前阶段产物字段。"
+            + (
+                "逐一解释student_questions中的疑问，不能用阶段概述代替回答。"
+                if response_task == "COURSE_QUESTION"
+                else "提供用户所请求的可修改参考；若对应具体待补字段，reference_draft须包含field与value，"
+                     "field绑定该字段。参考需由用户采纳后才写入设计。"
+            )
+        )
     stage = session.current_stage
     if stage is Stage.IDEA_BRAINSTORMING:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
@@ -314,6 +329,7 @@ def _stage_output_contract(
         return (
             "stage_payload_json必须包含proposal_status、proposal_sections、final_design和"
             "builder_pack_handoff，并汇总前12个阶段已经确认的Unity VR模拟实验设计；"
+            "final_design只包含当前设计摘要和source_stage_ids，不得内嵌stage_outputs、history或先前final_design。"
             "不得声称已经完成Unity实现、Builder Pack Gate或真实实验验收。"
         )
     return "stage_payload_json只编码当前阶段的结构化内容，不得包含其他阶段的结果。"
@@ -641,6 +657,7 @@ def build_prompt_packet(
         "recent_history": session.history[-6:] if include_recent_history else [],
         "pending_action": pending_action,
         "resolved_intent": resolved_turn_intent,
+        "response_task": session.turn_context.get("response_task"),
         "carried_context": carried_context,
         "latest_user_message": user_message,
         "selected_option_id": selected_option_id,
@@ -680,7 +697,7 @@ def build_prompt_packet(
         "system": GLOBAL_RULES,
         "context": context,
         "user": (
-            "只完成context.current_stage。返回JSON对象，不要使用Markdown代码块。"
+            "优先完成context.response_task指定的用户请求；没有该任务时才生成context.current_stage产物。返回JSON对象，不要使用Markdown代码块。"
             "如果是引导状态，student_task只能是字符串或null，不能包含多个问题。"
             "必须逐字遵守context.stage_output_contract；要求原样复制的检索对象不得改写。"
         ),

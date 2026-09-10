@@ -94,6 +94,7 @@ from .idea_development import (
     update_idea_development,
 )
 from .knowledge_base import KNOWLEDGE
+from .builder_portability import embed_supplied_references
 from .models import (
     STAGE_SEQUENCE,
     DesignAccessDenied,
@@ -850,8 +851,7 @@ def _explicit_student_question_intent(
     turn_intent: dict[str, Any],
 ) -> dict[str, Any] | None:
     if (
-        session.interaction_state is not InteractionState.EMVR_DIRECT
-        or turn_intent.get("intent") != UserIntent.UNCLEAR.value
+        turn_intent.get("intent") != UserIntent.UNCLEAR.value
         or "FALLBACK" not in str(turn_intent.get("source") or "").upper()
         or _has_persistent_turn_updates(turn_intent)
         or not _looks_like_student_question(message)
@@ -982,15 +982,60 @@ def _explicit_emvr_advance_requested(message: str) -> bool:
     )
 
 
-def _prioritize_emvr_content_before_transition(
+def _requested_response_types(turn_intent: dict[str, Any]) -> set[str]:
+    """Read service work independently of the resolver's primary intent."""
+
+    updates = turn_intent.get("semantic_updates", {})
+    updates = updates if isinstance(updates, dict) else {}
+    requested = {
+        response_type
+        for key, response_type in {
+            "student_questions": "ASK_COURSE_QUESTION",
+            "feedback_items": "CORRECT_ASSISTANT",
+            "correction_items": "CORRECT_ASSISTANT",
+            "quality_review_requests": "REQUEST_QUALITY_REVIEW",
+            "option_comparison_requests": "COMPARE_OPTIONS",
+            "version_requests": "VERSION_CONTROL",
+        }.items()
+        if updates.get(key)
+    }
+    controls = updates.get("control_actions", [])
+    if isinstance(controls, list):
+        requested.update(set(controls) & {"REQUEST_REFERENCE", "REQUEST_SUMMARY"})
+    primary_response = {
+        UserIntent.ASK_COURSE_QUESTION.value: "ASK_COURSE_QUESTION",
+        UserIntent.PROVIDE_FEEDBACK.value: "CORRECT_ASSISTANT",
+        UserIntent.REQUEST_MORE_EXAMPLES.value: "REQUEST_REFERENCE",
+        UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value: "REQUEST_SUMMARY",
+        UserIntent.REQUEST_DESIGN_REVIEW.value: "REQUEST_QUALITY_REVIEW",
+        UserIntent.COMPARE_DESIGN_OPTIONS.value: "COMPARE_OPTIONS",
+        UserIntent.MANAGE_DESIGN_VERSION.value: "VERSION_CONTROL",
+    }.get(turn_intent.get("intent"))
+    if primary_response:
+        requested.add(primary_response)
+    if turn_intent.get("source") == "IMPLEMENTATION_SECTION_PRESENTATION":
+        requested.add("REQUEST_SUMMARY")
+    return requested
+
+
+def _prioritize_user_content_before_transition(
     turn_intent: dict[str, Any],
     message: str,
+    interaction_state: InteractionState,
 ) -> None:
-    """Prevent inferred controls from skipping a correction or student question."""
+    """Keep both modes on user requests before running any stage navigation."""
 
     updates = turn_intent.get("semantic_updates", {})
     if not isinstance(updates, dict):
-        return
+        updates = {}
+        turn_intent["semantic_updates"] = updates
+    requested = _requested_response_types(turn_intent)
+    if "ASK_COURSE_QUESTION" in requested and not updates.get("student_questions"):
+        updates["student_questions"] = [message.strip()]
+    if "CORRECT_ASSISTANT" in requested and not updates.get("feedback_items"):
+        updates["feedback_items"] = [message.strip()]
+    request_pause = bool(requested or updates.get("unresolved_content"))
+    turn_intent["workflow_navigation_deferred"] = request_pause
     questions = updates.get("student_questions", [])
     has_questions = bool(
         isinstance(questions, list) and any(str(item).strip() for item in questions)
@@ -1000,30 +1045,45 @@ def _prioritize_emvr_content_before_transition(
         isinstance(feedback, list) and any(str(item).strip() for item in feedback)
     )
     has_edits = _has_persistent_turn_updates(turn_intent)
-    if not has_questions and not has_feedback and (
-        not has_edits or _explicit_emvr_advance_requested(message)
+    if not request_pause and (
+        interaction_state is not InteractionState.EMVR_DIRECT
+        or not has_edits or _explicit_emvr_advance_requested(message)
     ):
         return
     controls = updates.get("control_actions", [])
     if isinstance(controls, list):
         updates["control_actions"] = [
-            item for item in controls if item not in {"ADVANCE", "ACCEPT"}
+            item for item in controls
+            if item not in {"ADVANCE", "ACCEPT", "RETURN"}
         ]
     turn_intent.pop("advance_requested", None)
-    if not has_edits and has_questions:
+    explicit_context_change = turn_intent.get("intent") in {
+        UserIntent.NEW_TOPIC.value,
+        UserIntent.SET_INTERACTION_STATE.value,
+    }
+    if not has_edits and has_questions and not explicit_context_change:
         turn_intent["intent"] = UserIntent.ASK_COURSE_QUESTION.value
-        turn_intent["source"] = "SEMANTIC_EMVR_QUESTION_BEFORE_TRANSITION"
+        turn_intent["source"] = "SEMANTIC_QUESTION_BEFORE_TRANSITION"
         turn_intent["resolved_value"] = None
-    elif not has_edits and has_feedback:
+    elif not has_edits and has_feedback and not explicit_context_change:
         turn_intent["intent"] = UserIntent.PROVIDE_FEEDBACK.value
-        turn_intent["source"] = "SEMANTIC_EMVR_FEEDBACK_BEFORE_TRANSITION"
+        turn_intent["source"] = "SEMANTIC_FEEDBACK_BEFORE_TRANSITION"
         turn_intent["resolved_value"] = None
     if has_edits and turn_intent.get("intent") in {
         UserIntent.ADVANCE_STAGE.value,
         UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+        UserIntent.RETURN_TO_PREVIOUS_POINT.value,
     }:
         turn_intent["intent"] = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
-        turn_intent["source"] = "SEMANTIC_EMVR_CONTENT_BEFORE_TRANSITION"
+        turn_intent["source"] = "SEMANTIC_CONTENT_BEFORE_TRANSITION"
+    elif request_pause and turn_intent.get("intent") in {
+        UserIntent.ADVANCE_STAGE.value,
+        UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value,
+        UserIntent.RETURN_TO_PREVIOUS_POINT.value,
+    }:
+        turn_intent["intent"] = UserIntent.UNCLEAR.value
+        turn_intent["resolved_value"] = None
+        turn_intent["source"] = "SEMANTIC_REQUEST_BEFORE_TRANSITION"
 
 
 def _multi_act_student_notice(
@@ -1089,6 +1149,53 @@ def _multi_act_student_notice(
             )
         )
     return "".join(notices)
+
+
+def _generate_question_response(
+    generator: StageGenerator,
+    session: DesignSession,
+    turn_context: dict[str, Any],
+    questions: list[str],
+) -> StepOutput:
+    """Answer the requested questions against committed state, without a draft."""
+
+    context = deepcopy(turn_context)
+    context["response_task"] = "COURSE_QUESTION"
+    intent = context.setdefault("resolved_intent", {})
+    intent["intent"] = UserIntent.ASK_COURSE_QUESTION.value
+    intent["resolved_value"] = None
+    intent["advance_requested"] = False
+    intent["dialogue_acts"] = [
+        act for act in intent.get("dialogue_acts", [])
+        if act.get("type") == "ASK_COURSE_QUESTION"
+    ]
+    updates = intent.setdefault("semantic_updates", {})
+    for key in (
+        "control_actions", "quality_review_requests", "option_comparison_requests",
+        "version_requests", "feedback_items", "correction_items",
+    ):
+        updates[key] = []
+    updates["student_questions"] = deepcopy(questions)
+    session.turn_context = context
+    try:
+        answer = generator.generate(session, "\n".join(questions))
+    finally:
+        session.turn_context = {}
+    # A question response is read-only. Model-produced stage drafts or a new
+    # pending question must not replace the student's existing work/pending item.
+    payload: dict[str, Any] = {"preserve_pending_action": True}
+    if answer.stage_payload.get("request_rejected") is True:
+        payload["request_rejected"] = True
+    elif answer.stage_payload.get("request_response_incomplete") is True:
+        payload["pending_student_questions"] = deepcopy(questions)
+    elif answer.assistant_message.strip():
+        payload["answered_student_questions"] = deepcopy(questions)
+    return StepOutput(
+        assistant_message=answer.assistant_message,
+        stage_payload=payload,
+        assumptions=answer.assumptions,
+        warnings=answer.warnings,
+    )
 
 
 def _self_correction_notice(
@@ -2636,10 +2743,14 @@ def _prepare_emvr_completion_repair(
     session: DesignSession,
     stage: Stage,
     output: StepOutput,
+    error: str = "",
 ) -> None:
     """Keep a failed EMVR completion attempt actionable and stage-local."""
 
     issues = emvr_stage_completeness_issues(session, stage)
+    due = next_due_builder_requirement(session, stage)
+    if due and not issues:
+        issues = [{"field": due["field"], "label": due["label"], "question": due["question"]}]
     if not issues and stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
         quality_review = evaluate_design_quality(session, final_review=True)
         priority = quality_review.get("priority_issue")
@@ -2662,6 +2773,24 @@ def _prepare_emvr_completion_repair(
                 }
             ]
     if not issues:
+        if stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+            # Earlier stages already own a concrete pending decision. A failed
+            # navigation attempt must preserve it, not create an export blocker.
+            return
+        # An export-only failure must not be redirected to an unrelated
+        # student-summary question or left as a silently failing Continue.
+        message = error or "最终交付结构未通过检查。"
+        output.assistant_message = "交付检查未通过：" + message + "\n请修正对应来源或交付字段后重新检查；仅回复继续不会重复生成同一份失败报告。"
+        output.student_task = "修正错误指向的设计字段；包外引用须提供必要内容副本，未知结构错误需维护导出代码。"
+        output.stage_payload["proposal_status"] = "blocked"
+        output.stage_payload["artifact_blocker"] = {"message": message, "retry_requires_change": True}
+        output.stage_payload["preserve_pending_action"] = True
+        dialogue_state(session)["pending_action"] = None
+        set_pending_action_snapshot(session, None)
+        session.model_context["artifact_blocker"] = {
+            "fingerprint": _completion_source_fingerprint(session),
+            "message": output.assistant_message, "error": message,
+        }
         return
     issue = issues[0]
     question = str(issue["question"])
@@ -2711,6 +2840,34 @@ def _prepare_emvr_completion_repair(
     }
     state = dialogue_state(session)
     state["pending_action"] = deepcopy(output.stage_payload["pending_action"])
+    set_pending_action_snapshot(session, output.stage_payload["pending_action"])
+
+
+def _completion_source_fingerprint(session: DesignSession) -> str:
+    emvr = session.design_context.get("emvr_design", {})
+    emvr = emvr if isinstance(emvr, dict) else {}
+    material = {
+        "fields": stage_design_state_snapshot(session),
+        "canonical": emvr.get("field_state", {}),
+        "formula_flow": emvr.get("formula_flow", {}),
+        "references": session.design_context.get("builder_reference_material", []),
+        "sources": {key: value for key, value in session.stage_outputs.items()
+                    if key != Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT.value},
+    }
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _normalize_final_source_references(session: DesignSession, stage: Stage, output: StepOutput) -> None:
+    """Enforce the same bounded final contract for rule and online generators."""
+    if stage is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+        return
+    source_ids = [key for key in session.stage_outputs if key != stage.value]
+    output.stage_payload["source_stage_outputs"] = source_ids
+    final_design = output.stage_payload.get("final_design")
+    if isinstance(final_design, dict):
+        for key in ("stage_outputs", "history", "final_design"):
+            final_design.pop(key, None)
+        final_design["source_stage_ids"] = source_ids
 
 
 def _project_committed_stage_fields(
@@ -3251,6 +3408,26 @@ class WorkflowEngine:
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and isinstance(pending, dict)
+            and pending.get("subject") == IMPLEMENTATION_DEFAULTS_FIELD
+            and re.search(r"总结|提炼|精简|简化", message)
+            and (section_match := re.search(r"第\s*([0-9]+|[一二三四五六七八九十])\s*条", message))
+        ):
+            # A request to restate a numbered, visible contract section is a
+            # presentation operation. It must not become an implementation
+            # replacement, approval, or a request for the user to rewrite it.
+            numeral = section_match.group(1)
+            section_number = int(numeral) if numeral.isdigit() else "一二三四五六七八九十".index(numeral) + 1
+            lines = format_implementation_defaults(build_implementation_defaults(session)).splitlines()
+            section = next((line for line in lines if line.startswith(f"{section_number}. ")), "")
+            if section:
+                return resolved_intent(
+                    UserIntent.UNCLEAR, confidence=1.0,
+                    source="IMPLEMENTATION_SECTION_PRESENTATION",
+                    resolved_value=section,
+                ), pending
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and isinstance(pending, dict)
             and pending.get("type")
             in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
         ):
@@ -3266,6 +3443,8 @@ class WorkflowEngine:
             and compact_control
             in {
                 "给个参考",
+                "给我一个参考",
+                "请给我一个参考",
                 "请给个参考",
                 "给一份参考",
                 "请给一份参考",
@@ -3352,7 +3531,17 @@ class WorkflowEngine:
             message,
             pending,
             selected_option_id=request.selected_option_id,
-            complete_stage=request.complete_stage,
+            # A completion flag can accompany real text in API/UI requests.
+            # Parse that text when possible; the flag still authorizes later
+            # navigation, after the user-request gate has examined the turn.
+            complete_stage=(
+                request.complete_stage
+                and (
+                    not callable(getattr(self.generator, "resolve_intent", None))
+                    or _is_explicit_emvr_confirmation(_compact_control_text(message))
+                )
+                and not _looks_like_student_question(message)
+            ),
             interaction_state=request.interaction_state,
         )
         if direct is not None:
@@ -3843,7 +4032,8 @@ class WorkflowEngine:
         reopened_handoff = bool(
             session.status is WorkflowStatus.COMPLETE
             and session.interaction_state is InteractionState.EMVR_DIRECT
-            and next_due_builder_requirement(session, Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT)
+            and (next_due_builder_requirement(session, Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT)
+                 or not _emvr_artifact_readiness(session).get("builder_input_ready"))
         )
         if reopened_handoff:
             # An older completed design may lack a newly required contract or
@@ -3902,7 +4092,34 @@ class WorkflowEngine:
             isinstance(idea_before_patch, dict)
             and idea_before_patch.get("course_scope_confirmed") is True
         )
+        if "builder_reference_material" in request.context_patch:
+            # Reject malformed copied sources before changing the session. A
+            # global source-format error must not reopen unrelated design fields.
+            embed_supplied_references({}, request.context_patch["builder_reference_material"])
         _deep_merge(session.design_context, request.context_patch)
+        blocker = session.model_context.get("artifact_blocker", {})
+        if (
+            session.interaction_state is InteractionState.EMVR_DIRECT
+            and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+            and isinstance(blocker, dict) and blocker
+            and not request.context_patch and request.interaction_state is None
+            and request.version_request is None
+            and _compact_control_text(message).casefold() in {"继续", "下一步", "确认", "完成", "完成本阶段", "continue", "确认并继续"}
+            and blocker.get("fingerprint") == _completion_source_fingerprint(session)
+        ):
+            response = {
+                "design_id": session.design_id, "interaction_state": session.interaction_state.value,
+                "workflow_status": "active", "stage_status": "active", "current_stage": session.current_stage.value,
+                "handled_stage": session.current_stage.value, "next_stage": None,
+                "assistant_message": blocker["message"], "completion_error": blocker["error"],
+                "stage_payload": {"artifact_blocker": {"message": blocker["error"], "retry_requires_change": True}},
+                "report_ready": False, "builder_input_ready": False, "revision": session.revision,
+                "turn_id": request.turn_id,
+            }
+            _cache_turn_response(session, request, response)
+            self.store.save(session, expected_revision=session.revision)
+            return response
+        session.model_context.pop("artifact_blocker", None)
         if (
             session.current_stage is Stage.IDEA_BRAINSTORMING
             and session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -3939,8 +4156,10 @@ class WorkflowEngine:
                 request,
                 message,
             )
-        if session.interaction_state is InteractionState.EMVR_DIRECT:
-            _prioritize_emvr_content_before_transition(turn_intent, message)
+        _prioritize_user_content_before_transition(
+            turn_intent, message, session.interaction_state,
+        )
+        request_navigation_deferred = turn_intent.get("workflow_navigation_deferred") is True
         idea_for_direction_lock = session.design_context.get("idea", {})
         semantic_for_direction_lock = turn_intent.get("semantic_updates", {})
         if (
@@ -4144,16 +4363,8 @@ class WorkflowEngine:
             session.current_stage_index = 0
         formula_onboarding_output: StepOutput | None = None
         formula_onboarding_should_complete = False
-        formula_semantic = turn_intent.get("semantic_updates", {})
-        formula_questions: list[Any] = []
-        if isinstance(formula_semantic, dict):
-            for key in ("student_questions", "feedback_items"):
-                values = formula_semantic.get(key, [])
-                if isinstance(values, list):
-                    formula_questions.extend(values)
         formula_question_pause = bool(
-            isinstance(formula_questions, list)
-            and any(str(item).strip() for item in formula_questions)
+            request_navigation_deferred
             and self._emvr_formula_first_enabled()
             and emvr_formula_flow_active(session)
         )
@@ -4434,8 +4645,11 @@ class WorkflowEngine:
                 intent_name = UserIntent.UNCLEAR.value
                 content_intent_name = intent_name
         elif (
-            intent_name == UserIntent.RETURN_TO_PREVIOUS_POINT.value
-            or "RETURN" in control_actions
+            not request_navigation_deferred
+            and (
+                intent_name == UserIntent.RETURN_TO_PREVIOUS_POINT.value
+                or "RETURN" in control_actions
+            )
         ):
             self._return_to_previous_stage(session)
 
@@ -4460,7 +4674,8 @@ class WorkflowEngine:
             )
 
         explicit_transition_intent = bool(
-            intent_name == UserIntent.ADVANCE_STAGE.value
+            (request.complete_stage and input_kind != UNREASONABLE_REQUEST)
+            or intent_name == UserIntent.ADVANCE_STAGE.value
             or "ADVANCE" in control_actions
             or (
                 turn_intent.get("advance_requested") is True
@@ -4499,6 +4714,8 @@ class WorkflowEngine:
                 turn_intent["advance_requested"] = True
         if formula_onboarding_output is not None:
             explicit_transition_intent = formula_onboarding_should_complete
+        if request_navigation_deferred:
+            explicit_transition_intent = False
         # Commit EMVR semantic fields before completion validation, turn diff
         # calculation and version capture.  Previously this happened after all
         # three, so a "补充并继续" turn could fail validation once, and an
@@ -4799,10 +5016,20 @@ class WorkflowEngine:
                 or "REQUEST_REFERENCE" in control_actions
             )
         )
+        completed_response_types: set[str] = set()
         if formula_onboarding_output is not None:
             output = formula_onboarding_output
             session.turn_context = {}
             completion_error = None
+        elif turn_intent.get("source") == "IMPLEMENTATION_SECTION_PRESENTATION":
+            output = StepOutput(
+                assistant_message=str(turn_intent.get("resolved_value") or ""),
+                stage_payload={"presentation_only": True, "preserve_pending_action": True},
+                student_task=None,
+            )
+            session.turn_context = {}
+            completion_error = None
+            completed_response_types.add("REQUEST_SUMMARY")
         elif turn_intent.get("source") == "STALE_IMPLEMENTATION_DEFAULTS":
             output = _emvr_stage_entry_output(session, handled_stage)
             output.assistant_message = (
@@ -4811,7 +5038,40 @@ class WorkflowEngine:
             )
             session.turn_context = {}
             completion_error = None
-        elif version_only_turn:
+        elif idea_facet_reference_turn:
+            output = build_facet_reference_output(session)
+            completed_response_types.add("REQUEST_REFERENCE")
+            session.turn_context = {}
+            completion_error = None
+        elif guided_stage_reference_turn:
+            output = _guided_reference_output(session)
+            completed_response_types.add("REQUEST_REFERENCE")
+            session.turn_context = {}
+            completion_error = None
+        elif (
+            session.interaction_state is InteractionState.GUIDED_DESIGN
+            and handled_stage is Stage.IDEA_BRAINSTORMING
+            and (
+                intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+                or "REQUEST_REFERENCE" in control_actions
+            )
+        ):
+            # At the open exploration entry, a requested scene batch is itself
+            # the reference. It still needs the scene contract, while any
+            # accompanying course question is answered independently below.
+            reference_context = deepcopy(turn_context)
+            reference_intent = reference_context["resolved_intent"]
+            reference_intent["intent"] = UserIntent.REQUEST_MORE_EXAMPLES.value
+            reference_intent.setdefault("semantic_updates", {})["student_questions"] = []
+            session.turn_context = reference_context
+            try:
+                output = self.generator.generate(session, message)
+            finally:
+                session.turn_context = {}
+            if output.stage_payload.get("request_rejected") is not True:
+                completed_response_types.add("REQUEST_REFERENCE")
+            completion_error = None
+        elif version_only_turn and not emvr_stage_reference_turn:
             output = StepOutput(
                 assistant_message="\n\n".join(
                     item for item in (format_version_result(result) for result in version_results) if item
@@ -4824,7 +5084,8 @@ class WorkflowEngine:
             )
             session.turn_context = {}
             completion_error = None
-        elif quality_review_requested:
+            completed_response_types.add("VERSION_CONTROL")
+        elif quality_review_requested and not emvr_stage_reference_turn:
             priority = quality_review.get("priority_issue")
             output = StepOutput(
                 assistant_message=format_quality_review(
@@ -4847,7 +5108,8 @@ class WorkflowEngine:
             )
             session.turn_context = {}
             completion_error = None
-        elif option_comparison_requested:
+            completed_response_types.add("REQUEST_QUALITY_REVIEW")
+        elif option_comparison_requested and not emvr_stage_reference_turn:
             output = StepOutput(
                 assistant_message=format_option_comparison(
                     quality_review,
@@ -4863,6 +5125,7 @@ class WorkflowEngine:
             )
             session.turn_context = {}
             completion_error = None
+            completed_response_types.add("COMPARE_OPTIONS")
         elif emvr_stage_reference_turn:
             # A request for examples is a temporary response strategy, not a
             # stage answer.  Let the online generator answer it from the
@@ -4871,6 +5134,17 @@ class WorkflowEngine:
             # rebuilds the stage draft and used to erase the examples before
             # they reached the student.  The outstanding design question stays
             # active so the student can answer it after reading the reference.
+            # Other service requests are rendered independently below. Keep
+            # the reference generator focused so it cannot answer a question
+            # in place of the requested reference draft.
+            reference_context = deepcopy(turn_context)
+            reference_context["response_task"] = "REFERENCE"
+            reference_intent = reference_context["resolved_intent"]
+            reference_intent["intent"] = UserIntent.REQUEST_MORE_EXAMPLES.value
+            reference_updates = reference_intent.setdefault("semantic_updates", {})
+            reference_updates["student_questions"] = []
+            reference_updates["control_actions"] = ["REQUEST_REFERENCE"]
+            session.turn_context = reference_context
             try:
                 output = self.generator.generate(
                     session,
@@ -4879,6 +5153,21 @@ class WorkflowEngine:
             finally:
                 session.turn_context = {}
             reference_payload = output.stage_payload
+            expected_reference_field = (
+                recoverable_pending_field(pending_action)
+                if isinstance(pending_action, dict) else ""
+            )
+            if expected_reference_field in BUILDER_REQUIREMENT_FIELDS:
+                draft = reference_payload.get("reference_draft", {})
+                scaffold = reference_payload.get("reference_scaffold", {})
+                bound_field = (
+                    draft.get("field") if isinstance(draft, dict) else None
+                ) or (scaffold.get("field") if isinstance(scaffold, dict) else None)
+                if bound_field != expected_reference_field:
+                    # A long stage overview still fails to answer a specific
+                    # pending contract gap. Require an explicit field binding.
+                    output = _emvr_reference_output(session)
+                    reference_payload = output.stage_payload
             reference_has_detail = bool(
                 isinstance(reference_payload, dict)
                 and (
@@ -4984,6 +5273,8 @@ class WorkflowEngine:
                 )
                 set_pending_action_snapshot(session, pending_action)
             completion_error = None
+            if output.stage_payload.get("request_rejected") is not True:
+                completed_response_types.add("REQUEST_REFERENCE")
         elif design_summary_request:
             summary_snapshot = design_state_snapshot(session)
             requested_summary_fields = (
@@ -5022,22 +5313,19 @@ class WorkflowEngine:
             )
             session.turn_context = {}
             completion_error = None
-        elif final_summary_confirmation_turn:
+            completed_response_types.add("REQUEST_SUMMARY")
+        elif final_summary_confirmation_turn and not request_navigation_deferred:
             output = _guided_summary_completion_output(session)
             session.turn_context = {}
             completion_error = None
-        elif summary_completed_this_turn:
+        elif summary_completed_this_turn and not request_navigation_deferred:
             output = _guided_summary_completion_output(session)
             session.turn_context = {}
             completion_error = None
         elif dialogue_question_turn:
-            try:
-                generated_answer = self.generator.generate(
-                    session,
-                    message,
-                )
-            finally:
-                session.turn_context = {}
+            generated_answer = _generate_question_response(
+                self.generator, session, turn_context, student_questions,
+            )
             if (
                 handled_stage is Stage.IDEA_BRAINSTORMING
                 and session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -5047,14 +5335,11 @@ class WorkflowEngine:
                 output.assistant_message = generated_answer.assistant_message
                 output.assumptions = generated_answer.assumptions
                 output.warnings = generated_answer.warnings
-                output.stage_payload["answered_student_questions"] = deepcopy(
-                    student_questions
-                )
+                output.stage_payload.update(generated_answer.stage_payload)
             else:
                 output = generated_answer
-                output.stage_payload["answered_student_questions"] = deepcopy(
-                    student_questions
-                )
+            if output.stage_payload.get("answered_student_questions"):
+                completed_response_types.add("ASK_COURSE_QUESTION")
             if not has_structured_turn_updates:
                 output.stage_payload["preserve_pending_action"] = True
             completion_error = None
@@ -5224,14 +5509,6 @@ class WorkflowEngine:
                 )
             session.turn_context = {}
             completion_error = None
-        elif idea_facet_reference_turn:
-            output = build_facet_reference_output(session)
-            session.turn_context = {}
-            completion_error = None
-        elif guided_stage_reference_turn:
-            output = _guided_reference_output(session)
-            session.turn_context = {}
-            completion_error = None
         elif dynamic_idea_turn:
             confirmed_answer = (
                 resolved_student_message
@@ -5317,7 +5594,7 @@ class WorkflowEngine:
                     pending_action,
                     intent_name,
                     semantic_updates,
-                ):
+                ) and not request_navigation_deferred:
                     completed_stage = handled_stage
                     completed_output = output
                     _persist_guided_stage_draft(
@@ -5379,6 +5656,84 @@ class WorkflowEngine:
                         handled_stage,
                         output,
                     )
+        # Service requests are independent tasks. The primary response branch
+        # is only a starting point: a review, summary or reference must not
+        # swallow a course question (or another requested service) in this turn.
+        if (
+            intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+            and output.stage_payload.get("request_rejected") is not True
+            and any(output.stage_payload.get(key) for key in (
+                "reference_examples", "reference_draft", "reference_basis", "exploration_scenes",
+            ))
+        ):
+            completed_response_types.add("REQUEST_REFERENCE")
+        if (
+            student_questions
+            and "ASK_COURSE_QUESTION" not in completed_response_types
+            and not output.stage_payload.get("pending_student_questions")
+            and output.stage_payload.get("request_rejected") is not True
+        ):
+            answer = _generate_question_response(
+                self.generator, session, turn_context, student_questions,
+            )
+            output.assistant_message = "\n\n".join(
+                part for part in (answer.assistant_message, output.assistant_message) if part
+            )
+            output.assumptions.extend(answer.assumptions)
+            output.warnings.extend(answer.warnings)
+            if answer.stage_payload.get("answered_student_questions"):
+                output.stage_payload["answered_student_questions"] = deepcopy(student_questions)
+                completed_response_types.add("ASK_COURSE_QUESTION")
+            elif answer.stage_payload.get("pending_student_questions"):
+                output.stage_payload["pending_student_questions"] = deepcopy(student_questions)
+        if quality_review_requested and "REQUEST_QUALITY_REVIEW" not in completed_response_types:
+            review_text = format_quality_review(
+                quality_review, session.interaction_state, final_review=final_quality_review,
+            )
+            if review_text:
+                output.assistant_message = f"{output.assistant_message}\n\n{review_text}".strip()
+                completed_response_types.add("REQUEST_QUALITY_REVIEW")
+        if option_comparison_requested and "COMPARE_OPTIONS" not in completed_response_types:
+            comparison_text = format_option_comparison(quality_review, session.interaction_state)
+            if comparison_text:
+                output.assistant_message = f"{output.assistant_message}\n\n{comparison_text}".strip()
+                output.stage_payload["option_comparison"] = deepcopy(quality_review.get("option_comparison", []))
+                completed_response_types.add("COMPARE_OPTIONS")
+        if design_summary_request and "REQUEST_SUMMARY" not in completed_response_types:
+            summary_text = format_design_summary(session)
+            output.assistant_message = f"{output.assistant_message}\n\n目前已保存的设计：\n{summary_text}".strip()
+            output.stage_payload["read_only_design_summary"] = True
+            completed_response_types.add("REQUEST_SUMMARY")
+        if version_results:
+            completed_response_types.add("VERSION_CONTROL")
+        if feedback_items and (
+            turn_design_diff.get("has_changes")
+            or turn_design_diff.get("unchanged_requested_fields")
+            or output.stage_payload.get("summary_recovered_from_previous_turn")
+        ):
+            completed_response_types.add("CORRECT_ASSISTANT")
+        if (
+            summary_completed_this_turn
+            and output.stage_payload.get("summary_recovered_from_previous_turn") is True
+            and not student_questions
+            and not semantic_updates.get("unresolved_content")
+        ):
+            # Recovering the student's already-written final summary resolves
+            # the correction itself; no unanswered request remains to block it.
+            request_navigation_deferred = False
+        if request_navigation_deferred:
+            # Questions/unresolved requests keep the workflow item. A concrete
+            # reference or completed correction may replace it with an updated
+            # confirmation for the same stage, so later adoption stays bound.
+            if student_questions or semantic_updates.get("unresolved_content"):
+                output.stage_payload["preserve_pending_action"] = True
+                output.student_task = None
+            output.stage_payload["workflow_navigation_deferred"] = True
+            guided_stage_entry_turn = False
+            emvr_stage_entry_turn = False
+            if semantic_updates.get("unresolved_content") and not completed_response_types:
+                output.assistant_message = ""
+        output.stage_payload["completed_response_types"] = sorted(completed_response_types)
         # Some valid turns are served by a reference/entry/recovery branch
         # rather than the ordinary generator branch above.  Reconcile the
         # final visible payload from committed canonical state in every route,
@@ -5390,7 +5745,9 @@ class WorkflowEngine:
             session.interaction_state,
             turn_design_diff,
         )
-        if multi_act_notice and turn_intent.get("dialogue_acts"):
+        if multi_act_notice and (
+            turn_intent.get("dialogue_acts") or semantic_updates.get("unresolved_content")
+        ):
             output.assistant_message = (
                 f"{multi_act_notice}\n\n{output.assistant_message}"
                 if output.assistant_message
@@ -5529,6 +5886,7 @@ class WorkflowEngine:
         output.stage_payload["design_state"] = design_state_snapshot(session)
         output.stage_payload["stage_design_state"] = stage_design_state_snapshot(session)
         _persist_guided_stage_draft(session, handled_stage, output.stage_payload)
+        _normalize_final_source_references(session, handled_stage, output)
         session.revision += 1
         output_dict = output.to_dict()
         session.stage_outputs[handled_stage.value] = {
@@ -5576,6 +5934,8 @@ class WorkflowEngine:
             # guided mode.  Do not add an otherwise content-free confirmation
             # turn after the student has already done the requested synthesis.
             should_complete = True
+        if request_navigation_deferred:
+            should_complete = False
         if (
             session.interaction_state is InteractionState.GUIDED_DESIGN
             and handled_stage is Stage.IDEA_BRAINSTORMING
@@ -5594,6 +5954,7 @@ class WorkflowEngine:
                         session,
                         handled_stage,
                         output,
+                        completion_error,
                     )
                     # Completion is validated after the normal artifact was
                     # persisted.  Keep storage and history aligned with the
@@ -5620,6 +5981,8 @@ class WorkflowEngine:
                     and handled_stage.value in session.completed_stages
                 )
             ),
+            completed_response_types=set(output.stage_payload.get("completed_response_types", [])),
+            navigation_deferred=request_navigation_deferred,
         )
 
         if session.interaction_state is InteractionState.EMVR_DIRECT:

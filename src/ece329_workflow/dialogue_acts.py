@@ -10,7 +10,7 @@ from .builder_requirements import (
     BUILDER_REQUIREMENT_FIELDS,
     BUILDER_REQUIREMENT_SPECS,
 )
-from .emvr_design import EMVR_EDITABLE_FIELDS, EMVR_LIST_FIELDS
+from .emvr_design import EMVR_EDITABLE_FIELDS, EMVR_LIST_FIELDS, apply_emvr_field_updates
 from .emvr_formula_flow import (
     EMVR_FORMULA_ACTION_TYPES,
     normalize_formula_flow_action,
@@ -820,8 +820,6 @@ def apply_stage_field_updates(
         # The approved implementation is a complete document, not a short
         # conversational field. Truncating it silently discarded its tail.
         value = "" if operation == "CLEAR" else _text(item.get("value"))
-        if field not in BUILDER_REQUIREMENT_FIELDS and field != "procedure_steps":
-            value = value[:4000]
         if operation != "CLEAR" and not value:
             continue
         update_id = str(item.get("update_id") or "").strip() or _act_identity(
@@ -830,6 +828,12 @@ def apply_stage_field_updates(
             operation,
             value,
         )
+        current_value = _text(state.get(field))
+        canonical_fields = emvr.get("field_state", {})
+        if (session.interaction_state is InteractionState.EMVR_DIRECT
+                and field in BUILDER_REQUIREMENT_FIELDS
+                and isinstance(canonical_fields, dict) and field in canonical_fields):
+            current_value = _text(canonical_fields[field])
         if update_id in known_ids:
             already_matches_current_state = (
                 operation == "CLEAR" and field in explicitly_cleared
@@ -838,16 +842,16 @@ def apply_stage_field_updates(
                 and field not in explicitly_cleared
                 and field not in emvr_explicitly_cleared
                 and (
-                    _text(state.get(field)) == value
+                    current_value == value
                     or (
                         operation == "MERGE"
-                        and value.replace(" ", "") in _text(state.get(field)).replace(" ", "")
+                        and value.replace(" ", "") in current_value.replace(" ", "")
                     )
                 )
             )
             if already_matches_current_state:
                 continue
-        previous = "" if field in emvr_explicitly_cleared else _text(state.get(field))
+        previous = "" if field in emvr_explicitly_cleared else current_value
         was_explicitly_cleared = field in explicitly_cleared
         was_emvr_explicitly_cleared = field in emvr_explicitly_cleared
         signature = str(item.get("semantic_key") or "").strip().casefold()
@@ -859,6 +863,8 @@ def apply_stage_field_updates(
             if isinstance(known_signatures, list)
             else []
         )
+        if current_value != _text(state.get(field)):
+            known_signatures = []
         if operation == "CLEAR":
             next_value = ""
             explicitly_cleared.add(field)
@@ -916,6 +922,19 @@ def apply_stage_field_updates(
     state["explicitly_cleared_fields"] = sorted(explicitly_cleared)
     if emvr:
         emvr["explicitly_cleared_fields"] = sorted(emvr_explicitly_cleared)
+    if session.interaction_state is InteractionState.EMVR_DIRECT and changed:
+        # Both write paths can revise Builder fields. Mirror a newer stage
+        # write into the canonical store so report, validation and Builder
+        # cannot disagree based on which storage path received the edit.
+        shared = [field for field in changed if field in BUILDER_REQUIREMENT_FIELDS and field in EMVR_EDITABLE_FIELDS]
+        if shared:
+            if not isinstance(session.design_context.get("emvr_design"), dict):
+                session.design_context["emvr_design"] = {}
+            apply_emvr_field_updates(session.design_context["emvr_design"], {"field_updates": [
+                {"field_id": field, "operation": "CLEAR" if field in explicitly_cleared else "REPLACE",
+                 "value": state.get(field, "")}
+                for field in shared
+            ]})
     return list(dict.fromkeys(changed))
 
 
@@ -941,15 +960,19 @@ def reconcile_stage_clear_markers(
     if not isinstance(cleared, list):
         return
     cleared_fields = {str(item) for item in cleared if str(item)}
+    emvr = session.design_context.get("emvr_design", {})
+    emvr_cleared = set(emvr.get("explicitly_cleared_fields", []) or []) if isinstance(emvr, dict) else set()
     for item in updates:
         if not isinstance(item, dict):
             continue
         field = str(item.get("field_id") or item.get("field") or "")
         operation = str(item.get("operation") or "").upper()
         if (
-            field in cleared_fields
-            and operation in {"REPLACE", "MERGE"}
+            operation in {"REPLACE", "MERGE"}
             and item.get("value") not in (None, "", [], {})
         ):
             cleared_fields.discard(field)
+            emvr_cleared.discard(field)
     state["explicitly_cleared_fields"] = sorted(cleared_fields)
+    if isinstance(emvr, dict) and "explicitly_cleared_fields" in emvr:
+        emvr["explicitly_cleared_fields"] = sorted(emvr_cleared)

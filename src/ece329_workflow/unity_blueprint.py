@@ -8,6 +8,31 @@ from __future__ import annotations
 
 def construction_defaults(lab_id: str) -> dict[str, str]:
     return {
+        "bootstrap_and_references": (
+            "先按PDF本机定位规则找到包根，以包内UnityProject为唯一宿主；检查锁定Editor、Packages/manifest.json与packages-lock.json，"
+            "逐项解析本地依赖并核对实际路径仍在包内。Common来源为UnityProject/LocalPackages/com.emvr.lab-common。"
+            f"由包内labflow new初始化工具生成 LabSpecs/{lab_id}/source-references.json，基于 Policies/reuse-source-references.json；"
+            "随后用labflow source-references校验清单和完整性，清单与来源均只读，不能手写或更改。"
+            "路径相对builder_pack_root、不持久化机器绝对路径；缺依赖时列出缺项并停止当前构建。"
+            "项目已存在时先检查当前Lab状态，不能重复初始化覆盖Brief或别的Lab。新Lab仅在相应Gate获准后初始化。"
+        ),
+        "contract_and_entrypoint": (
+            "将PDF字段逐项映射到包内当前模板要求的lab_spec、objects、steps、telemetry_map、rubric五份合同；"
+            "保留lab_id、OBJ_*、S*和事件ID之间的引用，字段路径/JSON或YAML结构以当前包内模板为准。"
+            f"领域纯模型放Assets/Generated/{lab_id}/Runtime/，Editor生成器放Assets/Generated/{lab_id}/Editor/，"
+            f"测试放Assets/Generated/{lab_id}/Tests/；按依赖单向引用Runtime、Editor、Tests程序集。"
+            f"Editor入口建议为EMVR/Labs/{lab_id}/Build Scene；必须提供可复现的菜单入口及参数，而非手动编辑场景YAML。"
+            "先编译纯模型与测试，再编译生成器；在当前工作流批准的构建Gate由用户在锁定Editor中运行入口。"
+            "生成器幂等，域重载或重复点击不重复创建对象、EventSystem、服务、订阅或快照。"
+        ),
+        "traceability_and_completion": (
+            "实现前建立逐项映射表：需求字段 -> OBJ或控件参数键 -> 领域方法/适配器 -> S步骤 -> 证据ID。"
+            "每个S步骤的目标对象必须存在；每个参数都有范围/默认/单位/步长或完整离散选项；每个动作有桌面和XR对应；"
+            "每个验收项关联可观察结果。动态计算状态与教学步骤分开：VALID不能自动完成S1，Capture不能自动进入Compare，"
+            "不足两张兼容快照时保持可操作状态并提示缺项。领域证据满足后再通知Common runner推进一次。"
+            "为每个阶段输出明确的通过/失败条件、实际执行记录与下一步；编译失败、缺引用或无响应达到时限即停止，"
+            "显示错误与恢复操作，不自动循环重试，也不把预期日志当真实验收。"
+        ),
         "construction_order": (
             "B1 核对宿主 UnityProject/ProjectSettings/ProjectVersion.txt 与 Packages/manifest.json、"
             "packages-lock.json，沿用锁定的 Editor、渲染管线和 Common/XRI 包；解析全部 file: 依赖。"
@@ -36,7 +61,9 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "这些是职责绑定：Builder 必须读取宿主实际 API 声明后调用，不按名称猜测方法签名。"
         ),
         "room_and_coordinates": (
-            "Environment 实例化 ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab；"
+            "房间源为 ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab；先由批准导入器按GUID闭包导入，"
+            f"Environment再实例化 Assets/Generated/{lab_id}/ApprovedDependencies/EMVRRoom/Prefabs/Room_Big_Part_01.prefab，"
+            "不能把包根的ApprovedAssets源路径直接传给Unity AssetDatabase。"
             "XR 使用批准的 XR Interaction Setup 与 XR Device Simulator，保留依赖及 GUID。"
             "以房间可用地板中心为原点，+Y 向上、+Z 指向实验台、+X 向右。默认玩家起点为"
             "(0,0,-2.5) Unity 单位，实验中心为 (0,1.2,0)；以已确认房间空间要求为约束调整，避免穿墙。"
@@ -55,7 +82,9 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
         "solver_and_termination": (
             "模型为无 Unity 依赖的纯计算函数：输入是完整 SI 参数快照，输出包含数值、单位、有效性和错误原因。"
             "直接公式逐项求值；迭代/积分必须明确算法、步长、停止条件和上限后实施。"
-            "默认执行预算每次请求最多 10000 次迭代、每条轨迹最多 2048 步、每帧最多 4096 次采样；"
+            "单序列迭代默认上限10000次；每条轨迹默认上限2048步，具体采用已确认的数值契约。"
+            "全场请求总预算=确定种子数乘每条轨迹步数上限乘每步最大场求值次数（RK4为4，运行误差估计时计入额外求值）；"
+            "不能把单序列预算当作整组轨迹预算。每帧默认最多4096次采样；"
             "仅单帧采样预算用尽时让出到下一帧，并检查取消标志，不重新开始整个计算。"
             "这些是计算保护上限，不能替代物理模型所需的收敛精度。遇到 NaN/Infinity、奇点、超界、"
             "不收敛或总预算耗尽，终止并显示 INVALID 及具体原因，禁止自动重试或假称收敛。"
@@ -85,6 +114,9 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
 
 
 CONSTRUCTION_LABELS = (
+    ("bootstrap_and_references", "本机构建前提与复用清单"),
+    ("contract_and_entrypoint", "合同映射与Editor构建入口"),
+    ("traceability_and_completion", "需求到实现与验收的对应关系"),
     ("construction_order", "从零构建顺序"),
     ("generated_files", "文件与程序集安排"),
     ("common_wiring", "公共组件连接表"),

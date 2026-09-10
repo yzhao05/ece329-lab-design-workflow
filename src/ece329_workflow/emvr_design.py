@@ -633,25 +633,18 @@ def emvr_stage_one_readiness(emvr_design: Any) -> dict[str, Any]:
 
 def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
     if field_id in EMVR_SCALAR_FIELDS:
-        text = clean_emvr_field_text(field_id, value)[:1600]
+        text = clean_emvr_field_text(field_id, value)
         return text or None
     values = value if isinstance(value, list) else [value]
     # These lists are implementation contracts, not summaries. Dropping the
     # end of a parameter or a later procedure step silently changes the design.
-    full_contract = field_id in {
-        "parameter_specifications", "procedure_steps", "expected_results",
-        "acceptance_criteria", "report_questions", "object_constraints",
-    }
     result = list(
         dict.fromkeys(
-            (clean_emvr_field_text(field_id, item) if full_contract
-             else clean_emvr_field_text(field_id, item)[:800])
+            clean_emvr_field_text(field_id, item)
             for item in values
             if isinstance(item, str) and clean_emvr_field_text(field_id, item)
         )
     )
-    if not full_contract:
-        result = result[:20]
     return result or None
 
 
@@ -1152,17 +1145,17 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
 
-    def text_list(key: str, *, limit: int = 12) -> list[str]:
+    def text_list(key: str) -> list[str]:
         value = raw.get(key, [])
         if not isinstance(value, list):
             return []
         return list(
             dict.fromkeys(
-                str(item).strip()[:600]
+                str(item).strip()
                 for item in value
                 if isinstance(item, str) and item.strip()
             )
-        )[:limit]
+        )
 
     theory_links: list[dict[str, Any]] = []
     seen_relations: set[str] = set()
@@ -1199,9 +1192,9 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
             }
         )
         seen_relations.add(relation_id)
-    summary = str(raw.get("research_summary") or "").strip()[:1200]
+    summary = str(raw.get("research_summary") or "").strip()
     scalar_values = {
-        key: str(raw.get(key) or "").strip()[:1600] or None
+        key: str(raw.get(key) or "").strip() or None
         for key in EMVR_SCALAR_FIELDS
     }
     field_updates: list[dict[str, Any]] = []
@@ -1262,14 +1255,14 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
         "comparison_cases": text_list("comparison_cases"),
         "required_behaviors": text_list("required_behaviors"),
         "object_constraints": text_list("object_constraints"),
-        "procedure_steps": text_list("procedure_steps", limit=20),
+        "procedure_steps": text_list("procedure_steps"),
         "visualization_requirements": text_list("visualization_requirements"),
         "design_values": text_list("design_values"),
         "limitations": text_list("limitations"),
-        "parameter_specifications": text_list("parameter_specifications", limit=20),
-        "expected_results": text_list("expected_results", limit=20),
-        "acceptance_criteria": text_list("acceptance_criteria", limit=20),
-        "report_questions": text_list("report_questions", limit=20),
+        "parameter_specifications": text_list("parameter_specifications"),
+        "expected_results": text_list("expected_results"),
+        "acceptance_criteria": text_list("acceptance_criteria"),
+        "report_questions": text_list("report_questions"),
         "field_updates": field_updates,
         "theory_link_updates": theory_link_updates,
         # Relation IDs are derived from explicit semantic links.  A bare ID

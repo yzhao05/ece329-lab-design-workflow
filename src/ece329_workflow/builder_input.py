@@ -25,12 +25,15 @@ from .builder_defaults import (
     measurement_disables_probe,
     measurement_is_qualitative_only,
 )
+from .builder_portability import (
+    PACK_NAME, ROOT_DISCOVERY, SOURCE_BOUNDARY, UNITY_PROJECT,
+    embed_supplied_references, validate_portable_content, validate_embedded_reference_links,
+)
 from .models import DesignSession, InteractionState, Stage
 from .knowledge_base import KNOWLEDGE
 from .reporting import (
     _formula_expression_for_report,
     _pdf_safe_formula_text,
-    _unity_project_absolute_path,
     effective_emvr_stage_payload,
     effective_experiment_brief,
     validate_emvr_report_completeness,
@@ -54,46 +57,13 @@ def _text(value: Any, *, depth: int = 0) -> str:
         return "true" if value else "false"
     if isinstance(value, (str, int, float)):
         return str(value).strip()
-    if depth >= 3:
-        return ""
     if isinstance(value, list):
         return "；".join(
             part for item in value if (part := _text(item, depth=depth + 1))
         )
     if isinstance(value, dict):
-        preferred_keys = (
-            "display",
-            "equation",
-            "name",
-            "title",
-            "object_name",
-            "focus",
-            "value",
-        )
-        preferred = next(
-            (_text(value.get(key), depth=depth + 1) for key in preferred_keys if value.get(key)),
-            "",
-        )
-        details: list[str] = []
-        for key in (
-            "id",
-            "formula_id",
-            "role",
-            "expression",
-            "conditions",
-            "quantity",
-            "symbols",
-            "physical_meaning",
-            "reasoning",
-            "supports",
-            "units",
-            "pages",
-        ):
-            rendered = _text(value.get(key), depth=depth + 1)
-            if rendered and rendered != preferred:
-                details.append(f"{key}={rendered}")
-        if preferred:
-            return f"{preferred} ({'; '.join(details)})" if details else preferred
+        # Export is lossless: a display/name/value key must not hide siblings,
+        # numeric zero, false, or nested implementation details.
         parts = []
         for key, item in value.items():
             rendered = _text(item, depth=depth + 1)
@@ -143,7 +113,7 @@ def _object_rows(inventory: Any, desktop_plan: str) -> list[dict[str, str]]:
                 "object_type": _text(item.get("category")) or "unresolved",
                 "role": _text(item.get("purpose")) or "unresolved",
                 "initial_state": _text(item.get("physics_or_data_state")) or "unresolved",
-                "desktop_interaction": f"{desktop_plan}；本对象：{object_action}",
+                "desktop_interaction": f"{object_action}；对应桌面方式见本文 interaction_modes.mouse_to_vr_mapping",
                 "xr_interaction": object_action,
                 "visible_feedback": _text(item.get("visual_feedback")) or "unresolved",
                 "required": _text(item.get("required")) or "unresolved",
@@ -198,11 +168,11 @@ def _builder_formula_contracts(
                 formula.get("expression"), formula.get("equation"), formula.get("display")
             )
             name = _first_value(formula.get("name"), f"legacy_formula_{index}")
-            conditions = _text(formula.get("conditions")) or "Use the confirmed report boundary conditions."
+            conditions = _first_value(formula.get("conditions"), experiment_brief.get("boundary_conditions"), theory.get("assumptions")) or _UNRESOLVED
         else:
             expression = _text(formula)
             name = f"legacy_formula_{index}"
-            conditions = "Use the confirmed report boundary conditions."
+            conditions = _first_value(experiment_brief.get("boundary_conditions"), theory.get("assumptions")) or _UNRESOLVED
         if expression:
             contracts.append(
                 {
@@ -275,12 +245,14 @@ def _selected_formula_adjustable_inputs(
             for value in (variation or {}).get("units", [])
             if _text(value)
         ]
-        discrete = bool(re.search(r"(?:符号|配置|类型|极性|方向|模式|材料)", quantity))
+        discrete = bool(re.search(r"(?:符号|配置|类型|极性|模式|材料)", quantity))
+        mixed = discrete and bool(re.search(r"距离|位置|电荷量|频率|幅值|distance|position", quantity, re.I))
         rows.append(
             {
                 "quantity": quantity,
                 "symbols": symbols or ["defined in the confirmed formula contract"],
-                "units": units or (["dimensionless/categorical"] if discrete else ["defined in the confirmed parameter contract"]),
+                "units": (["mixed controls: each quantity uses its own unit in physics.input_parameter_contract; never assign one categorical unit to the whole group"]
+                          if mixed else units or (["categorical; numeric unit not applicable"] if discrete else ["see physics.input_parameter_contract in this PDF"])),
                 "control_role": "adjustable experiment independent variable",
                 "control_specification": parameter_contract,
             }
@@ -303,7 +275,12 @@ def _student_task_contracts(
             r"(?:并排|(?:比较|对照)(?!前|条件|配置|组|情形|方案|案例|实验|过程|逻辑|目的))",
             step,
         ) is not None
-        if re.search(r"(?:Reset|重置|加载.*基准|恢复.*初始|建立.*基准)", step, flags=re.IGNORECASE):
+        if re.search(r"(?:加载|恢复|建立)[^。；;]*基准", step):
+            action = "load the confirmed baseline preset"
+            response = "Restore baseline parameters and refresh once; preserve saved snapshots and current step"
+            evidence = "Parameters match the baseline in this PDF; earlier comparison evidence remains available"
+            exit_state = "VALID"
+        elif re.search(r"(?:Reset|重置|恢复.*初始)", step, flags=re.IGNORECASE):
             action = "activate Reset or load the confirmed baseline preset"
             response = "ResetController restores all confirmed defaults; model and UI refresh once"
             evidence = "Parameters and Status match the Initial/Reset contract"
@@ -320,8 +297,8 @@ def _student_task_contracts(
             exit_state = "COMPLETE"
         elif compare_requested:
             action = "select the saved cases named in this step and start comparison"
-            response = "LabFlowController locks a shared view/scale and presents the cases together"
-            evidence = "Every compared case shows its parameters, result, and shared visual encoding"
+            response = "Require at least two valid compatible snapshots; then lock a shared view/scale and present the cases together"
+            evidence = "At least two valid compatible snapshots show their IDs, parameters, results, and shared visual encoding"
             exit_state = "COMPARING"
         elif re.search(r"(?:记录|Capture|保存|快照)", step, flags=re.IGNORECASE):
             action = "press Capture after the current state becomes VALID"
@@ -345,7 +322,8 @@ def _student_task_contracts(
             exit_state = "CAPTURED"
         if exit_state in {"VALID", "CAPTURED"} and compare_requested:
             action += "; compare the named saved snapshots"
-            response += "; display cases with the same scale and view"
+            response += "; comparison is enabled only with at least two valid compatible snapshots; otherwise retain the current valid state (CAPTURED only if a snapshot exists); use the same scale and view"
+            evidence += "; at least two valid compatible snapshot IDs are visibly compared"
             exit_state = "COMPARING"
         if exit_state == "COMPLETE" and index < len(steps):
             exit_state = "VALID"
@@ -358,7 +336,7 @@ def _student_task_contracts(
                 "expected_action": f"{step}；Unity操作映射：{action}",
                 "unity_response": response,
                 "observable_evidence": evidence,
-                "success_criteria": f"Only advance when {evidence}; satisfy the complete stated step, then advance the Common runner once",
+                "success_criteria": f"Only advance when {evidence}; satisfy the complete stated step, then advance the Common runner once; exit_state below describes successful completion, never a failed action",
                 "exit_state": exit_state,
                 "status": "confirmed-from-design-session",
             }
@@ -506,8 +484,8 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             if not re.search(r"(?:探针|空间观察与测量工具)", item["display_name"])
         ]
     first_action = steps[0] if steps else _UNRESOLVED
-    builder_root = builder_values["builder_workspace_absolute_path"]
-    unity_project_path = _unity_project_absolute_path(builder_root)
+    builder_root = PACK_NAME
+    unity_project_path = UNITY_PROJECT
     formula_contracts = _builder_formula_contracts(experiment_brief, theory)
     formula_adjustable_inputs = _selected_formula_adjustable_inputs(
         formula_flow, experiment_brief, parameter_contract
@@ -579,14 +557,11 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("status", "draft", status="builder-template-reference"),
         ],
         "execution_context": [
-            _field("execution.builder_pack_or_host_root_absolute", builder_root),
-            _field("execution.unity_host_project_absolute", unity_project_path),
+            _field("execution.builder_pack_root", builder_root, status="builder-runtime-check"),
+            _field("execution.unity_project_relative", unity_project_path, status="pack-relative-path"),
             _field(
-                "execution.absolute_path_contract",
-                (
-                    "Original experiments and blind rebuilds use the same handoff rule: the final PDF carries one confirmed absolute implementation root. "
-                    "For this original experiment, use that root directly with integrated-development; do not create a RebuildWorkspaces blind-rebuild child and do not request another host path."
-                ),
+                "execution.local_root_discovery",
+                ROOT_DISCOVERY,
                 status="builder-processing-instruction",
             ),
             _field(
@@ -607,12 +582,12 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             ),
             _field(
                 "source_material.course_scope",
-                "ECE329 lecture notes and the workflow's verified supplemental references",
+                "ECE329：所用公式、适用条件、固定输入和实验约束见本文 Physics；必要补充内容见本文内嵌参考。课程出处是文献标识，不是包外文件读取要求。",
                 status="confirmed-from-course-scope",
             ),
             _field(
                 "source_material.builder_treatment",
-                "Treat this PDF as confirmed user input for Builder Gate 1; do not reinterpret the design intent.",
+                SOURCE_BOUNDARY,
                 status="builder-processing-instruction",
             ),
         ],
@@ -675,7 +650,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             "assumptions": (
                 _as_list(theory.get("assumptions"))
                 + _as_list(value_limits.get("limitations"))
-            ) or ["Use the confirmed ECE329 model assumptions in the design report."],
+            ) or [item["conditions"] for item in formula_contracts],
             "expected_results": expected_results,
         },
         "objects": objects,
@@ -690,7 +665,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         "visualization": [
             _field(
                 "visualization.requirements",
-                measurement_contract,
+                visualization.get("student_visualization_requirements") or measurement_contract,
                 status="confirmed-from-design-session",
             ),
             _field("visualization.trend_annotation", visualization.get("trend_annotation")),
@@ -711,11 +686,12 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("environment.lighting_requirement", builder_values["room_spatial_requirements"]),
             _field(
                 "environment.camera_and_ui_safe_area",
-                "Game View must keep instruction, experiment, status, and result regions visible.",
+                "Game View must keep instruction, experiment, parameters, status, and result regions visible.",
                 status="builder-policy-reference",
             ),
         ],
         "presets": [
+            _field("presets.parameter_values", parameter_contract),
             _field(
                 "presets.reference_condition",
                 variables.get("reference_condition"),
@@ -796,8 +772,8 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("acceptance.report_questions", builder_values["report_questions"]),
         ],
         "builder_runtime_constraints": [
-            _field("current_editor_state.builder_root_absolute", builder_root, status="confirmed-from-design-session"),
-            _field("current_editor_state.unity_project_absolute", unity_project_path, status="confirmed-from-design-session"),
+            _field("current_editor_state.builder_pack_root", builder_root, status="builder-runtime-check"),
+            _field("current_editor_state.unity_project_relative", unity_project_path, status="pack-relative-path"),
             _field("current_editor_state.unity_version", "Read the confirmed host UnityProject/ProjectSettings/ProjectVersion.txt; use its locked Editor version", status="builder-runtime-check"),
             _field("current_editor_state.unity_open", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
             _field("current_editor_state.compiling", "Builder must read the active editor state at Gate 1", status="builder-runtime-check"),
@@ -809,12 +785,31 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
         ],
         "handoff_notes": [
             "这是原创新实验，Builder 必须使用 integrated-development，不得改成 blind-rebuild。",
-            "PDF 中的绝对实现根目录是唯一运行目录；原创新实验与盲重建都遵守该绝对路径交接规则，但原创新实验不创建盲重建子副本。",
+            ROOT_DISCOVERY,
             "Builder 必须先把本 PDF 映射为 LabSpecs/<lab_id>/brief.yaml，再由用户确认 Gate 1。",
-            "本文件中的用户设计输入已在EMVR工作流前置确认；Builder只需执行实现期检查。",
+            "设计输入的确认仅覆盖其字段标明的范围；待确认建议不可伪装为既有决定，Gate 审批需由实际 Builder 工作流单独记录。",
             "本 PDF 仅描述实验设计，不授权创建 Unity 场景、代码或批准任何 Gate。",
         ],
     }
+    payload, embedded = embed_supplied_references(
+        payload, session.design_context.get("builder_reference_material", [])
+    )
+    payload["embedded_reference_material"] = [
+        _field("embedded_references.formula_basis", formula_contracts,
+               status="copied-course-formula-content",
+               note="已复制所选课程公式及适用条件；数值输入见本文 physics，不读取外部课件。"),
+        *embedded,
+    ]
+    payload["value_semantics"] = [
+        _field("value.required", "必需值缺失会阻止导出；0和false是有效值，不得当作空白。", status="export-invariant"),
+        _field("value.runtime", "Unity版本与打开/编译/Play Mode状态由本机检查；PDF不伪造运行时数值。", status="builder-runtime-check"),
+        _field("value.numeric_morphology_axis", "not-applicable：本实验采用定性空间比较，没有数值形态纵轴或理论曲线。"
+               if measurement_is_qualitative_only(measurement_contract) else "见本文 measurement_specifications 的指标、算法和单位。",
+               status="not-applicable" if measurement_is_qualitative_only(measurement_contract) else "confirmed-from-design-session"),
+        _field("value.spatial_probe", "not-applicable：本实验不使用空间探针，无需填写探针坐标或局部场读数。"
+               if measurement_disables_probe(measurement_contract) else measurement_contract,
+               status="not-applicable" if measurement_disables_probe(measurement_contract) else "confirmed-from-design-session"),
+    ]
     validate_builder_gate1_input(payload)
     return payload
 
@@ -822,7 +817,10 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
 def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     """Reject incomplete or contract-incompatible Builder handoffs."""
 
+    validate_portable_content(payload)
     required_sections = {
+        "embedded_reference_material",
+        "value_semantics",
         "document",
         "identity",
         "execution_context",
@@ -857,6 +855,12 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         raise ValueError(
             "Builder Gate 1 input contains empty sections: " + ", ".join(empty_sections)
         )
+    reference_ids = [str(row.get("key", "")).removeprefix("embedded_references.")
+                     for row in payload["embedded_reference_material"]
+                     if isinstance(row, dict) and str(row.get("key", "")).startswith("embedded_references.REF_")]
+    if len(reference_ids) != len(set(reference_ids)):
+        raise ValueError("Builder embedded reference IDs must be unique")
+    validate_embedded_reference_links(payload, set(reference_ids))
     formula_design = payload.get("formula_driven_experiment", {})
     if not isinstance(formula_design, dict):
         raise ValueError("Builder Gate 1 formula-driven experiment must be an object")
@@ -977,6 +981,9 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         raise ValueError("Builder Gate 1 requires the four EMVR learning goals")
     if len(payload.get("student_tasks", [])) < 5:
         raise ValueError("Builder Gate 1 requires a complete ordered student flow")
+    task_ids = [task.get("step_id") for task in payload["student_tasks"] if isinstance(task, dict)]
+    if task_ids != [f"S{index}" for index in range(1, len(payload["student_tasks"]) + 1)]:
+        raise ValueError("Builder student step IDs must be unique and ordered S1 through Sn")
     required_task_fields = {
         "step_id",
         "goal",
@@ -1017,6 +1024,8 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     def scan(value: Any, path: str) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
+                if key != "note" and item in (None, "", [], {}):
+                    unresolved_paths.append(f"{path}.{key}")
                 scan(item, f"{path}.{key}" if path else str(key))
         elif isinstance(value, list):
             for index, item in enumerate(value):
@@ -1052,15 +1061,13 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     if workflow_mode != "integrated-development":
         raise ValueError("Original EMVR experiments must use integrated-development")
     builder_root = row_value(
-        "execution_context", "execution.builder_pack_or_host_root_absolute"
+        "execution_context", "execution.builder_pack_root"
     )
     unity_root = row_value(
-        "execution_context", "execution.unity_host_project_absolute"
+        "execution_context", "execution.unity_project_relative"
     )
-    if not re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", builder_root):
-        raise ValueError("Builder Gate 1 execution root must be an absolute path")
-    if not unity_root.endswith(("/UnityProject", "\\UnityProject")):
-        raise ValueError("Builder Gate 1 Unity host path must resolve to UnityProject")
+    if builder_root != PACK_NAME or unity_root != UNITY_PROJECT:
+        raise ValueError("Builder Gate 1 must locate the local Pack and use relative UnityProject")
     object_ids = [
         str(item.get("object_id") or "")
         for item in payload.get("objects", [])
@@ -1068,6 +1075,10 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
     ]
     if not object_ids or len(object_ids) != len(set(object_ids)):
         raise ValueError("Builder Gate 1 object IDs must be present and unique")
+    for task in payload["student_tasks"]:
+        referenced_objects = set(re.findall(r"(?<![A-Za-z0-9_])OBJ_\d+(?![A-Za-z0-9_])", _text(task)))
+        if referenced_objects - set(object_ids):
+            raise ValueError(f"Builder student step {task['step_id']} references an unknown object ID")
     required_object_fields = {
         "object_id",
         "display_name",
@@ -1116,9 +1127,9 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
 
     required_contract_rows = {
         "execution_context": (
-            "execution.builder_pack_or_host_root_absolute",
-            "execution.unity_host_project_absolute",
-            "execution.absolute_path_contract",
+            "execution.builder_pack_root",
+            "execution.unity_project_relative",
+            "execution.local_root_discovery",
             "execution.initialization_command",
         ),
         "interaction_modes": (
@@ -1178,6 +1189,23 @@ def _paragraph_text(value: Any) -> str:
 
 def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
     data = build_builder_gate1_input(session)
+    return render_builder_gate1_payload_pdf(data)
+
+
+def render_builder_gate1_payload_pdf(data: dict[str, Any]) -> bytes:
+    validate_builder_gate1_input(data)
+    return render_builder_review_pdf(data["document"], _builder_sections(data), data["handoff_notes"])
+
+
+def render_builder_review_pdf(
+    metadata: dict[str, str], sections: list[tuple[str, list[dict[str, str]]]], notes: list[str]
+) -> bytes:
+    """Shared renderer for validated exports and explicitly labelled document reviews."""
+    validate_portable_content([metadata, sections, notes])
+    for heading, rows in sections:
+        if not rows or any(not _text(row.get(key)) for row in rows for key in ("key", "value", "status")):
+            raise ValueError(f"Blank PDF field in {heading}")
+    data = {"document": metadata}
     font_name = "STSong-Light"
     try:
         pdfmetrics.getFont(font_name)
@@ -1210,6 +1238,7 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
     heading_style = ParagraphStyle(
         "BuilderHeading",
         parent=styles["Heading2"],
+        keepWithNext=True,
         fontName=font_name,
         fontSize=12,
         leading=17,
@@ -1250,12 +1279,27 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
             value = row["value"]
             if row.get("note"):
                 value = f"{value}\n说明：{row['note']}"
-            table_rows.append(
-                [p(row["key"], key_style), p(value), p(row["status"], key_style)]
-            )
+            # Split the VALUE into measured paragraph fragments, then repeat
+            # the field ID/status on every fragment. Never create unlabeled
+            # continuation cells or truncate text to satisfy a page budget.
+            pending = [p(value)]
+            fragments = []
+            while pending:
+                paragraph = pending.pop(0)
+                if paragraph.wrap(92 * mm - 8, 10000)[1] <= 150:
+                    fragments.append(paragraph)
+                else:
+                    split = paragraph.split(92 * mm - 8, 150)
+                    if len(split) < 2:
+                        raise ValueError(f"Cannot paginate Builder field {row['key']}")
+                    fragments.append(split[0])
+                    pending[0:0] = split[1:]
+            for index, fragment in enumerate(fragments, 1):
+                suffix = f" [part {index}/{len(fragments)}]" if len(fragments) > 1 else ""
+                table_rows.append([p(row["key"] + suffix, key_style), fragment, p(row["status"], key_style)])
         table = Table(
             table_rows, colWidths=[48 * mm, 92 * mm, 40 * mm],
-            repeatRows=1, splitInRow=1,
+            repeatRows=1, splitInRow=0,
         )
         table.setStyle(
             TableStyle(
@@ -1292,10 +1336,31 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
                 "builder-runtime-check 表示由 Builder 在实际 Unity 工作区中核对。",
                 small_style,
             ),
-            p("长表格跨页时空白的字段名或状态单元格表示承接上一页同一行，并非该设计内容缺失。", small_style),
+            p("长值按 part 编号续写，每段重复字段名与状态。not-applicable须附理由；builder-runtime-check须在本机核对；proposal-needs-confirmation表示建议尚未确认。", small_style),
         ]
     )
 
+    for heading, rows in sections:
+        story.append(p(heading, heading_style))
+        story.append(field_table(rows or [_field(f"{heading}.content", _UNRESOLVED)]))
+
+    story.append(p("Handoff instructions", heading_style))
+    for note in notes:
+        story.append(p(f"• {note}"))
+
+    def footer(canvas: Any, doc: Any) -> None:
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#738696"))
+        canvas.drawString(15 * mm, 8 * mm, "ECE329 Lab Studio | Builder Gate 1 input")
+        canvas.drawRightString(A4[0] - 15 * mm, 8 * mm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buffer.getvalue()
+
+
+def _builder_sections(data: dict[str, Any]) -> list[tuple[str, list[dict[str, str]]]]:
     sections = [
         ("1. Lab identity", data["identity"]),
         ("2. Integrated-development execution context", data["execution_context"]),
@@ -1369,21 +1434,8 @@ def render_builder_gate1_input_pdf(session: DesignSession) -> bytes:
         ("18. Acceptance and evidence", data["acceptance_and_evidence"]),
         ("19. Builder runtime constraints", data["builder_runtime_constraints"]),
     ]
-    for heading, rows in sections:
-        story.append(p(heading, heading_style))
-        story.append(field_table(rows or [_field(f"{heading}.content", _UNRESOLVED)]))
-
-    story.append(p("20. Handoff instructions", heading_style))
-    for note in data["handoff_notes"]:
-        story.append(p(f"• {note}"))
-
-    def footer(canvas: Any, doc: Any) -> None:
-        canvas.saveState()
-        canvas.setFont("Helvetica", 7)
-        canvas.setFillColor(colors.HexColor("#738696"))
-        canvas.drawString(15 * mm, 8 * mm, "ECE329 Lab Studio | Builder Gate 1 input")
-        canvas.drawRightString(A4[0] - 15 * mm, 8 * mm, f"Page {doc.page}")
-        canvas.restoreState()
-
-    document.build(story, onFirstPage=footer, onLaterPages=footer)
-    return buffer.getvalue()
+    sections.extend([
+        ("21. Embedded source material", data["embedded_reference_material"]),
+        ("22. Value completeness and applicability", data["value_semantics"]),
+    ])
+    return sections

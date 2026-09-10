@@ -1149,6 +1149,7 @@ def _contains_forbidden_key(value: Any, forbidden: set[str]) -> bool:
 
 def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> None:
     stage = session.current_stage
+    response_task = session.turn_context.get("response_task") in {"COURSE_QUESTION", "REFERENCE"}
     student_visible_prose = " ".join(
         [output.assistant_message, output.student_task or "", *output.warnings]
     )
@@ -1156,7 +1157,7 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         raise ModelOutputError(
             "Student-facing text exposed an internal numbered stage reference"
         )
-    if stage is not Stage.IDEA_BRAINSTORMING:
+    if stage is not Stage.IDEA_BRAINSTORMING and not response_task:
         question_count = student_visible_prose.count("？") + student_visible_prose.count("?")
         if question_count > 1:
             raise ModelOutputError(
@@ -1174,7 +1175,7 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         if re.search(r"(?:由|来自)阶段\s*\d+|阶段\s*\d+\s*(?:确定|补充|处理)", visible_text):
             raise ModelOutputError("EMVR output exposed an internal stage placeholder")
     visual = output.visualization
-    if session.interaction_state is InteractionState.GUIDED_DESIGN:
+    if session.interaction_state is InteractionState.GUIDED_DESIGN and not response_task:
         required_fields = GUIDED_REQUIRED_PAYLOAD_FIELDS.get(stage)
         if required_fields and not any(
             output.stage_payload.get(field) for field in required_fields
@@ -1205,7 +1206,7 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
                 raise ModelOutputError(
                     "A later guided stage must return structured stage_readiness"
                 )
-    else:
+    elif not response_task:
         required_fields = EMVR_REQUIRED_PAYLOAD_FIELDS.get(stage, ())
         empty_allowed = (
             {"core_equations", "formula_support_map"}
@@ -1339,6 +1340,10 @@ def _validate_stage_constraints(session: DesignSession, output: StepOutput) -> N
         raise ModelOutputError(
             "Student-facing text contains internal implementation terminology"
         )
+    if response_task:
+        if output.visualization is not None or output.student_task is not None:
+            raise ModelOutputError("A request response must not add a workflow task or stage visualization")
+        return
     if (
         session.interaction_state is InteractionState.GUIDED_DESIGN
         and stage is Stage.COURSE_MAPPING_AND_DIRECTION
@@ -1626,6 +1631,11 @@ def _validate_lecture_grounding(
     validate(output.stage_payload, ("stage_payload",))
     if output.visualization is not None:
         validate(output.visualization, ("visualization",))
+
+    if session.turn_context.get("response_task") in {"COURSE_QUESTION", "REFERENCE"}:
+        # Course citations still pass the catalog/page/expression checks above.
+        # Only the unrelated stage artifact requirements are suspended.
+        return
 
     if (
         session.current_stage is Stage.IDEA_BRAINSTORMING
@@ -2062,6 +2072,10 @@ def _step_output_from_response(
         assumptions=_string_list(raw_output.get("assumptions"), "assumptions"),
         warnings=_string_list(raw_output.get("warnings"), "warnings"),
     )
+    if session.turn_context.get("response_task") in {"COURSE_QUESTION", "REFERENCE"}:
+        _validate_stage_constraints(session, output)
+        _validate_lecture_grounding(session, output, packet)
+        return output
     if (
         session.current_stage is Stage.IDEA_BRAINSTORMING
         and session.interaction_state is InteractionState.GUIDED_DESIGN

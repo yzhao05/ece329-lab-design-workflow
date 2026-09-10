@@ -88,7 +88,7 @@ class BuilderRequirementTests(unittest.TestCase):
         session = self._session()
         self.assertEqual(
             {item["field"] for item in missing_builder_requirements(session)},
-            set(VALID_VALUES),
+            set(VALID_VALUES) - {"builder_workspace_absolute_path"},
         )
         session.design_context["stage_design_state"] = dict(VALID_VALUES)
         record_implementation_defaults_approval(session, source="TEST")
@@ -106,7 +106,7 @@ class BuilderRequirementTests(unittest.TestCase):
         missing = {item["field"] for item in missing_builder_requirements(session)}
         self.assertEqual(missing, {"lab_id", "parameter_specifications"})
 
-    def test_relative_workspace_and_incomplete_runtime_contracts_remain_due(self) -> None:
+    def test_portable_workspace_is_ready_but_incomplete_design_contracts_remain_due(self) -> None:
         session = self._session()
         values = dict(VALID_VALUES)
         values.update(
@@ -125,7 +125,6 @@ class BuilderRequirementTests(unittest.TestCase):
         self.assertEqual(
             missing,
             {
-                "builder_workspace_absolute_path",
                 "initial_reset_state",
                 "model_constants_and_media",
                 "measurement_specifications",
