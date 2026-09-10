@@ -1408,6 +1408,24 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
     observed = _compact_context_items(requirements.get("observed_quantities")) or "目标响应"
     comparisons = _compact_context_items(requirements.get("comparison_cases")) or "已确认比较情形"
     reference = _emvr_reference_condition(requirements, stage_state, session)
+    if field == "procedure_steps":
+        from .procedure_contract import current_procedure, historical_procedure
+        steps = current_procedure(session)
+        if len(steps) < 5:
+            steps = historical_procedure(session) or [
+                "核对参数面板中的范围、默认值、单位和离散选项。",
+                f"加载并Capture基准：{reference}",
+                f"每次只改变{changed}中的一项，保持其余条件固定。",
+                f"等待计算完成，在统一视角和显示尺度下观察{observed}。",
+                f"对{comparisons}逐一保存参数、结果与有效性快照。",
+                "并排比较已保存快照，描述共同点和差异。",
+                "用已确认的课程公式解释差异，记录模型边界；核对Restore与Reset按契约工作。",
+            ]
+        candidate = '\n'.join(f'{i}. {step}' for i,step in enumerate(steps,1))
+        return StepOutput(assistant_message="以下是完整流程参考，尚未写入设计：\n"+candidate,
+            stage_payload={"reference_only":True,"reference_examples":steps,
+                           "reference_draft":{"field":field,"value":candidate},"preserve_pending_action":True},
+            student_task="可采用这份完整流程，或指定需要修改的步骤。")
     x_label, x_unit, y_label, y_unit = _emvr_parameter_axis(requirements)
     if session.current_stage is Stage.EXPECTED_DATA_VISUALIZATION:
         examples = [
@@ -1433,13 +1451,13 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
     pending = session.model_context.get("dialogue_state", {})
     pending = pending.get("pending_action") if isinstance(pending, dict) else None
     field = (
-        str(pending.get("subject") or session.current_stage.value)
+        str(recoverable_pending_field(pending) or pending.get("subject") or session.current_stage.value)
         if isinstance(pending, dict)
         else session.current_stage.value
     )
     candidate = (
         str(pending.get("candidate_answer") or "").strip()
-        if isinstance(pending, dict)
+        if isinstance(pending, dict) and pending.get("candidate_binding_authorized") is True
         else ""
     )
     if not candidate:

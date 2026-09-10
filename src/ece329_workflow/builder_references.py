@@ -26,6 +26,7 @@ def builder_field_reference(session: DesignSession, field: str) -> dict[str, Any
     if isinstance(brief, dict):
         formula_ids.update(brief.get("primary_formula_ids", []) or [])
     point_charge = "coulomb_point_charge" in formula_ids
+    magnetic_source = "biot_savart" in formula_ids
     current = values.get(field, "")
     adoptable = True
     if field == "model_constants_and_media" and point_charge:
@@ -58,6 +59,48 @@ def builder_field_reference(session: DesignSession, field: str) -> dict[str, Any
             f"4. {radius}；进入排除区、离开显示域、|E|<1e-9 V/m或达到步数上限时停止，"
             "遇到NaN/Infinity标为无效；步数上限终止需标记截断，不能称已收敛。\n"
             "5. 参数变更后取消旧计算并按最新状态刷新；比较组固定种子、步长、视角及色标。"
+        )
+    elif field == "measurement_specifications" and magnetic_source:
+        value = (
+            "建议测量方案（可修改）：\n"
+            "1. 参数面板显示当前电流大小I（A）、电流方向和载流路径选项；读取已确认控件状态，操作后刷新。\n"
+            "2. 磁场线方向取当前B矢量，环绕性用同一视角下的空间形态比较，不设置虚构的数值纵轴。"
+            "场线积分参数只是绘图条件；固定种子时线条数量不表示磁场强度。\n"
+            "3. 如保留强度颜色，颜色按|B|（T）与共同色标映射；不以曲线疏密代替数值计算。"
+            "零场时不显示方向箭头，并标记无定义方向。\n"
+            "4. 建议仅观察整体场线，不额外添加可移动探针；若已确认使用探针，则沿用已有采样位置与B读数。"
+            "稳恒磁场的相位、频率不适用。比较记录保存实际输入、显示配置和有效性。"
+        )
+        if current:
+            value = f"当前已记录：{current}\n参考补充（需选择实际采用项）：\n" + value
+            adoptable = False
+    elif field == "numerical_model_specifications" and magnetic_source:
+        value = (
+            "建议计算方案（这些数值是可修改的建议，不是既有决定）：\n"
+            "1. 在右手SI坐标中按已确认有向路径分段，逐元累加毕奥-萨伐尔场；"
+            "段长建议0.01 m，并以0.005 m复算；有限导线需明确回流路径，不能把有限线段当无限长导线。\n"
+            "2. 场线按B/|B|用RK4积分，显示域建议[-1.5,1.5]^3 m，步长0.02 m，每条最多5000步；"
+            "采用20个确定性种子，按实际路径表面外侧布置并固定保存种子坐标，比较组使用同一规则。\n"
+            "3. 精度参考：固定采样位置比较两种电流元段长所得B，误差容差为max(1e-9 T, 1%*|B_ref|)；"
+            "场线以0.01 m步长复算，比较同弧长位置，位置偏差容差建议0.001 m。近零场不使用相对误差除零。\n"
+            "4. 建议距任意导线段0.05 m内停止积分（数值排除区，不是导线物理半径）；"
+            "|B|<1e-12 T、出界、NaN/Infinity、闭合轨迹回到起点邻域或最大步数均终止。"
+            "最大步数截断不等于收敛；新参数取消旧任务，不自动反复重算。\n"
+            "还需根据本实验固定输入确认：各路径的有向几何与回流、实际种子位置、排除区是否与最小几何尺度兼容。"
+            "已有确认值优先，不用上述建议覆盖它们。"
+        )
+        if current:
+            value = f"当前已记录：{current}\n可用于补足缺项的参考：\n" + value
+        adoptable = False
+    elif field == "expected_results" and magnetic_source:
+        value = (
+            "建议预期结果：\n"
+            "1. 固定路径几何与介质时，B与带符号电流I成正比；正比例增加电流不会改变B/|B|的方向。"
+            "因此固定种子和积分规则时，不应要求场线数量或环绕范围必然增大；可用共同色标显示场强变化。\n"
+            "2. 相同几何下电流反向，B方向与环绕箭头反向，场线轨迹形状保持一致。\n"
+            "3. 仅比较已选路径：直导线的对称区域呈环绕形态，圆环磁场穿过环面并回绕，"
+            "长螺线管内部近似沿轴向均匀；有限几何的边缘与外部场必须由实际路径计算。\n"
+            "通过同一视角、种子、色标和输入快照比较上述结果；绘制疏密与空白不作为物理强度或零场的直接证据。"
         )
     elif field == "acceptance_criteria":
         value = (

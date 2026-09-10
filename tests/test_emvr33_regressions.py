@@ -101,7 +101,9 @@ def test_reference_uses_answer_field_when_pending_subject_is_a_stage():
 
 def test_unrelated_formula_never_receives_charge_constants_or_rk4_defaults():
     session = make_session()
-    session.design_context["emvr_design"]["formula_flow"]["formula_selection"]["primary_formula_ids"] = ["biot_savart"]
+    # Biot-Savart now has its own magnetic field-line reference (emvr35).
+    # A time-varying induction formula still must not inherit either template.
+    session.design_context["emvr_design"]["formula_flow"]["formula_selection"]["primary_formula_ids"] = ["faraday_differential"]
     session.design_context["stage_design_state"].pop("numerical_model_specifications")
     set_pending(session, "numerical_model_specifications")
     output = _emvr_reference_output(session)

@@ -139,6 +139,7 @@ from .stages import (
     stage_title,
 )
 from .store import SessionStore, store_from_environment
+from .meta_dialogue import meta_question_kinds, meta_question_output
 from .turn_planning import (
     compute_design_diff,
     finalize_turn_task_plan,
@@ -680,6 +681,72 @@ def _has_user_question_or_feedback(turn_intent: dict[str, Any]) -> bool:
     )
 
 
+def _explicit_emvr_contract_request(session, message, pending):
+    """Protect explicit reads and field-bound repairs before model interpretation."""
+    if session.interaction_state is not InteractionState.EMVR_DIRECT:
+        return None
+    from .procedure_contract import current_procedure, historical_procedure, procedure_steps, has_positive_action
+    text = message.strip().strip('*')
+    current = current_procedure(session)
+    def present(answer):
+        return resolved_intent(UserIntent.UNCLEAR, confidence=1.0,
+                               source="EMVR_STATE_PRESENTATION", resolved_value=answer)
+    field = recoverable_pending_field(pending) if isinstance(pending, dict) else ''
+    if field == 'numerical_model_specifications':
+        from .builder_requirements import numerical_tolerance_defined
+        if re.match(r"(?:补充|误差|收敛容差|容差|偏差)", text) and numerical_tolerance_defined(text) and not _looks_like_student_question(text):
+            return validate_resolved_intent(resolved_intent(
+                UserIntent.MODIFY_PREVIOUS_PROPOSAL, confidence=1.0, source="EMVR_NUMERICAL_SUPPLEMENT",
+                dialogue_acts=[{"type":"MODIFY_STAGE_FIELD", "target":field, "operation":"MERGE",
+                                "content":text, "confidence":1.0}], actions_authoritative=True,
+            ), pending)
+    indexed = re.search(r"(?:流程|步骤).{0,8}第\s*([0-9]+|[一二三四五六七八九十])\s*[条步项]", text)
+    if not indexed and (field == 'procedure_steps' or session.current_stage is Stage.CONCEPTUAL_PROCEDURE):
+        indexed = re.search(r"第\s*([0-9]+|[一二三四五六七八九十])\s*[条步项]", text)
+    if indexed:
+        token = indexed.group(1)
+        index = int(token) if token.isdigit() else '一二三四五六七八九十'.index(token)+1
+        edit = re.search(r"(?:改为|改成|替换为)[：:]?\s*(.+)$", text)
+        if not edit and re.search(r"写出|展开|显示|解释|说明|内容|是什么", text):
+            return present(f"第{index}步：{current[index-1]}\n完整流程仍保留{len(current)}步。" if 0<index<=len(current)
+                           else f"当前只记录了{len(current)}步，找不到第{index}步；请先恢复或补全流程。")
+        if edit and 0<index<=len(current):
+            steps = list(current)
+            steps[index-1] = edit.group(1).strip()
+        elif edit:
+            return present(f"当前只记录了{len(current)}步，无法修改第{index}步。")
+        else:
+            return None
+    elif re.search(r"(?:恢复|使用|采用)(?:之前|原来|历史|阶段\s*3).{0,12}流程", text):
+        if not has_positive_action(text, r"(?:恢复|使用|采用)(?:之前|原来|历史|阶段\s*3).{0,12}流程"):
+            return present("已保留当前流程，没有恢复历史版本。")
+        steps = historical_procedure(session)
+        if not steps:
+            return present("可用历史中没有完整流程，无法声称已经恢复。请提供完整步骤，或索取一份按当前设计生成的参考。")
+    elif '流程' in text and re.search(r"已经|确认过|之前|阶段\s*3", text) and not re.search(r"[：:]", text):
+        steps = current if len(current)>=5 else historical_procedure(session)
+        if steps:
+            return present("已核对记录，以下是" + ("当前流程" if len(current)>=5 else "历史中最近展示的完整流程（尚未恢复到当前设计）")
+                           + "：\n" + '\n'.join(f'{i}. {s}' for i,s in enumerate(steps,1))
+                           + ("\n如需恢复，请回复“恢复之前的实验流程”。" if len(current)<5 else ''))
+        return present("当前流程不完整，现有历史中也没有可核对的完整版本。请提供完整步骤或索取参考；不会把这句话当成实验步骤。")
+    else:
+        labelled = re.search(r"(?:使用下面这版作为实验流程|实验流程(?:分为\d+步)?|学生实验步骤)\s*[：:]\s*(.+)$", text, re.S)
+        if not labelled and field != 'procedure_steps':
+            return None
+        if not labelled and (re.search(r"[？?]|为什么|是不是|请解释|给我.{0,4}参考", text)
+                             or _looks_like_student_question(text)):
+            return None
+        steps = procedure_steps(labelled.group(1) if labelled else text)
+        if len(steps)<2:
+            return None
+    return validate_resolved_intent(resolved_intent(
+        UserIntent.MODIFY_PREVIOUS_PROPOSAL, confidence=1.0, source="EMVR_EXPLICIT_PROCEDURE_EDIT",
+        dialogue_acts=[{"type":"MODIFY_EMVR_FIELD", "target":"procedure_steps", "operation":"REPLACE",
+                        "content":steps, "confidence":1.0}], actions_authoritative=True,
+    ), pending)
+
+
 def _explicit_emvr_edit_intent(
     session: DesignSession,
     message: str,
@@ -1013,7 +1080,7 @@ def _requested_response_types(turn_intent: dict[str, Any]) -> set[str]:
     }.get(turn_intent.get("intent"))
     if primary_response:
         requested.add(primary_response)
-    if turn_intent.get("source") == "IMPLEMENTATION_SECTION_PRESENTATION":
+    if turn_intent.get("source") in {"IMPLEMENTATION_SECTION_PRESENTATION", "EMVR_STATE_PRESENTATION"}:
         requested.add("REQUEST_SUMMARY")
     return requested
 
@@ -2747,7 +2814,20 @@ def _prepare_emvr_completion_repair(
 ) -> None:
     """Keep a failed EMVR completion attempt actionable and stage-local."""
 
+    generated_pending = output.stage_payload.get("pending_action")
+    if (isinstance(generated_pending, dict) and generated_pending.get("default_proposal_value")
+            and recoverable_pending_field(generated_pending) == IMPLEMENTATION_DEFAULTS_FIELD):
+        # Keep the concrete proposal and its approval token. Rebinding this
+        # as a generic final-stage question makes approval impossible.
+        dialogue_state(session)["pending_action"] = deepcopy(generated_pending)
+        set_pending_action_snapshot(session, generated_pending)
+        return
     issues = emvr_stage_completeness_issues(session, stage)
+    if not issues and stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:
+        # Final validation checks every source stage. A missing earlier field
+        # is a writable design repair, never an unknown exporter failure.
+        issues = [issue for source_stage in Stage if source_stage is not stage
+                  for issue in emvr_stage_completeness_issues(session, source_stage)]
     due = next_due_builder_requirement(session, stage)
     if due and not issues:
         issues = [{"field": due["field"], "label": due["label"], "question": due["question"]}]
@@ -2823,7 +2903,7 @@ def _prepare_emvr_completion_repair(
     output.stage_payload["pending_action"] = {
         "type": "ANSWER_EMVR_STAGE_QUESTION",
         "interaction_state": InteractionState.EMVR_DIRECT.value,
-        "subject": stage.value,
+        "subject": answer_field,
         # Structured report projections bind to their canonical writable
         # source above, so a valid answer always changes persistent state.
         "answer_fields": [answer_field],
@@ -2838,6 +2918,17 @@ def _prepare_emvr_completion_repair(
             UserIntent.UNCLEAR.value,
         ],
     }
+    if answer_field == IMPLEMENTATION_DEFAULTS_FIELD:
+        contract = build_implementation_defaults(session)
+        proposal = format_implementation_defaults(contract)
+        output.stage_payload["pending_action"].update({
+            "default_proposal_value": proposal, "default_contract": contract,
+            "default_option_id": "approve-builder-implementation-defaults",
+        })
+        if proposal not in output.assistant_message:
+            output.assistant_message += "\n以下是按当前设计重新生成的完整默认方案：\n" + proposal
+        output.stage_payload["decision_options"] = [{"option_id":"approve-builder-implementation-defaults",
+                                                     "label":"批准默认方案","action":"APPROVE_DEFAULT_IMPLEMENTATION"}]
     state = dialogue_state(session)
     state["pending_action"] = deepcopy(output.stage_payload["pending_action"])
     set_pending_action_snapshot(session, output.stage_payload["pending_action"])
@@ -3397,6 +3488,9 @@ class WorkflowEngine:
         message: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = hydrate_pending_action_from_history(session)
+        procedure_intent = _explicit_emvr_contract_request(session, message, pending)
+        if procedure_intent is not None:
+            return procedure_intent, pending
         approved_defaults = _implementation_defaults_approval_intent(
             session,
             request,
@@ -3443,6 +3537,7 @@ class WorkflowEngine:
             and compact_control
             in {
                 "给个参考",
+                "给我个参考",
                 "给我一个参考",
                 "请给我一个参考",
                 "请给个参考",
@@ -3902,6 +3997,7 @@ class WorkflowEngine:
         ]
 
     def _reset_for_new_topic(self, session: DesignSession) -> None:
+        session.model_context['design_history_start'] = len(session.history)
         previous_design = {
             "idea": deepcopy(session.design_context.get("idea", {})),
             "emvr_design": deepcopy(session.design_context.get("emvr_design", {})),
@@ -4031,6 +4127,12 @@ class WorkflowEngine:
         cached_response = _cached_turn_response(session, request)
         if cached_response is not None:
             return cached_response
+        if (isinstance(request.message, str) and request.message.strip()
+                and not request.context_patch and request.version_request is None
+                and request.interaction_state in (None, session.interaction_state)
+                and preclassify_stage_one_input(request.message) != UNREASONABLE_REQUEST
+                and (meta_kinds := meta_question_kinds(request.message))):
+            return self._respond_to_meta_question(session, request, meta_kinds)
         reopened_handoff = bool(
             session.status is WorkflowStatus.COMPLETE
             and session.interaction_state is InteractionState.EMVR_DIRECT
@@ -4100,6 +4202,14 @@ class WorkflowEngine:
             embed_supplied_references({}, request.context_patch["builder_reference_material"])
         _deep_merge(session.design_context, request.context_patch)
         blocker = session.model_context.get("artifact_blocker", {})
+        if (blocker and session.interaction_state is InteractionState.EMVR_DIRECT
+                and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
+                and any(emvr_stage_completeness_issues(session, source) for source in Stage
+                        if source is not Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT)):
+            # Upgrade already-stuck sessions to a concrete, writable question.
+            _prepare_emvr_completion_repair(session, session.current_stage, StepOutput(assistant_message=""))
+            session.model_context.pop("artifact_blocker", None)
+            blocker = {}
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
@@ -5023,7 +5133,7 @@ class WorkflowEngine:
             output = formula_onboarding_output
             session.turn_context = {}
             completion_error = None
-        elif turn_intent.get("source") == "IMPLEMENTATION_SECTION_PRESENTATION":
+        elif turn_intent.get("source") in {"IMPLEMENTATION_SECTION_PRESENTATION", "EMVR_STATE_PRESENTATION"}:
             output = StepOutput(
                 assistant_message=str(turn_intent.get("resolved_value") or ""),
                 stage_payload={"presentation_only": True, "preserve_pending_action": True},
@@ -5891,10 +6001,12 @@ class WorkflowEngine:
         _normalize_final_source_references(session, handled_stage, output)
         session.revision += 1
         output_dict = output.to_dict()
-        session.stage_outputs[handled_stage.value] = {
-            "revision": session.revision,
-            **output_dict,
-        }
+        if not (session.interaction_state is InteractionState.EMVR_DIRECT
+                and any(output.stage_payload.get(key) for key in ("presentation_only", "reference_only", "clarification_required"))
+                and handled_stage.value in session.stage_outputs):
+            # Conversation assistance is not a replacement for the last
+            # authored stage artifact. Current field edits still project into it.
+            session.stage_outputs[handled_stage.value] = {"revision": session.revision, **output_dict}
         session.history.append(
             {
                 "revision": session.revision,
@@ -6061,6 +6173,54 @@ class WorkflowEngine:
             response["guided_export_url"] = (
                 f"/v1/designs/{session.design_id}/guided-summary.txt"
             )
+        _cache_turn_response(session, request, response)
+        self.store.save(session, expected_revision=expected_revision)
+        return response
+
+    def _respond_to_meta_question(
+        self, session: DesignSession, request: TurnRequest, kinds: list[str],
+    ) -> dict[str, Any]:
+        """Record a conversation-only turn without invoking design generation."""
+        expected_revision = session.revision
+        output = meta_question_output(session, kinds)
+        stage = session.current_stage
+        session.revision += 1
+        session.history.append({
+            "revision": session.revision, "handled_stage": stage.value,
+            "interaction_state": session.interaction_state.value,
+            "user_message": request.message.strip(), "selected_option_id": request.selected_option_id,
+            "resolved_intent": {"intent": UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
+                                "source": "WORKFLOW_META_QUESTION", "advance_requested": False},
+            "output": deepcopy(output),
+        })
+        response = {
+            "design_id": session.design_id, "interaction_state": session.interaction_state.value,
+            "handled_stage": stage.value, "handled_stage_number": STAGES_BY_ID[stage].number,
+            "handled_stage_title": stage_title(stage, session.interaction_state),
+            **stage_group_metadata(stage, session.interaction_state),
+            "transitioned_from_stage": None,
+            "stage_status": "completed" if stage.value in session.completed_stages else "active",
+            "workflow_status": session.status.value, **output,
+            "request_rejected": False, "completion_error": None,
+            "knowledge_source": KNOWLEDGE.source_reference,
+            "knowledge_sources": KNOWLEDGE.source_references,
+            "current_stage": stage.value,
+            "next_stage": session.next_stage.value if session.next_stage and session.status is not WorkflowStatus.COMPLETE else None,
+            "revision": session.revision, "turn_id": request.turn_id,
+        }
+        # Reporting may migrate derived views; it must not change the live state.
+        view = deepcopy(session)
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            response.update(task_report=build_emvr_task_report(view),
+                            builder_handoff_status=builder_handoff_status(view))
+            response.update(_emvr_artifact_readiness(view))
+            if response.get("report_ready"):
+                response["report_url"] = f"/v1/designs/{session.design_id}/report.pdf"
+            if response.get("builder_input_ready"):
+                response["builder_input_url"] = f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
+        elif session.status is WorkflowStatus.COMPLETE:
+            response.update(guided_export_ready=True,
+                            guided_export_url=f"/v1/designs/{session.design_id}/guided-summary.txt")
         _cache_turn_response(session, request, response)
         self.store.save(session, expected_revision=expected_revision)
         return response

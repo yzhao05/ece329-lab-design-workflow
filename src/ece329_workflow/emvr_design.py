@@ -635,16 +635,18 @@ def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
     if field_id in EMVR_SCALAR_FIELDS:
         text = clean_emvr_field_text(field_id, value)
         return text or None
+    from .procedure_contract import decode_text_list, procedure_steps
+    value = decode_text_list(value)
     values = value if isinstance(value, list) else [value]
+    values = [part for item in values for part in (decode_text_list(item) if isinstance(decode_text_list(item), list) else [item])]
+    if field_id == "procedure_steps":
+        values = procedure_steps(values)
     # These lists are implementation contracts, not summaries. Dropping the
     # end of a parameter or a later procedure step silently changes the design.
-    result = list(
-        dict.fromkeys(
-            clean_emvr_field_text(field_id, item)
-            for item in values
-            if isinstance(item, str) and clean_emvr_field_text(field_id, item)
-        )
-    )
+    result = [clean_emvr_field_text(field_id, item) for item in values
+              if isinstance(item, str) and clean_emvr_field_text(field_id, item)]
+    if field_id != "procedure_steps":
+        result = list(dict.fromkeys(result))
     return result or None
 
 
@@ -1147,6 +1149,8 @@ def normalize_emvr_design_update(raw: Any) -> dict[str, Any]:
 
     def text_list(key: str) -> list[str]:
         value = raw.get(key, [])
+        if key == "procedure_steps":
+            return _nonempty_field_value(key, value) or []
         if not isinstance(value, list):
             return []
         return list(

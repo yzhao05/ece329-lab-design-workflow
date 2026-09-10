@@ -12,7 +12,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .builder_requirements import (
     LAB_ID_PATTERN,
@@ -265,30 +265,27 @@ def _student_task_contracts(
     measurement_contract: str,
 ) -> list[dict[str, str]]:
     """Turn each confirmed procedure line into an implementable Unity transition."""
+    from .procedure_contract import has_positive_action
 
     rows: list[dict[str, str]] = []
     previous_state = "READY"
     for index, step in enumerate(steps, start=1):
         # A snapshot noun is not a Capture command: Restore, clearing and
         # inspecting saved evidence must never create fresh evidence.
-        capture_requested = bool(re.search(
-            r"(?<![A-Za-z])Capture(?![A-Za-z])|(?:保存|记录)(?!的|过)[^。；;,，]{0,24}(?:快照|结果|读数|基准)|等待[^。；;]{0,35}记录", step, re.I
-        ))
-        if re.search(r"(?:不|无需|禁止)(?:要|再|进行|点击)?\s*(?:Capture|保存|记录)", step, re.I):
-            capture_requested = False
-        restore_requested = bool(re.search(r"(?<![A-Za-z])Restore(?![A-Za-z])|恢复(?:最近|已保存|所选|指定|第\S+张)?快照", step, re.I))
+        capture_requested = has_positive_action(step,
+            r"(?<![A-Za-z])Capture(?![A-Za-z])|(?:保存|记录)(?!的|过)[^。；;,，]{0,24}(?:快照|结果|读数|基准)|等待[^。；;]{0,35}记录")
+        restore_requested = has_positive_action(step, r"(?<![A-Za-z])Restore(?![A-Za-z])|恢复(?:最近|已保存|所选|指定|第\S+张)?快照")
         # "每轮比较前恢复基准" and "比较情形" name context, not a
         # request to enter comparison before any snapshots exist.
-        compare_requested = re.search(
+        compare_requested = has_positive_action(step,
             r"(?:并排|(?:比较|对照)(?!前|条件|配置|组|情形|方案|案例|实验|过程|逻辑|目的))",
-            step,
-        ) is not None
-        if re.search(r"(?:加载|恢复|建立)[^。；;]*基准", step):
+        )
+        if has_positive_action(step, r"(?:加载|恢复|建立)[^。；;]*基准"):
             action = "load the confirmed baseline preset"
             response = "Restore baseline parameters and refresh once; preserve saved snapshots and current step"
             evidence = "Parameters match the baseline in this PDF; earlier comparison evidence remains available"
             exit_state = "VALID"
-        elif re.search(r"(?:Reset|重置|恢复.*初始)", step, flags=re.IGNORECASE):
+        elif has_positive_action(step, r"(?:Reset|重置|恢复.*初始)"):
             action = "activate Reset or load the confirmed baseline preset"
             response = "ResetController restores all confirmed defaults; model and UI refresh once"
             evidence = "Parameters and Status match the Initial/Reset contract"
@@ -298,7 +295,7 @@ def _student_task_contracts(
             response = "Common SnapshotStore restores all saved inputs and object states; recalculate once; preserve snapshots and never Capture implicitly"
             evidence = "Restored parameters and readouts match the selected snapshot; no additional snapshot ID exists"
             exit_state = "VALID"
-        elif re.search(r"(?:调节|改变|拖动|移动|切换|选择|设置|设为)", step):
+        elif has_positive_action(step, r"(?:调节|改变|拖动|移动|切换|选择|设置|设为)"):
             action = "change exactly the named independent-variable control"
             response = "ParameterController validates the value, then triggers one model and visualization refresh"
             evidence = f"Status shows the accepted value and Results follows: {measurement_contract}"
@@ -308,6 +305,9 @@ def _student_task_contracts(
             response = "LabFlowController checks that required comparisons exist and marks the task complete"
             evidence = "Completion status cites the snapshot IDs and the confirmed acceptance criterion"
             exit_state = "COMPLETE"
+            if compare_requested:
+                action = "compare the named saved snapshots; then " + action
+                response = "Require at least two valid compatible snapshots before comparison and interpretation; " + response
         elif compare_requested:
             action = "select the saved cases named in this step and start comparison"
             response = "Require at least two valid compatible snapshots; then lock a shared view/scale and present the cases together"
@@ -315,7 +315,7 @@ def _student_task_contracts(
             exit_state = "COMPARING"
         elif capture_requested:
             action = "press Capture after the current state becomes VALID"
-            response = "SnapshotStore records parameters, outputs, comparison label, and screenshot ID"
+            response = "Domain adapter wraps Common object-state JSON with parameters, outputs, validity, comparison label, and screenshot ID"
             evidence = "Results shows a new unique snapshot ID with the current parameter set"
             exit_state = "CAPTURED"
         else:
@@ -347,7 +347,7 @@ def _student_task_contracts(
             evidence += "; restored readouts match the saved inputs"
             if not capture_requested:
                 exit_state = "VALID"
-        if re.search(r"(?<![A-Za-z])Back(?![A-Za-z])|返回(?:开始页|Start)", step, re.I):
+        if has_positive_action(step, r"(?<![A-Za-z])Back(?![A-Za-z])|返回(?:开始页|Start)"):
             action += "; finish the preceding stated checks, then Back to Start"
             response += "; cancel pending work and leave the Lab without starting another computation"
             evidence += "; Start is visible and no stale result is committed"
@@ -1377,9 +1377,7 @@ def render_builder_review_pdf(
         story.append(p(heading, heading_style))
         story.append(field_table(rows or [_field(f"{heading}.content", _UNRESOLVED)]))
 
-    story.append(p("Handoff instructions", heading_style))
-    for note in notes:
-        story.append(p(f"• {note}"))
+    story.append(KeepTogether([p("Handoff instructions", heading_style), *[p(f"• {note}") for note in notes]]))
 
     def footer(canvas: Any, doc: Any) -> None:
         canvas.saveState()
@@ -1468,7 +1466,7 @@ def _builder_sections(data: dict[str, Any]) -> list[tuple[str, list[dict[str, st
         ("19. Builder runtime constraints", data["builder_runtime_constraints"]),
     ]
     sections.extend([
-        ("21. Embedded source material", data["embedded_reference_material"]),
-        ("22. Value completeness and applicability", data["value_semantics"]),
+        ("20. Embedded source material", data["embedded_reference_material"]),
+        ("21. Value completeness and applicability", data["value_semantics"]),
     ])
     return sections

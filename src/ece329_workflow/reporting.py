@@ -564,7 +564,7 @@ _NUMBERED_REPORT_FIELDS = {
 
 
 def _strip_report_list_marker(value: str) -> str:
-    return re.sub(r"^\s*(?:\d+[.、）)]|[-•])\s*", "", value).strip()
+    return re.sub(r"^\s*(?:\d+\.(?!\d)|\d+[、）)]|[-•])\s*", "", value).strip()
 
 
 def _coalesce_numbered_report_items(field: str, items: list[str]) -> list[str]:
@@ -637,7 +637,7 @@ def _readable_report_value(field: str, raw: Any) -> str:
             # one scalar even when the text is shorter than the long-text
             # threshold. Split on actual sentence endings and visible list
             # numbers so every requested item remains readable.
-            expanded = re.sub(r"\s+(?=\d+[.、）)]\s*)", "\n", text)
+            expanded = re.sub(r"\s+(?=\d+(?:\.(?!\d)|[、）)])\s*)", "\n", text)
             sentences = [
                 item.strip()
                 for item in re.split(r"\n+|(?<=[。！？?；;])\s*", expanded)
@@ -1612,6 +1612,22 @@ def effective_emvr_stage_payload(
                     else "记录每次比较的电荷配置、距离、已定义数值指标与场快照，保证结果可追溯"
                 ),
             ]
+    measurement_contract = builder_requirement_values(session).get("measurement_specifications")
+    if measurement_is_qualitative_only(measurement_contract):
+        # Measurement ownership applies to magnetic and other formula families,
+        # including stored payloads authored before the measurement was defined.
+        if stage is Stage.CONCEPTUAL_OR_VR_SETUP:
+            if isinstance(payload.get("physics_layer"), dict):
+                payload["physics_layer"]["real_time_updates"] = (
+                    "参数变化后重算理论场表现、方向和已确认定性分类，并刷新状态与快照比较。"
+                )
+            if "measurement_interface" not in explicitly_cleared:
+                payload["measurement_interface"] = [
+                    "当前参数及单位、有效性和模型边界",
+                    "按测量契约显示定性形态、方向与分类依据；用快照比较，不生成数值纵轴或理论曲线",
+                ]
+        elif stage is Stage.EXPECTED_DATA_VISUALIZATION:
+            payload["series_encoding"] = "按比较配置保存快照、定性类别与判断依据；不生成数值纵轴或理论曲线。"
     for field in (
         "reference_condition", "controlled_variables", "procedure_steps", "student_required_steps",
         "vr_suitability", "physics_layer", "unity_update_event",

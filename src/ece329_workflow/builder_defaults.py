@@ -6,13 +6,13 @@ import re
 from copy import deepcopy
 from typing import Any
 
-from .models import DesignSession, Stage
+from .models import DesignSession
 from .unity_blueprint import CONSTRUCTION_LABELS, construction_defaults
 from .physics_blueprint import selected_physics_guidance
 
 
 IMPLEMENTATION_DEFAULTS_FIELD = "implementation_defaults"
-IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v5"
+IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v6"
 _IMPLEMENTATION_INPUT_FIELDS = frozenset(
     {
         "lab_title",
@@ -82,7 +82,7 @@ def measurement_is_qualitative_only(value: Any) -> bool:
     text = _text(value)
     return bool(
         re.search(r"(?:仅(?:作|做|进行)?定性|只(?:作|做)定性|不涉及数值计算|无定量(?:读数|指标))", text)
-        or (re.search(r"定性(?:描述|判断)", text) and not re.search(r"(?:读数|显示|测量)[^。；]{0,45}(?:Bz|Bx|By|分量|大小|数值)", text, re.I))
+        or (re.search(r"定性(?:描述|判断|形态指标|分类)", text) and not re.search(r"(?:读数|显示|测量)[^。；]{0,45}(?:Bz|Bx|By|分量|大小|数值)", text, re.I))
     )
 
 
@@ -153,29 +153,11 @@ def project_derived_contract_text(session: DesignSession, value: Any) -> Any:
 
 
 def _procedure_steps(session: DesignSession) -> list[str]:
-    emvr = session.design_context.get("emvr_design", {})
-    emvr = emvr if isinstance(emvr, dict) else {}
-    field_state = emvr.get("field_state", {})
-    field_state = field_state if isinstance(field_state, dict) else {}
-    raw = field_state.get("procedure_steps")
-    stage_state = session.design_context.get("stage_design_state", {})
-    stage_state = stage_state if isinstance(stage_state, dict) else {}
-    if any(
-        "procedure_steps" in state.get("explicitly_cleared_fields", [])
-        for state in (emvr, stage_state)
-    ):
-        return []
-    if not raw and stage_state.get("procedure_steps"):
-        raw = [stage_state["procedure_steps"]]
-    if not isinstance(raw, list) or not raw:
-        stored = session.stage_outputs.get(Stage.CONCEPTUAL_PROCEDURE.value, {})
-        payload = stored.get("stage_payload", {}) if isinstance(stored, dict) else {}
-        raw = payload.get("procedure_steps", []) if isinstance(payload, dict) else []
+    from .procedure_contract import current_procedure
     return [
         _text(project_derived_contract_text(session, item))
-        for item in raw
-        if _text(item)
-    ] if isinstance(raw, list) else []
+        for item in current_procedure(session)
+    ]
 
 
 def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:

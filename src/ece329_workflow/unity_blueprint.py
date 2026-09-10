@@ -107,6 +107,36 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "Reset 取消未完成计算，恢复 Initial 契约及基准步骤，按确认规则清理记录；"
             "Back 取消计算并退出 Lab；新一轮 Start 从 Initial 开始，避免跨轮重复监听与旧结果回流。"
         ),
+        "common_adapter_contract": (
+            "核对包内 UnityProject/LocalPackages/com.emvr.lab-common/Runtime/SceneFlow/EmVrLabContractRunner.cs "
+            "和 UnityProject/LocalPackages/com.emvr.lab-common/Runtime/Objects/EmVrObjectStateSnapshotStore.cs。以下为已核对接口，宿主签名不一致时先报告差异。"
+            "Runner入口为 TryStartLab(out string error)、TryCompleteCurrentStep(out string error)；"
+            "CurrentStepId用于核对本次证据所属步骤。StepDefinition只有stepId、displayName、requiredObjectId、"
+            "requireSelection、requireCompletedDrag，不能代替本实验的物理或快照验收。"
+            "领域适配器先检查本S步骤全部原文动作和证据，再核对run_id、step_id及event_id去重，调用完成接口一次；"
+            "一次操作中连续两次Capture或中间改值不得合并成一次。失败显示error并停留原步骤，禁止每帧重试。"
+            "SnapshotStore入口为 TryCaptureSnapshot(out string snapshotJson, out string error)、"
+            "TryRestoreSnapshot(string snapshotJson, out string error)、TryResetObjects(out string error)。"
+            "将explicitObjects设为本Lab完整对象集合；动态对象由领域适配器在Restore前恢复同一成员集合，不能跳过对象数或ID检查。"
+            "Common快照仅含schema_version及objects的object_id、object_type、state_json；它不提供完整实验记录列表、"
+            "截图、物理单位、revision、有效性或对照标签。领域记录必须包裹Common JSON并保存本报告快照契约的这些元数据，"
+            "先验证结果有效再Capture，不能把TryCaptureSnapshot成功等同于物理验收通过。"
+            "Restore按领域记录取对应Common JSON，不改变教学步骤，step_id只作来源标记；所有对象导入期间抑制参数回调，"
+            "全部成功后只重算一次，失败时保留错误且不写新快照。"
+            "TryResetObjects不会清除CurrentSnapshotJson；Reset按本实验契约清理领域记录并更新run/reset代次，"
+            "Restore可用性由领域记录决定，禁止Reset后通过旧CurrentSnapshotJson复活已清除快照。"
+            "如Reset重新调用TryStartLab，应按已确认日志策略设置clearTelemetryOnStart，不能意外清掉整段实验审计。"
+        ),
+        "bounded_solver_work_units": (
+            "积分预算必须覆盖嵌套成本：毕奥萨伐尔一次场求值包含全部源段贡献，不能只计作一次便宜采样。"
+            "为源分段数、场采样点、种子数、轨迹步数、误差复算次数分别给有限上限，乘积计算检查整数溢出。"
+            "每个源段贡献或网格更新作为有界工作单元，循环保留种子/步/源段游标；建议每帧最多4096工作单元或4 ms，"
+            "每64单元检查单调时钟与取消标志，先到预算即保存游标并让出，不能从第一段重新开始。"
+            "每次恢复至少完成一个有界单元，或明确结束/取消，防止只让出而永不前进；设置总工作量硬上限。"
+            "误差复算在预算内执行固定次数，超差标精度不足并结束，等待显式修改或重试；不能无限减半步长。"
+            "若检测闭合场线，数值契约需定义最小已走弧长、回到起点的距离与切向一致阈值；"
+            "不能刚离开种子仍在邻域内就判闭合。物理容差仍以本实验契约为准，帧预算只约束运行响应。"
+        ),
         "verification_recipe": (
             "V1 用独立手算/解析基准检验公式：默认数值容差 abs(actual-expected) <= "
             "max(1e-9 个输出 SI 单位, 1e-5*abs(expected))；特殊量级或近似算法按已确认精度替换。"
@@ -133,5 +163,7 @@ CONSTRUCTION_LABELS = (
     ("physical_coordinate_convention", "物理坐标、方向与显示变换"),
     ("solver_and_termination", "计算契约与终止条件"),
     ("snapshot_schema", "快照数据与生命周期"),
+    ("common_adapter_contract", "Common实际接口与领域适配边界"),
+    ("bounded_solver_work_units", "嵌套计算预算与可恢复执行"),
     ("verification_recipe", "从零构建验证步骤"),
 )

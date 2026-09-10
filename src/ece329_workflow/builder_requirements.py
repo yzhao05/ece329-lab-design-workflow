@@ -415,9 +415,7 @@ def _cross_field_validation_error(
             and not re.search(r"无需|不(?:进行|需要|使用|做)|无积分", clause)
             for clause in re.split(r"[。；;\n]", numerical)
         )
-        if integrates and not re.search(
-            r"(?:容差|误差(?:上限|阈值)|收敛(?:阈值|精度)|tolerance)[^。；;\n]{0,45}\d", numerical, re.I
-        ):
+        if integrates and not numerical_tolerance_defined(numerical):
             return "数值积分给出了步长，但没有可检验的误差/收敛容差；步长和最大步数不能代替精度验收值。"
     if field == "model_constants_and_media":
         constants = values.get(field, "")
@@ -456,6 +454,15 @@ def _cross_field_validation_error(
             for clause in re.split(r"[。；;]", values.get(field, ""))):
             return "测量契约明确不使用空间探针，但 Initial/Reset 仍保留探针位置；请删除旧探针状态。"
     return None
+
+
+def numerical_tolerance_defined(value: str) -> bool:
+    """Recognize numeric error bounds, including percentages and comparisons."""
+    number = r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+    return bool(re.search(
+        rf"(?:容差|误差(?:上限|阈值)|收敛(?:阈值|精度)|tolerance)[^。；;\n]{{0,45}}{number}|"
+        rf"(?:相对误差|绝对误差|位置偏差|偏差|误差)\s*(?:小于|不超过|低于|<=|<|≤)\s*{number}", value, re.I
+    ))
 
 
 def _requirement_valid(

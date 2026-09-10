@@ -57,8 +57,11 @@ _COMPOSITION_STRATEGIES = frozenset({"SINGLE", "COMBINED", "SEPARATE_THEN_COMBIN
 
 
 def _unique_text(value: Any, *, limit: int = 12) -> list[str]:
+    from .procedure_contract import decode_text_list
+    value = decode_text_list(value)
     if not isinstance(value, list):
         return []
+    value = [part for item in value for part in (decode_text_list(item) if isinstance(decode_text_list(item), list) else [item])]
     return list(
         dict.fromkeys(
             str(item).strip()[:400]
