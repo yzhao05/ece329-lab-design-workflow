@@ -54,6 +54,7 @@ _FIELD_LABELS = {
     "normalized_idea": "设计起点",
     "target_phenomenon": "目标现象",
     "possible_vr_interactions": "可用交互",
+    "path_shape_options": "路径形状选项",
     "formula_direction_summary": "公式驱动的实验方向",
     "primary_formulas": "主要公式",
     "supporting_formulas": "辅助公式",
@@ -82,6 +83,7 @@ _FIELD_LABELS = {
     "comparison_cases": "比较情形",
     "physical_mechanism": "物理机制",
     "core_equations": "核心公式",
+    "supporting_equations": "辅助公式",
     "formula_support_map": "理论关系与研究内容的对应",
     "theory_selection_status": "理论关系筛选状态",
     "simulation_inputs": "计算输入",
@@ -167,6 +169,7 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
         "normalized_idea",
         "target_phenomenon",
         "possible_vr_interactions",
+        "path_shape_options",
         "formula_direction_summary",
         "primary_formulas",
         "supporting_formulas",
@@ -203,6 +206,7 @@ _REPORT_FIELDS: dict[Stage, tuple[str, ...]] = {
     Stage.THEORETICAL_FRAMEWORK: (
         "physical_mechanism",
         "core_equations",
+        "supporting_equations",
         "formula_support_map",
         "theory_selection_status",
         "simulation_inputs",
@@ -1417,7 +1421,8 @@ def effective_emvr_stage_payload(
             set_if("dependent_variable", {"name": _plain(observed)})
         elif "observed_quantities" in explicitly_cleared:
             payload.pop("dependent_variable", None)
-        set_if("controlled_variables", controls)
+        from .builder_defaults import project_numerical_controls
+        set_if("controlled_variables", project_numerical_controls(session, controls))
         set_bound(
             "parameter_specifications",
             "parameter_specifications",
@@ -1643,6 +1648,8 @@ def effective_emvr_stage_payload(
     ):
         if field in payload:
             payload[field] = project_derived_contract_text(session, payload[field])
+    from .emvr_catalog import project_catalog
+    project_catalog(session, stage, payload)
     return payload
 
 
@@ -1708,7 +1715,7 @@ def stage_report_section(
                     item["field"] = field
                 items.append(item)
             continue
-        if field == "core_equations" and isinstance(payload.get(field), list):
+        if field in {"core_equations", "supporting_equations"} and isinstance(payload.get(field), list):
             equations = []
             for formula in payload[field]:
                 if not isinstance(formula, dict):

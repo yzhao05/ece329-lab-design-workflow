@@ -210,6 +210,7 @@ def candidate_formulas_for_emvr_context(
 # are deliberately independent of any wording in the student's message.
 EMVR_SCALAR_FIELDS = frozenset(
     {
+        "primary_course_concept_id",
         # ``experiment_brief`` is the authoritative, complete statement of the
         # student's EMVR direction.  The remaining fields are projections used
         # for validation, Builder handoff and stage-specific discussion; none
@@ -236,6 +237,10 @@ EMVR_SCALAR_FIELDS = frozenset(
 )
 EMVR_LIST_FIELDS = frozenset(
     {
+        "course_reference_ids",
+        "primary_formula_ids",
+        "supporting_formula_ids",
+        "path_shape_options",
         "learning_objectives",
         "changed_quantities",
         "observed_quantities",
@@ -302,11 +307,17 @@ def recover_explicit_emvr_edits(
         return {}
 
     edits: dict[str, dict[str, Any]] = {}
+    shape_match = re.search(r'路径形状(?:只)?保留([^。；;]+)', text)
+    if shape_match:
+        shapes = re.findall(r'直导线|圆环|螺线管', shape_match.group(1))
+        if shapes:
+            edits['path_shape_options'] = {'operation': 'REPLACE', 'value': list(dict.fromkeys(shapes))}
     # Public labels refer to the same field at every stage. Quoted replacement
     # values have explicit boundaries, so several edits can be recovered without
     # assigning the whole message to whichever question happens to be pending.
     public_labels = {
         "research_object": "研究对象",
+        "course_relationship": "课程关系",
         "required_behaviors": "可用交互|核心操作|学生操作",
         "research_question": "研究问题|问题主线",
         "visualization_requirements": "教学可视化|可视化层|显示方式|显示内容",
@@ -319,7 +330,7 @@ def recover_explicit_emvr_edits(
     from .procedure_contract import has_positive_action
     for field, labels in public_labels.items():
         matches = re.finditer(
-            rf"(?:{labels})(?:换为|改为|改成|替换为|调整为)\s*(?:更简洁的)?\s*[‘“\"](?P<value>[^’”\"]+)[’”\"]",
+            rf"[‘“\"]?(?:{labels})[’”\"]?(?:换为|改回|改为|改成|替换为|调整为|就写)\s*(?:更简洁的)?\s*[‘“\"](?P<value>[^’”\"]+)[’”\"]",
             text,
         )
         for match in matches:
@@ -336,7 +347,10 @@ def recover_explicit_emvr_edits(
         # replaces that source field afterwards.
         edits['required_behaviors'] = {"operation": "REPLACE", "value": [str(current['research_object'])]}
     removal = re.search(r"(?:教学可视化|可视化层|显示内容)中的?[‘“\"]([^’”\"]+)[’”\"][^。]*?(?:去掉|删除|移除)", text)
-    if removal and has_positive_action(removal.group(0), r'去掉|删除|移除'):
+    unsuitable = re.search(r'(?:教学可视化|可视化层|显示内容)中的?[‘“\"]([^’”\"]+)[’”\"]不适用于(?:本|当前)实验', text)
+    if unsuitable:
+        removal = unsuitable
+    if removal and (unsuitable or has_positive_action(removal.group(0), r'去掉|删除|移除')):
         values = current.get('visualization_requirements', [])
         if isinstance(values, str):
             values = [values]
@@ -683,6 +697,12 @@ def emvr_stage_one_readiness(emvr_design: Any) -> dict[str, Any]:
 
 
 def _nonempty_field_value(field_id: str, value: Any) -> str | list[str] | None:
+    if field_id in {'primary_course_concept_id', 'course_reference_ids', 'primary_formula_ids', 'supporting_formula_ids'}:
+        known = {c['id'] for c in KNOWLEDGE.lectures} if 'course' in field_id else {f['id'] for f in KNOWLEDGE.formulas}
+        values = value if isinstance(value, list) else [value]
+        if not values or any(v not in known for v in values if isinstance(v, str)) or any(not isinstance(v, str) for v in values):
+            return None
+        return values[0] if field_id == 'primary_course_concept_id' else list(dict.fromkeys(values))
     if field_id in EMVR_SCALAR_FIELDS:
         text = clean_emvr_field_text(field_id, value)
         return text or None
@@ -944,6 +964,8 @@ def apply_emvr_field_updates(
             touched_fields.add(field_id)
 
     emvr_design["explicitly_cleared_fields"] = sorted(explicitly_cleared)
+    from .emvr_catalog import sync_selection
+    sync_selection(emvr_design, touched_fields)
 
     if touched_fields & {*EMVR_OBJECTIVE_FIELDS, "learning_objectives"}:
         _sync_learning_objective_summary(field_state, previous_objective_values)

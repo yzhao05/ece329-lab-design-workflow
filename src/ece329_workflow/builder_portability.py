@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+import json
 import re
 from typing import Any
 from urllib.parse import unquote
@@ -9,6 +10,8 @@ from urllib.parse import unquote
 PACK_NAME = "EMVR_Blind_BuilderPack"
 UNITY_PROJECT = "UnityProject"
 ROOT_DISCOVERY = (
+    "若已打开主包RebuildWorkspaces下有有效.emvr-workspace.json标记的EMVR_Blind_Rebuild_<lab_id>子包，"
+    "先核对标记的lab_id、workflow_mode和固定子目录位置，以该子包为builder_pack_root；不能退回主包或再次复制。"
     "以本机已打开的 EMVR_Blind_BuilderPack 为 builder_pack_root；若当前工作目录在包内，"
     "仅向上检查该包的祖先；若打开的是包的直接父目录，仅检查其同名直接子目录。"
     "核对 Tools/labflow/labflow.py、LabSpecs/templates/lab-brief.template.yaml 和 "
@@ -34,6 +37,24 @@ _SENTINELS = (
 def resolve_local_builder_pack(workspace: Path) -> Path:
     """Bounded local discovery for a consumer; export must not call this on a server."""
     workspace = workspace.resolve(strict=True)
+    for root in (workspace, *workspace.parents):
+        if root.name.startswith('EMVR_Blind_Rebuild_') or (root / '.emvr-workspace.json').is_file():
+            try:
+                marker_path = root / '.emvr-workspace.json'
+                if not marker_path.resolve().is_relative_to(root):
+                    raise ValueError('workspace marker leaves run root')
+                marker = json.loads(marker_path.read_text(encoding='utf-8-sig'))
+                lab_id = marker.get('lab_id', '')
+                valid_marker = (isinstance(lab_id, str) and re.fullmatch(r'[a-z][a-z0-9_]{2,63}', lab_id)
+                    and marker.get('workflow_mode') == 'blind-rebuild'
+                    and marker.get('required_master_directory_name') == PACK_NAME
+                    and marker.get('required_directory_name') == root.name == 'EMVR_Blind_Rebuild_' + lab_id
+                    and root.parent.name == 'RebuildWorkspaces' and root.parent.parent.name == PACK_NAME)
+                if not valid_marker or not _valid_pack_sentinels(root):
+                    raise ValueError('invalid run marker or incomplete run pack')
+                return root
+            except (OSError, ValueError, AttributeError) as exc:
+                raise ValueError('当前重建子包无效；请修复标记或依赖，不自动退回主包') from exc
     ancestors = [p for p in (workspace, *workspace.parents) if p.name == PACK_NAME]
     candidates = ancestors or [workspace / PACK_NAME]
     valid = []
@@ -44,12 +65,16 @@ def resolve_local_builder_pack(workspace: Path) -> Path:
         # A same-named symlink must not turn a direct-child check into outside access.
         if root != candidate:
             continue
-        if all((resolved := (root / name).resolve()).is_relative_to(root) and resolved.is_file()
-               for name in _SENTINELS):
+        if _valid_pack_sentinels(root):
             valid.append(root)
     if len(valid) != 1:
         raise ValueError("请打开唯一有效的本机 EMVR_Blind_BuilderPack 工作区")
     return valid[0]
+
+
+def _valid_pack_sentinels(root: Path) -> bool:
+    return all((resolved := (root / name).resolve()).is_relative_to(root) and resolved.is_file()
+               for name in _SENTINELS)
 
 
 _ABSOLUTE = re.compile(

@@ -880,12 +880,10 @@ def _generate_experiment_methods(
     )
     profile_changed = _profile_values(profile_ids, "supported_variations")
     profile_observed = _profile_values(profile_ids, "supported_observations")
-    all_changed = list(
-        dict.fromkeys([*_unique_text(analysis.get("changed_quantities")), *profile_changed])
-    )[:5]
-    all_observed = list(
-        dict.fromkeys([*_unique_text(analysis.get("observed_quantities")), *profile_observed])
-    )[:5]
+    all_changed = (_unique_text(selection.get("changed_quantities"))
+                   or _unique_text(analysis.get("changed_quantities")) or profile_changed)[:5]
+    all_observed = (_unique_text(selection.get("observed_quantities"))
+                    or _unique_text(analysis.get("observed_quantities")) or profile_observed)[:5]
     all_boundaries = _profile_values(profile_ids, "boundary_conditions")[:6]
     objects = _unique_text(analysis.get("mentioned_objects")) or [
         "与已确认公式对应的场源、材料或边界对象",
@@ -946,7 +944,7 @@ def _generate_experiment_methods(
         elif pattern_id == "CONTROLLED_COMPARISON":
             method_changed = all_changed[1:2] or all_changed[:1]
         elif pattern_id == "INVERSE_PARAMETER_INFERENCE":
-            method_changed = profile_changed[:1] or all_changed[:1]
+            method_changed = all_changed[:1]
         else:
             method_changed = all_changed[:3]
         changed_text = "、".join(method_changed) or "公式中的主要输入量"
@@ -1021,12 +1019,20 @@ def _format_selected_method_designs(
         and str(method.get("method_id") or "") in set(selected_method_ids)
     ]
     parts = ["下面只展开你刚选中的实验方法："]
+    brief = flow.get('experiment_brief', {})
     for index, method in enumerate(selected, start=1):
+        changed = brief.get('changed_quantities') or method.get('changed_quantities', [])
+        observed = brief.get('observed_quantities') or method.get('observed_quantities', [])
+        process = str(method.get('process_summary') or '')
+        for old, new in [(method.get('changed_quantities', []), changed),
+                         (method.get('observed_quantities', [])[:3], observed)]:
+            if old:
+                process = process.replace('、'.join(old), '、'.join(new))
         parts.append(
             f"设计 {index}｜{method.get('title')}\n"
-            f"实验过程：{method.get('process_summary')}\n"
-            f"主动变化：{'、'.join(method.get('changed_quantities', [])) or '待你补充'}\n"
-            f"重点观察：{'、'.join(method.get('observed_quantities', [])) or '待你补充'}"
+            f"实验过程：{process}\n"
+            f"主动变化：{'、'.join(changed) or '待你补充'}\n"
+            f"重点观察：{'、'.join(observed) or '待你补充'}"
         )
     parts.append(
         "这套设计是否符合你的设想？满意的话可以直接采用并继续；如果不满意，可以修改其中的对象、操作、变化量或观察量，也可以重新选择或增加其他方法。"

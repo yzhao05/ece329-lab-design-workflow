@@ -12,7 +12,7 @@ from .physics_blueprint import selected_physics_guidance
 
 
 IMPLEMENTATION_DEFAULTS_FIELD = "implementation_defaults"
-IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v6"
+IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v7"
 _IMPLEMENTATION_INPUT_FIELDS = frozenset(
     {
         "lab_title",
@@ -82,7 +82,7 @@ def measurement_is_qualitative_only(value: Any) -> bool:
     text = _text(value)
     return bool(
         re.search(r"(?:仅(?:作|做|进行)?定性|只(?:作|做)定性|不涉及数值计算|无定量(?:读数|指标))", text)
-        or (re.search(r"定性(?:描述|判断|形态指标|分类)", text) and not re.search(r"(?:读数|显示|测量)[^。；]{0,45}(?:Bz|Bx|By|分量|大小|数值)", text, re.I))
+        or (re.search(r"定性(?:描述|判断|形态指标|指标|分类)", text) and not re.search(r"(?:读数|显示|测量)[^。；]{0,45}(?:Bz|Bx|By|分量|大小|数值)", text, re.I))
     )
 
 
@@ -158,6 +158,26 @@ def _procedure_steps(session: DesignSession) -> list[str]:
         _text(project_derived_contract_text(session, item))
         for item in current_procedure(session)
     ]
+
+
+def project_numerical_controls(session: DesignSession, value: Any) -> Any:
+    """Numerical controls refer to their owning contract instead of stale copies."""
+    if not _latest_value(session, 'numerical_model_specifications'):
+        return value
+    if isinstance(value, list):
+        return [project_numerical_controls(session, item) for item in value]
+    if not isinstance(value, str):
+        return value
+    from .numerical_contract import NUMBER, LENGTH_UNIT
+    replacements = (
+        (rf'{NUMBER}\s*(?:源段|段直线近似)', '源离散（按最新数值契约固定）'),
+        (rf'(?:源分段数|源路径段数)\s*[:：=]?\s*{NUMBER}', '源离散（按最新数值契约固定）'),
+        (rf'{NUMBER}\s*个?(?:场线)?种子', '种子（按最新数值契约固定）'),
+        (rf'(?:场线)?步长\s*[:：=]?\s*{NUMBER}\s*{LENGTH_UNIT}', '积分步长（按最新数值契约固定）'),
+    )
+    for pattern, replacement in replacements:
+        value = re.sub(pattern, replacement, value)
+    return value
 
 
 def build_implementation_defaults(session: DesignSession) -> dict[str, Any]:

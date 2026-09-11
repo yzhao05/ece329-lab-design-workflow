@@ -4,9 +4,13 @@ from __future__ import annotations
 from typing import Any
 import re
 
-from .builder_requirements import BUILDER_REQUIREMENT_SPECS, builder_requirement_values
+from .builder_requirements import (
+    BUILDER_REQUIREMENT_SPECS, builder_requirement_values,
+    builder_requirement_value_is_valid, _cross_field_validation_error,
+)
 from .builder_defaults import project_derived_contract_text
 from .models import DesignSession
+from .numerical_contract import uses_biot_model, NUMBER, LENGTH_UNIT
 
 
 def builder_field_reference(session: DesignSession, field: str) -> dict[str, Any] | None:
@@ -16,15 +20,8 @@ def builder_field_reference(session: DesignSession, field: str) -> dict[str, Any
     values = builder_requirement_values(session)
     emvr = session.design_context.get("emvr_design", {})
     emvr = emvr if isinstance(emvr, dict) else {}
-    flow = emvr.get("formula_flow", {})
-    selection = flow.get("formula_selection", {}) if isinstance(flow, dict) else {}
-    selection = selection if isinstance(selection, dict) else {}
-    formula_ids = set(emvr.get("selected_primary_formula_ids", []) or [])
-    formula_ids.update(selection.get("primary", []) or [])
-    formula_ids.update(selection.get("primary_formula_ids", []) or [])
-    brief = emvr.get("authoritative_experiment_brief", {})
-    if isinstance(brief, dict):
-        formula_ids.update(brief.get("primary_formula_ids", []) or [])
+    from .emvr_catalog import selection
+    formula_ids = set(selection(emvr, 'primary'))
     point_charge = "coulomb_point_charge" in formula_ids
     magnetic_source = "biot_savart" in formula_ids
     current = values.get(field, "")
@@ -75,23 +72,21 @@ def builder_field_reference(session: DesignSession, field: str) -> dict[str, Any
             value = f"当前已记录：{current}\n参考补充（需选择实际采用项）：\n" + value
             adoptable = False
     elif field == "numerical_model_specifications" and magnetic_source:
-        value = (
-            "建议计算方案（这些数值是可修改的建议，不是既有决定）：\n"
-            "1. 在右手SI坐标中按已确认有向路径分段，逐元累加毕奥-萨伐尔场；"
-            "段长建议0.01 m，并以0.005 m复算；有限导线需明确回流路径，不能把有限线段当无限长导线。\n"
-            "2. 场线按B/|B|用RK4积分，显示域建议[-1.5,1.5]^3 m，步长0.02 m，每条最多5000步；"
-            "采用20个确定性种子，按实际路径表面外侧布置并固定保存种子坐标，比较组使用同一规则。\n"
-            "3. 精度参考：固定采样位置比较两种电流元段长所得B，误差容差为max(1e-9 T, 1%*|B_ref|)；"
-            "场线以0.01 m步长复算，比较同弧长位置，位置偏差容差建议0.001 m。近零场不使用相对误差除零。\n"
-            "4. 建议距任意导线段0.05 m内停止积分（数值排除区，不是导线物理半径）；"
-            "|B|<1e-12 T、出界、NaN/Infinity、闭合轨迹回到起点邻域或最大步数均终止。"
-            "最大步数截断不等于收敛；新参数取消旧任务，不自动反复重算。\n"
-            "还需根据本实验固定输入确认：各路径的有向几何与回流、实际种子位置、排除区是否与最小几何尺度兼容。"
-            "已有确认值优先，不用上述建议覆盖它们。"
-        )
-        if current:
-            value = f"当前已记录：{current}\n可用于补足缺项的参考：\n" + value
-        adoptable = False
+        if (uses_biot_model(current)
+                and builder_requirement_value_is_valid(field, current)
+                and not _cross_field_validation_error(session, field, values)):
+            value = current
+        else:
+            # A reference is a reviewable replacement proposal. Concatenating
+            # the old incomplete plan created conflicting values and an
+            # unadoptable reference that could never resolve the pending item.
+            radii = list(re.finditer(rf'排除半径\s*(?:为|[:：=])?\s*({NUMBER})\s*({LENGTH_UNIT})',
+                                     values.get('model_constants_and_media', '')))
+            radius = ' '.join(radii[-1].groups()) if radii else '0.05 m'
+            value = magnetic_numerical_reference(radius)
+        candidate = {**values, field: value}
+        adoptable = (builder_requirement_value_is_valid(field, value)
+                     and not _cross_field_validation_error(session, field, candidate))
     elif field == "expected_results" and magnetic_source:
         value = (
             "建议预期结果：\n"
@@ -125,3 +120,37 @@ def builder_field_reference(session: DesignSession, field: str) -> dict[str, Any
         value = (f"已记录：{current}\n" if current else "") + str(spec["question"])
         adoptable = False
     return {"field": field, "label": str(spec["label"]), "value": value, "adoptable": adoptable}
+
+
+def magnetic_numerical_reference(exclusion_radius: str = '0.05 m') -> str:
+    """Bounded, reproducible proposal; nothing is saved before user adoption."""
+    text = (
+        "数值实现方案：固定输入中的路径尺寸和介质保持原值。\n"
+        "1. 右手SI坐标，B单位T。已确认有向源路径采用毕奥-萨伐尔积分："
+        "源路径段长设为0.01 m，各光滑段按弧长等分为ceil(段弧长/0.01 m)个直线元，"
+        "分段端点不跨越几何拐角；每段中点求积，累加mu_0*I/(4*pi)*dl cross (r-mid)/|r-mid|^3。"
+        "真空使用固定输入中的mu_0；不把有限直导线当作无限长导线。\n"
+        "2. 圆环本身闭合，螺旋绕线本身不闭合。已有完整有向回流几何时沿用；"
+        "否则建议对每条开放源从终点b依次连接b+D*e、a+D*e、起点a，构成有限闭合回路。"
+        "a、b取固定输入的有向端点；D=4*max(1 m,源路径包围盒对角线长度)，"
+        "e取与b-a的单位方向绝对点积最小的坐标轴单位向量，同分时按x、y、z顺序选择。"
+        "全部回流段参与场计算，显示为辅助回流线并标注模型边界；不能忽略或称为无限远回流。"
+        "源几何缺失、路径相交或不满足已确认模型时停止并报告几何问题，不猜测源路径。\n"
+        "3. 显示计算域[-1.5,1.5]^3 m。种子坐标候选p(i,j,k)=(-1.35+0.3*i,-1.35+0.3*j,-1.35+0.3*k) m，"
+        "i,j,k各取0..9，按i、j、k字典序遍历有限1000点；排除距任意源段不大于0.05 m的候选，取前20个。"
+        "保存实际种子坐标，同几何电流比较复用；少于20个就提示布局不兼容，不无限重试。"
+        "精度复算沿用主计算种子，不能重新筛选出不同种子。\n"
+        "4. 每个种子沿+B/|B|用RK4积分，物理弧长步长0.02 m，每条最大5000步。"
+        "每次RK4中间求值都检查源距离和计算域边界；距源不大于0.05 m、出界、NaN/Infinity、|B|<1e-12 T均终止并记录原因。"
+        "I=0输出有效零场，隐藏方向箭头，不归一化零矢量。"
+        "闭合判据为已走弧长至少0.2 m、距种子小于0.01 m且切向与初始方向点积大于0.99。"
+        "最大步数只标记截断，不能声称收敛或闭合。\n"
+        "5. 验收仅复算一次：源路径段长0.005 m，同一有效种子及主轨迹采样点比较B，"
+        "误差容差max(1e-9 T,1%*|B_ref|)，近零场用绝对容差。"
+        "场线用0.01 m步长、最大10000步复算，共同有效弧长插值后位置偏差容差0.001 m；"
+        "排除区有效性或终止类别不一致时报告精度不足，不忽略失败点，不自动不断减半。\n"
+        "6. OnSimulationParameterChanged及Reset取消旧任务并递增revision，只提交最新revision结果；"
+        "每帧最多4096次源段贡献或4 ms，保存游标供下一帧继续；每方案源段上限100000，超限报告预算不足。"
+        "主计算完成后才允许Capture；参数变化只刷新，精度复算按显式验收操作执行。"
+    )
+    return text.replace('0.05 m', exclusion_radius)

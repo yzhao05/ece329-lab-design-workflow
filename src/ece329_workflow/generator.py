@@ -1388,6 +1388,8 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
         return StepOutput(
             assistant_message=(
                 f"下面只针对“{field_reference['label']}”给出参考，尚未写入设计：\n\n"
+                + ("采用后将以这份完整方案替换当前数值契约；其余设计字段保留。\n\n"
+                   if field == 'numerical_model_specifications' else '')
                 + field_reference["value"]
             ),
             stage_payload={
@@ -1407,6 +1409,15 @@ def _emvr_reference_output(session: DesignSession) -> StepOutput:
     changed = _compact_context_items(requirements.get("changed_quantities")) or "主要参数"
     observed = _compact_context_items(requirements.get("observed_quantities")) or "目标响应"
     comparisons = _compact_context_items(requirements.get("comparison_cases")) or "已确认比较情形"
+    if field == 'research_question' or (not field and session.current_stage is Stage.RESEARCH_QUESTION):
+        candidate = f'在其他条件保持一致时，{changed}变化会使{observed}产生什么差异？'
+        return StepOutput(
+            assistant_message='下面针对当前待补的研究问题给出参考，尚未写入设计：\n' + candidate,
+            stage_payload={'reference_only': True, 'preserve_pending_action': True,
+                           'reference_examples': [candidate],
+                           'reference_scaffold': {'field': 'research_question', 'example': candidate, 'editable': True},
+                           'reference_draft': {'field': 'research_question', 'value': candidate}},
+            student_task='可采用这句研究问题，或指出要调整的比较关系。')
     reference = _emvr_reference_condition(requirements, stage_state, session)
     if field == "procedure_steps":
         from .procedure_contract import current_procedure, historical_procedure
@@ -2484,7 +2495,9 @@ class RuleBasedStageGenerator:
                             "场强颜色映射：所有比较状态共用 |E_total| 统一色标",
                         ]
                         if point_charge_model
-                        else ["方向箭头", "波前或场线动画", "颜色强度映射"]
+                        else (["磁场方向箭头", "磁场线", "颜色强度映射"]
+                              if set(selected_formula_ids) & {'biot_savart', 'ampere_integral', 'ampere_magnetostatic', 'long_solenoid_field', 'current_sheet_magnetic_field'}
+                              else ["方向箭头", "波前或场线动画", "颜色强度映射"])
                     ),
                     "model_type": "课程层面的解析模型或预计算数据",
                     "research_question_preserved": research_focus,
@@ -2596,7 +2609,7 @@ class RuleBasedStageGenerator:
                         "保留参数基准和重置闭环",
                     ],
                 },
-                warnings=["这一部分只整理实验结构，不另外定义VR场景，也不扩展可访问性与舒适性设计。"],
+                warnings=[],
             )
         if stage is Stage.VARIABLES_AND_CONDITIONS:
             saved_changed = structured_requirements.get("changed_quantities", [])

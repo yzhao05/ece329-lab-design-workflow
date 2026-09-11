@@ -5,6 +5,11 @@ they are not fabricated callable APIs. Physical inputs remain student-owned.
 """
 from __future__ import annotations
 
+ROOM_ASSEMBLY_SOURCE = 'Policies/emvr-room-assembly.json'
+ROOM_LIGHTING_SOURCE = 'Policies/emvr-room-lighting.json'
+ROOM_LIGHTING_ASSET = 'ApprovedAssets/EMVRRoom/Lighting/RoomLighting.lighting'
+ROOM_PREFAB_SOURCES = tuple(f'ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_{part:02}.prefab' for part in (1, 2, 3))
+
 
 def construction_defaults(lab_id: str) -> dict[str, str]:
     return {
@@ -14,7 +19,11 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             f"由包内labflow new初始化工具生成 LabSpecs/{lab_id}/source-references.json，基于 Policies/reuse-source-references.json；"
             "随后用labflow source-references校验清单和完整性，清单与来源均只读，不能手写或更改。"
             "路径相对builder_pack_root、不持久化机器绝对路径；缺依赖时列出缺项并停止当前构建。"
-            "项目已存在时先检查当前Lab状态，不能重复初始化覆盖Brief或别的Lab。新Lab仅在相应Gate获准后初始化。"
+            "先检查.emvr-workspace.json与当前Lab状态；已有匹配工作区时恢复同一运行，不能重复初始化覆盖Brief或别的Lab。"
+            f"盲重建从主包执行 Tools/create_blind_run_pack.ps1 -LabId {lab_id}，"
+            f"仅使用包内RebuildWorkspaces/EMVR_Blind_Rebuild_{lab_id}；复制成功后打开该子包。"
+            "工作区建立与labflow new初始化属于Gate 0前准备；已在匹配的子包中时不再复制。"
+            "实际新Lab集成开发仅按包内integrated-development模式执行；逐Gate批准不由设计PDF代替。"
         ),
         "contract_and_entrypoint": (
             "将PDF字段逐项映射到包内当前模板要求的lab_spec、objects、steps、telemetry_map、rubric五份合同；"
@@ -61,8 +70,10 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "这些是职责绑定：Builder 必须读取宿主实际 API 声明后调用，不按名称猜测方法签名。"
         ),
         "room_and_coordinates": (
-            "房间源为 ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab；先由批准导入器按GUID闭包导入，"
-            f"Environment再实例化 Assets/Generated/{lab_id}/ApprovedDependencies/EMVRRoom/Prefabs/Room_Big_Part_01.prefab，"
+            f"房间布局读取 {ROOM_ASSEMBLY_SOURCE}；Room_Big_Part_01、02、03三种Prefab均由批准导入器按GUID闭包导入，"
+            f"Environment实例化 Assets/Generated/{lab_id}/ApprovedDependencies/EMVRRoom/Prefabs/ 下对应的三个Prefab，"
+            "按冻结配方复用五个实例：Part 01 x2、Part 02 x2、Part 03 x1，构成15 x 18 m完整房间；"
+            "不能只实例化Part 01或用Cube补墙。保持Prefab链接、正单位缩放及原始资源不变，只应用配方已有实例覆盖和整体平移旋转。"
             "不能把包根的ApprovedAssets源路径直接传给Unity AssetDatabase。"
             "XR 使用批准的 XR Interaction Setup 与 XR Device Simulator，保留依赖及 GUID。"
             "以房间可用地板中心为原点，+Y 向上、+Z 指向实验台、+X 向右。默认玩家起点为"
@@ -71,6 +82,17 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "禁止把放大后的场景距离直接当米。默认 1 Unity 单位显示 1 m；超出房间时统一缩放并显示物理标尺。"
             "Parameters 在实验中心右侧、Results 在左侧；屏幕页固定提供 Instruction、Experiment、"
             "Parameters、Status、Results 五区；世界空间面板正面 -Transform.forward 朝向实际摄像机。"
+        ),
+        "room_assembly_and_lighting": (
+            f"只读来源：{ROOM_ASSEMBLY_SOURCE}、{ROOM_LIGHTING_SOURCE}、{ROOM_LIGHTING_ASSET}。"
+            "Gate 5保存前验证五个链接实例的数量、活动状态、正单位缩放、15 x 18 m边界、实际地板支撑、接缝及房间两侧；"
+            "禁止删除、禁用、拆包、改写房间Part、网格、材质、贴图、.meta、导入副本或冻结配方来通过检查。"
+            "用户空间需求与冻结房间冲突时先报告冲突，实验台与界面在可用空间内布置。"
+            "按只读照明配方导入完整RoomLighting.lighting并连接当前场景LightingSettings；"
+            "采用Part 03四盏原始点光源及既有intensity=5.0覆盖、Flat环境光intensity=1.0、配方中的全部RenderSettings和GI设置；"
+            "不新增Directional Light，不只复制直射灯强度。历史LightingData只能只读参考，不能绑定为当前场景烘焙结果。"
+            "重建完成后在Unity执行 Window > Rendering > Lighting > Generate Lighting，等待完成再保存；"
+            "核对当前场景GI数据及Game View可见效果，不能把生成命令或预期截图当作已观察证据。"
         ),
         "reference_and_event_checks": (
             "每个可操作对象具备唯一 ID、Collider 和对应鼠标/XR 接口；纯可视对象不抢射线。"
@@ -162,6 +184,7 @@ CONSTRUCTION_LABELS = (
     ("generated_files", "文件与程序集安排"),
     ("common_wiring", "公共组件连接表"),
     ("room_and_coordinates", "房间、坐标和界面布局"),
+    ("room_assembly_and_lighting", "完整房间复用与照明验收"),
     ("reference_and_event_checks", "对象引用与事件检查"),
     ("physical_coordinate_convention", "物理坐标、方向与显示变换"),
     ("solver_and_termination", "计算契约与终止条件"),

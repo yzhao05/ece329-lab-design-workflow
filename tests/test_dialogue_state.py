@@ -7680,6 +7680,12 @@ class DialogueStateTests(unittest.TestCase):
                     ),
                 )
                 answer = f"{field}的已确认设计内容"
+                answer = {
+                    "primary_course_concept_id": "lecture_12",
+                    "course_reference_ids": "lecture_12",
+                    "primary_formula_ids": "biot_savart",
+                    "supporting_formula_ids": "ampere_magnetostatic",
+                }.get(field, answer)
                 resolved = validate_resolved_intent(
                     resolved_intent(
                         UserIntent.MODIFY_PREVIOUS_PROPOSAL,

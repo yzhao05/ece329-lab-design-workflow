@@ -543,17 +543,11 @@ class WorkflowEngineTests(unittest.TestCase):
 
         generator.next_intent = UserIntent.UNCLEAR
         first = engine.process_turn(session.design_id, {"message": answer})
-        retained = current_pending_action(engine.store.get(session.design_id))
-
-        self.assertTrue(first["stage_payload"].get("clarification_required", False))
-        self.assertEqual(retained["candidate_answer"], answer)
-        self.assertTrue(retained["candidate_binding_authorized"])
-
-        generator.next_intent = UserIntent.UNCLEAR
-        second = engine.process_turn(session.design_id, {"message": answer})
         stored = engine.store.get(session.design_id)
 
-        self.assertFalse(second["stage_payload"].get("clarification_required", False))
+        # A complete answer to the named contract field must survive an
+        # unavailable semantic parser on its first submission (emvr37(1)).
+        self.assertFalse(first["stage_payload"].get("clarification_required", False))
         self.assertEqual(
             builder_requirement_values(stored)["parameter_specifications"],
             answer,
@@ -612,8 +606,13 @@ class WorkflowEngineTests(unittest.TestCase):
             "步长0.1 m；离散变量电荷类型使用按钮，默认同种电荷，可选同种或异种。"
         )
 
-        generator.next_intent = UserIntent.UNCLEAR
-        engine.process_turn(session.design_id, {"message": answer})
+        # Recreate an authorized candidate persisted by an older backend;
+        # new complete answers now commit on their first submission.
+        pending.update(candidate_answer=answer, candidate_binding_authorized=True,
+                       candidate_source="STUDENT_REPLY", candidate_resolution="ANSWER_CURRENT_QUESTION")
+        session.model_context["dialogue_state"] = {"pending_action": pending}
+        set_pending_action_snapshot(session, pending)
+        engine.store.save(session)
         generator.next_intent = UserIntent.UNCLEAR
         result = engine.process_turn(session.design_id, {"message": "继续"})
         stored = engine.store.get(session.design_id)
@@ -3280,7 +3279,9 @@ class WorkflowEngineTests(unittest.TestCase):
             all(required_fields <= set(item) for item in payload["object_inventory"])
         )
         self.assertIn("physics_layer", payload)
-        self.assertIn("不另外定义VR场景", result["warnings"][0])
+        # Room placement is an explicit Builder requirement; do not contradict
+        # it with the old blanket warning after asking for spatial details.
+        self.assertFalse(any("不另外定义VR场景" in warning for warning in result["warnings"]))
 
     def test_visualization_is_theoretical_not_measured(self) -> None:
         first = self.engine.create_design(

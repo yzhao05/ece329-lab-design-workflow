@@ -739,7 +739,7 @@ function createMessageElement(message) {
     bubble.setAttribute("aria-label", "正在生成回答");
     bubble.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
   } else {
-    bubble.textContent = message.text;
+    bubble.textContent = message.role === "user" ? message.text : String(message.text || "").trim();
   }
 
   content.append(meta, bubble);
@@ -2355,8 +2355,8 @@ function applyResponse(response, userMessage) {
 }
 
 function composeAssistantText(response) {
-  const base = response.assistant_message || response.message || (response.student_task ? "" : "这一部分已经整理好了。");
-  const parts = [base];
+  const base = String(response.assistant_message || response.message || (response.student_task ? "" : "这一部分已经整理好了。")).trim();
+  const parts = base ? [base] : [];
   const shouldShowStudentTask = (
     state.mode === "EMVR_DIRECT" || state.stageIndex !== 0
   );
@@ -2365,10 +2365,10 @@ function composeAssistantText(response) {
     : "";
   if (studentTask && !base.includes(studentTask)) parts.push(studentTask);
   const warnings = Array.isArray(response.warnings)
-    ? response.warnings.filter((item) => typeof item === "string" && item.trim())
+    ? [...new Set(response.warnings.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()))].filter((item) => !base.includes(item))
     : [];
   if (warnings.length) parts.push(`提示：${warnings.join("；")}`);
-  if (response.completion_error && state.stageIndex !== 0) {
+  if (response.completion_error && state.stageIndex !== 0 && !parts.some((part) => part.includes(response.completion_error))) {
     parts.push(`这一步还差一点：${response.completion_error}`);
   }
   return parts.join("\n\n");

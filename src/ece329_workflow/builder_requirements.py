@@ -410,15 +410,8 @@ def _cross_field_validation_error(
             return "这项交付内容引用越界或参考副本不完整：" + str(exc) + "。请将必要内容复制到本字段，或提供带内容的内嵌参考；不要只保留包外路径。"
     if field == "numerical_model_specifications":
         numerical = values.get(field, "")
-        integrates = bool(re.search(r"RK4|龙格", numerical, re.I)) or any(
-            re.search(r"积分|trajectory", clause, re.I)
-            and not re.search(r"无需|不(?:进行|需要|使用|做)|无积分", clause)
-            for clause in re.split(r"[。；;\n]", numerical)
-        )
-        if integrates and not numerical_tolerance_defined(numerical):
-            return "数值积分给出了步长，但没有可检验的误差/收敛容差；步长和最大步数不能代替精度验收值。"
-        from .numerical_contract import biot_numerical_gap
-        gap = biot_numerical_gap(numerical)
+        from .numerical_contract import numerical_model_gap
+        gap = numerical_model_gap(numerical)
         if gap:
             return '数值算法还需明确：' + gap + '。'
     if field == "model_constants_and_media":
@@ -474,12 +467,8 @@ def _cross_field_validation_error(
 
 
 def numerical_tolerance_defined(value: str) -> bool:
-    """Recognize numeric error bounds, including percentages and comparisons."""
-    number = r"\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
-    return bool(re.search(
-        rf"(?:容差|误差(?:上限|阈值)|收敛(?:阈值|精度)|tolerance)[^。；;\n]{{0,45}}{number}|"
-        rf"(?:相对误差|绝对误差|位置偏差|偏差|误差)\s*(?:小于|不超过|低于|<=|<|≤)\s*{number}", value, re.I
-    ))
+    from .numerical_contract import numerical_tolerance_defined as defined
+    return defined(value)
 
 
 def _requirement_valid(

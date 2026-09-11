@@ -23,6 +23,7 @@ from .builder_requirements import (
 from .builder_defaults import (
     IMPLEMENTATION_DEFAULTS_FIELD,
     measurement_disables_probe,
+    measurement_disables_chart,
     measurement_is_qualitative_only,
 )
 from .builder_portability import (
@@ -31,6 +32,7 @@ from .builder_portability import (
 )
 from .models import DesignSession, InteractionState, Stage
 from .knowledge_base import KNOWLEDGE
+from .unity_blueprint import ROOM_ASSEMBLY_SOURCE, ROOM_LIGHTING_SOURCE, ROOM_LIGHTING_ASSET, ROOM_PREFAB_SOURCES
 from .reporting import (
     _formula_expression_for_report,
     _pdf_safe_formula_text,
@@ -633,6 +635,8 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 experiment_brief.get("formula_composition_strategy")
             ),
             "selected_methods": selected_methods,
+            **({'path_shape_options': list(emvr_design['field_state']['path_shape_options'])}
+               if emvr_design.get('field_state', {}).get('path_shape_options') else {}),
             "selected_pattern_ids": list(
                 experiment_brief.get("selected_experiment_pattern_ids", [])
             ),
@@ -705,12 +709,16 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("visualization.data_status", "theoretical_prediction; measured=false"),
         ],
         "environment": [
-            _field("environment.room_shell_strategy", "mandatory_approved_prefab", status="builder-policy-reference"),
+            _field("environment.room_shell_strategy", "mandatory_frozen_five_module_assembly", status="builder-policy-reference"),
             _field(
                 "environment.room_shell_source",
-                "ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab",
+                list(ROOM_PREFAB_SOURCES),
                 status="builder-policy-reference",
             ),
+            _field("environment.room_assembly_recipe", ROOM_ASSEMBLY_SOURCE, status="builder-policy-reference"),
+            _field("environment.room_module_counts", "Part 01 x2; Part 02 x2; Part 03 x1; 15 x 18 m; read-only linked prefabs", status="builder-policy-reference"),
+            _field("environment.lighting_recipe", ROOM_LIGHTING_SOURCE, status="builder-policy-reference"),
+            _field("environment.lighting_settings_asset", ROOM_LIGHTING_ASSET, status="builder-policy-reference"),
             _field("environment.room_placement_and_adaptation", builder_values["room_spatial_requirements"]),
             _field("environment.visual_style_reference", builder_values["room_spatial_requirements"]),
             _field("environment.lighting_requirement", builder_values["room_spatial_requirements"]),
@@ -743,7 +751,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             _field("scene.creation_mode", "new_scene", status="builder-policy-reference"),
             _field(
                 "scene.approved_asset_sources",
-                "ApprovedAssets/EMVRRoom/Prefabs/Room_Big_Part_01.prefab",
+                [*ROOM_PREFAB_SOURCES, ROOM_LIGHTING_ASSET],
                 status="builder-policy-reference",
             ),
             _field(
@@ -833,10 +841,10 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
     payload["value_semantics"] = [
         _field("value.required", "必需值缺失会阻止导出；0和false是有效值，不得当作空白。", status="export-invariant"),
         _field("value.runtime", "Unity版本与打开/编译/Play Mode状态由本机检查；PDF不伪造运行时数值。", status="builder-runtime-check"),
-        _field("value.numeric_morphology_axis", "not-applicable：本实验采用定性空间比较，没有数值形态纵轴或理论曲线。"
-               if measurement_is_qualitative_only(measurement_contract) else "见本文 measurement_specifications 的指标、算法和单位。",
-               status="not-applicable" if measurement_is_qualitative_only(measurement_contract) else "confirmed-from-design-session"),
-        _field("value.spatial_probe", "not-applicable：本实验不使用空间探针，无需填写探针坐标或局部场读数。"
+        _field("value.numeric_morphology_axis", "not-applicable：本实验不设置数值曲线或形态纵轴，保留测量契约定义的独立读数与快照。"
+               if measurement_disables_chart(measurement_contract) else "见本文 measurement_specifications 的指标、算法和单位。",
+               status="not-applicable" if measurement_disables_chart(measurement_contract) else "confirmed-from-design-session"),
+        _field("value.spatial_probe", "not-applicable：本实验不使用可移动空间探针；固定采样位置和读数仍按测量契约实现。"
                if measurement_disables_probe(measurement_contract) else measurement_contract,
                status="not-applicable" if measurement_disables_probe(measurement_contract) else "confirmed-from-design-session"),
     ]
@@ -1054,8 +1062,8 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         )
     ):
         raise ValueError("Builder Gate 1 physics contract is incomplete")
-    from .numerical_contract import biot_numerical_gap, geometry_gap
-    numerical_gap = biot_numerical_gap(str(physics.get('numerical_model', '')))
+    from .numerical_contract import numerical_model_gap, geometry_gap
+    numerical_gap = numerical_model_gap(str(physics.get('numerical_model', '')), formula_ids)
     fixed_geometry_gap = geometry_gap(str(physics.get('input_parameter_contract', '')),
                                       str(physics.get('constants_and_media', '')) + '；' + str(physics.get('numerical_model', '')))
     if numerical_gap or fixed_geometry_gap:

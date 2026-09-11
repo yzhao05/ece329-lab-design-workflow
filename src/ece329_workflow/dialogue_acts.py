@@ -848,6 +848,7 @@ def apply_stage_field_updates(
                     current_value == value
                     or (
                         operation == "MERGE"
+                        and field != "numerical_model_specifications"
                         and value.replace(" ", "") in current_value.replace(" ", "")
                     )
                 )
@@ -873,6 +874,11 @@ def apply_stage_field_updates(
             explicitly_cleared.add(field)
         elif operation == "REPLACE" or not previous:
             next_value = value
+            explicitly_cleared.discard(field)
+            emvr_explicitly_cleared.discard(field)
+        elif field == "numerical_model_specifications" and session.interaction_state is InteractionState.EMVR_DIRECT:
+            from .numerical_updates import merge_numerical_contract
+            next_value = merge_numerical_contract(previous, value)
             explicitly_cleared.discard(field)
             emvr_explicitly_cleared.discard(field)
         elif signature and signature in known_signatures:

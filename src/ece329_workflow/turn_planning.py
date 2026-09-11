@@ -38,6 +38,11 @@ SERVICE_ACT_TYPES = frozenset(
 )
 
 FIELD_LABELS = {
+    "primary_course_concept_id": "主要课程主题",
+    "course_reference_ids": "课程讲义依据",
+    "primary_formula_ids": "核心公式",
+    "supporting_formula_ids": "辅助公式",
+    "path_shape_options": "路径形状选项",
     "research_object": "研究对象",
     "course_relationship": "课程关系",
     "learning_objective": "学习目标",
@@ -486,6 +491,10 @@ def student_change_notice(
         label = str(change.get("label") or "这项设计")
         old_value = _compact(change.get("before"))
         new_value = _compact(change.get("after"))
+        if interaction_state is InteractionState.EMVR_DIRECT:
+            from .emvr_catalog import display_catalog_value
+            old_value = display_catalog_value(change.get('field'), change.get('before')) or old_value
+            new_value = display_catalog_value(change.get('field'), change.get('after')) or new_value
         old_is_long = len(str(change.get("before") or "")) > 110
         new_is_long = len(str(change.get("after") or "")) > 110
         if interaction_state is InteractionState.EMVR_DIRECT:

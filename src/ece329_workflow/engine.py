@@ -526,6 +526,11 @@ _TRANSIENT_GUIDED_PAYLOAD_KEYS = {
 }
 
 _STUDENT_FIELD_LABELS = {
+    "primary_course_concept_id": "主要课程主题",
+    "course_reference_ids": "课程讲义依据",
+    "primary_formula_ids": "核心公式",
+    "supporting_formula_ids": "辅助公式",
+    "path_shape_options": "路径形状选项",
     "research_object": "研究对象",
     "course_relationship": "课程关系",
     "learning_objective": "学习目标",
@@ -691,7 +696,29 @@ def _explicit_emvr_contract_request(session, message, pending):
     def present(answer):
         return resolved_intent(UserIntent.UNCLEAR, confidence=1.0,
                                source="EMVR_STATE_PRESENTATION", resolved_value=answer)
+    if re.search(r'核心公式|主要公式|辅助公式|支撑公式', text) and has_positive_action(text, r'删除|去掉|改为|改成|放到|放在'):
+        from .emvr_catalog import recover_catalog_edits, visible_core_ids, display_catalog_value
+        if not recover_catalog_edits(session, text) and not re.search(r'[？?]|可以吗|能算', text):
+            names = display_catalog_value('primary_formula_ids', visible_core_ids(session)) or '尚无已显示公式'
+            return present('这次未能定位要修改的公式。当前核心公式为：' + names + '。请用公式名称指定对象；理论依据保持原值。')
     field = recoverable_pending_field(pending) if isinstance(pending, dict) else ''
+    if field in {'parameter_specifications', 'model_constants_and_media', 'numerical_model_specifications'}:
+        explicit_replace = bool(re.match(r'(?:整体替换|全部替换|完整替换|用以下完整方案替换)\s*[:：]', text))
+        content = re.sub(r'^(?:整体替换|全部替换|完整替换|用以下完整方案替换)\s*[:：]\s*', '', text)
+        numeric_supplement = (field == 'numerical_model_specifications'
+            and re.match(r'(?:补充|源路径|源积分|分段数|求积规则|种子|计算算法|数值算法|算法[：:]|误差|收敛|容差|偏差|边界|最大步数)', content)
+            and re.search(r'\d|中点|梯形|辛普森|Simpson|高斯求积|零场', content, re.I))
+        if (not _looks_like_student_question(content)
+                and not re.search(r'[？?]|给我|参考|建议|不要|能否|可以吗|是否|够吗|合适吗|对吗|行吗', content)
+                and (numeric_supplement or builder_requirement_value_is_valid(field, content))):
+            other_edits = _explicit_emvr_edit_intent(session, content, pending)
+            if other_edits and any(act.get('target') != field for act in other_edits.get('dialogue_acts', [])):
+                return None  # Let whole-turn reconciliation retain other requested edits.
+            return validate_resolved_intent(resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION, confidence=1.0, source='EMVR_CONTRACT_SUPPLEMENT',
+                dialogue_acts=[{'type':'MODIFY_STAGE_FIELD', 'target':field,
+                    'operation':'REPLACE' if explicit_replace or field != 'numerical_model_specifications' else 'MERGE',
+                    'content':content, 'confidence':1.0}], actions_authoritative=True), pending)
     if field == 'model_constants_and_media':
         gap = re.search(r'尚未定义([^；]+)；固定对象', str(pending.get('question') or ''))
         scalar = re.fullmatch(r'\s*(?P<number>[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(?P<unit>m|cm|mm|米|厘米|毫米|匝)?\s*[。.]?', text, re.I)
@@ -720,14 +747,6 @@ def _explicit_emvr_contract_request(session, message, pending):
                 UserIntent.ANSWER_CURRENT_QUESTION, confidence=1.0, source='EMVR_NUMBERED_REPORT_ANSWER',
                 dialogue_acts=[{'type':'ANSWER_PENDING_QUESTION', 'target':field, 'operation':'REPLACE',
                                 'content':questions, 'confidence':1.0}], actions_authoritative=True,
-            ), pending)
-    if field == 'numerical_model_specifications':
-        from .builder_requirements import numerical_tolerance_defined
-        if re.match(r"(?:补充|误差|收敛容差|容差|偏差)", text) and numerical_tolerance_defined(text) and not _looks_like_student_question(text):
-            return validate_resolved_intent(resolved_intent(
-                UserIntent.MODIFY_PREVIOUS_PROPOSAL, confidence=1.0, source="EMVR_NUMERICAL_SUPPLEMENT",
-                dialogue_acts=[{"type":"MODIFY_STAGE_FIELD", "target":field, "operation":"MERGE",
-                                "content":text, "confidence":1.0}], actions_authoritative=True,
             ), pending)
     indexed = re.search(r"(?:流程|步骤).{0,8}第\s*([0-9]+|[一二三四五六七八九十])\s*[条步项]", text)
     if not indexed and (field == 'procedure_steps' or session.current_stage is Stage.CONCEPTUAL_PROCEDURE):
@@ -792,6 +811,8 @@ def _explicit_emvr_edit_intent(
             or session.stage_outputs.get(Stage.THEORETICAL_FRAMEWORK.value, {}).get("stage_payload", {}).get("visual_only_elements", [])
         )
     edits = recover_explicit_emvr_edits(message, current)
+    from .emvr_catalog import recover_catalog_edits
+    edits.update(recover_catalog_edits(session, message))
     if not edits:
         return None
     acts = [
@@ -859,6 +880,10 @@ def _reconcile_explicit_emvr_edits(session, message, pending, intent):
         'observed_quantities': {'observations'},
     }
     replaced = targets | {alias for field in targets for alias in aliases.get(field, set())}
+    if targets & {'primary_course_concept_id', 'course_reference_ids'} and not re.search(r'[‘“\"]?课程关系[’”\"]?(?:改|换|替换)', message):
+        replaced.add('course_relationship')
+    if targets & {'primary_formula_ids', 'supporting_formula_ids'} and not re.search(r'理论依据(?:改为|改成)', message):
+        replaced.update({'theoretical_framework', 'physical_mechanism'})
     # The current learning-objective prompt must not steal an explicitly named
     # earlier interaction edit. Separately named objective edits still survive.
     if 'required_behaviors' in targets and not re.search('目标', message):
@@ -2606,8 +2631,11 @@ def _prepare_emvr_stage_output(
     session: DesignSession,
     stage: Stage,
     output: StepOutput,
+    turn_intent: dict[str, Any] | None = None,
 ) -> None:
     """Make the stage artifact visible and wait for a contextual decision."""
+    from .emvr_catalog import project_catalog
+    project_catalog(session, stage, output.stage_payload)
 
     # The report payload is a view of canonical state, not a second source of
     # truth.  In particular, a model may describe Stage 1 with a broad course
@@ -2668,7 +2696,9 @@ def _prepare_emvr_stage_output(
     stage_seen_before = isinstance(
         previous_stage_payload.get("emvr_report_section"), dict
     )
-    resolved = session.turn_context.get("resolved_intent", {})
+    # Generation clears its temporary context before this projection runs.
+    # Pass the resolved turn explicitly so edits do not appear as empty replies.
+    resolved = turn_intent if turn_intent is not None else session.turn_context.get("resolved_intent", {})
     semantic_updates = (
         resolved.get("semantic_updates", {}) if isinstance(resolved, dict) else {}
     )
@@ -2730,6 +2760,19 @@ def _prepare_emvr_stage_output(
         output.assistant_message = ""
     else:
         output.assistant_message = f"{lead}\n\n{output.assistant_message.strip()}"
+
+    if touched_fields and touched_fields <= {'parameter_specifications', 'model_constants_and_media', 'numerical_model_specifications'}:
+        labels = {
+            'parameter_specifications': '参数范围、控件和默认值',
+            'model_constants_and_media': '常量、介质和固定输入',
+            'numerical_model_specifications': '数值方案',
+        }
+        updated = [labels[field] for field in labels if field in touched_fields]
+        if updated:
+            output.assistant_message = '已保存本次填写的' + '、'.join(updated) + '。'
+            if any(act.get('target') == 'numerical_model_specifications' and act.get('operation') == 'MERGE'
+                   for act in resolved.get('dialogue_acts', [])):
+                output.assistant_message += '本轮只补充数值契约，前面已填写的内容继续保留。'
 
     if stage is Stage.IDEA_BRAINSTORMING:
         readiness = emvr_stage_one_readiness(
@@ -2794,7 +2837,7 @@ def _prepare_emvr_stage_output(
         default_option_id = str(requirement.get("default_option_id") or "").strip()
         requirement_message = (
             f"这部分还需要明确{requirement['label']}，确认后才会进入 Builder 交接文档。"
-            + (f" {validation_error}" if validation_error else "")
+            + (f" {task}" if validation_error else "")
             + _default_proposal_text(session, default_value)
         )
         output.assistant_message = (
@@ -3635,6 +3678,14 @@ class WorkflowEngine:
         message: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = hydrate_pending_action_from_history(session)
+        if (session.interaction_state is InteractionState.EMVR_DIRECT
+                and '参考' in message and re.search(r'无关|不相关|不对应|问的是|补齐研究问题', message)
+                and not re.search(r'改为|改回|改成|替换|删除|新增|只保留|设为|就写', message)
+                and isinstance(pending, dict)):
+            return validate_resolved_intent(resolved_intent(
+                UserIntent.REQUEST_MORE_EXAMPLES, confidence=1.0, source='EMVR_REFERENCE_CORRECTION',
+                dialogue_acts=[{'type':'REQUEST_REFERENCE', 'target':recoverable_pending_field(pending),
+                               'content':message, 'confidence':1.0}], actions_authoritative=True), pending), pending
         if session.interaction_state is InteractionState.EMVR_DIRECT and _compact_control_text(message) in {
             '继续回答剩余问题', '回答剩余问题', '继续回答未完成的问题',
         }:
@@ -3693,8 +3744,7 @@ class WorkflowEngine:
             session.interaction_state is InteractionState.EMVR_DIRECT
             and isinstance(pending, dict)
             and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
-            and compact_control
-            in {
+            and (compact_control in {
                 "给个参考",
                 "给我个参考",
                 "给我一个参考",
@@ -3706,9 +3756,13 @@ class WorkflowEngine:
                 "请提供参考",
                 "给个例子",
                 "请给个例子",
-            }
+            } or re.fullmatch(
+                r'(?:请|麻烦)?(?:再)?(?:给我?|提供|来)(?:一?[个份条]|几[个份条])?'
+                r'(?:(?:完整|具体|详细|专业|可直接采用)的?)?(?:参考(?:方案|答案)?|例子|示例)(?:吧|好吗|可以吗|吗)?',
+                compact_control))
         ):
-            # This exact control request cannot be meaningful field content.
+            # A pure reference request, including qualifiers such as 完整的,
+            # cannot be meaningful field content. Do not consume mixed edits.
             # Resolve it locally so a temporary semantic-parser failure does
             # not turn the help request into another clarification loop.
             return (
@@ -5430,7 +5484,7 @@ class WorkflowEngine:
                 recoverable_pending_field(pending_action)
                 if isinstance(pending_action, dict) else ""
             )
-            if expected_reference_field in BUILDER_REQUIREMENT_FIELDS:
+            if expected_reference_field in BUILDER_REQUIREMENT_FIELDS or expected_reference_field == 'research_question':
                 draft = reference_payload.get("reference_draft", {})
                 scaffold = reference_payload.get("reference_scaffold", {})
                 bound_field = (
@@ -5522,6 +5576,20 @@ class WorkflowEngine:
                             f"可直接采用的参考草稿：{draft_value}\n"
                             "回复“继续”即可采用，也可以直接改写。"
                         )
+            if (isinstance(pending_action, dict)
+                    and recoverable_pending_field(pending_action) == 'numerical_model_specifications'):
+                from .builder_requirements import builder_requirement_values, _cross_field_validation_error
+                from .numerical_contract import numerical_model_gap
+                from .emvr_catalog import selection
+                draft = output.stage_payload.get('reference_draft')
+                candidate = str(draft.get('value') or '') if isinstance(draft, dict) else ''
+                values = {**builder_requirement_values(session), 'numerical_model_specifications': candidate}
+                if (not builder_requirement_value_is_valid('numerical_model_specifications', candidate)
+                        or numerical_model_gap(candidate, selection(session.design_context.get('emvr_design', {}), 'primary'))
+                        or _cross_field_validation_error(session, 'numerical_model_specifications', values)):
+                    # Online drafts must pass the same checks as submitted
+                    # answers; otherwise adoption would reopen the same gap.
+                    output = _emvr_reference_output(session)
             output.stage_payload["reference_only"] = True
             output.stage_payload["preserve_pending_action"] = True
             if isinstance(pending_action, dict):
@@ -5815,7 +5883,7 @@ class WorkflowEngine:
                 output.stage_payload.pop("student_value_and_limit_notes", None)
             _reconcile_guided_stage_readiness(session, handled_stage, output)
             if session.interaction_state is InteractionState.EMVR_DIRECT:
-                _prepare_emvr_stage_output(session, handled_stage, output)
+                _prepare_emvr_stage_output(session, handled_stage, output, turn_intent)
                 # If the student tried to continue from an unanswered EMVR
                 # entry question, this generated draft is the requested
                 # professional reference. Keep the stage active for review
