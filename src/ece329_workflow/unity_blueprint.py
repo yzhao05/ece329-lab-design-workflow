@@ -20,7 +20,12 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "随后用labflow source-references校验清单和完整性，清单与来源均只读，不能手写或更改。"
             "路径相对builder_pack_root、不持久化机器绝对路径；缺依赖时列出缺项并停止当前构建。"
             "先检查.emvr-workspace.json与当前Lab状态；已有匹配工作区时恢复同一运行，不能重复初始化覆盖Brief或别的Lab。"
-            f"盲重建从主包执行 Tools/create_blind_run_pack.ps1 -LabId {lab_id}，"
+            "先区分原创新实验与用户明确要求的既有Lab盲重建：原创新实验在主包使用integrated-development，"
+            "不执行复制命令；不能因本文提供恢复说明而改为blind-rebuild。"
+            f"原创新Lab初始化调用python Tools/labflow/labflow.py new，显式传--lab-id {lab_id} "
+            f"--mode integrated-development --scene Assets/Scenes/{lab_id}.unity；"
+            "--title与--domain分别取本文Lab identity中已确认的标题和领域。工具默认mode为blind-rebuild，不能省略--mode。"
+            f"仅用户明确要求盲重建既有Lab时从主包执行 Tools/create_blind_run_pack.ps1 -LabId {lab_id}，"
             f"仅使用包内RebuildWorkspaces/EMVR_Blind_Rebuild_{lab_id}；复制成功后打开该子包。"
             "工作区建立与labflow new初始化属于Gate 0前准备；已在匹配的子包中时不再复制。"
             "实际新Lab集成开发仅按包内integrated-development模式执行；逐Gate批准不由设计PDF代替。"
@@ -101,6 +106,19 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "场景生成器检查缺失引用、重复 ID、丢失脚本、缺房顶/地板/墙、摄像机及 EventSystem；"
             "失败时给出对象路径并停止保存成功标记，不能用 Find 循环等待引用出现。"
         ),
+        "initialization_and_readiness": (
+            "场景生成时先写入全部序列化引用及OBJ_*注册表；禁止依赖多个组件Awake的偶然执行顺序。"
+            "Awake只缓存自身引用，不推进步骤、不Capture；OnEnable只做可去重订阅，未初始化的回调不触发计算。"
+            "由唯一LabFlowController在Start或用户Start入口调用同一个幂等InitializeOnce："
+            "先校验Common服务与全部对象引用，再显式初始化领域模型、参数状态、可视化及Snapshot适配器，"
+            "最后按Initial契约回填控件并只重算一次；初始化完成前禁用参数、Capture与步骤完成操作。"
+            "InitializeOnce是待实现的领域入口名，不是Common现成API；Runner的TryStartLab仅在引用及领域初始化通过后调用一次。"
+            "使用INITIALIZING/READY/FAILED状态避免Start按钮与Unity Start同时重复启动；"
+            "所有等待都要有有限时限并给出缺失依赖，默认初始化等待上限10 s，不能在Update中反复Find或重新初始化。"
+            "OnDisable取消计算、解除订阅并使旧回调失效；再次启用按当前run代次恢复或明确重新开始，不能叠加监听。"
+            "验收覆盖首次启动、重复点击Start、对象禁用再启用、脚本域重载、缺失引用："
+            "分别核对一次初始计算、无重复对象/快照/步骤事件，以及失败可见且不会持续自动重试。"
+        ),
         "physical_coordinate_convention": (
             "纯模型采用右手SI坐标：+x向右、+y向上、+z朝向观察者；显示映射 P(x,y,z)=(x,y,-z)，"
             "场景位置=实验中心+s*P(物理位置-物理中心)，其中s为统一显示缩放；读回参数必须使用逆变换。"
@@ -123,11 +141,23 @@ def construction_defaults(lab_id: str) -> dict[str, str]:
             "离开显示边界或达到步数上限时终止；种子、步长和色标在比较组间保持一致。"
         ),
         "snapshot_schema": (
-            "每次显式 Capture 保存 lab_id、design_revision、step_id、snapshot_id、UTC 时间、"
+            "每次显式 Capture 保存 schema_version、run_id、lab_id、design_revision、step_id、snapshot_id、UTC 时间、"
             "完整 SI 参数、离散配置、全部 OBJ_* 状态及动态对象成员、输出/单位/有效性、比较标签与截图 ID。"
             "Restore 恢复最近快照并重算一次，不生成新快照；无快照时禁用 Restore。"
             "Reset 取消未完成计算，恢复 Initial 契约及基准步骤，按确认规则清理记录；"
             "Back 取消计算并退出 Lab；新一轮 Start 从 Initial 开始，避免跨轮重复监听与旧结果回流。"
+        ),
+        "snapshot_compatibility_and_restore": (
+            "快照附带公式模型版本、求解器/源离散/种子规则版本、坐标约定、比较变量键与受控条件。"
+            "Compare先核对同一lab_id、兼容schema及模型版本、相同输出物理量/单位和受控条件；"
+            "允许已确认的自变量及比较情形不同，不能要求全部参数相同而阻止实验对照。"
+            "设计修订号不同须核对上述语义兼容性，不凭编号直接混用；不同run_id按已确认记录保留规则处理。"
+            "Restore先在临时状态中校验版本、参数范围、有限数值、必需OBJ_*及动态对象成员，"
+            "通过后取消旧任务并以一次事务恢复；抑制控件回填事件，最后只发起一次重算。"
+            "缺对象、损坏或不兼容快照须列明原因并保留恢复前状态及记录，不部分覆盖、不自动重试。"
+            "若提交恢复时失败，回滚完整领域及对象状态；重算的旧revision结果不能写回。"
+            "验收包括允许自变量不同的两张有效快照、受控条件冲突、旧schema、缺失对象、恢复中异常，"
+            "分别检查比较可达、错误可见、状态无部分写入和重算次数。"
         ),
         "common_adapter_contract": (
             "核对包内 UnityProject/LocalPackages/com.emvr.lab-common/Runtime/SceneFlow/EmVrLabContractRunner.cs "
@@ -186,9 +216,11 @@ CONSTRUCTION_LABELS = (
     ("room_and_coordinates", "房间、坐标和界面布局"),
     ("room_assembly_and_lighting", "完整房间复用与照明验收"),
     ("reference_and_event_checks", "对象引用与事件检查"),
+    ("initialization_and_readiness", "初始化顺序与就绪门控"),
     ("physical_coordinate_convention", "物理坐标、方向与显示变换"),
     ("solver_and_termination", "计算契约与终止条件"),
     ("snapshot_schema", "快照数据与生命周期"),
+    ("snapshot_compatibility_and_restore", "快照兼容性与恢复失败处理"),
     ("common_adapter_contract", "Common实际接口与领域适配边界"),
     ("bounded_solver_work_units", "嵌套计算预算与可恢复执行"),
     ("verification_recipe", "从零构建验证步骤"),

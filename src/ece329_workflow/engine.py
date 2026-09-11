@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
+import sqlite3
 import uuid
-from copy import deepcopy
+from copy import copy, deepcopy
 from difflib import SequenceMatcher
 from threading import RLock
 from typing import Any
@@ -106,6 +108,7 @@ from .models import (
     TurnRequest,
     SessionConflict,
     WorkflowStatus,
+    WorkflowError,
 )
 from .prompts import build_prompt_packet
 from .openai_generator import generator_from_environment
@@ -140,6 +143,14 @@ from .stages import (
 )
 from .store import SessionStore, store_from_environment
 from .meta_dialogue import meta_question_kinds, meta_question_output
+from .feedback import (
+    feedback_only, feedback_output, guidance as feedback_guidance,
+    remember_answer, inspect_pending, restore_committed_fields,
+    question_task_evidence, audit_task_plan, source_stamp,
+    record_event,
+    reconcile_meta_requests,
+    blocked_repeat,
+)
 from .turn_planning import (
     compute_design_diff,
     finalize_turn_task_plan,
@@ -189,6 +200,11 @@ def _turn_request_fingerprint(request: TurnRequest) -> str:
         "selected_option_id": request.selected_option_id,
         "version_request": request.version_request,
     }
+    # Preserve fingerprints of old clients that did not submit a model.
+    if request.model is not None:
+        payload['model'] = request.model
+    if request.model_config is not None:
+        payload['model_config'] = request.model_config
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -225,6 +241,12 @@ def _cache_turn_response(
     request: TurnRequest,
     response: dict[str, Any],
 ) -> None:
+    response['selected_model'] = session.model_context.get('selected_model')
+    response['model_config'] = deepcopy(session.model_context.get('model_config'))
+    response['model_config_version'] = session.model_context.get('model_config_version', 0)
+    from .telemetry import CURRENT_TRACE
+    if (trace := CURRENT_TRACE.get()) is not None:
+        response['telemetry_id'] = trace.data['id']
     if not request.turn_id:
         return
     cache = session.model_context.setdefault("turn_idempotency", [])
@@ -1342,6 +1364,11 @@ def _generate_question_response(
     """Answer the requested questions against committed state, without a draft."""
 
     separated = [part.strip() for q in questions for part in re.split(r'(?<=[？?])\s*', q) if part.strip()]
+    if len(separated) == 1 and (kinds := meta_question_kinds(separated[0])):
+        meta = meta_question_output(session, kinds)
+        return StepOutput(assistant_message=meta["assistant_message"], stage_payload={
+            "preserve_pending_action": True, "answered_student_questions": separated,
+        })
     if len(separated) > 1:
         replies = []
         pending_questions = separated[16:]
@@ -1350,7 +1377,11 @@ def _generate_question_response(
         # Match the dialogue action limit. Never turn one long message into
         # an unbounded sequence of model calls; retain overflow as unanswered.
         for question in separated[:16]:
-            result = _generate_question_response(generator, session, turn_context, [question])
+            try:
+                result = _generate_question_response(generator, session, turn_context, [question])
+            except WorkflowError:
+                result = StepOutput("这一项暂时未能回答，已保留待补答；其他已完成的回答仍然有效。",
+                                    stage_payload={"pending_student_questions": [question]})
             replies.append(f'{len(replies)+1}. {question}\n{result.assistant_message}')
             warnings.extend(result.warnings)
             if result.stage_payload.get('answered_student_questions'):
@@ -3665,6 +3696,84 @@ class WorkflowEngine:
         self.generator = generator or generator_from_environment()
         self.store = store or store_from_environment()
         self._session_locks = tuple(RLock() for _ in range(64))
+        self.experience_store = None
+        self._routing_metrics = {}
+        self._model_generator_lock = RLock()
+        self.project_id = 'default'
+        self._telemetry = {}
+
+    def _record_routing_metrics(self, info):
+        with self._model_generator_lock:
+            for key in ('api_successes', 'api_failures', 'response_chain_resets', 'output_rejections',
+                        'repair_successes', 'intent_api_successes', 'intent_api_failures', 'intent_repair_successes', 'fallback_calls'):
+                self._routing_metrics[key] = self._routing_metrics.get(key, 0) + info.get(key, 0)
+            if info.get('last_fallback_reason'):
+                self._routing_metrics['last_fallback_reason'] = info['last_fallback_reason']
+
+    def model_configuration(self, design_id=None):
+        from .model_routing import ModelRouter
+        router = ModelRouter(self.generator)
+        if design_id is None:
+            return router.public()
+        session = self.store.get(design_id)
+        config = session.model_context.get('model_config')
+        if config is None:
+            config = router.defaults()
+            from .model_selection import primary_generator
+            if session.model_context.get('selected_model') and primary_generator(self.generator) is not None:
+                config.update(strategy='custom', model_override=session.model_context['selected_model'])
+        return {'config': deepcopy(config),
+                'version': session.model_context.get('model_config_version', 0)}
+
+    def update_model_configuration(self, design_id, config, version):
+        from .model_routing import ModelRouter
+        validated = ModelRouter(self.generator).validate(config)
+        with self._lock_for_design(design_id):
+            session = self.store.get(design_id)
+            if type(version) is not int or version != session.model_context.get('model_config_version', 0):
+                raise SessionConflict('Model configuration changed; reload before saving')
+            session.model_context['model_config'] = validated
+            session.model_context['model_config_version'] = version + 1
+            self.store.save(session, expected_revision=session.revision)
+            return {'config': validated, 'version': version + 1}
+
+    def telemetry_records(self, design_id, offset=0):
+        if type(offset) is not int or not 0 <= offset <= 100000:
+            raise ValueError('Invalid telemetry offset')
+        self.store.get(design_id)
+        if self.experience_store is not None:
+            return self.experience_store.telemetry(design_id, offset)
+        with self._model_generator_lock:
+            return [deepcopy(row) for row in reversed(list(self._telemetry.values())) if row['design_id'] == design_id][offset:offset + 100]
+
+    def available_models(self):
+        from .model_selection import catalogue
+        return catalogue(self.generator)
+
+    def _attach_experiences(self, session, message):
+        if not session.model_context.get('model_config', {}).get('experience_enabled', True):
+            session.turn_context['experience_rules'] = []
+            self._refresh_experience_chain(session, enabled=False)
+            return
+        if self.experience_store is not None:
+            from .feedback import categories
+            try:
+                session.turn_context['experience_rules'] = self.experience_store.retrieve(
+                    session.interaction_state.value, session.current_stage.value, message, categories(message),
+                    design_id=session.design_id, project_id=self.project_id,
+                    topic=str(session.design_context.get('idea', {}).get('original', ''))[:500])
+            except (sqlite3.Error, OSError, ValueError):
+                session.turn_context['experience_rules'] = []
+                logging.getLogger(__name__).warning('Experience retrieval unavailable; using curated guidance')
+            self._refresh_experience_chain(session, enabled=True)
+
+    @staticmethod
+    def _refresh_experience_chain(session, *, enabled):
+        signature = [enabled, [[r['id'], r.get('version')] for r in session.turn_context.get('experience_rules', [])]]
+        old = session.model_context.get('experience_signature')
+        if old != signature and (old is not None or signature[1] or not enabled):
+            session.model_context.pop('openai_previous_response_id', None)
+        session.model_context['experience_signature'] = signature
 
     def _emvr_formula_first_enabled(self) -> bool:
         """Enable the formula flow only with a semantic topic resolver."""
@@ -4268,11 +4377,17 @@ class WorkflowEngine:
         self,
         idea: str,
         interaction_state: InteractionState | str | None = None,
+        model: str | None = None,
+        model_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(idea, str):
             raise ValueError("idea must be a string")
         if not idea.strip():
             raise ValueError("idea must not be empty")
+        from .model_selection import validate_model
+        selected_model = validate_model(self.generator, model)
+        from .model_routing import ModelRouter
+        config = ModelRouter(self.generator).validate({} if model_config is None else model_config)
         requested_state = self._coerce_state(interaction_state)
         # Structured API/UI state remains authoritative except for the single
         # public shortcut requested by the product: any safe message that
@@ -4306,6 +4421,9 @@ class WorkflowEngine:
         session.model_context["resume_token_hash"] = hashlib.sha256(
             resume_token.encode("utf-8")
         ).hexdigest()
+        if selected_model is not None:
+            session.model_context['selected_model'] = selected_model
+        session.model_context['model_config'] = config
         if (
             state is InteractionState.EMVR_DIRECT
             and self._emvr_formula_first_enabled()
@@ -4314,7 +4432,7 @@ class WorkflowEngine:
         self.store.save(session)
         result = self.process_turn(
             session.design_id,
-            TurnRequest(message=idea.strip()),
+            TurnRequest(message=idea.strip(), model=model, model_config=model_config),
         )
         result["design_access_token"] = access_token
         result["design_resume_token"] = resume_token
@@ -4326,7 +4444,74 @@ class WorkflowEngine:
         request: TurnRequest | dict[str, Any],
     ) -> dict[str, Any]:
         with self._lock_for_design(design_id):
-            return self._process_turn_locked(design_id, request)
+            from .model_selection import validate_model, primary_generator
+            from .model_routing import ModelRouter, RoutedGenerator
+            from .telemetry import TurnTrace, CURRENT_TRACE
+            if isinstance(request, dict):
+                request = self._request_from_dict(request)
+            if not isinstance(request, TurnRequest):
+                raise ValueError('turn request must be an object')
+            request.turn_id = _validated_turn_id(request.turn_id)
+            session = self.store.get(design_id)
+            cached = _cached_turn_response(session, request)
+            if cached is not None:
+                return cached
+            router = ModelRouter(self.generator)
+            raw = request.model_config if request.model_config is not None else session.model_context.get('model_config')
+            if raw is None:
+                raw = {**router.defaults(), 'strategy': 'custom',
+                       'model_override': session.model_context.get('selected_model')}
+            if not isinstance(raw, dict):
+                raise ValueError('model_config must be an object')
+            raw = deepcopy(raw)
+            if primary_generator(self.generator) is None and request.model is None and request.model_config is None:
+                raw['model_override'] = None
+            if request.model is not None:
+                validate_model(self.generator, request.model)
+                raw.update(strategy='custom', model_override=request.model)
+            config = router.validate(raw)
+            if config.get('adaptive_enabled'):
+                try:
+                    seen = {}
+                    for row in self.telemetry_records(design_id):
+                        for event in reversed(row.get('stages', [])):
+                            if event.get('phase') != 'generate':
+                                continue
+                            stage = event['stage']
+                            values = seen.setdefault(stage, [])
+                            if len(values) < 5:
+                                values.append(event.get('validator_pass') is False or bool(event.get('adaptive_escalation')))
+                    router.failure_counts = {stage: sum(values) for stage, values in seen.items()}
+                except (sqlite3.Error, OSError):
+                    logging.getLogger(__name__).warning('Adaptive history unavailable; using configured policy')
+            runner = copy(self)
+            runner.generator = RoutedGenerator(self.generator, router, config, session.current_stage.value, self._record_routing_metrics)
+            if 'model_config' in session.model_context or request.model_config is not None or request.model is not None:
+                runner._active_model_config = config
+            trace = TurnTrace(session, request)
+            trace.data['model_config'] = deepcopy(config)
+            token = CURRENT_TRACE.set(trace)
+            result = None
+            error = None
+            try:
+                result = runner._process_turn_locked(design_id, request)
+                return result
+            except Exception as exc:
+                error = exc
+                raise
+            finally:
+                record = trace.finish(result, error)
+                CURRENT_TRACE.reset(token)
+                try:
+                    if self.experience_store is not None:
+                        self.experience_store.record_telemetry(record)
+                    else:
+                        with self._model_generator_lock:
+                            self._telemetry[record['id']] = record
+                            while len(self._telemetry) > 1000:
+                                self._telemetry.pop(next(iter(self._telemetry)))
+                except (sqlite3.Error, OSError):
+                    logging.getLogger(__name__).warning('Telemetry persistence unavailable')
 
     def _process_turn_locked(
         self,
@@ -4334,14 +4519,42 @@ class WorkflowEngine:
         request: TurnRequest | dict[str, Any],
     ) -> dict[str, Any]:
         session = self.store.get(design_id)
+        if hasattr(self, '_active_model_config'):
+            config = deepcopy(self._active_model_config)
+            if session.model_context.get('model_config') != config:
+                session.model_context['model_config_version'] = session.model_context.get('model_config_version', 0) + 1
+            session.model_context['model_config'] = config
         if isinstance(request, dict):
             request = self._request_from_dict(request)
         if not isinstance(request, TurnRequest):
             raise ValueError("turn request must be an object")
+        if isinstance(request.message, str):
+            self._attach_experiences(session, request.message)
         request.turn_id = _validated_turn_id(request.turn_id)
         cached_response = _cached_turn_response(session, request)
         if cached_response is not None:
             return cached_response
+        from .model_selection import primary_generator
+        primary = primary_generator(self.generator)
+        if primary is not None:
+            if session.model_context.get('selected_model') != primary.model:
+                session.model_context.pop('openai_previous_response_id', None)
+            session.model_context['selected_model'] = primary.model
+        else:
+            session.model_context.pop('selected_model', None)
+            session.model_context.pop('openai_previous_response_id', None)
+        if (isinstance(request.message, str) and not request.context_patch
+                and request.version_request is None and request.selected_option_id is None
+                and request.interaction_state in (None, session.interaction_state)
+                and blocked_repeat(session, request.message)):
+            return self._respond_to_meta_question(session, request, [], feedback_kinds=["answered_pending"])
+        if (isinstance(request.message, str) and request.message.strip()
+                and not request.context_patch and request.version_request is None
+                and request.interaction_state in (None, session.interaction_state)
+                and preclassify_stage_one_input(request.message) != UNREASONABLE_REQUEST
+                and (feedback_kinds := feedback_only(request.message))
+                and not meta_question_kinds(request.message)):
+            return self._respond_to_meta_question(session, request, [], feedback_kinds=feedback_kinds)
         if (isinstance(request.message, str) and request.message.strip()
                 and not request.context_patch and request.version_request is None
                 and request.interaction_state in (None, session.interaction_state)
@@ -4393,6 +4606,8 @@ class WorkflowEngine:
                         f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
                     )
             response["turn_id"] = request.turn_id
+            _cache_turn_response(session, request, response)
+            self.store.save(session, expected_revision=session.revision)
             return response
         if not isinstance(request.message, str):
             raise ValueError("message must be a string")
@@ -4483,6 +4698,8 @@ class WorkflowEngine:
                 request,
                 message,
             )
+        if input_kind != UNREASONABLE_REQUEST:
+            reconcile_meta_requests(turn_intent, message)
         _prioritize_user_content_before_transition(
             turn_intent, message, session.interaction_state,
         )
@@ -5182,11 +5399,14 @@ class WorkflowEngine:
             ),
             source=("VERSION_CONTROL" if version_results else "STUDENT_TURN"),
         )
+        self._attach_experiences(session, message)
         turn_context: dict[str, Any] = {
             "selected_option_id": request.selected_option_id,
             "resolved_intent": deepcopy(turn_intent),
             "pending_action": deepcopy(pending_action),
             "carried_context": build_carried_context(session),
+            "feedback_guidance": feedback_guidance(session, message),
+            "experience_rules": deepcopy(session.turn_context.get('experience_rules', [])),
         }
         _persist_guided_stage_input(
             session,
@@ -5261,6 +5481,8 @@ class WorkflowEngine:
         # the pre-edit snapshot while the rule generator sees the new state.
         turn_context["carried_context"] = build_carried_context(session)
         session.turn_context = turn_context
+        feedback_committed = workflow_design_snapshot(session)
+        remember_answer(session, pending_action, turn_design_diff)
         if transitioned_from_stage is None:
             self._record_student_decision(
                 session,
@@ -6077,6 +6299,16 @@ class WorkflowEngine:
             if semantic_updates.get("unresolved_content") and not completed_response_types:
                 output.assistant_message = ""
         output.stage_payload["completed_response_types"] = sorted(completed_response_types)
+        repaired_fields = restore_committed_fields(session, feedback_committed, turn_intent, handled_stage)
+        if repaired_fields:
+            current_fields = workflow_design_snapshot(session)
+            repair_failed = any(current_fields.get(f) != feedback_committed.get(f) for f in repaired_fields)
+            output.stage_payload["feedback_state_repaired"] = not repair_failed
+            if repair_failed:
+                request_navigation_deferred = True
+                output.student_task = None
+                output.assistant_message = "本轮部分修改未能保持到最终输出，已暂停推进并保留现有记录。需要先核对修改结果。"
+                turn_design_diff = compute_design_diff(design_before_turn, current_fields, turn_intent.get("task_plan"))
         # Some valid turns are served by a reference/entry/recovery branch
         # rather than the ordinary generator branch above.  Reconcile the
         # final visible payload from committed canonical state in every route,
@@ -6234,6 +6466,11 @@ class WorkflowEngine:
             and output.stage_payload.get("preserve_pending_action") is not True
         ):
             save_pending_action(session, handled_stage, output)
+        if inspect_pending(session, output, permit_loop_guard=not bool(
+            student_questions or request_navigation_deferred or output.stage_payload.get("reference_only")
+            or output.stage_payload.get("request_rejected")
+        )):
+            request_navigation_deferred = True
         output.stage_payload["design_state"] = design_state_snapshot(session)
         output.stage_payload["stage_design_state"] = stage_design_state_snapshot(session)
         _persist_guided_stage_draft(session, handled_stage, output.stage_payload)
@@ -6252,6 +6489,7 @@ class WorkflowEngine:
                 "handled_stage": handled_stage.value,
                 "interaction_state": session.interaction_state.value,
                 "user_message": message,
+                "selected_model": session.model_context.get('selected_model'),
                 "selected_option_id": request.selected_option_id,
                 "resolved_intent": {
                     "intent": intent_name,
@@ -6336,7 +6574,9 @@ class WorkflowEngine:
             ),
             completed_response_types=set(output.stage_payload.get("completed_response_types", [])),
             navigation_deferred=request_navigation_deferred,
+            task_evidence=question_task_evidence(turn_intent.get("task_plan"), output.stage_payload),
         )
+        audit_task_plan(session, dialogue_state(session)["last_task_plan"], output.stage_payload)
 
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             task_report = build_emvr_task_report(session)
@@ -6418,18 +6658,67 @@ class WorkflowEngine:
 
     def _respond_to_meta_question(
         self, session: DesignSession, request: TurnRequest, kinds: list[str],
+        *, feedback_kinds: list[str] | None = None,
     ) -> dict[str, Any]:
         """Record a conversation-only turn without invoking design generation."""
         expected_revision = session.revision
-        output = meta_question_output(session, kinds)
+        output = (feedback_output(session, request.message, feedback_kinds)
+                  if feedback_kinds else meta_question_output(session, kinds))
+        feedback_details = output["stage_payload"].pop("feedback_details", {})
+        if feedback_kinds and "missed_requests" in feedback_kinds:
+            state = session.model_context.setdefault("feedback", {})
+            plan = state.get("last_tasks", {})
+            queued = state.setdefault("unanswered_tasks", [deepcopy(t) for t in plan.get("tasks", [])
+                if t.get("type") == "ASK_COURSE_QUESTION" and t.get("status") == "READY"])
+            tasks = [t for t in queued if t.get("type") == "ASK_COURSE_QUESTION"
+                     and t.get("status") == "READY" and isinstance(t.get("content"), str)]
+            source = source_stamp(session)["fingerprint"]
+            retried = state.setdefault("question_retries", [])
+            tasks = [t for t in tasks if f"{source}:{t['task_id']}" not in retried][:16]
+            if tasks:
+                retried.extend(f"{source}:{t['task_id']}" for t in tasks)
+                del retried[:-50]
+                try:
+                    answer = _generate_question_response(self.generator, session,
+                        {"carried_context": build_carried_context(session),
+                         "experience_rules": deepcopy(session.turn_context.get('experience_rules', []))},
+                        [t["content"] for t in tasks])
+                except WorkflowError:
+                    answer = StepOutput(assistant_message="补答服务暂时未能完成，已保留未答问题和现有设计。本次自动补答已停止。",
+                                        stage_payload={"pending_student_questions": [t["content"] for t in tasks]})
+                output["assistant_message"] = "\n\n".join([
+                    *[text for kind, text in feedback_details.items() if kind != "missed_requests"],
+                    answer.assistant_message,
+                ])
+                output["assumptions"].extend(answer.assumptions)
+                output["warnings"].extend(answer.warnings)
+                output["stage_payload"].update(answer.stage_payload)
+                evidence = question_task_evidence({"tasks": tasks}, answer.stage_payload)
+                for task in tasks:
+                    if evidence.get(task["task_id"]):
+                        task["status"] = "COMPLETED"
+                state["unanswered_tasks"] = [t for t in state.get("unanswered_tasks", []) if t.get("status") != "COMPLETED"]
+                completed_origins = {t.get("origin_task_id") for t in tasks if t.get("status") == "COMPLETED"}
+                remaining_origins = {t.get("origin_task_id") for t in state["unanswered_tasks"]}
+                for task in plan.get("tasks", []):
+                    if evidence.get(task["task_id"]) or task["task_id"] in completed_origins - remaining_origins:
+                        task["status"] = "COMPLETED"
+                plan["completed_task_count"] = sum(t.get("status") in {"APPLIED", "NO_CHANGE", "PRESERVED", "COMPLETED"}
+                                                   for t in plan.get("tasks", []))
+                plan["remaining_task_count"] = sum(t.get("status") in {"READY", "NEEDS_CLARIFICATION", "BLOCKED"}
+                                                   for t in plan.get("tasks", []))
+                dialogue_state(session)["last_task_plan"] = deepcopy(plan)
+                record_event(session, "missed_requests", {"task_ids": [t["task_id"] for t in tasks]},
+                             outcome="repaired" if all(t["status"] == "COMPLETED" for t in tasks) else "needs_review")
         stage = session.current_stage
         session.revision += 1
         session.history.append({
             "revision": session.revision, "handled_stage": stage.value,
             "interaction_state": session.interaction_state.value,
             "user_message": request.message.strip(), "selected_option_id": request.selected_option_id,
+            "selected_model": session.model_context.get('selected_model'),
             "resolved_intent": {"intent": UserIntent.REQUEST_CURRENT_DESIGN_SUMMARY.value,
-                                "source": "WORKFLOW_META_QUESTION", "advance_requested": False},
+                                "source": "WORKFLOW_FEEDBACK" if feedback_kinds else "WORKFLOW_META_QUESTION", "advance_requested": False},
             "output": deepcopy(output),
         })
         response = {
@@ -6592,7 +6881,9 @@ class WorkflowEngine:
     def get_prompt_packet(self, design_id: str, user_message: str = "") -> dict[str, Any]:
         if not isinstance(user_message, str):
             raise ValueError("message must be a string")
-        return build_prompt_packet(self.store.get(design_id), user_message)
+        session = self.store.get(design_id)
+        self._attach_experiences(session, user_message)
+        return build_prompt_packet(session, user_message)
 
     def verify_design_token(self, design_id: str, token: str) -> bool:
         if not token:
@@ -6607,7 +6898,11 @@ class WorkflowEngine:
     def generator_info(self) -> dict[str, Any]:
         runtime_info = getattr(self.generator, "runtime_info", None)
         if callable(runtime_info):
-            return runtime_info()
+            info = runtime_info()
+            with self._model_generator_lock:
+                for key, value in self._routing_metrics.items():
+                    info[key] = info.get(key, 0) + value if isinstance(value, int) else value
+            return info
         return {
             "provider": "custom",
             "model": None,
@@ -6711,6 +7006,8 @@ class WorkflowEngine:
             selected_option_id=selected_option_id,
             turn_id=turn_id,
             version_request=version_request,
+            model=data.get('model'),
+            model_config=data.get('model_config'),
         )
 
     @staticmethod

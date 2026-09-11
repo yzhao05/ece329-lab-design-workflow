@@ -12,7 +12,7 @@ from .physics_blueprint import selected_physics_guidance
 
 
 IMPLEMENTATION_DEFAULTS_FIELD = "implementation_defaults"
-IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v7"
+IMPLEMENTATION_DEFAULTS_VERSION = "builder-ui-flow-v9"
 _IMPLEMENTATION_INPUT_FIELDS = frozenset(
     {
         "lab_title",

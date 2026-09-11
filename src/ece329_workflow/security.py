@@ -67,6 +67,8 @@ class APISettings:
     access_code: str = ""
     prompt_debug_enabled: bool = False
     prompt_debug_token: str = ""
+    feedback_admin_token: str = ""
+    project_id: str = 'default'
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "APISettings":
@@ -116,6 +118,8 @@ class APISettings:
             access_code=env.get("ECE329_ACCESS_CODE", "").strip(),
             prompt_debug_enabled=prompt_debug_enabled,
             prompt_debug_token=prompt_debug_token,
+            feedback_admin_token=env.get("ECE329_FEEDBACK_ADMIN_TOKEN", "").strip(),
+            project_id=env.get('ECE329_PROJECT_ID', 'default').strip() or 'default',
         )
 
     def allows_origin(self, origin: str) -> bool:

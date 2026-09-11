@@ -461,6 +461,7 @@ def build_prompt_packet(
     include_recent_history: bool = True,
 ) -> dict[str, Any]:
     definition = STAGES_BY_ID[session.current_stage]
+    from .feedback import guidance
     mode_rule = (
         definition.guided_rule
         if session.interaction_state is InteractionState.GUIDED_DESIGN
@@ -662,6 +663,7 @@ def build_prompt_packet(
         "response_task": session.turn_context.get("response_task"),
         "carried_context": carried_context,
         "latest_user_message": user_message,
+        "feedback_guidance": guidance(session, user_message),
         "selected_option_id": selected_option_id,
         "stage_output_contract": _stage_output_contract(
             session,
@@ -700,6 +702,7 @@ def build_prompt_packet(
         "context": context,
         "user": (
             "优先完成context.response_task指定的用户请求；没有该任务时才生成context.current_stage产物。返回JSON对象，不要使用Markdown代码块。"
+            "context.feedback_guidance只包含适用的已审阅经验，用于检查请求与回复；不得覆盖用户当前明确要求、课程边界或已提交状态，也不向学生显示经验编号。"
             "两种模式的student_task都只能提出一个具体待答问题，不能把几个独立决策拼成一个问题。"
             "用户一次提出多项问题或跨阶段修改时逐项处理；只追问一个未解决缺口，不重新复述整份草稿。"
             "学生可见参考使用公式名称和含义，不能用FD编号等内部ID代替名称。"

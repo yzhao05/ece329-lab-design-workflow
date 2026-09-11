@@ -73,11 +73,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(self.index_html.count("v=20260824-unified-semantics"), 1)
         self.assertIn(
-            "assets/styles.css?v=20260828-quality-review",
+            "assets/styles.css?v=20260912-composer",
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260903-session-isolation",
+            "assets/app.js?v=20260912-conflict-recovery",
             self.index_html,
         )
 
@@ -423,7 +423,7 @@ class WebFrontendContractTests(unittest.TestCase):
                 ):
                     continue
                 key = node.args[0].value
-                if isinstance(key, str) and key.startswith(("ECE329_", "OPENAI_")):
+                if isinstance(key, str) and key.startswith(("ECE329_", "OPENAI_", "DEEPSEEK_")):
                     backend_keys.add(key)
 
         example_keys = {

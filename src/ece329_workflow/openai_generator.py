@@ -301,16 +301,18 @@ class ResponsesTransport(Protocol):
 class OpenAIResponsesHTTPTransport:
     """Minimal Responses API transport with no third-party dependency."""
 
-    def __init__(self, api_key: str, timeout_seconds: float = 45.0) -> None:
+    def __init__(self, api_key: str, timeout_seconds: float = 45.0, *, endpoint: str = RESPONSES_ENDPOINT, provider: str = 'OpenAI') -> None:
         if not api_key.strip():
             raise ModelConfigurationError("OPENAI_API_KEY is required")
         self._api_key = api_key.strip()
         self._timeout_seconds = timeout_seconds
+        self._endpoint = endpoint
+        self._provider = provider
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
-            RESPONSES_ENDPOINT,
+            self._endpoint,
             data=body,
             method="POST",
             headers={
@@ -336,16 +338,16 @@ class OpenAIResponsesHTTPTransport:
             raise ModelHTTPError(exc.code, error_code) from exc
         except URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise ModelTimeoutError("OpenAI Responses API timed out") from exc
+                raise ModelTimeoutError(f"{self._provider} API timed out") from exc
             raise ModelConnectionError(
-                "Unable to connect to the OpenAI Responses API"
+                f"Unable to connect to the {self._provider} API"
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise ModelTimeoutError("OpenAI Responses API timed out") from exc
+            raise ModelTimeoutError(f"{self._provider} API timed out") from exc
         except json.JSONDecodeError as exc:
-            raise ModelOutputError("OpenAI Responses API returned invalid JSON") from exc
+            raise ModelOutputError(f"{self._provider} API returned invalid JSON") from exc
         if not isinstance(result, dict):
-            raise ModelOutputError("OpenAI Responses API returned an unexpected payload")
+            raise ModelOutputError(f"{self._provider} API returned an unexpected payload")
         return result
 
 
@@ -1098,6 +1100,9 @@ def _parse_intent_response(
 
 
 def _extract_output_text(response: dict[str, Any]) -> str:
+    validator = getattr(response, 'validate_output', None)
+    if callable(validator):
+        validator()
     direct = response.get("output_text")
     if isinstance(direct, str) and direct.strip():
         return direct
@@ -2341,6 +2346,7 @@ class OpenAIStageGenerator:
     final_max_output_tokens: int = 5000
     stateful: bool = False
     repair_attempts: int = 1
+    allowed_models: tuple[str, ...] | None = None
     supports_emvr_formula_flow: bool = field(default=True, init=False, repr=False)
     _api_successes: int = field(default=0, init=False, repr=False)
     _api_failures: int = field(default=0, init=False, repr=False)
@@ -2363,7 +2369,16 @@ class OpenAIStageGenerator:
         same request contract.
         """
 
+        from .model_selection import configured_models, model_details
+        try:
+            self.allowed_models = configured_models(self.model, self.allowed_models)
+        except ValueError as exc:
+            raise ModelConfigurationError(str(exc)) from exc
         self.reasoning_effort = _reasoning_effort(self.reasoning_effort)
+        details = model_details(self.model, self.reasoning_effort)
+        self.reasoning_effort = details['reasoning']
+        if not details['stateful']:
+            self.stateful = False
         self.intent_max_output_tokens = _positive_int(
             self.intent_max_output_tokens,
             "OPENAI_INTENT_MAX_OUTPUT_TOKENS",
@@ -3198,6 +3213,7 @@ class OpenAIStageGenerator:
             "instructions": (
                 "你只负责把学生本轮消息拆成一个或多个可执行对话动作，不回答课程问题，也不决定阶段编号。"
                 "必须结合previous_question、pending_action、carried_context和user_message。"
+                "feedback_guidance是已审阅经验，仅辅助识别和检查本轮请求；不能覆盖用户当前要求或已提交状态，不能把反馈文字写入实验字段。"
                 "dialogue_acts_json必须是JSON序列化数组；它是主要输出。不要假设学生只会按"
                 "previous_question预设的格式回答。同一句可以同时包含：回答当前问题、补充或修改"
                 "其他设计字段、修改基础比较、提出课程问题、索取参考或总结、纠正助手理解，以及"
@@ -4815,16 +4831,19 @@ class OpenAIStageGenerator:
         packet = build_prompt_packet(
             session,
             user_message,
-            include_recent_history=not self.stateful,
+            include_recent_history=(not self.stateful or not session.model_context.get('openai_previous_response_id')),
         )
-        input_text = (
-            f"{packet['user']}\n\n"
-            "传输契约说明：把stage_payload对象序列化到stage_payload_json字符串中；"
-            "只有阶段10才把visualization对象序列化到visualization_json字符串中，"
-            "其他阶段visualization_json必须为null。\n\n"
-            "CONTEXT_JSON:\n"
-            f"{packet['serialized_context']}"
-        )
+        def input_for(prompt_packet: dict[str, Any]) -> str:
+            return (
+                f"{prompt_packet['user']}\n\n"
+                "传输契约说明：把stage_payload对象序列化到stage_payload_json字符串中；"
+                "只有阶段10才把visualization对象序列化到visualization_json字符串中，"
+                "其他阶段visualization_json必须为null。\n\n"
+                "CONTEXT_JSON:\n"
+                f"{prompt_packet['serialized_context']}"
+            )
+
+        input_text = input_for(packet)
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and session.current_stage is Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT
@@ -4884,6 +4903,8 @@ class OpenAIStageGenerator:
                 raise
             session.model_context.pop("openai_previous_response_id", None)
             request_payload.pop("previous_response_id", None)
+            packet = build_prompt_packet(session, user_message, include_recent_history=True)
+            request_payload["input"][0]["content"][0]["text"] = input_for(packet)
             with self._metrics_lock:
                 self._chain_resets += 1
             LOGGER.warning(
@@ -4909,6 +4930,10 @@ class OpenAIStageGenerator:
                 raise
             repair_payload = deepcopy(request_payload)
             repair_payload.pop("previous_response_id", None)
+            # Repair also starts a fresh remote chain; give it the same local
+            # history as HTTP chain recovery instead of losing answered context.
+            packet = build_prompt_packet(session, user_message, include_recent_history=True)
+            repair_payload["input"][0]["content"][0]["text"] = input_for(packet)
             repair_payload["input"][0]["content"].append(
                 {
                     "type": "input_text",
@@ -4952,9 +4977,11 @@ class OpenAIStageGenerator:
             intent_successes = self._intent_api_successes
             intent_failures = self._intent_api_failures
             intent_repair_successes = self._intent_repair_successes
+        from .model_selection import model_provider, model_details
         return {
-            "provider": "openai",
+            "provider": model_provider(self.model),
             "model": self.model,
+            "api_model": model_details(self.model)['api_model'],
             "reasoning_effort": self.reasoning_effort,
             "intent_max_output_tokens": self.intent_max_output_tokens,
             "fallback_enabled": False,
@@ -5036,6 +5063,7 @@ class FallbackStageGenerator:
                 type(exc).__name__,
             )
             output = self.fallback.generate(session, user_message)
+            output.warnings.append(f"所选模型 {self.primary.model} 暂未完成本轮回复，已使用本地规则恢复。")
             return output
 
     def runtime_info(self) -> dict[str, Any]:
@@ -5044,7 +5072,7 @@ class FallbackStageGenerator:
             fallback_calls = self._fallback_calls
             last_fallback_reason = self._last_fallback_reason
         return {
-            "provider": "openai",
+            "provider": primary_info['provider'],
             "model": self.primary.model,
             "reasoning_effort": self.primary.reasoning_effort,
             "intent_max_output_tokens": self.primary.intent_max_output_tokens,
@@ -5119,20 +5147,36 @@ def generator_from_environment(
 ) -> RuleBasedStageGenerator | OpenAIStageGenerator | FallbackStageGenerator:
     env = os.environ if environ is None else environ
     mode = env.get("ECE329_GENERATOR", "auto").strip().casefold()
-    if mode not in {"auto", "openai", "rule"}:
-        raise ModelConfigurationError("ECE329_GENERATOR must be auto, openai, or rule")
+    if mode not in {"auto", "openai", "deepseek", "rule"}:
+        raise ModelConfigurationError("ECE329_GENERATOR must be auto, openai, deepseek, or rule")
     if mode == "rule":
         return RuleBasedStageGenerator()
 
     api_key = env.get("OPENAI_API_KEY", "").strip()
-    if not api_key and transport is None:
-        if mode == "openai":
-            raise ModelConfigurationError(
-                "ECE329_GENERATOR=openai requires OPENAI_API_KEY"
-            )
+    deepseek_key = env.get('DEEPSEEK_API_KEY', '').strip()
+    if mode == 'openai' and not api_key and transport is None:
+        raise ModelConfigurationError('ECE329_GENERATOR=openai requires OPENAI_API_KEY')
+    if mode == 'deepseek' and not deepseek_key and transport is None:
+        raise ModelConfigurationError('ECE329_GENERATOR=deepseek requires DEEPSEEK_API_KEY')
+    if not api_key and not deepseek_key and transport is None:
         return RuleBasedStageGenerator()
 
-    model = env.get("OPENAI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    use_deepseek = mode == 'deepseek' or (mode == 'auto' and not api_key and deepseek_key and transport is None)
+    model = ((env.get('DEEPSEEK_MODEL', 'deepseek-flash').strip() or 'deepseek-flash') if use_deepseek
+             else (env.get("OPENAI_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL))
+    from .model_selection import configured_models, OPENAI_MODELS, DEEPSEEK_MODELS, model_provider
+    from .provider_transport import ProviderResponsesTransport, DeepSeekJSONTransport
+    if model_provider(model) != ('deepseek' if use_deepseek else 'openai'):
+        raise ModelConfigurationError('Default model must match the selected provider')
+    enabled = {'openai': bool(api_key) or (transport is not None and not use_deepseek),
+               'deepseek': bool(deepseek_key) or (transport is not None and use_deepseek)}
+    requested = (tuple(part.strip() for part in env['ECE329_ALLOWED_MODELS'].split(','))
+                 if env.get('ECE329_ALLOWED_MODELS', '').strip() else
+                 (*OPENAI_MODELS, *DEEPSEEK_MODELS, model))
+    try:
+        allowed = configured_models(model, tuple(m for m in requested if enabled[model_provider(m)]))
+    except ValueError as exc:
+        raise ModelConfigurationError(str(exc)) from exc
     reasoning_effort = _reasoning_effort(
         env.get("OPENAI_REASONING_EFFORT", "medium")
     )
@@ -5153,9 +5197,21 @@ def generator_from_environment(
         env.get("OPENAI_FINAL_MAX_OUTPUT_TOKENS", "5000"),
         "OPENAI_FINAL_MAX_OUTPUT_TOKENS",
     )
+    if transport is None:
+        deepseek_transport = None
+        if deepseek_key:
+            deepseek_budget = _positive_int(env.get('DEEPSEEK_MAX_OUTPUT_TOKENS', '8192'), 'DEEPSEEK_MAX_OUTPUT_TOKENS')
+            if deepseek_budget > 384000:
+                raise ModelConfigurationError('DEEPSEEK_MAX_OUTPUT_TOKENS must not exceed 384000')
+            deepseek_transport = DeepSeekJSONTransport(
+                deepseek_key, env.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
+                _positive_float(env.get('DEEPSEEK_TIMEOUT_SECONDS', '90'), 'DEEPSEEK_TIMEOUT_SECONDS'), deepseek_budget)
+        transport = ProviderResponsesTransport(
+            OpenAIResponsesHTTPTransport(api_key, timeout) if api_key else None, deepseek_transport)
     primary = OpenAIStageGenerator(
-        transport=transport or OpenAIResponsesHTTPTransport(api_key, timeout),
+        transport=transport,
         model=model,
+        allowed_models=allowed,
         reasoning_effort=reasoning_effort,
         intent_max_output_tokens=intent_max_tokens,
         max_output_tokens=max_tokens,

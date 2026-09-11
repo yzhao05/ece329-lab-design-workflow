@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from ece329_workflow.builder_input import _field, _text, render_builder_review_pdf, _student_task_contracts
+from ece329_workflow.builder_input import _field, _text, render_builder_review_pdf, _student_task_contracts, _contract_parts
 from ece329_workflow.builder_portability import (
     PACK_NAME, ROOT_DISCOVERY, embed_supplied_references,
     resolve_local_builder_pack, validate_portable_content,
@@ -65,6 +65,17 @@ def test_discovery_requires_real_pack_sentinels(portable_workspace):
     root.mkdir()
     with pytest.raises(ValueError):
         resolve_local_builder_pack(root)
+
+
+@pytest.mark.parametrize('offset', [881, 894, 900, 905, 1800])
+def test_contract_pagination_never_detaches_relative_path_root(offset):
+    content = '说明。' * (offset // 3) + ' ' * (offset % 3) + 'Assets/Scenes/example.unity；本 PDF 内嵌参考 REF_01。'
+    parts = _contract_parts(content)
+    assert ''.join(parts) == content
+    assert any('Assets/Scenes/example.unity' in part for part in parts)
+    validate_portable_content(parts)
+    with pytest.raises(ValueError):
+        validate_portable_content(_contract_parts(content + ' ../outside.txt'))
 
 
 @pytest.mark.parametrize("value", [

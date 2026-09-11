@@ -230,6 +230,9 @@ const dom = {
   quickActions: document.querySelector("#quickActions"),
   chatForm: document.querySelector("#chatForm"),
   chatInput: document.querySelector("#chatInput"),
+  modelSelect: document.querySelector("#modelSelect"),
+  modelHelp: document.querySelector("#modelHelp"),
+  refreshModels: document.querySelector("#refreshModels"),
   sendButton: document.querySelector("#sendButton"),
   evidenceContent: document.querySelector("#evidenceContent"),
   designNotes: document.querySelector("#designNotes"),
@@ -270,6 +273,10 @@ let lastConnectionError = null;
 let replayingPendingRequest = false;
 let designGeneration = 0;
 const activeRequestControllers = new Set();
+let modelCatalog = { enabled: false, default_model: null, models: [] };
+let modelCatalogMessage = "正在加载模型…";
+let modelCatalogRequest = 0;
+let routingCatalog = null;
 
 function initialState() {
   return {
@@ -277,6 +284,7 @@ function initialState() {
     sessionKind: null,
     stageIndex: 0,
     mode: "GUIDED_DESIGN",
+    selectedModel: null,
     messages: [
       {
         id: crypto.randomUUID(),
@@ -314,6 +322,8 @@ function initialState() {
     guidedExportReady: false,
     guidedExportUrl: null,
     pendingRequest: null,
+    modelConfig: null,
+    modelConfigVersion: 0,
   };
 }
 
@@ -342,6 +352,7 @@ function saveState() {
 
 function invalidateDesignRequests() {
   designGeneration += 1;
+  window.dispatchEvent(new Event("ece329:design-changed"));
   for (const controller of activeRequestControllers) controller.abort();
   activeRequestControllers.clear();
   typingMessageId = null;
@@ -577,6 +588,8 @@ async function checkConnection() {
     setConnectionState("demo", "本地示例 · 课程服务未连接");
     lastConnectionError = null;
     dom.offlineNotice.hidden = false;
+    modelCatalogMessage = "本地示例不调用在线模型。";
+    renderModelSelection();
     return;
   }
   try {
@@ -584,13 +597,115 @@ async function checkConnection() {
     lastConnectionError = null;
     setConnectionState("online", "课程服务已连接");
     dom.offlineNotice.hidden = true;
+    await loadModelCatalog();
   } catch (error) {
     lastConnectionError = error;
     setConnectionState("error", "课程服务连接失败");
     dom.offlineNotice.hidden = false;
     dom.offlineNotice.querySelector("strong").textContent = "离线模式";
-    dom.offlineNotice.querySelector("span").textContent = "无法连接课程服务，暂时使用本地示例回答。";
+    dom.offlineNotice.querySelector("span").textContent = "无法连接课程服务，请检查服务地址或稍后重试。已保存的对话仍可查看。";
   }
+}
+
+async function loadModelCatalog() {
+  const requestId = ++modelCatalogRequest;
+  const generation = designGeneration;
+  if (!apiBase()) return;
+  dom.refreshModels.disabled = true;
+  try {
+    const catalogue = await apiRequest("/v1/models", { method: "GET" });
+    if (requestId !== modelCatalogRequest || generation !== designGeneration) return;
+    if (!Array.isArray(catalogue.models) || typeof catalogue.enabled !== "boolean"
+        || catalogue.models.some(item => typeof item.id !== "string" || typeof item.label !== "string")
+        || (catalogue.enabled && !catalogue.models.some(item => item.id === catalogue.default_model))) {
+      throw new Error("模型列表格式无效");
+    }
+    modelCatalog = catalogue;
+    routingCatalog = catalogue.routing || null;
+    if (routingCatalog?.enabled && !state.modelConfig) {
+      state.modelConfig = structuredClone(routingCatalog.defaults);
+      if (state.designId && state.selectedModel) Object.assign(state.modelConfig, {strategy: 'custom', model_override: state.selectedModel});
+    }
+    if (!catalogue.enabled && !state.pendingRequest) state.selectedModel = null;
+    if (!state.selectedModel && catalogue.enabled) state.selectedModel = catalogue.default_model;
+    modelCatalogMessage = catalogue.enabled ? "切换后从下一条消息生效。" : "后端当前使用本地规则，尚未启用在线模型。";
+    saveState();
+  } catch (error) {
+    if (requestId !== modelCatalogRequest || generation !== designGeneration) return;
+    modelCatalog = { enabled: false, default_model: null, models: [] };
+    routingCatalog = null;
+    modelCatalogMessage = "模型列表不可用，请刷新列表或检查后端是否已更新。";
+  } finally {
+    if (requestId === modelCatalogRequest) {
+      dom.refreshModels.disabled = !apiBase() || dom.sendButton.disabled;
+      renderModelSelection();
+    }
+  }
+}
+
+function renderModelSelection() {
+  window.renderModelStrategy?.();
+  const select = dom.modelSelect;
+  select.replaceChildren();
+  for (const item of modelCatalog.models) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = item.label;
+    select.append(option);
+  }
+  const unavailable = state.selectedModel && modelCatalog.enabled && !modelCatalog.models.some(item => item.id === state.selectedModel);
+  if (!modelCatalog.enabled || unavailable) {
+    const option = document.createElement("option");
+    option.value = unavailable ? state.selectedModel : "";
+    option.textContent = unavailable ? `${state.selectedModel}（已停用，请重新选择）` : "在线模型不可选";
+    option.disabled = Boolean(unavailable);
+    select.append(option);
+  }
+  select.value = modelCatalog.enabled ? state.selectedModel || modelCatalog.default_model : "";
+  select.disabled = !modelCatalog.enabled || dom.sendButton.disabled;
+  dom.refreshModels.disabled = !apiBase() || dom.sendButton.disabled;
+  const selectedEntry = modelCatalog.models.find(item => item.id === state.selectedModel);
+  const providerHelp = selectedEntry?.provider === 'deepseek'
+    ? selectedEntry.preset_reasoning === 'none' ? 'DeepSeek 快速预设：关闭深度思考；从下一条消息生效。'
+      : selectedEntry.preset_reasoning === 'high' ? 'DeepSeek 深度思考预设：固定使用高推理强度；从下一条消息生效。'
+        : '已选择 DeepSeek；推理强度由当前能力策略决定。'
+    : modelCatalogMessage;
+  dom.modelHelp.textContent = unavailable ? "原模型已停用，请从列表中选择其他模型。"
+    : state.pendingRequest && Object.hasOwn(state.pendingRequest, "model") && state.pendingRequest.model !== state.selectedModel
+      ? "快捷重试仍使用原模型；新发送的消息使用当前选择。" : providerHelp;
+}
+
+function modelForRequest() {
+  // A timeout replay must not silently move to a different model, including
+  // old pending requests which omitted this field entirely.
+  return state.pendingRequest ? state.pendingRequest.model || null
+    : modelForNewRequest();
+}
+
+function modelForNewRequest() {
+  if (routingCatalog?.enabled && state.modelConfig) return state.modelConfig.model_override || null;
+  return modelCatalog.enabled ? state.selectedModel || modelCatalog.default_model : null;
+}
+
+function modelConfigForRequest() {
+  if (state.pendingRequest) return state.pendingRequest.modelConfig || null;
+  return routingCatalog?.enabled ? state.modelConfig : null;
+}
+
+function applyRoutingReply(response) {
+  const samePreference = !state.pendingRequest || JSON.stringify(state.pendingRequest.modelConfig || null) === JSON.stringify(state.modelConfig);
+  if (response.model_config) {
+    if (samePreference) state.modelConfig = structuredClone(response.model_config);
+    state.modelConfigVersion = response.model_config_version || 0;
+  }
+}
+
+function applyModelReply(response) {
+  if (!Object.hasOwn(response, "selected_model")) return;
+  const choseNextModel = state.pendingRequest && state.selectedModel
+    && !(routingCatalog?.enabled && !state.modelConfig?.model_override)
+    && state.selectedModel !== (state.pendingRequest.model || null);
+  if (!choseNextModel) state.selectedModel = response.selected_model || modelCatalog.default_model;
 }
 
 function setConnectionState(kind, label) {
@@ -600,6 +715,7 @@ function setConnectionState(kind, label) {
 }
 
 function render() {
+  renderModelSelection();
   renderStages();
   renderMessages();
   renderQuickActions();
@@ -756,6 +872,14 @@ function createMessageElement(message) {
   }
 
   article.append(avatar, content);
+  if (message.role === 'assistant' && !message.typing && message.designId === state.designId && state.sessionKind === 'api') {
+    const report = document.createElement('button');
+    report.type = 'button'; report.className = 'ghost-button'; report.textContent = '反馈这条回答 / Report Problem';
+    report.addEventListener('click', () => window.dispatchEvent(new CustomEvent('ece329:report-output', {detail: {
+      designId: message.designId, stage: message.stage, revision: message.revision, telemetry_id: message.telemetryId,
+    }})));
+    content.append(report);
+  }
   return article;
 }
 
@@ -797,9 +921,19 @@ function normalizeQuickAction(action) {
   };
 }
 
-function retryPendingRequest() {
+async function retryPendingRequest() {
   const pending = state.pendingRequest;
   if (!pending || dom.sendButton.disabled) return;
+  if (pending.needsRefresh) {
+    setBusy(true);
+    let refreshed;
+    try { refreshed = await refreshConflictedRequest(); }
+    finally { setBusy(false); }
+    if (!refreshed) {
+      showToast("同步设计失败，请检查连接后重试。尚未重新提交回答。");
+      return;
+    }
+  }
   replayingPendingRequest = true;
   dom.chatInput.value = pending.message || "";
   state.pendingUiAction = pending.uiAction || null;
@@ -1154,6 +1288,8 @@ async function sendVersionAction(versionRequest, message) {
     message,
     uiAction: null,
     versionRequest,
+    model: modelForNewRequest(),
+    modelConfig: routingCatalog?.enabled ? structuredClone(state.modelConfig) : null,
   };
   addMessage("user", message);
   setBusy(true);
@@ -1198,6 +1334,10 @@ function addMessage(role, text, tags = [], options = {}) {
     tags,
     meta: options.meta,
     typing: options.typing || false,
+    designId: options.designId,
+    stage: options.stage,
+    revision: options.revision,
+    telemetryId: options.telemetryId,
   };
   state.messages.push(message);
   saveState();
@@ -1218,6 +1358,21 @@ async function handleSubmit(event) {
   event.preventDefault();
   const message = dom.chatInput.value.trim();
   if (!message || dom.sendButton.disabled) return;
+  if (state.pendingRequest?.needsRefresh) {
+    setBusy(true);
+    let refreshed;
+    try { refreshed = await refreshConflictedRequest(); }
+    finally { setBusy(false); }
+    if (!refreshed) {
+      showToast("同步设计失败，请检查连接后重试。尚未提交回答。");
+      return;
+    }
+  }
+  if (!replayingPendingRequest && modelCatalog.enabled && modelForNewRequest()
+      && !modelCatalog.models.some(item => item.id === modelForNewRequest())) {
+    showToast("请先选择一个可用模型。");
+    return;
+  }
   const requestGeneration = designGeneration;
 
   const isPendingReplay = replayingPendingRequest && Boolean(state.pendingRequest);
@@ -1233,6 +1388,8 @@ async function handleSubmit(event) {
     !state.pendingRequest
     || state.pendingRequest.message !== message
     || state.pendingRequest.uiAction !== uiAction
+    || (!isPendingReplay && ((state.pendingRequest.model || null) !== modelForNewRequest()
+        || JSON.stringify(state.pendingRequest.modelConfig || null) !== JSON.stringify(routingCatalog?.enabled ? state.modelConfig : null)))
   ) {
     state.pendingRequest = {
       turnId: crypto.randomUUID(),
@@ -1240,6 +1397,8 @@ async function handleSubmit(event) {
       uiAction,
       optionId: selectedOptionId,
       versionRequest: null,
+      model: modelForNewRequest(),
+      modelConfig: routingCatalog?.enabled ? structuredClone(state.modelConfig) : null,
     };
   }
   state.pendingUiAction = null;
@@ -1315,7 +1474,6 @@ async function handleSubmit(event) {
       return;
     }
     if (error instanceof ApiError && error.code === "session_conflict") {
-      await reloadApiDesignState();
       // A conflicting idempotency key must never be reused for the next attempt.
       state.pendingRequest = {
         ...(state.pendingRequest || {}),
@@ -1323,11 +1481,15 @@ async function handleSubmit(event) {
         message,
         uiAction,
         optionId: selectedOptionId,
+        needsRefresh: true,
       };
+      const refreshed = await refreshConflictedRequest();
+      if (requestGeneration !== designGeneration) return;
       addMessage(
         "assistant",
-        "设计可能已在另一个窗口更新。我已同步当前设计，请重新发送本轮内容。",
-        ["状态已刷新"],
+        refreshed ? "设计可能已在另一个窗口更新。我已同步设计与模型设置，请重新发送本轮内容。"
+          : "设计已发生冲突，但同步失败。请检查连接后重试；会先同步，再提交本轮内容。",
+        [refreshed ? "状态已刷新" : "等待同步"],
         { meta: "ECE329 Agent" },
       );
       state.quickActions = [pendingRequestRetryAction()];
@@ -1371,10 +1533,12 @@ async function sendToApi(message, uiAction = null) {
 async function createApiDesign(message) {
   const requestGeneration = designGeneration;
   const idempotencyKey = state.pendingRequest?.turnId || crypto.randomUUID();
+  const selectedModel = modelForRequest();
+  const modelConfig = modelConfigForRequest();
   const request = () => apiRequest("/v1/designs", {
       method: "POST",
       headers: { ...courseAccessHeaders(), "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({ idea: message }),
+      body: JSON.stringify({ idea: message, ...(selectedModel ? { model: selectedModel } : {}), ...(modelConfig ? {model_config: modelConfig} : {}) }),
     });
   try {
     return await request();
@@ -1473,22 +1637,46 @@ async function authorizedDesignDownload(path) {
 }
 
 async function reloadApiDesignState() {
-  if (!state.designId) return;
+  if (!state.designId) return null;
   const requestGeneration = designGeneration;
   const designId = state.designId;
   try {
     const design = await authorizedDesignApiRequest(`/v1/designs/${encodeURIComponent(designId)}`, {
       method: "GET",
     });
-    if (requestGeneration !== designGeneration) return;
+    if (requestGeneration !== designGeneration) return null;
     applyDesignSnapshot(design);
+    return design;
   } catch (error) {
     if (requestGeneration !== designGeneration) return;
     console.warn("Unable to refresh design state", error);
+    return null;
   }
 }
 
+async function refreshConflictedRequest() {
+  const pending = state.pendingRequest, generation = designGeneration;
+  if (!pending) return false;
+  const design = await reloadApiDesignState();
+  if (!design || generation !== designGeneration || pending !== state.pendingRequest) return false;
+  if (state.selectedModel === pending.model && Object.hasOwn(design, "selected_model")) {
+    state.selectedModel = design.selected_model || modelCatalog.default_model;
+  }
+  // Conflict recovery rebases onto refreshed settings. Only ambiguous network
+  // retries keep the original frozen configuration and idempotency key.
+  pending.modelConfig = routingCatalog?.enabled ? structuredClone(state.modelConfig) : null;
+  pending.model = routingCatalog?.enabled ? state.modelConfig?.model_override || null : state.selectedModel;
+  pending.needsRefresh = false;
+  saveState();
+  renderModelSelection();
+  return true;
+}
+
 function applyDesignSnapshot(design) {
+  applyRoutingReply(design);
+  if (Object.hasOwn(design, "selected_model") && !state.pendingRequest) {
+    state.selectedModel = design.selected_model || modelCatalog.default_model;
+  }
   if (design.design_access_token) {
     sessionStorage.setItem(DESIGN_TOKEN_KEY, design.design_access_token);
   }
@@ -1525,6 +1713,10 @@ function applyDesignSnapshot(design) {
 function buildTurnRequest(message, uiAction = null, versionRequest = null) {
   const turnId = state.pendingRequest?.turnId || crypto.randomUUID();
   const turn = { message, turn_id: turnId };
+  const config = modelConfigForRequest();
+  if (config) turn.model_config = config;
+  const selectedModel = modelForRequest();
+  if (selectedModel) turn.model = selectedModel;
   if (versionRequest) turn.version_request = versionRequest;
   const optionId = state.pendingRequest?.optionId || state.pendingOptionId;
   if (optionId) {
@@ -2262,6 +2454,8 @@ function applyResponse(response, userMessage) {
     state.sessionKind = "api";
   }
   state.mode = response.interaction_state || state.mode;
+  applyModelReply(response);
+  applyRoutingReply(response);
 
   const stageId = response.current_stage || response.handled_stage;
   const nextIndex = STAGES.findIndex(([id]) => id === stageId);
@@ -2337,6 +2531,10 @@ function applyResponse(response, userMessage) {
   ];
   addMessage("assistant", text, tags, {
     meta: response._runtime_source === "api" ? "ECE329 Agent" : "页面演示",
+    designId: response._runtime_source === 'api' ? state.designId : null,
+    revision: response.revision,
+    stage: handledStageId,
+    telemetryId: response.telemetry_id,
   });
 
   if (!state.notes.some((note) => note.includes(userMessage.slice(0, 40)))) {
@@ -2478,6 +2676,7 @@ function setBusy(isBusy) {
   dom.sendButton.disabled = isBusy;
   dom.chatInput.disabled = isBusy;
   dom.sendButton.querySelector("span").textContent = isBusy ? "处理中" : "发送";
+  renderModelSelection();
 }
 
 function autoGrowInput() {
@@ -2642,6 +2841,15 @@ dom.chatInput.addEventListener("keydown", (event) => {
   }
 });
 dom.resetButton.addEventListener("click", resetDesign);
+dom.modelSelect.addEventListener("change", () => {
+  const selected = dom.modelSelect.value;
+  if (!modelCatalog.enabled || dom.sendButton.disabled || !modelCatalog.models.some(item => item.id === selected)) return;
+  state.selectedModel = selected;
+  if (routingCatalog?.enabled) state.modelConfig = {...(state.modelConfig || routingCatalog.defaults), strategy: 'custom', model_override: selected};
+  saveState();
+  renderModelSelection();
+});
+dom.refreshModels.addEventListener("click", loadModelCatalog);
 dom.chartParameter.addEventListener("input", drawChart);
 dom.downloadReportButton.addEventListener("click", downloadTaskReport);
 dom.downloadBuilderInputButton.addEventListener("click", downloadBuilderInput);

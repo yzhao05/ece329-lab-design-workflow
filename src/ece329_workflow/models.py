@@ -62,6 +62,8 @@ class DesignSession:
     history: list[dict[str, Any]] = field(default_factory=list)
     model_context: dict[str, Any] = field(default_factory=dict)
     turn_context: dict[str, Any] = field(default_factory=dict, repr=False)
+    # Store-owned optimistic token, never included in public or persisted JSON.
+    _store_snapshot: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def current_stage(self) -> Stage:
@@ -107,6 +109,9 @@ class DesignSession:
             "stage_number": self.current_stage_index + 1,
             "status": self.status.value,
             "revision": self.revision,
+            "selected_model": self.model_context.get("selected_model"),
+            "model_config": deepcopy(self.model_context.get("model_config")),
+            "model_config_version": self.model_context.get("model_config_version", 0),
             "completed_stages": list(self.completed_stages),
             "design_context": public_design_context,
             "stage_outputs": self.stage_outputs,
@@ -125,6 +130,8 @@ class TurnRequest:
     selected_option_id: str | None = None
     turn_id: str | None = None
     version_request: dict[str, Any] | None = None
+    model: str | None = None
+    model_config: dict[str, Any] | None = None
 
 
 class WorkflowError(Exception):

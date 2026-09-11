@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src https: http://127.0.0.1:8080 http://localhost:8080; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <title>反馈经验审阅 · ECE329</title>
+  <link rel="stylesheet" href="assets/styles.css?v=20260912-composer">
+  <link rel="stylesheet" href="assets/feedback.css?v=20260911">
+</head>
+<body>
+  <main class="feedback-review">
+    <a href="./">返回设计工作台</a>
+    <h1>反馈经验审阅</h1>
+    <p>核对反馈证据、适用范围和处理建议。确认经验不含个人信息、实验专属参数或越权指令，并记录验证依据后再启用。启用结果从下一轮检索生效；候选经验不会自动指导设计。</p>
+    <form id="reviewLogin" class="feedback-form">
+      <label for="reviewToken">维护者令牌（ECE329_FEEDBACK_ADMIN_TOKEN）</label>
+      <input id="reviewToken" type="password" autocomplete="off" required>
+      <label for="reviewFilter">查看状态</label>
+      <select id="reviewFilter"><option value="candidate">待审阅</option><option value="active">已启用</option><option value="disabled">已停用</option><option value="rejected">未采用</option><option value="deleted">已删除</option></select>
+      <div class="experience-actions"><button type="submit" class="send-button">加载记录</button><button id="reviewLogout" type="button" class="ghost-button">清除令牌</button></div>
+    </form>
+    <p>令牌只用于当前页面，不保存在浏览器存储中。分析失败的反馈可由提交者在工作台重试。</p>
+    <p id="reviewStatus" role="status" aria-live="polite"></p>
+    <section id="reviewCards" aria-label="经验及证据"></section>
+    <div class="experience-actions"><button id="reviewPrevious" type="button" class="ghost-button" disabled>上一页</button><button id="reviewNext" type="button" class="ghost-button" disabled>下一页</button></div>
+  </main>
+  <script src="assets/config.js?v=20260824-unified-semantics"></script>
+  <script src="assets/feedback-review.js?v=20260912-routing"></script>
+</body>
+</html>

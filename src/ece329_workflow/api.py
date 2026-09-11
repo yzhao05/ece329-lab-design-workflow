@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -30,6 +31,7 @@ from .openai_generator import (
     ModelTimeoutError,
 )
 from .security import APISettings, FixedWindowRateLimiter
+from .experience import ExperienceStore, FeedbackService, ModelExperienceExtractor
 
 
 JsonHeaders = [
@@ -50,6 +52,7 @@ class WorkflowAPI:
         engine: WorkflowEngine | None = None,
         settings: APISettings | None = None,
         rate_limiter: FixedWindowRateLimiter | None = None,
+        feedback_service: FeedbackService | None = None,
     ) -> None:
         self.engine = engine or WorkflowEngine()
         self.settings = settings or APISettings.from_environment()
@@ -60,6 +63,14 @@ class WorkflowAPI:
         self._create_idempotency: dict[str, dict[str, Any]] = {}
         self._create_idempotency_lock = RLock()
         self._create_request_locks: dict[str, RLock] = {}
+        self.feedback = feedback_service or FeedbackService(
+            ExperienceStore(getattr(getattr(self.engine, 'store', None), 'path', None), project_id=self.settings.project_id),
+            ModelExperienceExtractor(getattr(self.engine, 'generator', None)),
+        )
+        self.engine.experience_store = self.feedback.store
+        self.engine.project_id = self.settings.project_id
+        self.feedback.store.project_id = self.settings.project_id
+        self.feedback.start()
 
     def __call__(
         self,
@@ -79,7 +90,7 @@ class WorkflowAPI:
             )
         start_response = cors_start_response
 
-        if method == "POST":
+        if method in {"POST", "PATCH", "DELETE"}:
             allowed, retry_after = self.rate_limiter.allow(self._client_key(environ))
             if not allowed:
                 return self._respond(
@@ -89,6 +100,39 @@ class WorkflowAPI:
                     [("Retry-After", str(retry_after))],
                 )
         try:
+            if method == 'GET' and path == '/v1/models':
+                return self._respond(start_response, HTTPStatus.OK, {**self.engine.available_models(), 'routing': self.engine.model_configuration()})
+            if method == 'GET' and path == '/v1/config':
+                return self._respond(start_response, HTTPStatus.OK, self.engine.model_configuration())
+            config_match = re.fullmatch(r'/v1/designs/([^/]+)/model-config', path)
+            if config_match and method in {'GET', 'PATCH'}:
+                design_id = config_match.group(1)
+                self._require_design_token(environ, design_id)
+                if method == 'GET':
+                    result = self.engine.model_configuration(design_id)
+                else:
+                    body = self._read_json(environ)
+                    if set(body) != {'config', 'version'}:
+                        raise ValueError('Model configuration requires config and version')
+                    result = self.engine.update_model_configuration(design_id, body['config'], body['version'])
+                return self._respond(start_response, HTTPStatus.OK, result)
+            telemetry_match = re.fullmatch(r'/v1/designs/([^/]+)/telemetry', path)
+            if telemetry_match and method == 'GET':
+                design_id = telemetry_match.group(1)
+                self._require_design_token(environ, design_id)
+                offset = int(parse_qs(environ.get('QUERY_STRING', '')).get('offset', ['0'])[0])
+                records = self.engine.telemetry_records(design_id, offset)
+                return self._respond(start_response, HTTPStatus.OK, {'records': records, 'next_offset': offset + 100 if len(records) == 100 else None})
+            relevant_match = re.fullmatch(r'/v1/designs/([^/]+)/experiences/relevant', path)
+            if relevant_match and method == 'GET':
+                design_id = relevant_match.group(1)
+                self._require_design_token(environ, design_id)
+                session = self.engine.store.get(design_id)
+                query = parse_qs(environ.get('QUERY_STRING', '')).get('q', [''])[0]
+                if len(query) > self.settings.max_text_chars:
+                    raise ValueError('Experience query is too long')
+                self.engine._attach_experiences(session, query)
+                return self._respond(start_response, HTTPStatus.OK, {'experiences': session.turn_context.get('experience_rules', [])})
             if method == "OPTIONS":
                 return self._respond(start_response, HTTPStatus.NO_CONTENT, None)
             if method == "GET" and path == "/health":
@@ -185,12 +229,17 @@ class WorkflowAPI:
                 body = self._read_json(environ)
                 idea = self._required_string(body, "idea", self.settings.max_text_chars)
                 interaction_state = self._optional_string(body, "interaction_state")
+                selected_model = body.get('model')
+                model_config = body.get('model_config')
+                model_options = {**({'model': selected_model} if selected_model is not None else {}),
+                                 **({'model_config': model_config} if model_config is not None else {})}
                 idempotency_key = self._idempotency_key(environ)
                 fingerprint = self._payload_fingerprint(
-                    {"idea": idea, "interaction_state": interaction_state}
+                    {"idea": idea, "interaction_state": interaction_state,
+                     **model_options}
                 )
                 if not idempotency_key:
-                    result = self.engine.create_design(idea, interaction_state)
+                    result = self.engine.create_design(idea, interaction_state, **model_options)
                 else:
                     with self._create_idempotency_lock:
                         request_lock = self._create_request_locks.setdefault(
@@ -206,7 +255,7 @@ class WorkflowAPI:
                                 )
                             result = deepcopy(cached["response"])
                         else:
-                            result = self.engine.create_design(idea, interaction_state)
+                            result = self.engine.create_design(idea, interaction_state, **model_options)
                             with self._create_idempotency_lock:
                                 self._create_idempotency[idempotency_key] = {
                                     "fingerprint": fingerprint,
@@ -279,6 +328,40 @@ class WorkflowAPI:
                 )
 
             design_match = re.fullmatch(r"/v1/designs/([^/]+)", path)
+            feedback_match = re.fullmatch(r"/v1/designs/([^/]+)/feedback(?:/([a-f0-9]{32})/retry)?", path)
+            if feedback_match and method in {"GET", "POST"}:
+                design_id, ticket_id = feedback_match.groups()
+                self._require_design_token(environ, design_id)
+                if method == 'GET' and ticket_id is None:
+                    self.feedback.start()
+                    return self._respond(start_response, HTTPStatus.OK, {'feedback': self.feedback.store.tickets(design_id)})
+                if method == 'POST' and ticket_id:
+                    self.feedback.store.retry(design_id, ticket_id)
+                    self.feedback.start()
+                    return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
+                if method == 'POST':
+                    body = self._read_json(environ)
+                    with self.engine._lock_for_design(design_id):
+                        result, created = self.feedback.store.submit(self.engine.store.get(design_id), body)
+                    self.feedback.start()
+                    return self._respond(start_response, HTTPStatus.CREATED if created else HTTPStatus.OK, result)
+
+            review_match = re.fullmatch(r"/v1/feedback/experiences(?:/([a-f0-9]{32})/review)?", path)
+            if review_match and method in {'GET', 'POST'}:
+                candidate = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
+                if not self.settings.feedback_admin_token or not hmac.compare_digest(candidate.encode(), self.settings.feedback_admin_token.encode()):
+                    raise DesignAccessDenied('A feedback maintainer token is required')
+                experience_id = review_match.group(1)
+                if method == 'GET' and experience_id is None:
+                    query = parse_qs(environ.get('QUERY_STRING', ''))
+                    items = self.feedback.store.experiences(query.get('status', [None])[0], int(query.get('offset', ['0'])[0]))
+                    return self._respond(start_response, HTTPStatus.OK, {'experiences': items})
+                if method == 'POST' and experience_id:
+                    body = self._read_json(environ)
+                    if set(body) - {'decision', 'version', 'note', 'content', 'scope'}:
+                        raise ValueError('Unknown review field')
+                    result = self.feedback.store.review(experience_id, body.get('decision'), body.get('version'), body.get('note'), body.get('content'), body.get('scope'))
+                    return self._respond(start_response, HTTPStatus.OK, result)
             if method == "GET" and design_match:
                 self._require_design_token(environ, design_match.group(1))
                 query = parse_qs(environ.get("QUERY_STRING", ""))
@@ -287,7 +370,9 @@ class WorkflowAPI:
                 return self._respond(start_response, HTTPStatus.OK, result)
             if method == "DELETE" and design_match:
                 self._require_design_token(environ, design_match.group(1))
-                self.engine.delete_design(design_match.group(1))
+                with self.engine._lock_for_design(design_match.group(1)):
+                    self.engine.delete_design(design_match.group(1))
+                    self.feedback.store.delete_design(design_match.group(1))
                 return self._respond(start_response, HTTPStatus.NO_CONTENT, None)
 
             turn_match = re.fullmatch(r"/v1/designs/([^/]+)/turns", path)
@@ -549,8 +634,8 @@ class WorkflowAPI:
                 cors_headers.extend(
                     [
                         ("Access-Control-Allow-Origin", allowed_origin),
-                        ("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-ECE329-Access-Code, X-ECE329-Debug-Token"),
-                        ("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS"),
+                        ("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-ECE329-Access-Code, X-ECE329-Debug-Token, X-ECE329-Feedback-Admin-Token"),
+                        ("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS"),
                         ("Vary", "Origin"),
                     ]
                 )

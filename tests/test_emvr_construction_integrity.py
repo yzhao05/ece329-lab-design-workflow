@@ -142,8 +142,27 @@ def test_missing_numerical_algorithm_blocks_export_without_reopening_other_field
 
 def test_default_blueprint_contains_construction_bindings_and_finite_execution():
     text = pending_defaults(session_with_contract())["default_proposal_value"]
-    for marker in ("ProjectVersion.txt", "EmVrLabContractRunner", "EmVrObjectStateSnapshotStore", "取消", "OnDisable", "RK4", "2048", "Capture"):
+    for marker in ("ProjectVersion.txt", "EmVrLabContractRunner", "EmVrObjectStateSnapshotStore", "取消", "OnDisable", "RK4", "2048", "Capture",
+                   "InitializeOnce", "INITIALIZING/READY/FAILED", "10 s", "Awake", "脚本域重载"):
         assert marker in text
+
+
+def test_upgraded_snapshot_contract_requires_review_then_stays_approved():
+    session = session_with_contract()
+    record_implementation_defaults_approval(session, source='TEST')
+    session.design_context['emvr_design']['implementation_defaults_approval']['contract_version'] = 'builder-ui-flow-v8'
+    assert not implementation_defaults_approval_valid(session)
+    proposal = pending_defaults(session)['default_proposal_value']
+    for marker in ('--mode integrated-development', 'schema_version', 'run_id',
+                   '允许已确认的自变量', '不部分覆盖', '回滚完整领域及对象状态'):
+        assert marker in proposal
+    apply_stage_field_updates(session, [{'field': 'implementation_defaults', 'operation': 'REPLACE', 'value': proposal}],
+                              stage=Stage.DESIGN_VALUE_AND_LIMITATIONS)
+    record_implementation_defaults_approval(session, source='TEST')
+    assert implementation_defaults_approval_valid(session)
+    assert 'implementation_defaults' not in {row['field'] for row in missing_builder_requirements(session)}
+    session.history.append({'user_message': '你现在在问什么？', 'output': {}})
+    assert implementation_defaults_approval_valid(session)
 
 
 def test_compound_procedure_actions_have_reachable_capture_transitions():

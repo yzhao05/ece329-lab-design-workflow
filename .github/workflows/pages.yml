@@ -48,6 +48,12 @@ jobs:
         run: |
           python -m pytest -q
           node --check docs/assets/app.js
+          node --check docs/assets/model-strategy.js
+          node --check docs/assets/feedback-client.js
+          node --check docs/assets/feedback-ui.js
+          node --check docs/assets/feedback-review.js
+          node --test tests/frontend/feedback.test.cjs
+          node --test tests/frontend/model-selection.test.cjs
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

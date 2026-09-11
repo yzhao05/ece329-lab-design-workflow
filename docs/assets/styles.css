@@ -186,6 +186,13 @@ a:focus-visible {
   background: rgb(255 255 255 / 8%);
 }
 
+.model-control { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px 12px; padding: 14px var(--composer-inset) 0; margin-bottom: 2px; font-size: 14px; }
+.model-control > label { font-weight: 600; white-space: nowrap; }
+.model-control select { width: 100%; min-width: 0; max-width: none; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--ink); background: white; font: inherit; }
+.model-control small { grid-column: 1 / -1; color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+.model-refresh { min-height: 40px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: #f7faf9; color: var(--ink-soft); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.model-control select:focus-visible { outline: 3px solid rgb(21 127 120 / 30%); outline-offset: 2px; }
+
 .app-shell {
   display: grid;
   min-height: calc(100vh - 72px);
@@ -612,6 +619,7 @@ a:focus-visible {
 
 .composer {
   grid-row: 5;
+  --composer-inset: 17px;
   margin: 0 18px 18px;
   overflow: hidden;
   border: 1px solid var(--line-strong);
@@ -630,7 +638,7 @@ a:focus-visible {
   display: block;
   width: 100%;
   max-height: 150px;
-  padding: 15px 17px 8px;
+  padding: 15px var(--composer-inset) 8px;
   resize: none;
   border: 0;
   outline: 0;
@@ -648,7 +656,7 @@ a:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 7px 9px 9px 17px;
+  padding: 7px var(--composer-inset) 12px;
 }
 
 .composer-footer > span {
@@ -1264,4 +1272,26 @@ a:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+.strategy-control { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px 12px; min-width: 0; padding: 14px var(--composer-inset); background: #f7faf9; border-bottom: 1px solid var(--line-strong); font-size: 14px; }
+.strategy-control > label { font-weight: 600; }
+.strategy-control select { width: 100%; min-width: 0; min-height: 36px; padding: 7px 10px; border: 1px solid #cadbdc; border-radius: 9px; background: white; color: var(--ink); font: inherit; }
+.strategy-options, .strategy-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.strategy-options label { display: inline-flex; align-items: center; gap: 6px; line-height: 1.5; }
+.strategy-options input { margin: 0; accent-color: var(--teal); }
+.strategy-control small, .strategy-control details { grid-column: 1 / -1; min-width: 0; }
+.strategy-control small { color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+.strategy-control summary { cursor: pointer; color: var(--teal); padding-block: 3px; }
+.strategy-control details { max-height: 240px; overflow: auto; }
+.strategy-control .ghost-button, .message-content .ghost-button { color: #17334a; background: #f3f8f8; border: 1px solid #b8d1d0; padding: 7px 10px; font-size: 12px; }
+.message-content .ghost-button { margin-top: 8px; }
+.stage-routing-rows { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(220px,100%),1fr)); gap: 8px; margin-top: 8px; }
+.stage-routing-rows label { display: grid; gap: 4px; min-width: 0; }
+
+@media (max-width: 480px) {
+  .model-control { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-control > label { grid-column: 1; grid-row: 1; }
+  .model-refresh { grid-column: 2; grid-row: 1; min-height: 34px; padding-block: 5px; }
+  .model-control select { grid-column: 1 / -1; grid-row: 2; }
+  .model-control small { grid-row: 3; }
 }

@@ -72,6 +72,7 @@ def _session_from_payload(payload: str) -> DesignSession:
         stage_outputs=dict(data.get("stage_outputs", {})),
         history=list(data.get("history", [])),
         model_context=dict(data.get("model_context", {})),
+        _store_snapshot=payload,
     )
 
 
@@ -98,10 +99,13 @@ class InMemorySessionStore:
             existing = self._items.get(session.design_id)
             if expected_revision is not None and (
                 existing is None or existing.revision != expected_revision
+                or (session._store_snapshot is not None
+                    and session._store_snapshot != existing._store_snapshot)
             ):
                 raise SessionConflict(
                     "The design changed during this request; reload it before retrying."
                 )
+            session._store_snapshot = _session_payload(session)
             self._items[session.design_id] = deepcopy(session)
             self._updated_at[session.design_id] = time.time()
 
@@ -192,19 +196,25 @@ class SQLiteSessionStore:
                         """,
                         (session.design_id, session.revision, payload),
                     )
-                    return
-                cursor = connection.execute(
-                    """
-                    UPDATE design_sessions
-                    SET revision = ?, payload = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE design_id = ? AND revision = ?
-                    """,
-                    (session.revision, payload, session.design_id, expected_revision),
-                )
-                if cursor.rowcount != 1:
-                    raise SessionConflict(
-                        "The design changed during this request; reload it before retrying."
+                else:
+                    # Configuration and credential updates may leave the design
+                    # revision unchanged. Compare the loaded row too, atomically,
+                    # so another worker's changes cannot be silently overwritten.
+                    cursor = connection.execute(
+                        """
+                        UPDATE design_sessions
+                        SET revision = ?, payload = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE design_id = ? AND revision = ?
+                          AND (? IS NULL OR payload = ?)
+                        """,
+                        (session.revision, payload, session.design_id, expected_revision,
+                         session._store_snapshot, session._store_snapshot),
                     )
+                    if cursor.rowcount != 1:
+                        raise SessionConflict(
+                            "The design changed during this request; reload it before retrying."
+                        )
+        session._store_snapshot = payload
 
     def delete(self, design_id: str) -> None:
         with closing(self._connect()) as connection:

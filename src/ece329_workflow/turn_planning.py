@@ -384,6 +384,7 @@ def finalize_turn_task_plan(
     transition_completed: bool,
     completed_response_types: set[str] | None = None,
     navigation_deferred: bool = False,
+    task_evidence: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Attach per-task outcomes after state commit and response planning."""
 
@@ -427,6 +428,8 @@ def finalize_turn_task_plan(
                 completed_response_types is None
                 or response_type in completed_response_types
             )
+            if task_evidence is not None and task.get("task_id") in task_evidence:
+                completed = response_generated and task_evidence[task["task_id"]]
             task["status"] = "COMPLETED" if completed else "READY"
         elif phase == "NAVIGATE":
             if navigation_deferred and target in {"ADVANCE", "ACCEPT", "RETURN"}:

@@ -3139,6 +3139,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         )
         session = guided_session()
         session.model_context["openai_previous_response_id"] = "resp_stale"
+        session.history.append({"user_message": "已确认的对比要求，不要再问", "output": {}})
         generator = OpenAIStageGenerator(transport=transport, stateful=True)
 
         output = generator.generate(session, "继续研究传输线驻波")
@@ -3150,6 +3151,8 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             "resp_stale",
         )
         self.assertNotIn("previous_response_id", transport.requests[1])
+        self.assertNotIn("已确认的对比要求，不要再问", transport.requests[0]["input"][0]["content"][0]["text"])
+        self.assertIn("已确认的对比要求，不要再问", transport.requests[1]["input"][0]["content"][0]["text"])
         self.assertEqual(
             session.model_context["openai_previous_response_id"],
             "resp_recovered",
@@ -3175,6 +3178,20 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
             session.model_context["openai_previous_response_id"],
             "resp_ignored",
         )
+
+    def test_stateful_output_repair_restores_local_history_and_is_bounded(self) -> None:
+        session = guided_session()
+        session.model_context['openai_previous_response_id'] = 'resp_existing'
+        session.history.append({'user_message': '保留已经回答的边界条件', 'output': {}})
+        transport = FakeTransport(outputs=[{'assistant_message': 'invalid'}, valid_output()])
+        OpenAIStageGenerator(transport=transport, stateful=True).generate(session, '研究传输线驻波')
+        self.assertEqual(len(transport.requests), 2)
+        self.assertNotIn('previous_response_id', transport.requests[1])
+        self.assertIn('保留已经回答的边界条件', transport.requests[1]['input'][0]['content'][0]['text'])
+        broken = FakeTransport(error=ModelHTTPError(404, 'previous_response_not_found'))
+        with self.assertRaises(ModelHTTPError):
+            OpenAIStageGenerator(transport=broken, stateful=True).generate(session, '继续')
+        self.assertEqual(len(broken.requests), 2)
 
     def test_emvr_final_stage_uses_larger_budget_and_requires_package(self) -> None:
         transport = FakeTransport(
@@ -3974,7 +3991,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         output = fallback.generate(guided_session(), "研究传输线驻波")
 
         self.assertTrue(output.stage_payload["alternative_ideas"])
-        self.assertEqual(output.warnings, [])
+        self.assertTrue(any('本地规则恢复' in warning for warning in output.warnings))
         info = fallback.runtime_info()
         self.assertEqual(info["last_fallback_reason"], "model_transport_error")
         self.assertEqual(info["fallback_calls"], 1)
@@ -4064,7 +4081,7 @@ class OpenAIStageGeneratorTests(unittest.TestCase):
         self.assertTrue(
             any("还没有具体思路" in item.get("content", "") for item in preserved)
         )
-        runtime = fallback.runtime_info()
+        runtime = engine.generator_info()
         self.assertGreater(runtime["intent_api_failures"], 0)
         self.assertIn(
             runtime["last_fallback_reason"],

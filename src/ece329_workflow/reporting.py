@@ -1933,6 +1933,7 @@ def _effective_emvr_visualization(
 
 
 def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
+    from .feedback import source_stamp
     sections: list[dict[str, Any]] = []
     for stage in Stage:
         stored = session.stage_outputs.get(stage.value)
@@ -2190,6 +2191,7 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
     return {
         "title": "ECE329 EMVR 模拟实验设计报告",
         "design_id": session.design_id,
+        "source_design": source_stamp(session),
         "status": (
             "complete" if session.status is WorkflowStatus.COMPLETE else "in_progress"
         ),
@@ -2268,6 +2270,8 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
     story: list[Any] = [paragraph(report["title"], title_style)]
     summary_data = [
         [paragraph("设计编号", body_style), paragraph(report["design_id"], body_style)],
+        [paragraph("设计版本", body_style), paragraph(report["source_design"]["revision"], body_style)],
+        [paragraph("内容校验", body_style), paragraph(report["source_design"]["fingerprint"], body_style)],
         [paragraph("报告状态", body_style), paragraph("已完成" if report["status"] == "complete" else "完善中", body_style)],
         [paragraph("实验想法", body_style), paragraph(report["idea"] or "尚未填写", body_style)],
     ]

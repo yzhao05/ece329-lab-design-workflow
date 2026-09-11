@@ -1067,6 +1067,12 @@ def hydrate_pending_action_from_history(
     """Migrate a pre-upgrade conversation without exposing internal fields."""
 
     current = current_pending_action(session)
+    if current is None:
+        from .feedback import source_stamp
+        closed = session.model_context.get("feedback", {}).get("closed_pending", {})
+        if (closed.get("stage") == session.current_stage.value
+                and closed.get("fingerprint") == source_stamp(session)["fingerprint"]):
+            return None
     if current is not None:
         pending_stage = str(current.get("stage") or "").strip()
         if pending_stage and pending_stage != session.current_stage.value:
@@ -4568,6 +4574,7 @@ def serialize_intent_input(
     pending_action: dict[str, Any] | None,
     carried_context: dict[str, Any],
 ) -> str:
+    from .feedback import guidance
     previous_question = str(pending_action.get("question") or "") if pending_action else ""
     intent_context = deepcopy(carried_context)
     comparisons = intent_context.get("baseline_comparisons", [])
@@ -4622,6 +4629,7 @@ def serialize_intent_input(
             ),
             "intent_entry_context": intent_entry_context,
             "carried_context": intent_context,
+            "feedback_guidance": guidance(session, user_message),
             "user_message": user_message,
         },
         ensure_ascii=False,

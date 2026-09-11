@@ -371,14 +371,12 @@ def _student_task_contracts(
     return rows
 
 
-def _contract_parts(value: str, *, limit: int = 900) -> list[str]:
-    parts: list[str] = []
-    for line in str(value or "").splitlines() or [str(value or "")]:
-        text = line.strip()
-        while text:
-            parts.append(text[:limit])
-            text = text[limit:]
-    return parts
+def _contract_parts(value: str) -> list[str]:
+    # Semantic rows must retain complete paths and reference IDs. Arbitrary
+    # character cuts can turn Assets/Scenes/... into an absolute /Scenes/...
+    # or detach the allowed Pack root. field_table paginates measured paragraphs
+    # and repeats the same field ID, so no content-level size limit is needed.
+    return [line.strip() for line in str(value or "").splitlines() if line.strip()]
 
 
 def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
@@ -564,6 +562,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
             "按已确认的公式自变量契约逐项执行比较：" + parameter_contract
         ]
 
+    from .feedback import source_stamp, validate_builder_projection
     payload = {
         "document": {
             "title": "EMVR Builder Pack — Gate 1 Requirements Input",
@@ -573,6 +572,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 "本文件不表示 Gate 已获批准，也不表示 Unity 实现已经完成。"
             ),
             "source_design_id": session.design_id,
+            "source_design": source_stamp(session),
             "target_gate": "Gate 1 — Brief confirmed",
             "template_reference": "LabSpecs/templates/lab-brief.template.yaml (schema 1.0.0)",
         },
@@ -849,6 +849,7 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                status="not-applicable" if measurement_disables_probe(measurement_contract) else "confirmed-from-design-session"),
     ]
     validate_builder_gate1_input(payload)
+    validate_builder_projection(session, payload)
     return payload
 
 
@@ -1371,6 +1372,10 @@ def render_builder_review_pdf(
             [
                 _field("document.purpose", data["document"]["purpose"], status="processing-instruction"),
                 _field("document.source_design_id", data["document"]["source_design_id"]),
+                *([
+                    _field("document.source_revision", data["document"]["source_design"]["revision"]),
+                    _field("document.source_fingerprint", data["document"]["source_design"]["fingerprint"]),
+                ] if data["document"].get("source_design") else []),
                 _field("document.target_gate", data["document"]["target_gate"], status="builder-template-reference"),
                 _field("document.template_reference", data["document"]["template_reference"], status="builder-template-reference"),
             ]

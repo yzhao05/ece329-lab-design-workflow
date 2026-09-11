@@ -10,7 +10,8 @@
     <title>ECE329 Lab Studio</title>
     <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
     <link rel="manifest" href="site.webmanifest">
-    <link rel="stylesheet" href="assets/styles.css?v=20260828-quality-review">
+    <link rel="stylesheet" href="assets/styles.css?v=20260912-composer">
+    <link rel="stylesheet" href="assets/feedback.css?v=20260911">
   </head>
   <body>
     <a class="skip-link" href="#chatInput">跳到消息输入框</a>
@@ -29,6 +30,7 @@
           <span class="status-dot" aria-hidden="true"></span>
           <span>检查连接中</span>
         </div>
+        <button id="feedbackButton" class="ghost-button" type="button">反馈问题</button>
         <button id="resetButton" class="ghost-button" type="button">新建设计</button>
       </div>
     </header>
@@ -82,6 +84,33 @@
         <div id="quickActions" class="quick-actions" aria-label="快捷操作"></div>
 
         <form id="chatForm" class="composer">
+          <div class="strategy-control">
+            <label for="modelStrategy">模型策略</label>
+            <select id="modelStrategy" disabled>
+              <option value="recommended">Recommended</option><option value="fast">Fast</option>
+              <option value="quality">High Quality</option><option value="custom">Custom</option>
+            </select>
+            <div class="strategy-options">
+              <label><input id="experienceEnabled" type="checkbox" checked> 使用已审阅经验</label>
+              <label><input id="adaptiveRoutingEnabled" type="checkbox"> 失败时有限升级模型</label>
+            </div>
+            <div class="strategy-actions">
+              <button id="saveModelStrategy" type="button" class="ghost-button">保存策略</button>
+              <button id="exportTelemetry" type="button" class="ghost-button">导出评测记录</button>
+            </div>
+            <small id="strategyStatus" role="status">默认按阶段选择模型；本地校验始终启用。</small>
+            <details id="stageRoutingDetails" hidden><summary>分阶段设置</summary>
+              <label for="defaultModelProfile">默认能力</label><select id="defaultModelProfile"></select>
+              <button id="clearModelOverride" type="button" class="ghost-button">使用能力路由</button>
+              <div id="stageRoutingRows" class="stage-routing-rows"></div>
+            </details>
+          </div>
+          <div class="model-control">
+            <label for="modelSelect">回复模型</label>
+            <select id="modelSelect" aria-describedby="modelHelp" disabled><option value="">正在加载模型…</option></select>
+            <button id="refreshModels" class="model-refresh" type="button">刷新列表</button>
+            <small id="modelHelp">切换后从下一条消息生效。</small>
+          </div>
           <label class="sr-only" for="chatInput">输入你的实验设计想法</label>
           <textarea
             id="chatInput"
@@ -210,6 +239,31 @@
       </aside>
     </main>
 
+    <dialog id="feedbackDialog" class="feedback-dialog" aria-labelledby="feedbackTitle">
+      <div class="feedback-heading"><h2 id="feedbackTitle">反馈问题</h2><button id="feedbackClose" type="button" class="ghost-button">关闭</button></div>
+      <p>提交后会保存反馈和当前设计的相关记录，由后台助手分析。可复用的经验经维护者审阅后，用于改进后续对话。提交反馈不会推进设计阶段。</p>
+      <form id="feedbackForm" class="feedback-form">
+        <label for="feedbackCategory">问题类型</label>
+        <select id="feedbackCategory">
+          <option value="answered_pending">重复询问已回答的问题</option>
+          <option value="cross_stage_edit">跨阶段修改没有生效</option>
+          <option value="meta_question">没有回应流程或状态问题</option>
+          <option value="missed_requests">漏答或漏做了请求</option>
+          <option value="artifact_mismatch">对话、设计或 PDF 不一致</option>
+          <option value="other" selected>其他问题</option>
+        </select>
+        <label for="feedbackMessage">发生了什么？你期待怎样的结果？</label>
+        <label for="feedbackScope">建议适用范围（均须审阅后启用）</label>
+        <select id="feedbackScope"><option value="session">本次设计</option><option value="project">本课程项目</option><option value="global" selected>通用经验候选</option></select>
+        <p id="feedbackTarget"></p>
+        <textarea id="feedbackMessage" rows="5" maxlength="4000" required placeholder="例如：间距已经确认过了，但助手又重复询问。"></textarea>
+        <button id="feedbackSubmit" class="send-button" type="submit">提交反馈</button>
+      </form>
+      <p id="feedbackStatus" role="status" aria-live="polite"></p>
+      <div class="feedback-heading"><h3>本设计的反馈记录</h3><button id="feedbackRefresh" type="button" class="ghost-button">刷新状态</button></div>
+      <ul id="feedbackHistory" class="feedback-history"></ul>
+      <a href="feedback-review.html" target="_blank" rel="noopener">维护者审阅入口</a>
+    </dialog>
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
     <noscript>
@@ -217,6 +271,9 @@
     </noscript>
 
     <script src="assets/config.js?v=20260824-unified-semantics"></script>
-    <script src="assets/app.js?v=20260903-session-isolation"></script>
+    <script src="assets/app.js?v=20260912-conflict-recovery"></script>
+    <script src="assets/model-strategy.js?v=20260912-routing"></script>
+    <script src="assets/feedback-client.js?v=20260912-routing"></script>
+    <script src="assets/feedback-ui.js?v=20260912-routing"></script>
   </body>
 </html>
