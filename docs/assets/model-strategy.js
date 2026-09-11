@@ -19,7 +19,7 @@
     const disabled = !routingCatalog?.enabled || dom.sendButton.disabled || saving;
     for (const name of ['modelStrategy', 'experienceEnabled', 'adaptiveRoutingEnabled', 'saveModelStrategy', 'defaultModelProfile', 'clearModelOverride']) el[name].disabled = disabled;
     el.exportTelemetry.disabled = !state.designId || state.sessionKind !== 'api' || dom.sendButton.disabled;
-    if (!routingCatalog?.enabled || !state.modelConfig) { el.stageRoutingDetails.hidden = true; return; }
+    if (!routingCatalog?.enabled || !state.modelConfig) { el.stageRoutingDetails.hidden = true; window.updateModelPopover?.(); return; }
     el.modelStrategy.value = state.modelConfig.strategy;
     el.experienceEnabled.checked = state.modelConfig.experience_enabled;
     el.adaptiveRoutingEnabled.checked = Boolean(state.modelConfig.adaptive_enabled);
@@ -40,6 +40,7 @@
     el.strategyStatus.textContent = state.pendingRequest ? '有待重试请求：重试保留原策略，新消息使用当前设置。'
       : state.modelConfig.model_override ? '当前固定使用所选模型。选择“使用能力路由”可恢复分阶段设置。'
       : '从下一条消息生效；直接选择回复模型将切换为 Custom。本地校验始终启用。';
+    window.updateModelPopover?.();
   };
   el.modelStrategy.addEventListener('change', () => {
     if (!routingCatalog?.enabled) return;

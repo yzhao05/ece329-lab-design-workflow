@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | DeepSeek Flash（recommend） | `deepseek-flash` | `deepseek-flash` | 推理强度跟随阶段能力配置 |
 | DeepSeek Flash（快速预设） | `deepseek-flash:fast` | `deepseek-flash` | 关闭 thinking，适合简单补答与低延迟对照 |
-| DeepSeek Flash（深度思考预设） | `deepseek-flash:reasoning` | `deepseek-flash` | 固定 high，供复杂问题对照 |
+| DeepSeek Flash（深度思考预设） | `deepseek-flash:reasoning` | `deepseek-flash` | 默认 high，可在思考强度设置中覆盖 |
 | DeepSeek V4 Pro | `deepseek-v4-pro` | `deepseek-v4-pro` | 保留 Pro 模型作为另一种选择，强度跟随能力配置 |
 
 `recommend` 是本项目推荐标记，不是效果评测结论。带冒号的 ID 是本项目预设，发送到官方 API 前转换为真实模型名，不冒充独立模型。模型选择依据[官方当前调用说明](https://api-docs.deepseek.com/)：旧 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 已映射至 Flash，不作为另外两个模型重复展示；旧 `deepseek-chat/deepseek-reasoner` 也不加入新白名单。实际权限和未来可用性仍以部署账号及官方公告为准。
@@ -52,7 +52,7 @@ ECE329_ALLOWED_MODELS=deepseek-flash,deepseek-flash:fast,deepseek-flash:reasonin
 | `DEEPSEEK_MAX_OUTPUT_TOKENS` | `8192`；包含思考与输出 token，作为现有各阶段 token 预算的下限，应用上限 384000 |
 | `ECE329_ALLOWED_MODELS` | 两供应商共用的管理员白名单，包含本项目预设 ID；最多 12 项 |
 
-现有 `OPENAI_REASONING_EFFORT` 仍是基础生成器的通用默认强度，阶段路由可覆盖它；DeepSeek 将 medium/xhigh 映射为 high，快速预设固定 none、深度预设固定 high，依据[官方 thinking 文档](https://api-docs.deepseek.com/guides/thinking_mode/)。`OPENAI_*MAX_OUTPUT_TOKENS` 等既有阶段预算仍保留，DeepSeek 使用两者较大值，避免思考消耗完小预算导致 JSON 被截断。后台反馈提炼跟随后端基础模型，不跟随某位学生临时选择的模型。
+现有 `OPENAI_REASONING_EFFORT` 仍是基础生成器的通用默认强度，阶段路由可覆盖它；DeepSeek 将 medium/xhigh 映射为 high，快速预设默认 none、深度预设默认 high，依据[官方 thinking 文档](https://api-docs.deepseek.com/guides/thinking_mode/)。用户可为每个模型选择 none/low/high/max，手动强度优先于预设。`OPENAI_*MAX_OUTPUT_TOKENS` 等既有设置成为动态预算基线，整轮剩余额度始终优先于 DeepSeek 的预算下限，见 [思考强度与动态预算](reasoning-budgets.md)。后台反馈提炼跟随后端基础模型，不跟随某位学生临时选择的模型。
 
 若已经配置 `ECE329_MODEL_REGISTRY`，其中模型也须在当前白名单内。希望三个能力均使用 DeepSeek，可设置：
 

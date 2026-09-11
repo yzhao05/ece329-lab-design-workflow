@@ -26,13 +26,13 @@ def model_provider(model):
     return 'deepseek' if isinstance(model, str) and model.startswith('deepseek-') else 'openai'
 
 
-def model_details(model, reasoning='medium'):
+def model_details(model, reasoning='medium', *, apply_preset=True):
     provider = model_provider(model)
     if provider == 'deepseek':
         if model not in DEEPSEEK_MODELS:
             raise ValueError('Unsupported DeepSeek model; use deepseek-flash or deepseek-v4-pro')
         api_model, preset, _ = DEEPSEEK_MODELS[model]
-        effort = preset or ('high' if reasoning in ('medium', 'xhigh') else reasoning)
+        effort = (preset if apply_preset else None) or ('high' if reasoning in ('medium', 'xhigh') else reasoning)
         return {'provider': provider, 'api_model': api_model, 'reasoning': effort, 'stateful': False}
     return {'provider': provider, 'api_model': model, 'reasoning': reasoning, 'stateful': True}
 

@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
 from .engine import WorkflowEngine
+from .generation_policy import TurnBudgetExceeded
 from .models import (
     DesignAccessDenied,
     SessionConflict,
@@ -55,6 +56,8 @@ class WorkflowAPI:
         feedback_service: FeedbackService | None = None,
     ) -> None:
         self.engine = engine or WorkflowEngine()
+        from .localization import DisplayTranslator
+        self.translator = DisplayTranslator(getattr(self.engine, 'generator', None))
         self.settings = settings or APISettings.from_environment()
         self.rate_limiter = rate_limiter or FixedWindowRateLimiter(
             self.settings.rate_limit_requests,
@@ -100,6 +103,26 @@ class WorkflowAPI:
                     [("Retry-After", str(retry_after))],
                 )
         try:
+            if method == 'POST' and path == '/v1/localization':
+                body = self._read_json(environ)
+                if set(body) - {'texts', 'language', 'design_id', 'model'}:
+                    raise ValueError('Unexpected translation fields')
+                design_id = body.get('design_id')
+                if design_id is not None and (not isinstance(design_id, str) or not design_id.strip() or len(design_id) > 160):
+                    raise ValueError('Invalid translation design_id')
+                model = body.get('model')
+                if design_id:
+                    self._require_design_token(environ, design_id)
+                    if model is None:
+                        model = self.engine.store.get(design_id).model_context.get('selected_model')
+                elif environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN'):
+                    candidate = str(environ['HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN'])
+                    if not self.settings.feedback_admin_token or not hmac.compare_digest(candidate.encode(), self.settings.feedback_admin_token.encode()):
+                        raise DesignAccessDenied('A feedback maintainer token is required')
+                else:
+                    self._require_admission_code(environ)
+                translated = self.translator.translate(body.get('texts'), body.get('language'), model)
+                return self._respond(start_response, HTTPStatus.OK, {'translations': translated, 'language': body['language']})
             if method == 'GET' and path == '/v1/models':
                 return self._respond(start_response, HTTPStatus.OK, {**self.engine.available_models(), 'routing': self.engine.model_configuration()})
             if method == 'GET' and path == '/v1/config':
@@ -232,6 +255,7 @@ class WorkflowAPI:
                 selected_model = body.get('model')
                 model_config = body.get('model_config')
                 model_options = {**({'model': selected_model} if selected_model is not None else {}),
+                                 **({'language': body['language']} if 'language' in body else {}),
                                  **({'model_config': model_config} if model_config is not None else {})}
                 idempotency_key = self._idempotency_key(environ)
                 fingerprint = self._payload_fingerprint(
@@ -279,7 +303,9 @@ class WorkflowAPI:
             if method == "GET" and report_match:
                 design_id = report_match.group(1)
                 self._require_design_token(environ, design_id)
-                body = self.engine.render_report_pdf(design_id)
+                language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
+                from .localization import validate_language, english_pdf
+                body = english_pdf(self.engine, self.translator, design_id) if validate_language(language) == 'en' else self.engine.render_report_pdf(design_id)
                 safe_name = f"ece329-emvr-{design_id}.pdf"
                 return self._respond_bytes(
                     start_response,
@@ -297,7 +323,9 @@ class WorkflowAPI:
             if method == "GET" and builder_input_match:
                 design_id = builder_input_match.group(1)
                 self._require_design_token(environ, design_id)
-                body = self.engine.render_builder_input_pdf(design_id)
+                language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
+                from .localization import validate_language, english_pdf
+                body = english_pdf(self.engine, self.translator, design_id, builder=True) if validate_language(language) == 'en' else self.engine.render_builder_input_pdf(design_id)
                 safe_name = f"ece329-emvr-builder-gate1-{design_id}.pdf"
                 return self._respond_bytes(
                     start_response,
@@ -316,6 +344,10 @@ class WorkflowAPI:
                 design_id = guided_export_match.group(1)
                 self._require_design_token(environ, design_id)
                 body = self.engine.render_guided_summary_text(design_id)
+                language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
+                from .localization import validate_language
+                if validate_language(language) == 'en':
+                    body = self.translator.english_tree(body.decode('utf-8'), self.engine.store.get(design_id).model_context.get('selected_model')).encode('utf-8')
                 safe_name = f"ece329-guided-summary-{design_id}.txt"
                 return self._respond_bytes(
                     start_response,
@@ -409,6 +441,11 @@ class WorkflowAPI:
                 return self._respond(start_response, HTTPStatus.OK, result)
 
             return self._respond(start_response, HTTPStatus.NOT_FOUND, {"error": "route_not_found"})
+        except TurnBudgetExceeded:
+            return self._respond(start_response, HTTPStatus.CONFLICT, {
+                'error': 'model_budget_exceeded', 'retryable': False,
+                'diagnostic_id': diagnostic_id,
+                'detail': 'This turn reached its output/call budget; change settings or shorten the request before sending a new turn.'})
         except SessionNotFound as exc:
             return self._respond(start_response, HTTPStatus.NOT_FOUND, {"error": "session_not_found", "detail": str(exc)})
         except DesignAccessDenied as exc:

@@ -1248,7 +1248,7 @@ def render_builder_gate1_payload_pdf(data: dict[str, Any]) -> bytes:
 
 
 def render_builder_review_pdf(
-    metadata: dict[str, str], sections: list[tuple[str, list[dict[str, str]]]], notes: list[str]
+    metadata: dict[str, str], sections: list[tuple[str, list[dict[str, str]]]], notes: list[str], *, language: str = 'zh'
 ) -> bytes:
     """Shared renderer for validated exports and explicitly labelled document reviews."""
     validate_portable_content([metadata, sections, notes])
@@ -1328,7 +1328,7 @@ def render_builder_review_pdf(
         for row in rows:
             value = row["value"]
             if row.get("note"):
-                value = f"{value}\n说明：{row['note']}"
+                value = f"{value}\n{'Note: ' if language == 'en' else '说明：'}{row['note']}"
             # Split the VALUE into measured paragraph fragments, then repeat
             # the field ID/status on every fragment. Never create unlabeled
             # continuation cells or truncate text to satisfy a page budget.
@@ -1385,12 +1385,13 @@ def render_builder_review_pdf(
         [
             Spacer(1, 3 * mm),
             p(
+                ("Status: confirmed-from-design-session indicates user-confirmed design content; builder-policy-reference identifies fixed Builder Pack requirements; builder-runtime-check requires verification in the local Unity workspace." if language == 'en' else
                 "状态说明：confirmed-from-design-session 表示已由用户在 EMVR 设计过程中确认；"
                 "builder-policy-reference 表示来自 Builder Pack 的固定约束；"
-                "builder-runtime-check 表示由 Builder 在实际 Unity 工作区中核对。",
+                "builder-runtime-check 表示由 Builder 在实际 Unity 工作区中核对。"),
                 small_style,
             ),
-            p("长值按 part 编号续写，每段重复字段名与状态。not-applicable须附理由；builder-runtime-check须在本机核对；proposal-needs-confirmation表示建议尚未确认。", small_style),
+            p("Long values continue in numbered parts with repeated field IDs and status. not-applicable requires a reason; builder-runtime-check requires local verification; proposal-needs-confirmation is not approved." if language == 'en' else "长值按 part 编号续写，每段重复字段名与状态。not-applicable须附理由；builder-runtime-check须在本机核对；proposal-needs-confirmation表示建议尚未确认。", small_style),
         ]
     )
 

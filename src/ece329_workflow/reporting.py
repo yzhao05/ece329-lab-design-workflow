@@ -2202,11 +2202,11 @@ def build_emvr_task_report(session: DesignSession) -> dict[str, Any]:
     }
 
 
-def render_emvr_report_pdf(session: DesignSession) -> bytes:
+def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', presentation: dict[str, Any] | None = None) -> bytes:
     if session.interaction_state is not InteractionState.EMVR_DIRECT:
         raise ValueError("PDF summary is only available for an EMVR design")
     validate_emvr_report_completeness(session)
-    report = build_emvr_task_report(session)
+    report = presentation if presentation is not None else build_emvr_task_report(session)
     if not report["sections"]:
         raise ValueError("The EMVR design does not have report content yet")
 
@@ -2265,6 +2265,12 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
     )
 
     def paragraph(value: Any, style: ParagraphStyle) -> Paragraph:
+        if language == 'en':
+            value = {'设计编号':'Design ID','设计版本':'Design revision','内容校验':'Content fingerprint',
+                     '报告状态':'Report status','已完成':'Complete','完善中':'In progress','实验想法':'Experiment idea',
+                     '尚未填写':'Not provided',
+                     '说明：本报告记录的是课程实验设计与Unity VR模拟规划，不代表已经完成Unity实现、真实测量或验收。':
+                     'This report records an experiment design and Unity VR plan. It does not certify Unity implementation, actual measurements or acceptance.'}.get(str(value),value)
         return Paragraph(_paragraph_text(value), style)
 
     story: list[Any] = [paragraph(report["title"], title_style)]
@@ -2342,7 +2348,7 @@ def render_emvr_report_pdf(session: DesignSession) -> bytes:
         canvas.setFillColor(colors.HexColor("#738696"))
         canvas.drawCentredString(A4[0] / 2 - 10 * mm, 9 * mm, "ECE329 Lab Studio")
         canvas.setFont(font_name, 8)
-        canvas.drawString(A4[0] / 2 + 15 * mm, 9 * mm, f"第 {doc.page} 页")
+        canvas.drawString(A4[0] / 2 + 15 * mm, 9 * mm, f"Page {doc.page}" if language == 'en' else f"第 {doc.page} 页")
         canvas.restoreState()
 
     document.build(story, onFirstPage=footer, onLaterPages=footer)

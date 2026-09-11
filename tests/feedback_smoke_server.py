@@ -47,11 +47,13 @@ def main():
         if args.models and path == '/__smoke/model-requests':
             start_response('200 OK', [('Content-Type', 'application/json')])
             records = [{'model': r['model'], 'schema': r['text']['format']['name'],
+                                'reasoning_effort': r.get('reasoning', {}).get('effort'),
+                                'max_output_tokens': r.get('max_output_tokens'),
                                 'previous_response_id': r.get('previous_response_id')}
                                for r in model_transport.requests]
             if args.deepseek:
                 records += [{'model': r['model'], 'provider':'deepseek', 'thinking':r['thinking']['type'],
-                             'reasoning_effort':r.get('reasoning_effort')} for r in deepseek_chat.requests]
+                             'reasoning_effort':r.get('reasoning_effort'), 'max_output_tokens':r.get('max_tokens')} for r in deepseek_chat.requests]
             return [json.dumps(records).encode()]
         if path.startswith('/v1/') or path in {'/health', '/ready'}:
             return api(environ, start_response)

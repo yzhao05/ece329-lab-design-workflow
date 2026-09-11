@@ -104,6 +104,27 @@ function enableRouting(h) {
     state.modelConfig=structuredClone(routingCatalog.defaults); state.selectedModel='gpt-5.4-mini';`);
 }
 
+test('language is frozen for retries and updated for new messages', () => {
+  const h=harness();
+  h.context.window.ECE329I18n={language:'en'};
+  assert.equal(h.run("buildTurnRequest('hello').language"),'en');
+  h.run("state.pendingRequest={turnId:'language-retry',language:'en'};");
+  h.context.window.ECE329I18n.language='zh';
+  assert.equal(h.run("buildTurnRequest('hello').language"),'en');
+  h.run('state.pendingRequest=null');
+  assert.equal(h.run("buildTurnRequest('hello').language"),'zh');
+});
+
+test('display translation batches short texts and never submits a design turn', async () => {
+  const h=harness();const calls=[];
+  h.context.translateFixture=(url,options)=>{calls.push([url,JSON.parse(options.body)]);return {translations:JSON.parse(options.body).texts.map(t=>'English '+t)};};
+  h.run('apiRequest=translateFixture');
+  const result=await h.run("window.requestDisplayTranslation(['first','second','third','fourth'],'en')");
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][0],'/v1/localization');
+  assert.equal(result.translations.length,4);
+});
+
 for (const mode of ['EMVR_DIRECT', 'GUIDED_DESIGN']) {
   test(`${mode}: conflict refresh rebases frozen retry onto current server settings`, async () => {
     const h = harness(); enableRouting(h);
@@ -168,6 +189,17 @@ test('failed catalogue refresh disables stale routing controls', async () => {
   await h.run('loadModelCatalog()');
   assert.equal(h.run('routingCatalog'),null);
   assert.equal(h.run('modelConfigForRequest()'),null);
+});
+
+test('catalogue removes obsolete effort preferences without rewriting submitted retries', async () => {
+  const h=harness(); enableRouting(h);
+  h.run(`state.modelConfig.reasoning_overrides={'gpt-5.4-mini':'high','gpt-5.5':'max','removed-model':'low'};
+    state.pendingRequest={turnId:'effort-retry-001',modelConfig:structuredClone(state.modelConfig)};
+    apiRequest=async()=>({...modelCatalog,routing:{...routingCatalog,execution:{models:{
+      'gpt-5.4-mini':{reasoning_efforts:['low','high']},'gpt-5.5':{reasoning_efforts:['low','high']}}}}});`);
+  await h.run('loadModelCatalog()');
+  assert.equal(h.run('JSON.stringify(state.modelConfig.reasoning_overrides)'),'{"gpt-5.4-mini":"high"}');
+  assert.equal(h.run("buildTurnRequest('retry').model_config.reasoning_overrides['removed-model']"),'low');
 });
 
 test('automatic strategy transmits configuration without overriding its model; retry freezes it', () => {

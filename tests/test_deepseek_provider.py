@@ -29,7 +29,10 @@ class ChatFixture:
         self.requests.append(deepcopy(payload))
         schema = json.loads(payload['messages'][0]['content'].split('JSON Schema:\n')[-1])
         properties = schema['properties']
-        if 'useful' in properties:
+        if 'translations' in properties:
+            from tests.localization_fixture import translations
+            text = json.dumps(translations(payload['messages'][-1]['content'], 'into English' in payload['messages'][0]['content']))
+        elif 'useful' in properties:
             text = json.dumps(candidate())
         else:
             name = ('ece329_context_intent' if 'resolved_value_json' in properties else

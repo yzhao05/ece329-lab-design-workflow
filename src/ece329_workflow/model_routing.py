@@ -8,6 +8,7 @@ from time import perf_counter
 from .models import Stage
 from .model_selection import primary_generator, validate_model, model_details, model_provider
 from .telemetry import CURRENT_TRACE, ObservedTransport
+from .generation_policy import GenerationPolicy, TurnBudget, supported_efforts
 
 PROFILES = ('fast', 'balanced', 'reasoning')
 STRATEGIES = ('recommended', 'fast', 'quality', 'custom')
@@ -25,6 +26,7 @@ class ModelRouter:
         preferred = 'deepseek-v4-pro' if model_provider(default) == 'deepseek' else 'gpt-5.6-sol'
         strong = preferred if primary and preferred in primary.allowed_models else default
         self.generator = generator
+        self.execution = GenerationPolicy(generator, env)
         self.failure_counts = {}
         self.registry = {'fast': {'model': default, 'reasoning': 'low'},
                          'balanced': {'model': default, 'reasoning': primary.reasoning_effort if primary else 'medium'},
@@ -38,8 +40,11 @@ class ModelRouter:
                 if not isinstance(value, dict) or set(value) != {'model', 'reasoning'}:
                     raise ValueError('Each profile requires model and reasoning')
                 validate_model(generator, value['model'])
-                if value['reasoning'] not in {'none', 'low', 'medium', 'high', 'xhigh'}:
+                if value['reasoning'] not in {'none', 'low', 'medium', 'high', 'xhigh', 'max'}:
                     raise ValueError('Invalid profile reasoning effort')
+                details = model_details(value['model'], value['reasoning'])
+                if details['reasoning'] not in supported_efforts(value['model']):
+                    raise ValueError('Profile reasoning effort is unsupported by its model')
             self.registry = deepcopy(registry)
         if env.get('ECE329_STAGE_POLICY'):
             policy = json.loads(env['ECE329_STAGE_POLICY'])
@@ -49,7 +54,8 @@ class ModelRouter:
 
     def defaults(self):
         return {'strategy': 'recommended', 'profile': 'balanced', 'stage_overrides': {},
-                'model_override': None, 'experience_enabled': True, 'adaptive_enabled': False}
+                'model_override': None, 'experience_enabled': True, 'adaptive_enabled': False,
+                'reasoning_overrides': {}}
 
     def validate(self, value):
         if not isinstance(value, dict) or set(value) - set(self.defaults()):
@@ -58,6 +64,13 @@ class ModelRouter:
         if config['strategy'] not in STRATEGIES or config['profile'] not in PROFILES or any(type(config[k]) is not bool for k in ('experience_enabled','adaptive_enabled')):
             raise ValueError('Invalid model strategy/profile/experience setting')
         overrides = config['stage_overrides']
+        efforts = config['reasoning_overrides']
+        if not isinstance(efforts, dict):
+            raise ValueError('reasoning_overrides must map enabled model IDs to supported efforts')
+        for model, effort in efforts.items():
+            validate_model(self.generator, model)
+            if not isinstance(effort, str) or effort not in supported_efforts(model):
+                raise ValueError('Unsupported reasoning effort for selected model')
         if not isinstance(overrides, dict) or set(overrides) - set(self.policy) or any(v not in PROFILES for v in overrides.values()):
             raise ValueError('Invalid stage overrides; local validation is always enabled')
         if config['model_override'] is not None:
@@ -69,6 +82,7 @@ class ModelRouter:
     def public(self):
         return {'enabled': primary_generator(self.generator) is not None,
                 'registry': deepcopy(self.registry), 'stage_policy': dict(self.policy),
+                'execution': {'models': deepcopy(self.execution.models)},
                 'strategies': list(STRATEGIES), 'defaults': self.defaults(), 'local_validator': 'always_enabled'}
 
     def resolve(self, stage, config):
@@ -82,13 +96,24 @@ class ModelRouter:
             route.update(self.registry[profile], profile=profile, adaptive_reason='recent_validator_failures')
         if config['model_override'] is not None:
             route['model'] = config['model_override']
+        return self.finalize_route(route, config)
+
+    def finalize_route(self, route, config):
+        """Apply target-model preferences and budgets on every routing path."""
+        route = dict(route)
         if route['model'] is not None:
             route.update(model_details(route['model'], route['reasoning']))
+            if route['reasoning'] not in supported_efforts(route['model']):
+                route['reasoning'] = supported_efforts(route['model'])[-1]
+            if route['model'] in config.get('reasoning_overrides', {}):
+                route.update(model_details(route['model'], config['reasoning_overrides'][route['model']], apply_preset=False))
+            route.update(self.execution.budget(route['model'], route['reasoning']))
         return route
 
     @staticmethod
     def can_escalate(stage, config, route):
         return (config.get('adaptive_enabled', False) and config['model_override'] is None
+                and route['model'] not in config.get('reasoning_overrides', {})
                 and stage not in config['stage_overrides'] and route['profile'] != 'reasoning')
 
 
@@ -97,12 +122,14 @@ class RoutedGenerator:
     def __init__(self, base, router, config, initial_stage, on_metrics=None):
         self.base, self.router, self.config = base, router, config
         self.initial_route = router.resolve(initial_stage, config)
+        self.budget = TurnBudget(self.initial_route)
         self.on_metrics = on_metrics
 
     @property
     def primary(self):
         primary = primary_generator(self.base)
-        return replace(primary, model=self.initial_route['model'], reasoning_effort=self.initial_route['reasoning']) if primary else None
+        return replace(primary, model=self.initial_route['model'], reasoning_effort=self.initial_route['reasoning'],
+                       reasoning_override=self.initial_route['reasoning']) if primary else None
 
     def __getattr__(self, name):
         original = getattr(self.base, name)
@@ -115,11 +142,14 @@ class RoutedGenerator:
             primary = primary_generator(self.base)
             chosen = self.base
             if primary is not None:
-                if session.model_context.get('selected_model') != route['model']:
+                if (session.model_context.get('selected_model') != route['model']
+                        or session.model_context.get('selected_reasoning') != route['reasoning']):
                     session.model_context.pop('openai_previous_response_id', None)
                 session.model_context['selected_model'] = route['model']
+                session.model_context['selected_reasoning'] = route['reasoning']
                 selected = replace(primary, model=route['model'], reasoning_effort=route['reasoning'],
-                                   transport=ObservedTransport(primary.transport, session, route))
+                                   reasoning_override=route['reasoning'],
+                                   transport=ObservedTransport(primary.transport, session, route, self.budget))
                 chosen = FallbackStageGenerator(primary=selected, fallback=self.base.fallback) if isinstance(self.base, FallbackStageGenerator) else selected
                 if self.config.get('adaptive_enabled') and name == 'generate':
                     chosen = selected
@@ -141,15 +171,18 @@ class RoutedGenerator:
                     if primary is None or name != 'generate' or not self.router.can_escalate(session.current_stage.value, self.config, route):
                         raise
                     stronger = {**route, **self.router.registry['reasoning'], 'profile':'reasoning', 'adaptive_reason':'validator_failure'}
-                    stronger.update(model_details(stronger['model'], stronger['reasoning']))
+                    stronger = self.router.finalize_route(stronger, self.config)
                     if stronger['model'] == route['model'] and stronger['reasoning'] == route['reasoning']:
                         raise
                     session.model_context.pop('openai_previous_response_id', None)
                     session.model_context['selected_model'] = stronger['model']
+                    session.model_context['selected_reasoning'] = stronger['reasoning']
+                    session.turn_context['model_route'] = stronger
                     event['adaptive_escalation'] = stronger
                     event['validation_failures_before_escalation'] = 1
                     upgraded = replace(primary, model=stronger['model'], reasoning_effort=stronger['reasoning'],
-                                       transport=ObservedTransport(primary.transport, session, stronger))
+                                       reasoning_override=stronger['reasoning'],
+                                       transport=ObservedTransport(primary.transport, session, stronger, self.budget))
                     try:
                         result = upgraded.generate(session, *args, **kwargs)
                     finally:

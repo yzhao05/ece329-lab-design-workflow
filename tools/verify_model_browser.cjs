@@ -15,7 +15,9 @@ fs.mkdirSync(output, { recursive: true });
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   async function send(model, create = false) {
+    await page.locator("#currentModelButton").click();
     await page.locator("#modelSelect").selectOption(model);
+    await page.locator("#closeModelPopover").click();
     await page.locator("#chatInput").fill("电场的叠加如何计算？");
     const pending = page.waitForResponse(response => response.request().method() === "POST" &&
       (create ? response.url() === `${base}/v1/designs` : response.url().endsWith("/turns")));
@@ -63,6 +65,7 @@ fs.mkdirSync(output, { recursive: true });
     for (const model of newModels) await send(model);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator("#sendButton").scrollIntoViewIfNeeded();
+    await page.locator("#currentModelButton").click();
     await page.screenshot({ path: path.join(output, "mobile.png"), animations: 'disabled' });
     const bounds = await page.locator("#modelSelect").boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390);

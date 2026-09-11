@@ -1,6 +1,6 @@
 # 对话中的模型选择
 
-两个 mode 都在消息输入框上方提供策略选择和模型下拉框。新设计默认 Recommended，根据当前阶段选择能力；Custom 可逐阶段覆盖，也可固定具体模型。选择或保存策略本身不会发送消息或推进阶段。完整配置与评测说明见 [模型路由与经验层](routing-experience-implementation.md)。模型列表包含：
+两个 mode 都通过输入框右下角的当前模型名称展开绿色设置浮窗，包含策略、模型和思考强度。新设计默认 Recommended，根据当前阶段选择能力；Custom 可逐阶段覆盖，也可固定具体模型。每个模型可以保存独立的思考强度，切换时动态显示单次与整轮输出限额。选择或保存策略本身不会发送消息或推进阶段。预算算法与后端变量见 [思考强度与动态预算](reasoning-budgets.md)，完整路由配置见 [模型路由与经验层](routing-experience-implementation.md)。模型列表包含：
 
 除下列 OpenAI 模型外，配置 DeepSeek 密钥后还支持 Flash、Flash 快速预设、Flash 深度思考预设和 V4 Pro。真实模型名、四个选项的区别和后端变量见 [DeepSeek 接入说明](deepseek-setup.md)。
 
@@ -27,7 +27,7 @@ ECE329_ALLOWED_MODELS=gpt-5.4-mini,gpt-5.4,gpt-5.4-nano,gpt-5.5,gpt-5.6-sol,gpt-
 # OPENAI_API_KEY 沿用现有后端密钥，不放进前端。
 ```
 
-`OPENAI_MODEL` 是 OpenAI 为基础供应商时的默认模型，也继续作为后台反馈经验提炼模型；DeepSeek 为基础供应商时对应 `DEEPSEEK_MODEL`。`ECE329_ALLOWED_MODELS` 控制用户可选清单，必须包含基础模型。未设置白名单时，按配置的供应商密钥开放七个 OpenAI 选项和四个 DeepSeek 选项；自定义 OpenAI 模型使用其 API ID 作为界面名称。超时和 token 预算沿用现有配置，DeepSeek 有独立超时和预算下限。OpenAI 使用 Responses/严格 JSON Schema；DeepSeek 使用 Chat JSON Output 加本地完整 Schema 校验。默认 OpenAI reasoning 能力优先用白名单中的 `gpt-5.6-sol`；可通过 `ECE329_MODEL_REGISTRY` 改写。
+`OPENAI_MODEL` 是 OpenAI 为基础供应商时的默认模型，也继续作为后台反馈经验提炼模型；DeepSeek 为基础供应商时对应 `DEEPSEEK_MODEL`。`ECE329_ALLOWED_MODELS` 控制用户可选清单，必须包含基础模型。未设置白名单时，按配置的供应商密钥开放七个 OpenAI 选项和四个 DeepSeek 选项；自定义 OpenAI 模型使用其 API ID 作为界面名称。现有 token 设置作为动态预算的基线，整轮上限始终优先于 DeepSeek 的预算下限。超时仍使用各供应商现有设置。OpenAI 使用 Responses/严格 JSON Schema；DeepSeek 使用 Chat JSON Output 加本地完整 Schema 校验。默认 OpenAI reasoning 能力优先用白名单中的 `gpt-5.6-sol`；可通过 `ECE329_MODEL_REGISTRY` 改写。
 
 已有部署若显式设置了旧的三个模型白名单，更新代码不会覆盖管理员配置。请将后端该环境变量更新为上述清单并重启服务，然后点击前端模型列表旁的刷新按钮；仅修改 `.env.example` 不会改变生产环境。
 

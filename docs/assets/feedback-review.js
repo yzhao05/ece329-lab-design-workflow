@@ -4,6 +4,42 @@
   const el = Object.fromEntries(["Login", "Token", "Filter", "Logout", "Status", "Cards", "Previous", "Next"]
     .map(name => [name, document.getElementById(`review${name}`)]));
   const base = String(window.ECE329_CONFIG?.API_BASE_URL || "").trim().replace(/\/$/, "");
+  window.requestDisplayTranslation = async (texts, language) => {
+    if (!base || !el.Token.value.trim()) throw new Error('Enter a maintainer token to translate review evidence.');
+    const controller = new AbortController();
+    const token = el.Token.value.trim(), pieces = [], output = texts.map(()=>[]);
+    texts.forEach((text,index)=>{
+      for (let start=0;start<text.length;) {
+        let end=Math.min(start+4000,text.length);
+        if (end<text.length) {
+          while(end>start && /[^\s\u3400-\u9fff]/.test(text[end-1]) && /[^\s\u3400-\u9fff]/.test(text[end])) end--;
+          if(end===start) throw new Error('An indivisible display token is too long');
+        }
+        if(text.slice(start,end).trim()) pieces.push({index,text:text.slice(start,end)});
+        start=end;
+      }
+    });
+    const timeout = setTimeout(()=>controller.abort(),90000);
+    try {
+      if(pieces.length>96) throw new Error('Review display is too large');
+      for(let start=0;start<pieces.length;) {
+        if(el.Token.value.trim()!==token) throw new Error('Review credentials changed');
+        const batch=[];let size=0;
+        while(start<pieces.length && batch.length<24 && size+pieces[start].text.length<=12000) {
+          size+=pieces[start].text.length;batch.push(pieces[start++]);
+        }
+        const response = await fetch(`${base}/v1/localization`,{method:'POST',signal:controller.signal,
+          headers:{'Content-Type':'application/json','X-ECE329-Feedback-Admin-Token':token},
+          body:JSON.stringify({texts:batch.map(p=>p.text),language})});
+        if (!response.ok) throw new Error('Translation unavailable');
+        const result=await response.json();
+        if(result.translations?.length!==batch.length) throw new Error('Incomplete translation');
+        batch.forEach((piece,i)=>output[piece.index].push(result.translations[i]));
+      }
+      return {language,translations:output.map(parts=>parts.join('\n'))};
+    } finally {clearTimeout(timeout);}
+  };
+  window.ECE329I18n?.refresh();
   let offset = 0;
   let generation = 0;
   let loading = false;

@@ -29,13 +29,22 @@ class TurnTrace:
 
 
 class ObservedTransport:
-    def __init__(self, transport, session, route):
+    def __init__(self, transport, session, route, budget=None):
         self.transport, self.session, self.route = transport, session, route
+        self.budget = budget
 
     def create(self, payload):
         from .model_selection import model_details
-        details = model_details(payload.get('model'), payload.get('reasoning', {}).get('effort', 'medium'))
+        details = model_details(payload.get('model'), payload.get('reasoning', {}).get('effort', 'medium'), apply_preset=False)
         trace = CURRENT_TRACE.get()
+        if self.budget is not None:
+            reserved = self.budget.reserve(self.route['max_output_tokens'])
+            payload = {**payload, 'max_output_tokens': reserved}
+            # The provider adapter must not raise this turn's remaining budget.
+            if details['provider'] == 'deepseek':
+                payload['_workflow_output_cap'] = reserved
+            if trace:
+                trace.data['output_budget_limit'] = self.budget.limit
         start = perf_counter()
         # Count only rules actually present in this request after prompt budgets
         # and recovery payload construction; never store the serialized prompt.
@@ -46,20 +55,28 @@ class ObservedTransport:
                'schema': payload.get('text', {}).get('format', {}).get('name'),
                'experience_rule_ids': [r['id'] for r in self.session.turn_context.get('experience_rules', []) if r['id'] in serialized],
                'input_tokens': None, 'output_tokens': None, 'error_type': None}
+        row['max_output_tokens'] = payload.get('max_output_tokens')
         try:
             response = self.transport.create(payload)
-            usage = response.get('usage') or {}
+            usage = response.get('usage')
+            if not isinstance(usage, dict):
+                usage = {}
             for key in ('input_tokens', 'output_tokens'):
                 value = usage.get(key)
                 if type(value) is int and value >= 0:
                     row[key] = value
-            cached = (usage.get('input_tokens_details') or {}).get('cached_tokens')
+            input_details = usage.get('input_tokens_details')
+            cached = input_details.get('cached_tokens') if isinstance(input_details, dict) else None
             row['cached_input_tokens'] = cached if type(cached) is int and cached >= 0 else None
             return response
         except Exception as exc:
             row['error_type'] = type(exc).__name__
             raise
         finally:
+            if self.budget is not None:
+                self.budget.settle(reserved, row['output_tokens'])
+                if trace:
+                    trace.data['output_budget_charged'] = self.budget.charged
             row['latency_ms'] = round((perf_counter() - start) * 1000, 2)
             if trace is not None:
                 trace.data['calls'].append(row)

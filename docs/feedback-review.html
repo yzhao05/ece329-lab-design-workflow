@@ -6,12 +6,14 @@
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src https: http://127.0.0.1:8080 http://localhost:8080; object-src 'none'; base-uri 'self'; form-action 'self'">
   <title>反馈经验审阅 · ECE329</title>
-  <link rel="stylesheet" href="assets/styles.css?v=20260912-composer">
+  <link rel="stylesheet" href="assets/styles.css?v=20260912-effort-budget">
   <link rel="stylesheet" href="assets/feedback.css?v=20260911">
 </head>
 <body>
   <main class="feedback-review">
     <a href="./">返回设计工作台</a>
+    <button id="languageToggle" class="ghost-button" type="button" data-i18n-ignore>English</button>
+    <button id="translationRetry" class="ghost-button" type="button" hidden>Retry translation</button>
     <h1>反馈经验审阅</h1>
     <p>核对反馈证据、适用范围和处理建议。确认经验不含个人信息、实验专属参数或越权指令，并记录验证依据后再启用。启用结果从下一轮检索生效；候选经验不会自动指导设计。</p>
     <form id="reviewLogin" class="feedback-form">
@@ -27,6 +29,8 @@
     <div class="experience-actions"><button id="reviewPrevious" type="button" class="ghost-button" disabled>上一页</button><button id="reviewNext" type="button" class="ghost-button" disabled>下一页</button></div>
   </main>
   <script src="assets/config.js?v=20260824-unified-semantics"></script>
-  <script src="assets/feedback-review.js?v=20260912-routing"></script>
+  <script src="assets/i18n-catalog.js?v=20260912-effort-budget"></script>
+  <script src="assets/i18n.js?v=20260912-review"></script>
+  <script src="assets/feedback-review.js?v=20260912-language"></script>
 </body>
 </html>

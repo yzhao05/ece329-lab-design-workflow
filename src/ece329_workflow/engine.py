@@ -205,6 +205,8 @@ def _turn_request_fingerprint(request: TurnRequest) -> str:
         payload['model'] = request.model
     if request.model_config is not None:
         payload['model_config'] = request.model_config
+    if request.language is not None:
+        payload['language'] = request.language
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -244,6 +246,7 @@ def _cache_turn_response(
     response['selected_model'] = session.model_context.get('selected_model')
     response['model_config'] = deepcopy(session.model_context.get('model_config'))
     response['model_config_version'] = session.model_context.get('model_config_version', 0)
+    response['language'] = session.model_context.get('response_language', 'zh')
     from .telemetry import CURRENT_TRACE
     if (trace := CURRENT_TRACE.get()) is not None:
         response['telemetry_id'] = trace.data['id']
@@ -4379,6 +4382,7 @@ class WorkflowEngine:
         interaction_state: InteractionState | str | None = None,
         model: str | None = None,
         model_config: dict[str, Any] | None = None,
+        language: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(idea, str):
             raise ValueError("idea must be a string")
@@ -4424,6 +4428,9 @@ class WorkflowEngine:
         if selected_model is not None:
             session.model_context['selected_model'] = selected_model
         session.model_context['model_config'] = config
+        if language is not None:
+            from .localization import validate_language
+            session.model_context['response_language'] = validate_language(language)
         if (
             state is InteractionState.EMVR_DIRECT
             and self._emvr_formula_first_enabled()
@@ -4432,7 +4439,7 @@ class WorkflowEngine:
         self.store.save(session)
         result = self.process_turn(
             session.design_id,
-            TurnRequest(message=idea.strip(), model=model, model_config=model_config),
+            TurnRequest(message=idea.strip(), model=model, model_config=model_config, language=language),
         )
         result["design_access_token"] = access_token
         result["design_resume_token"] = resume_token
@@ -4466,6 +4473,7 @@ class WorkflowEngine:
             raw = deepcopy(raw)
             if primary_generator(self.generator) is None and request.model is None and request.model_config is None:
                 raw['model_override'] = None
+                raw['reasoning_overrides'] = {}
             if request.model is not None:
                 validate_model(self.generator, request.model)
                 raw.update(strategy='custom', model_override=request.model)
@@ -4534,6 +4542,12 @@ class WorkflowEngine:
         cached_response = _cached_turn_response(session, request)
         if cached_response is not None:
             return cached_response
+        if request.language is not None:
+            from .localization import validate_language
+            language = validate_language(request.language)
+            if language != session.model_context.get('response_language', 'zh'):
+                session.model_context.pop('openai_previous_response_id', None)
+            session.model_context['response_language'] = language
         from .model_selection import primary_generator
         primary = primary_generator(self.generator)
         if primary is not None:
@@ -7008,6 +7022,7 @@ class WorkflowEngine:
             version_request=version_request,
             model=data.get('model'),
             model_config=data.get('model_config'),
+            language=data.get('language'),
         )
 
     @staticmethod

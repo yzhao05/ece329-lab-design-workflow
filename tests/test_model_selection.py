@@ -34,7 +34,10 @@ class ModelTransport:
             self.requests.append(deepcopy(payload))
             index = len(self.requests)
         schema = payload['text']['format']['name']
-        if schema == 'ece329_context_intent':
+        if schema == 'ece329_display_translation':
+            from tests.localization_fixture import translations
+            output = translations(payload['input'][0]['content'], 'into English' in payload['instructions'])
+        elif schema == 'ece329_context_intent':
             if self.barrier:
                 self.barrier.wait(timeout=5)
             output = {'intent': 'ASK_COURSE_QUESTION', 'target': None, 'resolved_value_json': None,

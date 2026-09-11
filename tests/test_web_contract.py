@@ -73,11 +73,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(self.index_html.count("v=20260824-unified-semantics"), 1)
         self.assertIn(
-            "assets/styles.css?v=20260912-composer",
+            "assets/styles.css?v=20260912-effort-budget",
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260912-conflict-recovery",
+            "assets/app.js?v=20260912-effort-budget",
             self.index_html,
         )
 
@@ -416,8 +416,9 @@ class WebFrontendContractTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if not (
                     isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "get"
+                    and ((isinstance(node.func, ast.Attribute) and node.func.attr == "get")
+                         or (path.name == 'generation_policy.py' and isinstance(node.func, ast.Name)
+                             and node.func.id == 'setting'))
                     and node.args
                     and isinstance(node.args[0], ast.Constant)
                 ):

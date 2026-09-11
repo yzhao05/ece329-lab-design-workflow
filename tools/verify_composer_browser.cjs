@@ -15,7 +15,9 @@ fs.mkdirSync(output, {recursive:true});
   page.on('pageerror', e => errors.push(e.message));
   const admin={'X-ECE329-Feedback-Admin-Token':'smoke-maintainer'};
   async function send(model) {
+    await page.locator('#currentModelButton').click();
     await page.locator('#modelSelect').selectOption(model);
+    await page.locator('#closeModelPopover').click();
     await page.locator('#chatInput').fill('电场的叠加如何计算？');
     const response=page.waitForResponse(r => r.request().method()==='POST' && r.url().endsWith('/turns'));
     await page.locator('#sendButton').click();
@@ -70,15 +72,16 @@ fs.mkdirSync(output, {recursive:true});
       const widths=[];
       for (const width of [1440,1024,768,390,320]) {
         await page.setViewportSize({width,height:1100});
+        await page.locator('#currentModelButton').click();
         const geometry=await page.evaluate(() => {
-          const input=document.getElementById('chatInput'), css=getComputedStyle(input);
+          const input=document.querySelector('#modelPopover .model-control'), css=getComputedStyle(input);
           const left=input.getBoundingClientRect().left+parseFloat(css.paddingLeft);
           const rect=selector => {const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,width:r.width};};
           return {left,label:rect('[for="modelSelect"]'),help:rect('#modelHelp'),select:rect('#modelSelect'),
-            refresh:rect('#refreshModels'),form:rect('#chatForm'),inset:parseFloat(css.paddingRight),scroll:document.documentElement.scrollWidth};
+            refresh:rect('#refreshModels'),form:rect('#modelPopover'),inset:parseFloat(css.paddingRight),scroll:document.documentElement.scrollWidth};
         });
-        assert.ok(Math.abs(geometry.label.left-geometry.left)<1,'Label aligns with textarea text');
-        assert.ok(Math.abs(geometry.help.left-geometry.left)<1,'Help aligns with textarea text');
+        assert.ok(Math.abs(geometry.label.left-geometry.left)<1,'Label aligns with panel inset');
+        assert.ok(Math.abs(geometry.help.left-geometry.left)<1,'Help aligns with panel inset');
         assert.ok(geometry.scroll<=width,'No page overflow');
         if (width<=480) {
           assert.ok(Math.abs(geometry.select.left-geometry.left)<1);
@@ -87,7 +90,8 @@ fs.mkdirSync(output, {recursive:true});
           assert.ok(Math.abs(geometry.refresh.left-geometry.select.right-12)<1,'Select fills available row width');
         }
         widths.push({viewport:width,select:geometry.select.width});
-        if ([1440,390].includes(width)) await page.locator('#chatForm').screenshot({path:path.join(output,`${mode}-${width}.png`)});
+        if ([1440,390].includes(width)) await page.locator('#modelPopover').screenshot({path:path.join(output,`${mode}-${width}.png`)});
+        await page.locator('#closeModelPopover').click();
       }
       console.log(JSON.stringify({mode,passed:true,widths,checks:'model switching, output feedback, extraction, approval, real prompt injection and withdrawal, responsive text alignment'}));
     }

@@ -12,6 +12,7 @@ const output=path.resolve(__dirname,'../.test-tmp/strategy-browser');fs.mkdirSyn
   const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
   const page=await context.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));
   async function send(create=false){
+    if (await page.locator('#modelPopover').isVisible()) await page.locator('#closeModelPopover').click();
     await page.locator('#chatInput').fill('电场的叠加如何计算？');
     const pending=page.waitForResponse(r=>r.request().method()==='POST'&&(create?r.url()===`${base}/v1/designs`:r.url().endsWith('/turns')));
     await page.locator('#sendButton').click();const response=await pending;
@@ -22,6 +23,7 @@ const output=path.resolve(__dirname,'../.test-tmp/strategy-browser');fs.mkdirSyn
     await page.goto(base);await page.waitForFunction(()=>!document.getElementById('modelStrategy').disabled);
     assert.equal(await page.locator('#modelStrategy').inputValue(),'recommended');
     const first=await send(true);assert.equal(first.request.model,undefined);assert.equal(first.request.model_config.strategy,'recommended');
+    await page.locator('#currentModelButton').click();
     await page.locator('#modelStrategy').selectOption('quality');
     const saving=page.waitForResponse(r=>r.request().method()==='PATCH'&&r.url().endsWith('/model-config'));
     await page.locator('#saveModelStrategy').click();assert.ok((await saving).ok());
@@ -29,6 +31,7 @@ const output=path.resolve(__dirname,'../.test-tmp/strategy-browser');fs.mkdirSyn
     const second=await send();assert.equal(second.body.selected_model,'gpt-5.6-sol');
     assert.equal(second.body.current_stage,first.body.current_stage);
     await page.reload();await page.waitForFunction(()=>document.getElementById('modelStrategy').value==='quality'&&!document.getElementById('modelStrategy').disabled);
+    await page.locator('#currentModelButton').click();
     await page.locator('#modelStrategy').selectOption('custom');
     await page.locator('#stageRoutingDetails summary').click();
     assert.equal(await page.locator('#stageRoutingRows select').count(),13);
@@ -43,6 +46,7 @@ const output=path.resolve(__dirname,'../.test-tmp/strategy-browser');fs.mkdirSyn
     await page.locator('#feedbackSubmit').click();const submitted=await savingFeedback;assert.ok(submitted.ok());
     const feedback=await submitted.json();assert.equal(submitted.request().postDataJSON().telemetry_id,third.body.telemetry_id);
     assert.equal(feedback.scope,'session');await page.locator('#feedbackClose').click();
+    await page.locator('#currentModelButton').click();
     const download=page.waitForEvent('download');await page.locator('#exportTelemetry').click();
     const file=await download;const target=path.join(output,'telemetry.json');await file.saveAs(target);
     const data=JSON.parse(fs.readFileSync(target,'utf8'));assert.ok(data.records.length>=3);

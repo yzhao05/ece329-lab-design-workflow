@@ -2340,6 +2340,7 @@ class OpenAIStageGenerator:
     transport: ResponsesTransport
     model: str = DEFAULT_MODEL
     reasoning_effort: str = "medium"
+    reasoning_override: str | None = None
     intent_max_output_tokens: int = 1400
     max_output_tokens: int = 2400
     stage_one_max_output_tokens: int = 3200
@@ -2375,8 +2376,13 @@ class OpenAIStageGenerator:
         except ValueError as exc:
             raise ModelConfigurationError(str(exc)) from exc
         self.reasoning_effort = _reasoning_effort(self.reasoning_effort)
-        details = model_details(self.model, self.reasoning_effort)
+        if self.reasoning_override is not None:
+            self.reasoning_effort = _reasoning_effort(self.reasoning_override)
+        details = model_details(self.model, self.reasoning_effort, apply_preset=self.reasoning_override is None)
         self.reasoning_effort = details['reasoning']
+        from .generation_policy import supported_efforts
+        if self.reasoning_effort not in supported_efforts(self.model):
+            raise ModelConfigurationError('Reasoning effort is unsupported by the selected model')
         if not details['stateful']:
             self.stateful = False
         self.intent_max_output_tokens = _positive_int(
@@ -5130,13 +5136,13 @@ def _boolean(value: Any, name: str) -> bool:
 def _reasoning_effort(value: Any) -> str:
     if not isinstance(value, str):
         raise ModelConfigurationError(
-            "OPENAI_REASONING_EFFORT must be none, low, medium, high, or xhigh"
+            "OPENAI_REASONING_EFFORT must be none, low, medium, high, xhigh, or max (model permitting)"
         )
     normalized = value.strip().casefold()
-    allowed = {"none", "low", "medium", "high", "xhigh"}
+    allowed = {"none", "low", "medium", "high", "xhigh", "max"}
     if normalized not in allowed:
         raise ModelConfigurationError(
-            "OPENAI_REASONING_EFFORT must be none, low, medium, high, or xhigh"
+            "OPENAI_REASONING_EFFORT must be none, low, medium, high, xhigh, or max (model permitting)"
         )
     return normalized
 

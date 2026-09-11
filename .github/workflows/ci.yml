@@ -30,6 +30,9 @@ jobs:
         run: |
           python -m pytest -q
           python -m compileall -q src tests tools
+          node --check docs/assets/i18n-catalog.js
+          node --check docs/assets/i18n.js
+          node --check docs/assets/model-popover.js
           node --check docs/assets/app.js
           node --check docs/assets/model-strategy.js
           node --check docs/assets/feedback-client.js

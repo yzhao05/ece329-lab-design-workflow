@@ -62,7 +62,7 @@ class DeepSeekJSONTransport:
             api_key, timeout_seconds, endpoint=base_url.strip().rstrip('/') + '/chat/completions', provider='DeepSeek')
 
     def create(self, payload):
-        details = model_details(payload['model'], payload.get('reasoning', {}).get('effort', 'medium'))
+        details = model_details(payload['model'], payload.get('reasoning', {}).get('effort', 'medium'), apply_preset='reasoning' not in payload)
         if details['provider'] != 'deepseek':
             raise ModelConfigurationError('DeepSeek transport cannot receive another provider model')
         if payload.get('previous_response_id'):
@@ -84,6 +84,8 @@ class DeepSeekJSONTransport:
             messages.append({'role': entry.get('role', 'user'), 'content': content})
         effort = details['reasoning']
         budget = max(payload.get('max_output_tokens', 0), self.max_output_tokens)
+        if '_workflow_output_cap' in payload:
+            budget = min(budget, payload['_workflow_output_cap'])
         if not 1 <= budget <= 384000:
             raise ModelConfigurationError('DeepSeek output token budget must be between 1 and 384000')
         request = {'model': details['api_model'], 'messages': messages, 'stream': False,

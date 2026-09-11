@@ -112,6 +112,7 @@ class DesignSession:
             "selected_model": self.model_context.get("selected_model"),
             "model_config": deepcopy(self.model_context.get("model_config")),
             "model_config_version": self.model_context.get("model_config_version", 0),
+            "language": self.model_context.get("response_language", "zh"),
             "completed_stages": list(self.completed_stages),
             "design_context": public_design_context,
             "stage_outputs": self.stage_outputs,
@@ -132,6 +133,7 @@ class TurnRequest:
     version_request: dict[str, Any] | None = None
     model: str | None = None
     model_config: dict[str, Any] | None = None
+    language: str | None = None
 
 
 class WorkflowError(Exception):

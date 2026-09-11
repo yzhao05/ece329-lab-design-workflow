@@ -462,13 +462,15 @@ EMVR Builder PDF 的本机目录定位、包内边界、内嵌资料和 Value �
 
 工作台右上角“反馈问题”支持提交、查看回执及有限重试。后台异步分析反馈，维护者在 [经验审阅页](docs/feedback-review.html) 核对证据、编辑并启用/停用规则；两个 mode 的后续意图解析和回复均检索已启用经验。部署需配置持久化 `ECE329_DATABASE_PATH`、现有在线模型及独立的 `ECE329_FEEDBACK_ADMIN_TOKEN`，详细接口、状态和验收步骤见 [反馈层说明](docs/feedback-layer.md#反馈提交分析审阅检索的完整线路)。
 
-输入框上方提供 Recommended / Fast / High Quality / Custom 策略、逐阶段能力覆盖和具体模型选择，支持在对话中切换。后端通过 `ECE329_ALLOWED_MODELS` 控制 OpenAI 与 DeepSeek 的可选范围，通过 `ECE329_MODEL_REGISTRY` 和 `ECE329_STAGE_POLICY` 控制路由。旧会话固定模型选择保持兼容，见 [模型选择说明](docs/model-selection.md)。
+点击输入框右下角的当前模型名称，可展开绿色设置浮窗，选择 Recommended / Fast / High Quality / Custom 策略、逐阶段能力覆盖和具体模型。后端通过 `ECE329_ALLOWED_MODELS` 控制 OpenAI 与 DeepSeek 的可选范围，通过 `ECE329_MODEL_REGISTRY` 和 `ECE329_STAGE_POLICY` 控制路由。旧会话固定模型选择保持兼容，见 [模型选择说明](docs/model-selection.md)。顶部语言按钮支持中英文界面、回复与导出，见 [语言与模型浮窗说明](docs/language-and-model-popover.md)。
 
 每条在线回答支持独立反馈、会话/项目/全局候选范围和评测关联；新增经验开关、可选的有限自适应升级及评测 JSON 导出。原状态机和本地校验保留。五项方案的实现位置、API、部署配置及评测边界见 [模型路由与经验层实施说明](docs/routing-experience-implementation.md)。
 
 支持同时接入 OpenAI 与 DeepSeek。DeepSeek 提供 Flash、Flash 快速/深度思考两个预设及 V4 Pro 四个选项，按供应商隔离密钥、协议和上下文。新增依赖安装、后端环境变量及单独使用 DeepSeek 的方法见 [DeepSeek 接入说明](docs/deepseek-setup.md)。
 
 模型与反馈恢复、长路径分页误判、从零构建输入及 CMD 推送方法的最新复核见 [2026-09-12 项目审阅](docs/project-review-2026-09-12.md)。
+
+思考强度、累计预算、双语缓存循环与译文引用保护的增补审阅及 CMD 推送命令见 [本轮审阅记录](docs/review-reasoning-language-2026-09-12.md)。
 
 内置 `InMemorySessionStore` 适合本地开发；设置 `ECE329_DATABASE_PATH` 后会启用SQLite和乐观版本检查。SQLite适合单服务实例，多实例部署仍应替换为共享数据库。
 

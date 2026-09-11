@@ -422,6 +422,28 @@ function requestFailurePresentation(error) {
   const code = apiError?.code || "unknown_client_error";
   const status = Number(apiError?.status || 0);
   const diagnosticId = String(apiError?.details?.diagnostic_id || "").trim();
+  if (window.ECE329I18n?.language === 'en') {
+    const reasons = {
+      client_timeout:'The browser stopped waiting. The backend may still be processing; wait briefly before retrying.',
+      network_error:'Cannot reach the course service. Check the network, backend URL and CORS configuration.',
+      request_aborted:'The page cancelled this request.', model_timeout:'The model response timed out.',
+      model_rate_limited:'The model service is rate limited. Wait briefly before retrying.',
+      model_output_invalid:'The model output failed structure or course-scope validation and was not written to the design.',
+      model_budget_exceeded:'This turn reached its output or call limit. Change the model/effort settings or shorten the request, then send a new message.',
+      model_request_rejected:'The model API rejected this request. Check the model name and API configuration.',
+      model_configuration_error:'The model configuration is invalid. Ask the administrator to check the backend environment variables.',
+      model_connection_error:'The course backend could not reach the model service.',
+      model_upstream_error:'The model service returned a temporary server error.',
+      invalid_request:'The request or workflow state failed validation. Refresh the design before retrying.',
+      invalid_json:'The request body is not valid JSON.', request_too_large:'The input is too long. Shorten it and retry.',
+      not_found:'This endpoint was not found. Check the backend URL and frontend/backend versions.',
+      workflow_error:'This operation conflicts with the current workflow state. Refresh before retrying.',
+      backend_unavailable:'The course service is not ready. Check the backend readiness endpoint and service logs.',
+    };
+    const reason = reasons[code] || `The request could not be completed (HTTP ${status || 'unavailable'}).`;
+    return {message:`${reason} Your saved design is preserved.${diagnosticId ? ` Diagnostic ID: ${diagnosticId}` : ''}`,
+      tag:code,badge:'Request incomplete',notice:reason,toast:'Request incomplete; design preserved'};
+  }
   const suffix = diagnosticId ? `（诊断编号：${diagnosticId}）` : "";
   const phase = String(apiError?.details?.phase || "").trim();
   const phaseLabel = {
@@ -431,6 +453,11 @@ function requestFailurePresentation(error) {
   const phaseSuffix = phaseLabel ? `（发生在：${phaseLabel}）` : "";
   const timeoutSeconds = Math.round(Number(apiError?.details?.timeout_ms || 0) / 1000);
   const presentations = {
+    model_budget_exceeded: {
+      message: '本轮已达到输出或调用次数上限，已停止模型调用。请调整模型、思考强度或缩短请求，再发送新消息。',
+      tag: '本轮预算已用完', badge: '本轮调用已停止',
+      notice: '已有设计记录保留；解析与修复共用整轮预算。', toast: '本轮预算已用完',
+    },
     client_timeout: {
       message: `本轮处理已超过浏览器等待时间${timeoutSeconds ? `（约${timeoutSeconds}秒）` : ""}，页面已停止等待。后端可能仍在处理；请先稍等片刻，再重新发送刚才的回答。`,
       tag: "浏览器等待超时",
@@ -626,6 +653,12 @@ async function loadModelCatalog() {
       state.modelConfig = structuredClone(routingCatalog.defaults);
       if (state.designId && state.selectedModel) Object.assign(state.modelConfig, {strategy: 'custom', model_override: state.selectedModel});
     }
+    if (state.modelConfig?.reasoning_overrides && routingCatalog?.execution) {
+      // Refresh live preferences only; a submitted retry retains its exact body.
+      state.modelConfig = {...state.modelConfig, reasoning_overrides: Object.fromEntries(
+        Object.entries(state.modelConfig.reasoning_overrides).filter(([model, effort]) =>
+          routingCatalog.execution.models?.[model]?.reasoning_efforts.includes(effort)))};
+    }
     if (!catalogue.enabled && !state.pendingRequest) state.selectedModel = null;
     if (!state.selectedModel && catalogue.enabled) state.selectedModel = catalogue.default_model;
     modelCatalogMessage = catalogue.enabled ? "切换后从下一条消息生效。" : "后端当前使用本地规则，尚未启用在线模型。";
@@ -666,13 +699,15 @@ function renderModelSelection() {
   dom.refreshModels.disabled = !apiBase() || dom.sendButton.disabled;
   const selectedEntry = modelCatalog.models.find(item => item.id === state.selectedModel);
   const providerHelp = selectedEntry?.provider === 'deepseek'
-    ? selectedEntry.preset_reasoning === 'none' ? 'DeepSeek 快速预设：关闭深度思考；从下一条消息生效。'
-      : selectedEntry.preset_reasoning === 'high' ? 'DeepSeek 深度思考预设：固定使用高推理强度；从下一条消息生效。'
+    ? state.modelConfig?.reasoning_overrides?.[state.selectedModel] ? '使用此模型单独设置的思考强度；从下一条消息生效。'
+      : selectedEntry.preset_reasoning === 'none' ? 'DeepSeek 快速预设：关闭深度思考；从下一条消息生效。'
+      : selectedEntry.preset_reasoning === 'high' ? 'DeepSeek 深度思考预设：默认使用高推理强度，可单独调整；从下一条消息生效。'
         : '已选择 DeepSeek；推理强度由当前能力策略决定。'
     : modelCatalogMessage;
   dom.modelHelp.textContent = unavailable ? "原模型已停用，请从列表中选择其他模型。"
     : state.pendingRequest && Object.hasOwn(state.pendingRequest, "model") && state.pendingRequest.model !== state.selectedModel
       ? "快捷重试仍使用原模型；新发送的消息使用当前选择。" : providerHelp;
+  window.updateModelPopover?.();
 }
 
 function modelForRequest() {
@@ -1290,6 +1325,7 @@ async function sendVersionAction(versionRequest, message) {
     versionRequest,
     model: modelForNewRequest(),
     modelConfig: routingCatalog?.enabled ? structuredClone(state.modelConfig) : null,
+    language: window.ECE329I18n?.language,
   };
   addMessage("user", message);
   setBusy(true);
@@ -1388,7 +1424,8 @@ async function handleSubmit(event) {
     !state.pendingRequest
     || state.pendingRequest.message !== message
     || state.pendingRequest.uiAction !== uiAction
-    || (!isPendingReplay && ((state.pendingRequest.model || null) !== modelForNewRequest()
+    || (!isPendingReplay && (state.pendingRequest.language !== window.ECE329I18n?.language
+        || (state.pendingRequest.model || null) !== modelForNewRequest()
         || JSON.stringify(state.pendingRequest.modelConfig || null) !== JSON.stringify(routingCatalog?.enabled ? state.modelConfig : null)))
   ) {
     state.pendingRequest = {
@@ -1399,6 +1436,7 @@ async function handleSubmit(event) {
       versionRequest: null,
       model: modelForNewRequest(),
       modelConfig: routingCatalog?.enabled ? structuredClone(state.modelConfig) : null,
+      language: window.ECE329I18n?.language,
     };
   }
   state.pendingUiAction = null;
@@ -1506,7 +1544,11 @@ async function handleSubmit(event) {
       [failure.tag],
       { meta: "ECE329 Agent" },
     );
-    state.quickActions = [pendingRequestRetryAction()];
+    if (error instanceof ApiError && error.code === 'model_budget_exceeded') {
+      state.pendingRequest = null;
+      state.quickActions = [];
+      if (!dom.chatInput.value) dom.chatInput.value = message;
+    } else state.quickActions = [pendingRequestRetryAction()];
     showToast(failure.toast);
   } finally {
     setBusy(false);
@@ -1538,14 +1580,14 @@ async function createApiDesign(message) {
   const request = () => apiRequest("/v1/designs", {
       method: "POST",
       headers: { ...courseAccessHeaders(), "Idempotency-Key": idempotencyKey },
-      body: JSON.stringify({ idea: message, ...(selectedModel ? { model: selectedModel } : {}), ...(modelConfig ? {model_config: modelConfig} : {}) }),
+      body: JSON.stringify({ idea: message, ...(selectedModel ? { model: selectedModel } : {}), ...(modelConfig ? {model_config: modelConfig} : {}), ...(window.ECE329I18n ? {language: state.pendingRequest?.language || window.ECE329I18n.language} : {}) }),
     });
   try {
     return await request();
   } catch (error) {
     if (requestGeneration !== designGeneration) throw error;
     if (!(error instanceof ApiError) || error.code !== "access_denied") throw error;
-    const accessCode = window.prompt("该网站需要输入课程访问码。请输入老师提供的访问码。", "");
+    const accessCode = window.prompt(window.ECE329I18n?.text("该网站需要输入课程访问码。请输入老师提供的访问码。") || "该网站需要输入课程访问码。请输入老师提供的访问码。", "");
     if (!accessCode) throw error;
     sessionStorage.setItem(ACCESS_CODE_KEY, accessCode.trim());
     return request();
@@ -1615,6 +1657,7 @@ async function authorizedDesignApiRequest(path, options = {}) {
 }
 
 async function authorizedDesignDownload(path) {
+  if (window.ECE329I18n) path += `${path.includes('?') ? '&' : '?'}language=${window.ECE329I18n.language}`;
   const requestGeneration = designGeneration;
   let token = await ensureDesignAccessToken();
   if (requestGeneration !== designGeneration) {
@@ -1713,6 +1756,8 @@ function applyDesignSnapshot(design) {
 function buildTurnRequest(message, uiAction = null, versionRequest = null) {
   const turnId = state.pendingRequest?.turnId || crypto.randomUUID();
   const turn = { message, turn_id: turnId };
+  const language = state.pendingRequest?.language || window.ECE329I18n?.language;
+  if (language) turn.language = language;
   const config = modelConfigForRequest();
   if (config) turn.model_config = config;
   const selectedModel = modelForRequest();
@@ -2698,7 +2743,7 @@ function showToast(message) {
 }
 
 function resetDesign() {
-  const confirmed = window.confirm("确定开始一个新的实验设计吗？当前浏览器中的对话记录会被清除。");
+  const confirmed = window.confirm(window.ECE329I18n?.text("确定开始一个新的实验设计吗？当前浏览器中的对话记录会被清除。") || "确定开始一个新的实验设计吗？当前浏览器中的对话记录会被清除。");
   if (!confirmed) return;
   const designId = state.designId;
   const token = sessionStorage.getItem(DESIGN_TOKEN_KEY) || "";
@@ -2772,8 +2817,10 @@ function drawChart() {
   ctx.lineTo(width - pad.right, height - pad.bottom);
   ctx.stroke();
 
-  ctx.fillText(yAxis, 2, pad.top + 2);
-  ctx.fillText(xAxis, Math.max(pad.left, width - ctx.measureText(xAxis).width - 4), height - 7);
+  const displayY = window.ECE329I18n?.text(yAxis) || yAxis;
+  const displayX = window.ECE329I18n?.text(xAxis) || xAxis;
+  ctx.fillText(displayY, 2, pad.top + 2);
+  ctx.fillText(displayX, Math.max(pad.left, width - ctx.measureText(displayX).width - 4), height - 7);
 
   const parameter = Number(dom.chartParameter.value);
   dom.parameterValue.value = hasApiPoints ? "理论" : parameter.toFixed(2);
@@ -2882,4 +2929,42 @@ async function initializePage() {
   }
 }
 
+window.requestDisplayTranslation = async (texts, language) => {
+  const generation = designGeneration, designId = state.designId;
+  const model = modelForNewRequest();
+  const pieces = [], assembled = texts.map(() => []);
+  texts.forEach((text,index) => {
+    for (let start = 0; start < text.length;) {
+      let end = Math.min(start + 4000,text.length);
+      if (end < text.length) {
+        const breaks = [...text.slice(start,end).matchAll(/[。；！？\n]/g)];
+        const last = breaks.at(-1);
+        if (last && last.index > 2000) end = start + last.index + 1;
+        else {
+          while (end > start && /[^\s\u3400-\u9fff]/.test(text[end-1]) && /[^\s\u3400-\u9fff]/.test(text[end])) end--;
+          if (end === start) throw new Error('An indivisible display token is too long');
+        }
+      }
+      const part = text.slice(start,end);
+      if (part.trim()) pieces.push({index,text:part});
+      start=end;
+    }
+  });
+  if (pieces.length > 96) throw new Error('Translation is too large');
+  for (let start = 0; start < pieces.length;) {
+    if (generation !== designGeneration) throw new Error('Design changed');
+    const group = []; let size = 0;
+    while (start < pieces.length && group.length < 24 && size + pieces[start].text.length <= 12000) {
+      size += pieces[start].text.length; group.push(pieces[start++]);
+    }
+    const body = JSON.stringify({texts:group.map(p=>p.text),language,...(designId ? {design_id:designId} : {}),...(model ? {model} : {})});
+    const result = await (designId ? authorizedDesignApiRequest('/v1/localization', {method:'POST',body})
+      : apiRequest('/v1/localization', {method:'POST',body,headers:courseAccessHeaders()}));
+    if (!Array.isArray(result.translations) || result.translations.length !== group.length) throw new Error('Incomplete translation');
+    group.forEach((piece,i) => assembled[piece.index].push(result.translations[i]));
+  }
+  return {language,translations:assembled.map(parts=>parts.join('\n'))};
+};
+window.addEventListener('ece329:translations-ready', drawChart);
+window.addEventListener('ece329:language-changed', () => { renderModelSelection(); drawChart(); });
 void initializePage();

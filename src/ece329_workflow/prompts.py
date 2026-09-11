@@ -698,7 +698,8 @@ def build_prompt_packet(
         },
     }
     return {
-        "system": GLOBAL_RULES,
+        "system": GLOBAL_RULES + ('\nThe user selected English. Write all user-facing explanations, questions, labels and student tasks in English. Preserve schema keys, IDs, equations, units and existing design facts.'
+            if session.model_context.get('response_language') == 'en' else '\n用户选择中文；面向用户的说明、提问与任务使用中文，保留公式、单位和标识符。'),
         "context": context,
         "user": (
             "优先完成context.response_task指定的用户请求；没有该任务时才生成context.current_stage产物。返回JSON对象，不要使用Markdown代码块。"
