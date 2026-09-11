@@ -2355,7 +2355,7 @@ function applyResponse(response, userMessage) {
 }
 
 function composeAssistantText(response) {
-  const base = response.assistant_message || response.message || "这一部分已经整理好了。";
+  const base = response.assistant_message || response.message || (response.student_task ? "" : "这一部分已经整理好了。");
   const parts = [base];
   const shouldShowStudentTask = (
     state.mode === "EMVR_DIRECT" || state.stageIndex !== 0

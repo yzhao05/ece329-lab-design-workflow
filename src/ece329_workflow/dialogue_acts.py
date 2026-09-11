@@ -771,6 +771,7 @@ def apply_stage_field_updates(
     *,
     stage: Stage,
     provenance: str = "STUDENT_CONFIRMED",
+    mirror_aliases: bool = True,
 ) -> list[str]:
     """Idempotently commit later-stage fields without copying the whole turn."""
 
@@ -925,6 +926,14 @@ def apply_stage_field_updates(
     if emvr:
         emvr["explicitly_cleared_fields"] = sorted(emvr_explicitly_cleared)
     if session.interaction_state is InteractionState.EMVR_DIRECT and changed:
+        aliases = {'interactions': 'required_behaviors', 'visualization_plan': 'visualization_requirements'}
+        alias_updates = [
+            {'field_id': aliases[field], 'operation': 'CLEAR' if field in explicitly_cleared else 'REPLACE',
+             'value': [state[field]] if state.get(field) else []}
+            for field in changed if field in aliases
+        ]
+        if alias_updates and mirror_aliases:
+            apply_emvr_field_updates(session.design_context.setdefault('emvr_design', {}), {'field_updates': alias_updates})
         # Both write paths can revise Builder fields. Mirror a newer stage
         # write into the canonical store so report, validation and Builder
         # cannot disagree based on which storage path received the edit.

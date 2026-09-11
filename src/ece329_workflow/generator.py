@@ -2333,7 +2333,6 @@ class RuleBasedStageGenerator:
             conceptual_objective = (
                 structured_requirements.get("conceptual_objective")
                 or (saved_objectives[0] if saved_objectives else "")
-                or latest_stage_input
                 or f"解释{topics[0]}中的核心物理机制"
             )
             changed_text = _compact_context_items(

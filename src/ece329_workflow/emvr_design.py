@@ -302,6 +302,46 @@ def recover_explicit_emvr_edits(
         return {}
 
     edits: dict[str, dict[str, Any]] = {}
+    # Public labels refer to the same field at every stage. Quoted replacement
+    # values have explicit boundaries, so several edits can be recovered without
+    # assigning the whole message to whichever question happens to be pending.
+    public_labels = {
+        "research_object": "研究对象",
+        "required_behaviors": "可用交互|核心操作|学生操作",
+        "research_question": "研究问题|问题主线",
+        "visualization_requirements": "教学可视化|可视化层|显示方式|显示内容",
+        "conceptual_objective": "概念目标",
+        "calculation_objective": "计算目标",
+        "analysis_objective": "分析目标",
+        "vr_interaction_objective": "交互目标|VR交互目标",
+        "observation_objective": "观察目标",
+    }
+    from .procedure_contract import has_positive_action
+    for field, labels in public_labels.items():
+        matches = re.finditer(
+            rf"(?:{labels})(?:换为|改为|改成|替换为|调整为)\s*(?:更简洁的)?\s*[‘“\"](?P<value>[^’”\"]+)[’”\"]",
+            text,
+        )
+        for match in matches:
+            suffix = re.split(r'[。；;]', text[match.end():], maxsplit=1)[0]
+            prefix = re.split(r'[。；;]', text[:match.start()])[-1]
+            if re.search(r'合适吗|可以吗|是否可行|怎么样|行不行', suffix) or re.search(r'请问|能否|是否可以', prefix):
+                continue
+            if has_positive_action(text[:match.end()], re.escape(match.group(0))):
+                value = match.group('value').strip()
+                edits[field] = {"operation": "REPLACE", "value": [value] if field in EMVR_LIST_FIELDS else value}
+    transfer = re.search(r"把(?:目前|当前|之前)?研究对象的内容(?:移到|复制到)(?:可用交互|核心操作)", text)
+    if transfer and has_positive_action(text, re.escape(transfer.group(0))) and current.get('research_object'):
+        # Resolve sources from the pre-edit snapshot, even when the same turn
+        # replaces that source field afterwards.
+        edits['required_behaviors'] = {"operation": "REPLACE", "value": [str(current['research_object'])]}
+    removal = re.search(r"(?:教学可视化|可视化层|显示内容)中的?[‘“\"]([^’”\"]+)[’”\"][^。]*?(?:去掉|删除|移除)", text)
+    if removal and has_positive_action(removal.group(0), r'去掉|删除|移除'):
+        values = current.get('visualization_requirements', [])
+        if isinstance(values, str):
+            values = [values]
+        retained = [re.sub(r'^[或和与、；;]+|[或和与、；;]+$', '', str(v).replace(removal.group(1), '')).strip() for v in values]
+        edits['visualization_requirements'] = {"operation": "REPLACE", "value": [v for v in retained if v]}
     label_patterns = {
         "changed_quantities": r"(?:主动变化|主动改变|可调内容|可调参数|变化量|自变量)",
         "observed_quantities": r"(?:观察内容|观察量|观察响应|响应量|观察)",
@@ -341,6 +381,8 @@ def recover_explicit_emvr_edits(
     }
     scalar_labels = "|".join(scalar_label_patterns.values())
     for field, label_pattern in scalar_label_patterns.items():
+        if field in edits:
+            continue
         match = re.search(
             rf"{label_pattern}\s*(?:(?:改成|改为|调整为|设为|是|为)\s*[：:]?|[：:])\s*"
             rf"(?P<value>.+?)(?=(?:[；;]\s*(?:{scalar_labels})\s*"
@@ -350,6 +392,11 @@ def recover_explicit_emvr_edits(
         if not match:
             continue
         raw_value = match.group("value").strip()
+        prefix = re.split(r'[。；;]', text[:match.start()])[-1]
+        if re.search(r'请问|能否|是否可以', prefix) or re.search(r'[’”\"]\s*(?:合适吗|可以吗|是否可行|怎么样|行不行)', raw_value):
+            continue
+        if not has_positive_action(text, re.escape(match.group(0))):
+            continue
         value = (
             raw_value.rstrip("，,。；;！!").strip()
             if field == "research_question"
@@ -466,7 +513,7 @@ def recover_explicit_emvr_edits(
     asks_research_question_detail = bool(
         re.search(
             r"(?:研究问题|问题主线)[^。；;]{0,40}"
-            r"(?:更具体|具体些|具体一点|具体一些|更明确|明确些)",
+            r"(?:更具体|具体些|具体一点|具体一些|更明确|明确些|需要明确比较关系)",
             text,
         )
     )
@@ -478,6 +525,7 @@ def recover_explicit_emvr_edits(
         if asks_concept_detail:
             edits["conceptual_objective"] = {
                 "operation": "REPLACE",
+                "derived": True,
                 "value": (
                     f"解释{relation}如何决定{research_object}周围的{observed}"
                     f"随{changed}发生变化"
@@ -486,6 +534,7 @@ def recover_explicit_emvr_edits(
         if asks_interaction_detail:
             edits["vr_interaction_objective"] = {
                 "operation": "REPLACE",
+                "derived": True,
                 "value": (
                     f"在VR中通过控件或直接操作调节{changed}，实时观察{observed}，"
                     f"并把交互结果与{relation}的预测对应"
@@ -499,7 +548,9 @@ def recover_explicit_emvr_edits(
             object_clause = f"{research_object}的" if research_object else ""
             edits["research_question"] = {
                 "operation": "REPLACE",
-                "value": f"当{changed}改变时，{object_clause}{observed}如何变化？",
+                "derived": True,
+                "value": (f"在其余条件一致时，比较不同{changed}配置下{object_clause}{observed}的差异。"
+                          if '比较关系' in text else f"当{changed}改变时，{object_clause}{observed}如何变化？"),
             }
     return edits
 

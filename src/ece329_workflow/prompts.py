@@ -699,7 +699,9 @@ def build_prompt_packet(
         "context": context,
         "user": (
             "优先完成context.response_task指定的用户请求；没有该任务时才生成context.current_stage产物。返回JSON对象，不要使用Markdown代码块。"
-            "如果是引导状态，student_task只能是字符串或null，不能包含多个问题。"
+            "两种模式的student_task都只能提出一个具体待答问题，不能把几个独立决策拼成一个问题。"
+            "用户一次提出多项问题或跨阶段修改时逐项处理；只追问一个未解决缺口，不重新复述整份草稿。"
+            "学生可见参考使用公式名称和含义，不能用FD编号等内部ID代替名称。"
             "必须逐字遵守context.stage_output_contract；要求原样复制的检索对象不得改写。"
         ),
         "response_schema": {

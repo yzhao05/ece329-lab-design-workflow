@@ -692,6 +692,35 @@ def _explicit_emvr_contract_request(session, message, pending):
         return resolved_intent(UserIntent.UNCLEAR, confidence=1.0,
                                source="EMVR_STATE_PRESENTATION", resolved_value=answer)
     field = recoverable_pending_field(pending) if isinstance(pending, dict) else ''
+    if field == 'model_constants_and_media':
+        gap = re.search(r'尚未定义([^；]+)；固定对象', str(pending.get('question') or ''))
+        scalar = re.fullmatch(r'\s*(?P<number>[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*(?P<unit>m|cm|mm|米|厘米|毫米|匝)?\s*[。.]?', text, re.I)
+        if gap and scalar:
+            amount = float(scalar.group('number'))
+            turns = '匝数' in gap.group(1)
+            unit = scalar.group('unit')
+            if not (0 < amount < float('inf')) or (turns and (not amount.is_integer() or unit not in (None, '匝'))) or (not turns and unit == '匝'):
+                return present('这项需要正整数匝数或带长度单位的正值；当前常量保持不变，请修正这个数值。')
+            label = gap.group(1).replace('（米）', '')
+            replacement = label + '：' + scalar.group('number') + ('匝' if turns else unit or 'm')
+            from .builder_requirements import builder_requirement_values
+            prior = builder_requirement_values(session).get(field, '')
+            # Replace a previous value for this property, instead of retaining
+            # a conflicting zero/negative value and repeatedly asking to fix it.
+            prior = re.sub(re.escape(label)+r'(?:（米）)?\s*[:：=]?\s*[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\s*(?:mm|cm|m|毫米|厘米|米|匝)?', '', prior)
+            return validate_resolved_intent(resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION, confidence=1.0, source='EMVR_GEOMETRY_SUPPLEMENT',
+                dialogue_acts=[{'type':'ANSWER_PENDING_QUESTION', 'target':field, 'operation':'REPLACE',
+                                'content':prior.rstrip('；。')+'；'+replacement, 'confidence':1.0}], actions_authoritative=True,
+            ), pending)
+    if field == 'report_questions' and re.match(r'\s*1[，,、.)）]', text):
+        questions = procedure_steps(text)
+        if len(questions) >= 2:
+            return validate_resolved_intent(resolved_intent(
+                UserIntent.ANSWER_CURRENT_QUESTION, confidence=1.0, source='EMVR_NUMBERED_REPORT_ANSWER',
+                dialogue_acts=[{'type':'ANSWER_PENDING_QUESTION', 'target':field, 'operation':'REPLACE',
+                                'content':questions, 'confidence':1.0}], actions_authoritative=True,
+            ), pending)
     if field == 'numerical_model_specifications':
         from .builder_requirements import numerical_tolerance_defined
         if re.match(r"(?:补充|误差|收敛容差|容差|偏差)", text) and numerical_tolerance_defined(text) and not _looks_like_student_question(text):
@@ -757,17 +786,22 @@ def _explicit_emvr_edit_intent(
     current = merge_emvr_structured_requirements(
         session.design_context.get("emvr_design", {})
     )
+    if not current.get("visualization_requirements"):
+        current["visualization_requirements"] = (
+            session.design_context.get("stage_design_state", {}).get("visualization_plan")
+            or session.stage_outputs.get(Stage.THEORETICAL_FRAMEWORK.value, {}).get("stage_payload", {}).get("visual_only_elements", [])
+        )
     edits = recover_explicit_emvr_edits(message, current)
     if not edits:
         return None
     acts = [
         {
-            "type": "MODIFY_EMVR_FIELD",
+            "type": "MODIFY_DESIGN_FIELD" if field in DESIGN_ACT_FIELDS else "MODIFY_EMVR_FIELD",
             "target": field,
             "operation": str(update.get("operation") or "REPLACE"),
             "content": deepcopy(update.get("value")),
             "confidence": 1.0,
-            "semantic_key": f"explicit_emvr_edit:{field}",
+            "semantic_key": f"{'derived' if update.get('derived') else 'explicit'}_emvr_edit:{field}",
         }
         for field, update in edits.items()
     ]
@@ -786,6 +820,62 @@ def _explicit_emvr_edit_intent(
         ),
         pending_action,
     )
+
+
+def _reconcile_explicit_emvr_edits(session, message, pending, intent):
+    """Complete a partial semantic edit batch using unambiguous public labels."""
+    flow = session.design_context.get('emvr_design', {}).get('formula_flow', {})
+    if session.current_stage is Stage.IDEA_BRAINSTORMING and flow and flow.get('phase') != EMVR_DETAIL_DESIGN:
+        return intent
+    explicit = _explicit_emvr_edit_intent(session, message, pending)
+    if explicit is None:
+        return intent
+    original_acts = deepcopy(intent.get('dialogue_acts', []))
+    if not original_acts:
+        updates = intent.get('semantic_updates', {})
+        for key, act_type in (('design_updates','MODIFY_DESIGN_FIELD'), ('stage_field_updates','MODIFY_STAGE_FIELD')):
+            original_acts.extend({'type':act_type, 'target':item.get('field'), 'operation':item.get('operation', 'REPLACE'),
+                                  'content':item.get('value'), 'confidence':1.0} for item in updates.get(key, []))
+        emvr_updates = updates.get('emvr_design_update') or {}
+        original_acts.extend({'type':'MODIFY_EMVR_FIELD', 'target':item.get('field_id'), 'operation':item.get('operation', 'REPLACE'),
+                              'content':item.get('value'), 'confidence':1.0} for item in emvr_updates.get('field_updates', []))
+        for control in updates.get('control_actions', []):
+            original_acts.append({'type': control if control in {'REQUEST_REFERENCE', 'REQUEST_SUMMARY', 'REQUEST_QUALITY_REVIEW'} else 'CONTROL',
+                                  'target': '' if control.startswith('REQUEST_') else control, 'confidence':1.0})
+        original_acts.extend({'type':'UNRESOLVED', 'content':content, 'confidence':1.0}
+                             for content in updates.get('unresolved_content', []))
+    edits = [act for act in explicit.get('dialogue_acts', []) if not (
+        str(act.get('semantic_key', '')).startswith('derived_')
+        and any(old.get('target') == act.get('target') and old.get('content')
+                and not re.match(r'^(?:还|仍)?需要|^更具体|^明确比较关系', str(old['content'])) for old in original_acts)
+    )]
+    if not edits:
+        return intent
+    targets = {act['target'] for act in edits}
+    aliases = {
+        'required_behaviors': {'interactions'},
+        'visualization_requirements': {'visualization_plan', 'visualization_layer'},
+        'changed_quantities': {'independent_variable'},
+        'observed_quantities': {'observations'},
+    }
+    replaced = targets | {alias for field in targets for alias in aliases.get(field, set())}
+    # The current learning-objective prompt must not steal an explicitly named
+    # earlier interaction edit. Separately named objective edits still survive.
+    if 'required_behaviors' in targets and not re.search('目标', message):
+        replaced.update({'vr_interaction_objective', 'conceptual_objective', 'learning_objective', 'learning_objectives'})
+    write_types = {'ANSWER_PENDING_QUESTION', 'MODIFY_DESIGN_FIELD', 'MODIFY_STAGE_FIELD', 'MODIFY_EMVR_FIELD'}
+    retained = [deepcopy(act) for act in original_acts
+                if act.get('target') not in replaced or act.get('type') not in write_types]
+    raw = deepcopy(intent)
+    raw['intent'] = UserIntent.MODIFY_PREVIOUS_PROPOSAL.value
+    raw['dialogue_acts'] = retained + edits
+    raw['actions_authoritative'] = True
+    raw['source'] = 'EMVR_LABELLED_EDIT_RECONCILIATION'
+    # Do not discard genuine remaining requests when repairing one field.
+    for question in intent.get('semantic_updates', {}).get('student_questions', []):
+        if not any(act.get('type') == 'ASK_COURSE_QUESTION' and act.get('content') == question for act in retained):
+            raw['dialogue_acts'].append({'type':'ASK_COURSE_QUESTION', 'content':question, 'confidence':1.0})
+    return validate_resolved_intent(raw, pending)
 
 
 def _direct_builder_answer_intent(
@@ -1226,6 +1316,32 @@ def _generate_question_response(
 ) -> StepOutput:
     """Answer the requested questions against committed state, without a draft."""
 
+    separated = [part.strip() for q in questions for part in re.split(r'(?<=[？?])\s*', q) if part.strip()]
+    if len(separated) > 1:
+        replies = []
+        pending_questions = separated[16:]
+        answered = []
+        warnings = []
+        # Match the dialogue action limit. Never turn one long message into
+        # an unbounded sequence of model calls; retain overflow as unanswered.
+        for question in separated[:16]:
+            result = _generate_question_response(generator, session, turn_context, [question])
+            replies.append(f'{len(replies)+1}. {question}\n{result.assistant_message}')
+            warnings.extend(result.warnings)
+            if result.stage_payload.get('answered_student_questions'):
+                answered.append(question)
+            else:
+                pending_questions.append(question)
+        payload = {'preserve_pending_action':True, 'question_responses':len(replies)}
+        if pending_questions:
+            payload['pending_student_questions'] = pending_questions
+            payload['partially_answered_student_questions'] = answered
+        else:
+            payload['answered_student_questions'] = separated
+        if len(separated) > 16:
+            replies.append(f'本轮已处理前16个问题，另有{len(separated)-16}个问题保留待答，可继续要求回答剩余问题。')
+        return StepOutput(assistant_message='\n\n'.join(replies), stage_payload=payload, warnings=list(dict.fromkeys(warnings)))
+
     context = deepcopy(turn_context)
     context["response_task"] = "COURSE_QUESTION"
     intent = context.setdefault("resolved_intent", {})
@@ -1233,8 +1349,8 @@ def _generate_question_response(
     intent["resolved_value"] = None
     intent["advance_requested"] = False
     intent["dialogue_acts"] = [
-        act for act in intent.get("dialogue_acts", [])
-        if act.get("type") == "ASK_COURSE_QUESTION"
+        {'type':'ASK_COURSE_QUESTION', 'content':question, 'confidence':1.0}
+        for question in questions
     ]
     updates = intent.setdefault("semantic_updates", {})
     for key in (
@@ -1243,11 +1359,12 @@ def _generate_question_response(
     ):
         updates[key] = []
     updates["student_questions"] = deepcopy(questions)
+    previous_context = session.turn_context
     session.turn_context = context
     try:
         answer = generator.generate(session, "\n".join(questions))
     finally:
-        session.turn_context = {}
+        session.turn_context = previous_context
     # A question response is read-only. Model-produced stage drafts or a new
     # pending question must not replace the student's existing work/pending item.
     payload: dict[str, Any] = {"preserve_pending_action": True}
@@ -1257,6 +1374,8 @@ def _generate_question_response(
         payload["pending_student_questions"] = deepcopy(questions)
     elif answer.assistant_message.strip():
         payload["answered_student_questions"] = deepcopy(questions)
+    else:
+        payload['pending_student_questions'] = deepcopy(questions)
     return StepOutput(
         assistant_message=answer.assistant_message,
         stage_payload=payload,
@@ -2306,6 +2425,16 @@ def _emvr_entry_reference(
     return references.get(stage, [])
 
 
+def _default_proposal_text(session, value):
+    if not value:
+        return ''
+    for entry in reversed(session.history[-8:]):
+        previous = entry.get('output', {}).get('stage_payload', {}).get('pending_action', {})
+        if previous.get('default_proposal_value') == value:
+            return '\n\n完整默认方案与上次展示一致；可继续询问具体条目，或审阅后批准。'
+    return f'\n\n以下是按当前实验生成的完整默认方案：\n{value}'
+
+
 def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput:
     requirement = next_due_builder_requirement(session, stage)
     if requirement is not None:
@@ -2345,11 +2474,7 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
                 f"为了让这份设计可以直接交给 EMVR Builder 使用，"
                 f"现在先明确{requirement['label']}。"
                 + (f"\n\n{validation_error}" if validation_error else "")
-                + (
-                    f"\n\n以下是按当前实验生成的完整默认方案：\n{default_value}"
-                    if default_value
-                    else ""
-                )
+                + _default_proposal_text(session, default_value)
             ),
             stage_payload={
                 "emvr_guided_entry": True,
@@ -2384,7 +2509,7 @@ def _emvr_stage_entry_output(session: DesignSession, stage: Stage) -> StepOutput
         # structured state.  Reprinting it at every stage made long EMVR
         # designs look as if the agent had restarted, so later stages only
         # acknowledge continuity and show the current layer or its delta.
-        acknowledgement = "我会沿用已经锁定的实验方向。"
+        acknowledgement = ""
     else:
         acknowledgement = "我会承接前面已经确定的实验内容。"
     reference_draft = _emvr_entry_reference(stage, context)
@@ -2670,11 +2795,7 @@ def _prepare_emvr_stage_output(
         requirement_message = (
             f"这部分还需要明确{requirement['label']}，确认后才会进入 Builder 交接文档。"
             + (f" {validation_error}" if validation_error else "")
-            + (
-                f"\n\n以下是按当前实验生成的完整默认方案：\n{default_value}"
-                if default_value
-                else ""
-            )
+            + _default_proposal_text(session, default_value)
         )
         output.assistant_message = (
             f"{existing_message}\n\n{requirement_message}"
@@ -2740,10 +2861,20 @@ def _prepare_emvr_stage_output(
             "需要修订时直接指出对应内容，设计边界准确时也可以确认继续。"
         )
     else:
-        task = (
-            "这份设计草稿将写入任务报告。请核对物理关系、Unity映射和模型边界；"
-            "需要调整时指出对应设计层，内容准确时确认继续即可。"
-        )
+        focus = {
+            Stage.COURSE_MAPPING_AND_DIRECTION: '课程依据与实验方向的对应',
+            Stage.LEARNING_OBJECTIVES: '学生需要学会的能力',
+            Stage.RESEARCH_QUESTION: '研究问题中的比较关系',
+            Stage.THEORETICAL_FRAMEWORK: '公式与实验输入、输出的对应',
+            Stage.HYPOTHESIS: '预期变化及其适用条件',
+            Stage.CONCEPTUAL_OR_VR_SETUP: '操作后的可见反馈与初始状态',
+            Stage.VARIABLES_AND_CONDITIONS: '各参数范围与固定条件',
+            Stage.CONCEPTUAL_PROCEDURE: '学生操作步骤的先后顺序',
+            Stage.EXPECTED_DATA_VISUALIZATION: '显示方式与观察目标的对应',
+            Stage.RESULT_INTERPRETATION: '预期结果与通过条件',
+            Stage.DESIGN_VALUE_AND_LIMITATIONS: '可行性与模型局限',
+        }.get(stage, '当前内容')
+        task = f'请核对{focus}；可指出要改的一项，或确认继续。'
     output.student_task = task
     output.stage_payload["pending_action"] = {
         "type": "CONFIRM_STAGE_OR_MODIFY",
@@ -2995,6 +3126,11 @@ def _project_committed_stage_fields(
             saved = str(requirements.get(field) or "").strip()
             if saved:
                 output.stage_payload[field] = saved
+    elif stage is Stage.THEORETICAL_FRAMEWORK:
+        requirements = merge_emvr_structured_requirements(session.design_context.get('emvr_design', {}))
+        display = requirements.get('visualization_requirements') or value('visualization_plan')
+        if display:
+            output.stage_payload['visual_only_elements'] = deepcopy(display)
     elif stage is Stage.COURSE_MAPPING_AND_DIRECTION:
         if value("design_rationale"):
             output.stage_payload["selection_reason"] = value("design_rationale")
@@ -3388,6 +3524,17 @@ def _persist_emvr_stage_input(
         # requirements such as an already confirmed learning objective.
         structured_requirements[stage.value] = deepcopy(structured_update)
         apply_emvr_field_updates(emvr_design, structured_update)
+        alias_updates = []
+        for item in structured_update.get('field_updates', []):
+            alias = {'required_behaviors': 'interactions', 'visualization_requirements': 'visualization_plan'}.get(item.get('field_id'))
+            if alias:
+                current_value = emvr_design.get('field_state', {}).get(item['field_id'], [])
+                alias_updates.append({'field': alias, 'operation': 'CLEAR' if item.get('operation') == 'CLEAR' else 'REPLACE',
+                                      'value': '；'.join(current_value) if isinstance(current_value, list) else current_value})
+                if alias == 'visualization_plan':
+                    alias_updates.append({**alias_updates[-1], 'field': 'visualization_layer'})
+        if alias_updates:
+            apply_stage_field_updates(session, alias_updates, stage=stage, mirror_aliases=False)
         reconcile_stage_clear_markers(
             session,
             structured_update.get("field_updates", []),
@@ -3488,6 +3635,18 @@ class WorkflowEngine:
         message: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = hydrate_pending_action_from_history(session)
+        if session.interaction_state is InteractionState.EMVR_DIRECT and _compact_control_text(message) in {
+            '继续回答剩余问题', '回答剩余问题', '继续回答未完成的问题',
+        }:
+            start = session.model_context.get('design_history_start', 0)
+            start = start if isinstance(start, int) and start >= 0 else 0
+            for entry in reversed(session.history[start:]):
+                payload = entry.get('output', {}).get('stage_payload', {})
+                if payload.get('pending_student_questions'):
+                    return resolved_intent(UserIntent.ASK_COURSE_QUESTION, confidence=1.0, source='EMVR_QUESTION_CONTINUATION',
+                                           semantic_updates={'student_questions':deepcopy(payload['pending_student_questions'])}), pending
+                if payload.get('answered_student_questions') or entry.get('resolved_intent', {}).get('intent') == 'NEW_TOPIC':
+                    break
         procedure_intent = _explicit_emvr_contract_request(session, message, pending)
         if procedure_intent is not None:
             return procedure_intent, pending
@@ -3758,6 +3917,7 @@ class WorkflowEngine:
                 carried_context,
             )
             validated = validate_resolved_intent(semantic, pending)
+            validated = _reconcile_explicit_emvr_edits(session, message, pending, validated)
             recovered = recover_repeated_pending_answer(
                 validated,
                 pending,
@@ -3921,6 +4081,7 @@ class WorkflowEngine:
             ),
             pending,
         )
+        validated = _reconcile_explicit_emvr_edits(session, message, pending, validated)
         direct_builder_answer = _direct_builder_answer_intent(
             session,
             message,
@@ -5794,10 +5955,12 @@ class WorkflowEngine:
             output.assumptions.extend(answer.assumptions)
             output.warnings.extend(answer.warnings)
             if answer.stage_payload.get("answered_student_questions"):
-                output.stage_payload["answered_student_questions"] = deepcopy(student_questions)
+                output.stage_payload["answered_student_questions"] = deepcopy(answer.stage_payload['answered_student_questions'])
                 completed_response_types.add("ASK_COURSE_QUESTION")
             elif answer.stage_payload.get("pending_student_questions"):
-                output.stage_payload["pending_student_questions"] = deepcopy(student_questions)
+                output.stage_payload["pending_student_questions"] = deepcopy(answer.stage_payload['pending_student_questions'])
+                if answer.stage_payload.get('partially_answered_student_questions'):
+                    output.stage_payload['partially_answered_student_questions'] = deepcopy(answer.stage_payload['partially_answered_student_questions'])
         if quality_review_requested and "REQUEST_QUALITY_REVIEW" not in completed_response_types:
             review_text = format_quality_review(
                 quality_review, session.interaction_state, final_review=final_quality_review,
@@ -5935,6 +6098,14 @@ class WorkflowEngine:
             message,
             turn_intent,
         )
+        if session.interaction_state is InteractionState.EMVR_DIRECT:
+            for profile in KNOWLEDGE.public_formula_design_profiles():
+                profile_id = str(profile.get('profile_id') or '')
+                title = str(profile.get('title_zh') or '')
+                if profile_id and title:
+                    output.assistant_message = output.assistant_message.replace(profile_id, f'“{title}”公式组')
+                    if output.student_task:
+                        output.student_task = output.student_task.replace(profile_id, f'“{title}”公式组')
         self._validate_step_output(session.interaction_state, output.student_task)
         if not dynamic_idea_turn:
             self._commit_stage_one_thread(

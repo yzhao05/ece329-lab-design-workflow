@@ -168,7 +168,7 @@ def test_json_encoded_lists_and_decimal_results_are_not_corrupted():
 def test_percentage_tolerance_supplement_is_merged_without_erasing_model(complete):
     e,s=prepare(complete)
     s.current_stage_index=list(Stage).index(Stage.EXPECTED_DATA_VISUALIZATION)
-    initial='毕奥萨伐尔数值积分；场线RK4；计算域[-1.5,1.5] m；采样20个种子，最大5000步；边界和奇点终止。'
+    initial='毕奥萨伐尔数值积分，源路径分段512段，按中点求积；场线RK4；计算域[-1.5,1.5] m；20个种子坐标为(0.6*cos(2*pi*k/20),0,0.6*sin(2*pi*k/20)) m，k=0..19，最大5000步；边界和奇点终止；零场不归一化。'
     apply_stage_field_updates(s,[{'field':'numerical_model_specifications','operation':'REPLACE','value':initial}],stage=s.current_stage)
     s.model_context['dialogue_state']={'pending_action':{'type':'ANSWER_EMVR_STAGE_QUESTION','subject':'numerical_model_specifications','answer_fields':['numerical_model_specifications'],'question':'请补充误差容差。'}}
     e.store.save(s)

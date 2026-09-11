@@ -457,7 +457,9 @@ def build_builder_gate1_input(session: DesignSession) -> dict[str, Any]:
                 _text(method_by_id[method_id].get("description"))
             ),
             "process_summary": _formula_expression_for_report(
-                _text(method_by_id[method_id].get("process_summary"))
+                "按本文 Student tasks 中已确认的有序步骤执行；"
+                "改变：" + _text(experiment_brief.get("changed_quantities")) + "；"
+                "观察：" + _text(experiment_brief.get("observed_quantities")) + "。"
             ),
         }
         for method_id in experiment_brief.get("selected_experiment_method_ids", [])
@@ -1052,6 +1054,12 @@ def validate_builder_gate1_input(payload: dict[str, Any]) -> None:
         )
     ):
         raise ValueError("Builder Gate 1 physics contract is incomplete")
+    from .numerical_contract import biot_numerical_gap, geometry_gap
+    numerical_gap = biot_numerical_gap(str(physics.get('numerical_model', '')))
+    fixed_geometry_gap = geometry_gap(str(physics.get('input_parameter_contract', '')),
+                                      str(physics.get('constants_and_media', '')) + '；' + str(physics.get('numerical_model', '')))
+    if numerical_gap or fixed_geometry_gap:
+        raise ValueError('Builder physics inputs are not reproducible: ' + str(numerical_gap or fixed_geometry_gap))
     unresolved_paths: list[str] = []
 
     def scan(value: Any, path: str) -> None:

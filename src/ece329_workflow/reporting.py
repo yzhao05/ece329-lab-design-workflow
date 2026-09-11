@@ -417,6 +417,12 @@ def _formal_report_text(value: Any) -> str:
 
 
 _FORMULA_CHARACTER_REPLACEMENTS = {
+    "r̂": "r_hat",
+    "x̂": "x_hat",
+    "ŷ": "y_hat",
+    "ŷ": "y_hat",
+    "ẑ": "z_hat",
+    "ẑ": "z_hat",
     "εrε₀": "epsilon_r * epsilon_0",
     "εᵣε₀": "epsilon_r * epsilon_0",
     "εr": "epsilon_r",
@@ -993,7 +999,7 @@ def effective_emvr_stage_payload(
         set_bound(
             "possible_vr_interactions",
             "required_behaviors",
-            requirements.get("desktop_interaction_plan") or brief.get("operations"),
+            requirements.get("required_behaviors") or brief.get("operations") or requirements.get("desktop_interaction_plan"),
         )
         formula_ids = list(brief.get("primary_formula_ids", []))
         supporting_ids = list(brief.get("supporting_formula_ids", []))
@@ -1310,6 +1316,7 @@ def effective_emvr_stage_payload(
             set_bound(field, field, stage_state.get(field) or requirements.get(field))
         for field in ("physics_layer", "visualization_layer", "measurement_interface"):
             set_if(field, stage_state.get(field))
+        set_bound('visualization_layer', 'visualization_requirements', stage_state.get('visualization_layer') or requirements.get('visualization_requirements') or stage_state.get('visualization_plan'))
         set_bound(
             "interactions",
             "required_behaviors",
@@ -1612,6 +1619,8 @@ def effective_emvr_stage_payload(
                     else "记录每次比较的电荷配置、距离、已定义数值指标与场快照，保证结果可追溯"
                 ),
             ]
+    if stage is Stage.THEORETICAL_FRAMEWORK:
+        set_bound('visual_only_elements', 'visualization_requirements', requirements.get('visualization_requirements') or stage_state.get('visualization_plan'))
     measurement_contract = builder_requirement_values(session).get("measurement_specifications")
     if measurement_is_qualitative_only(measurement_contract):
         # Measurement ownership applies to magnetic and other formula families,

@@ -417,8 +417,19 @@ def _cross_field_validation_error(
         )
         if integrates and not numerical_tolerance_defined(numerical):
             return "数值积分给出了步长，但没有可检验的误差/收敛容差；步长和最大步数不能代替精度验收值。"
+        from .numerical_contract import biot_numerical_gap
+        gap = biot_numerical_gap(numerical)
+        if gap:
+            return '数值算法还需明确：' + gap + '。'
     if field == "model_constants_and_media":
         constants = values.get(field, "")
+        # Discrete geometry controls still need numerical source geometry.
+        # Ask for the first missing property, retaining all other supplied data.
+        choices = values.get('parameter_specifications', '')
+        from .numerical_contract import geometry_gap
+        gap = geometry_gap(choices, constants + '；' + values.get('numerical_model_specifications', ''))
+        if gap:
+            return f'载流路径选项中尚未定义{gap}；固定对象也需要有效几何输入（长度为正且带单位，匝数为正整数），不能由Builder猜测。'
         if "绝对值" in constants and re.search(r"两(?:个|个点)?电荷|两源", constants):
             signed_context = "；".join(values.get(key, "") for key in (
                 "model_constants_and_media", "parameter_specifications", "initial_reset_state"
@@ -432,7 +443,13 @@ def _cross_field_validation_error(
             if len(names) < 2 and not verbal_convention:
                 return "两源只给出了电荷量绝对值；请补充每个源的带符号初值及同号/异号切换约定，不能由Builder猜测。"
     if field in {"expected_results", "acceptance_criteria"}:
+        numerical = values.get('numerical_model_specifications', '')
+        fixed_seeds = re.search(r'(?:固定[^。；;]{0,15}种子|种子(?:点)?\s*\d+|\d+\s*个?种子)', numerical)
         for clause in re.split(r"[。；;\n]", values.get(field, "")):
+            if (fixed_seeds and re.search(r'毕奥|Biot|biot_savart', numerical, re.I)
+                    and re.search(r'场线[^。；;]{0,20}(?:更密|最密|密度[^。；;]{0,8}增加|范围[^。；;]{0,8}(?:扩大|最大))', clause)
+                    and not re.search(r'不|不能|不得|无需|并非', clause)):
+                return '固定种子下，增大电流不能作为场线条数、密度或环绕范围必然增加的验收条件；请用场强映射或方向、形态比较定义结果。'
             if "场线" in clause and re.search(r"空白[^。；;]{0,40}(?:显著扩大|必然扩大|一定扩大)", clause) and not re.search(r"不|不能|不得|无需", clause):
                 return "场线绘制的空白不能作为零场区域或固定扩大的硬判据；请按公式、统一视图和实际形态定义验收。"
     if field == "parameter_specifications" and _uses_named_distance_bands(session):

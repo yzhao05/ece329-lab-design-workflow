@@ -448,6 +448,10 @@ EMVR Builder PDF 的本机目录定位、包内边界、内嵌资料和 Value �
 
 混合元问题、否定操作、跨实验历史恢复、Common 接口和有限计算预算的后续修复，以及闭合圆环磁场 PDF 与 CMD 推送方法，见 [emvr35 项目复核](docs/emvr35-project-review.md)。
 
+多项请求遗漏、跨阶段栏目误绑定、抽象意见误写入及重复确认的修复，见 [emvr36 对话维护记录](docs/emvr36-dialogue-recovery.md)。
+
+请求丢失、否定与讨论误写入、有限问题批次、数值输入完整性及 PDF 公式与方法范围的后续修复，见 [emvr36 项目复核与 CMD 推送](docs/emvr36-project-review.md)。
+
 内置 `InMemorySessionStore` 适合本地开发；设置 `ECE329_DATABASE_PATH` 后会启用SQLite和乐观版本检查。SQLite适合单服务实例，多实例部署仍应替换为共享数据库。
 
 `OpenAIStageGenerator` 使用官方 Responses API 的严格 JSON Schema 结构化输出。模型结果仍会经过本地校验：想法探索必须逐项复用本轮课程/补充检索结果并保留课程范围映射和来源，课程映射及理论依据中的公式必须来自已核对目录；预期数据可视化不得伪装成实测数据；引导状态的学生总结不得代写最终方案；EMVR概念结构不得加入场景、舒适性或可访问性字段。阶段推进仍只由 `WorkflowEngine` 控制。
