@@ -1120,6 +1120,7 @@ def build_exploration_scenes(
             f"{direction} {focus}",
             index,
             excluded_signatures=used_signatures,
+            catalog_scene_id=option.get("catalog_scene_id"),
         )
         title = str(template["title"])
         physical_frame = str(template["physical_picture"])

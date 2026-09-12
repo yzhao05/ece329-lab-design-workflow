@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "scene_catalog": "materialized exploration catalog ECE329-S001 through ECE329-S138",
+  "scene_catalog": "legacy exploration catalog ECE329-S001 through ECE329-S138; runtime extensions are declared in guided_formula_pattern_scenes.json",
   "formula_profile_source": "formula_design_profiles.json",
-  "description": "图景与公式设计档案的多对多映射。图景展示与抽样逻辑不读取本文件。",
+  "description": "原有图景与公式设计档案的多对多映射。运行时合并Guided扩展，供方向筛选与图景选定后的公式绑定使用；既有编号与绑定保持不变。",
   "profile_scene_links": [
     {
       "profile_id": "FD01_FIELD_FOUNDATIONS",

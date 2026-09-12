@@ -4466,12 +4466,12 @@ class WorkflowEngineTests(unittest.TestCase):
     def test_exploration_catalog_covers_every_course_and_supplement_point(self) -> None:
         catalog = KNOWLEDGE.exploration_scene_catalog()
 
-        self.assertEqual(len(catalog), 138)
+        self.assertEqual(len(catalog), 183)
         self.assertEqual(
             [item["catalog_scene_number"] for item in catalog],
-            list(range(1, 139)),
+            list(range(1, 184)),
         )
-        self.assertEqual(len({item["catalog_scene_id"] for item in catalog}), 138)
+        self.assertEqual(len({item["catalog_scene_id"] for item in catalog}), 183)
         self.assertEqual(
             sum(item["catalog_source_type"] == "LECTURE_AXIS" for item in catalog),
             117,

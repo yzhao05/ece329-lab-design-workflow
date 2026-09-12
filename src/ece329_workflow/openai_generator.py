@@ -1720,6 +1720,12 @@ def _validate_lecture_grounding(
                     "Every Stage 1 alternative must exactly reuse a retrieved brainstorm option"
                 )
         if phase == BREADTH_EXPLORATION:
+            option_ids = [str(item.get("option_id") or "") for item in alternatives]
+            if not all(option_ids) or len(set(option_ids)) != len(option_ids):
+                raise ModelOutputError("Breadth exploration must use distinct sampled option IDs")
+            if any(item.get("sampling_cycle_start") for item in retrieved_brainstorm_options):
+                if alternatives != retrieved_brainstorm_options:
+                    raise ModelOutputError("Exhausted scene pools must preserve the sampled cycle boundary")
             if len(alternatives) != 3:
                 raise ModelOutputError(
                     "Breadth exploration must contain exactly three sampled alternatives"

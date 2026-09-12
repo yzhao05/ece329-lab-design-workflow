@@ -688,6 +688,12 @@ def build_prompt_packet(
             ),
             "brainstorm_options": brainstorm_options,
             "exploration_scene_catalog_size": len(KNOWLEDGE.exploration_points),
+            "guided_scene_rendering_rule": (
+                "带scene_template的候选已绑定具体公式×适用范式，沿用其画面、探索问题与启发语气，"
+                "保留其独特操作和比较目标，不改写成旧的通用画面；可按用户语言翻译。"
+                "pattern_id和sampling_cycle字段仅供内部追踪，不向用户显示。"
+                "sampling_cycle_start表示对应范围已抽尽，新一轮从此候选开始；保持候选顺序。"
+            ),
             "previously_shown_scene_count": len(shown_option_ids),
             "baseline_comparison_suggestions": (
                 KNOWLEDGE.standard_comparison_suggestions(retrieval_text, limit=1)

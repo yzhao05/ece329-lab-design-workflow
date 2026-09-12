@@ -4,6 +4,7 @@ import hashlib
 import json
 import random
 import re
+from copy import deepcopy
 from importlib.resources import files
 from typing import Any
 
@@ -29,6 +30,10 @@ class LectureKnowledgeBase:
         self.scene_template_data = json.loads(
             root.joinpath("scene_templates.json").read_text(encoding="utf-8")
         )
+        self.guided_scene_data = json.loads(
+            root.joinpath("guided_formula_pattern_scenes.json").read_text(encoding="utf-8")
+        )
+        self.guided_formula_pattern_scenes = self.guided_scene_data["scenes"]
         self.lectures: list[dict[str, Any]] = self.concept_data["lectures"]
         self.baseline_comparisons: list[dict[str, Any]] = self.concept_data.get(
             "baseline_comparisons",
@@ -82,7 +87,11 @@ class LectureKnowledgeBase:
         self._exploration_by_scene_id = {
             item["catalog_scene_id"]: item for item in self.exploration_points
         }
+        self._register_guided_formula_links()
         self._formula_profile_ids_by_scene_id = self._build_scene_formula_index()
+        errors = self.validate()
+        if errors:
+            raise ValueError("Invalid course knowledge catalog: " + "; ".join(errors))
 
     @property
     def source_reference(self) -> dict[str, Any]:
@@ -308,7 +317,7 @@ class LectureKnowledgeBase:
         return max(counts, key=lambda key: (counts[key], -list(counts).index(key)))
 
     def _build_exploration_points(self) -> list[dict[str, Any]]:
-        """Expand every cataloged lecture axis and supplemental relation into one point."""
+        """Keep legacy IDs stable and append authored formula-pattern scenes."""
 
         points: list[dict[str, Any]] = []
 
@@ -368,13 +377,71 @@ class LectureKnowledgeBase:
                         "catalog_source_type": "SUPPLEMENTAL_RELATION",
                     }
                 )
+        for scene in self.guided_formula_pattern_scenes:
+            profile = self._formula_profile_by_id.get(scene["profile_id"], {})
+            formula_ids = [
+                *scene["primary_formula_ids"],
+                *(fid for pid in [scene["profile_id"], *scene.get("supporting_profile_ids", [])]
+                  for role in ("primary_formula_ids", "supporting_formula_ids")
+                  for fid in self._formula_profile_by_id.get(pid, {}).get(role, [])),
+            ]
+            formulas = [self._formula_by_id[fid] for fid in dict.fromkeys(formula_ids)
+                        if fid in self._formula_by_id]
+            # Topic retrieval follows the authored primary relation. Matching
+            # every supporting formula can pull an unrelated scene into a
+            # narrow request (e.g. line impedance into polarization).
+            scope_ids = list(dict.fromkeys(
+                cid for fid in scene["primary_formula_ids"]
+                for cid in self._formula_by_id.get(fid, {}).get("concept_ids", [])
+            ))
+            lecture = self._lecture_by_id.get(scope_ids[0], {}) if scope_ids else {}
+            add_point({
+                "catalog_scene_id": scene["catalog_scene_id"],
+                "option_id": f"guided:{scene['catalog_scene_id']}",
+                "direction": profile.get("title_zh", ""),
+                "focus": scene["focus"],
+                "concept_id": scope_ids[0] if scope_ids else "",
+                "source_lecture": lecture.get("lecture"),
+                "course_scope_concept_ids": scope_ids,
+                # A concept citation must use that lecture's canonical range.
+                # Cross-lecture formula locators are a separate reference set.
+                "source_pages": list(lecture.get("pages", [])),
+                "formula_source_pages": sorted({page for f in formulas for page in f["pages"]}),
+                "course_block": profile.get("course_block", ""),
+                "catalog_source_type": "FORMULA_PATTERN_SCENE",
+                "profile_id": scene["profile_id"],
+                "pattern_id": scene["pattern_id"],
+                "scene_template": {key: scene[key] for key in (
+                    "title", "physical_picture", "thinking_prompt", "illustrative_extension"
+                )},
+            })
         return points
 
+    def _register_guided_formula_links(self) -> None:
+        """Extend canonical links from one authored source; preserve legacy bindings."""
+        links = {item["profile_id"]: item for item in self.profile_scene_links}
+        for scene in self.guided_formula_pattern_scenes:
+            scene_id = scene["catalog_scene_id"]
+            supporting = []
+            for profile_id in [scene["profile_id"], *scene.get("supporting_profile_ids", [])]:
+                profile = self._formula_profile_by_id.get(profile_id, {})
+                links.setdefault(profile_id, {"profile_id": profile_id, "scene_ids": []})[
+                    "scene_ids"
+                ].append(scene_id)
+                supporting.extend(profile.get("primary_formula_ids", []))
+                supporting.extend(profile.get("supporting_formula_ids", []))
+            self.scene_formula_roles[scene_id] = {
+                "primary_formula_ids": list(scene["primary_formula_ids"]),
+                "supporting_formula_ids": [fid for fid in dict.fromkeys(supporting)
+                                           if fid not in scene["primary_formula_ids"]],
+            }
+        self.profile_scene_links = list(links.values())
+
     def exploration_scene_catalog(self) -> list[dict[str, Any]]:
-        return [dict(point) for point in self.exploration_points]
+        return deepcopy(self.exploration_points)
 
     def _build_scene_formula_index(self) -> dict[str, list[str]]:
-        """Build the many-to-many index without changing exploration scenes."""
+        """Index legacy and authored formula bindings for deterministic selection."""
 
         index: dict[str, list[str]] = {}
         for link in self.profile_scene_links:
@@ -430,12 +497,12 @@ class LectureKnowledgeBase:
             "primary_formula_ids": primary_ids,
             "supporting_formula_ids": supporting_ids,
             "primary_formulas": [
-                dict(self._formula_by_id[formula_id])
+                deepcopy(self._formula_by_id[formula_id])
                 for formula_id in primary_ids
                 if formula_id in self._formula_by_id
             ],
             "supporting_formulas": [
-                dict(self._formula_by_id[formula_id])
+                deepcopy(self._formula_by_id[formula_id])
                 for formula_id in supporting_ids
                 if formula_id in self._formula_by_id
             ],
@@ -545,6 +612,8 @@ class LectureKnowledgeBase:
             for point in self.exploration_points
             if str(point.get("concept_id") or "") in lecture_ids
             or str(point.get("supplemental_concept_id") or "") in supplemental_ids
+            or (point.get("catalog_source_type") == "FORMULA_PATTERN_SCENE"
+                and bool(lecture_ids.intersection(point.get("course_scope_concept_ids", []))))
         ]
         if normalized_domain:
             matched = [
@@ -607,10 +676,24 @@ class LectureKnowledgeBase:
                     or self._scene_matches_formula_domain(point, normalized_domain)
                 )
             )
-        if len(remaining) < limit:
-            remaining = list(relevant or self.exploration_points)
-
         rng = random.Random(self._sample_seed(seed_key, len(excluded)))
+        if len(remaining) < limit:
+            # Drain the last unseen entries before starting a new cycle. A
+            # fixed three-item response may straddle that boundary, but must
+            # never silently discard the last one or two unseen candidates.
+            tail = rng.sample(remaining, len(remaining))
+            tail_ids = {point["option_id"] for point in tail}
+            refill = [point for point in self.exploration_points
+                      if point["option_id"] not in tail_ids
+                      and (not normalized_domain or
+                           self._scene_matches_formula_domain(point, normalized_domain))]
+            next_cycle = [dict(point) for point in rng.sample(
+                refill, min(limit - len(tail), len(refill))
+            )]
+            if next_cycle:
+                next_cycle[0]["sampling_cycle_start"] = True
+                next_cycle[0]["sampling_cycle_domain"] = normalized_domain
+            return deepcopy([*tail, *next_cycle])
         no_specific_match = (
             not normalized_domain
             and len(relevant) == len(self.exploration_points)
@@ -625,10 +708,10 @@ class LectureKnowledgeBase:
                     sampled.append(rng.choice(block_points))
             if len(sampled) == 3:
                 rng.shuffle(sampled)
-                return [dict(point) for point in sampled]
+                return deepcopy(sampled)
 
         count = min(limit, len(remaining))
-        return [dict(point) for point in rng.sample(remaining, count)]
+        return deepcopy(rng.sample(remaining, count))
 
     def standard_comparison_suggestions(
         self,
@@ -709,9 +792,17 @@ class LectureKnowledgeBase:
         index: int,
         *,
         excluded_signatures: set[str] | None = None,
+        catalog_scene_id: str | None = None,
     ) -> dict[str, Any]:
         """Return a scene together with its stable cross-turn identity."""
 
+        point = self._exploration_by_scene_id.get(str(catalog_scene_id or ""), {})
+        if point.get("scene_template"):
+            template = point["scene_template"]
+            # Bound scenes must not fall back to another physical subject when
+            # the display-template history is exhausted; sampling owns cycles.
+            return {**template, "template_id": f"guided_{catalog_scene_id}",
+                    "template_signature": self._scene_signature(template)}
         normalized = direction.casefold()
         candidates: list[tuple[int, int, dict[str, Any]]] = []
         for order, template in enumerate(self.scene_templates):
@@ -894,7 +985,7 @@ class LectureKnowledgeBase:
             str(item) for item in profile.get("supporting_formula_ids", [])
         ]
         return {
-            **dict(profile),
+            **deepcopy(profile),
             "applicable_experiment_pattern_ids": list(
                 self._pattern_ids_by_formula_profile.get(
                     str(profile.get("profile_id") or ""),
@@ -902,12 +993,12 @@ class LectureKnowledgeBase:
                 )
             ),
             "primary_formulas": [
-                dict(self._formula_by_id[formula_id])
+                deepcopy(self._formula_by_id[formula_id])
                 for formula_id in primary_ids
                 if formula_id in self._formula_by_id
             ],
             "supporting_formulas": [
-                dict(self._formula_by_id[formula_id])
+                deepcopy(self._formula_by_id[formula_id])
                 for formula_id in supporting_ids
                 if formula_id in self._formula_by_id
             ],
@@ -1522,7 +1613,8 @@ class LectureKnowledgeBase:
                         errors.append(
                             f"supplemental concept {concept_id} has invalid pages for {source_id}: {pages}"
                         )
-        expected_scene_count = sum(
+        self._validate_guided_scenes(errors)
+        expected_scene_count = len(self.guided_formula_pattern_scenes) + sum(
             len(lecture.get("brainstorm_axes", [])) for lecture in self.lectures
         ) + sum(
             len(concept.get("relationship_examples", []))
@@ -1557,6 +1649,35 @@ class LectureKnowledgeBase:
             if scene_id != f"ECE329-S{expected_number:03d}":
                 errors.append(f"exploration scene id sequence is broken at {expected_number}")
         return errors
+
+    def _validate_guided_scenes(self, errors: list[str]) -> None:
+        """Reject disconnected, inapplicable and duplicate authored scene data."""
+        titles = {item["title"] for item in [*self.scene_templates, *self.generic_scene_frames]}
+        pictures = {item["physical_picture"] for item in [*self.scene_templates, *self.generic_scene_frames]}
+        focuses = {item["focus"] for item in self.exploration_points
+                   if item["catalog_source_type"] != "FORMULA_PATTERN_SCENE"}
+        pairs: set[tuple[str, str]] = set()
+        for scene in self.guided_formula_pattern_scenes:
+            scene_id = scene["catalog_scene_id"]
+            profile_id, pattern_id = scene["profile_id"], scene["pattern_id"]
+            point = self._exploration_by_scene_id.get(scene_id, {})
+            lecture = self._lecture_by_id.get(point.get("concept_id"), {})
+            if not lecture or point.get("source_pages") != lecture.get("pages"):
+                errors.append(f"guided scene {scene_id} has invalid concept citation pages")
+            if pattern_id not in self._pattern_ids_by_formula_profile.get(profile_id, []):
+                errors.append(f"guided scene {scene_id} uses an inapplicable formula-pattern pair")
+            pair = (profile_id, pattern_id)
+            if pair in pairs:
+                errors.append(f"duplicate guided formula-pattern pair: {pair}")
+            pairs.add(pair)
+            for field in ("focus", "title", "physical_picture", "thinking_prompt", "illustrative_extension"):
+                if not isinstance(scene.get(field), str) or not scene[field].strip():
+                    errors.append(f"guided scene {scene_id} has an empty {field}")
+            for field, seen in (("title", titles), ("physical_picture", pictures), ("focus", focuses)):
+                value = str(scene.get(field) or "").strip()
+                if value in seen:
+                    errors.append(f"guided scene {scene_id} duplicates {field}")
+                seen.add(value)
 
 
 KNOWLEDGE = LectureKnowledgeBase()

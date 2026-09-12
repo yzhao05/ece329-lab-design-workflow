@@ -1,0 +1,597 @@
+{
+  "schema_version": 1,
+  "description": "Guided专用的公式×适用范式图景扩展；每条是独立编写的探索任务，不穷举不适用组合，不改变EMVR动态生成。旧S001–S138保持不变，新条目只在末尾追加。公式与适用条件以公式目录为准；延伸是启发性设想，不代表已接受的实验要求。",
+  "scenes": [
+    {
+      "catalog_scene_id": "ECE329-S139",
+      "profile_id": "FD14_MAGNETIC_VECTOR_POTENTIAL",
+      "pattern_id": "FORWARD_VISUALIZATION",
+      "primary_formula_ids": [
+        "magnetic_vector_potential"
+      ],
+      "focus": "磁矢势的大小和它的旋度，哪一个决定这里的磁场",
+      "title": "把磁矢势的地图卷成磁场",
+      "physical_picture": "一组固定电流旁，同时浮起磁矢势的箭头和由它的空间变化得到的磁场。你可以逐层揭开两张图，看箭头很长的地方是否也一定有很强的磁场。",
+      "thinking_prompt": "磁矢势的大小和它的旋度，哪一个决定这里的磁场？",
+      "illustrative_extension": "把箭头换成环形小标记，探索怎样表达局部旋转；标记是显示方式，不是新的场源。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S140",
+      "profile_id": "FD17_CHARGE_CONTINUITY_MAXWELL",
+      "pattern_id": "FORWARD_VISUALIZATION",
+      "primary_formula_ids": [
+        "continuity_equation"
+      ],
+      "focus": "局部电荷的积累能否由边界上的净流入解释",
+      "title": "给一小块空间做电荷收支账",
+      "physical_picture": "在导电区域圈出一个透明小盒子，流入与流出的电流分别留下记录，盒内净电荷随时间更新。暂时遮住其中一项，再用另外两项追踪它的变化。",
+      "thinking_prompt": "局部电荷的积累能否由边界上的净流入解释？",
+      "illustrative_extension": "把小盒子拼成相邻格子，看看公共面的收支怎样抵消；网格只是观察划分。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S141",
+      "profile_id": "FD21_PHASOR_FIELDS",
+      "pattern_id": "FORWARD_VISUALIZATION",
+      "primary_formula_ids": [
+        "phasor_maxwell"
+      ],
+      "focus": "共同的相位起点与两点间的相位差分别改变了什么",
+      "title": "用一排时钟重放同一个正弦场",
+      "physical_picture": "空间各处挂起相位时钟，同一时刻的指针投影拼出场的快照。逐帧播放后，再把时钟的初始读数统一平移，比较哪些图案移动、哪些相对关系保留。",
+      "thinking_prompt": "共同的相位起点与两点间的相位差分别改变了什么？",
+      "illustrative_extension": "把指针改成光点轨道，探索更直观的相位显示；光点运动不代表介质粒子的运动。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S142",
+      "profile_id": "FD10_COAXIAL_CAPACITANCE_CONDUCTANCE",
+      "pattern_id": "SINGLE_PARAMETER_SWEEP",
+      "primary_formula_ids": [
+        "coax_capacitance_per_length"
+      ],
+      "focus": "同轴电容响应绝对尺寸还是内外半径比",
+      "title": "放大一根电缆却保留内外比例",
+      "physical_picture": "把同轴结构的内外半径一起放大，始终锁住它们的比值、材料和长度。几何轮廓明显变了，单位长度电容的读数却需要你重新判断。",
+      "thinking_prompt": "同轴电容响应绝对尺寸还是内外半径比？",
+      "illustrative_extension": "给两种尺寸叠上同一张比例尺与各自的实尺，比较缩放前后的局部场；端部效应另行讨论。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S143",
+      "profile_id": "FD16_INDUCTANCE_ENERGY",
+      "pattern_id": "SINGLE_PARAMETER_SWEEP",
+      "primary_formula_ids": [
+        "magnetic_energy"
+      ],
+      "focus": "电流增加相同的一步时，新增储能是否也总相同",
+      "title": "让电流刻度与储能刻度并排走",
+      "physical_picture": "在线性、几何固定的电感旁放两条刻度，一条记录电流，另一条记录磁场储能。缓慢调节电流，保留每次快照，看两条刻度怎样一起增长。",
+      "thinking_prompt": "电流增加相同的一步时，新增储能是否也总相同？",
+      "illustrative_extension": "把储能做成一格格填满的容器；容器只表示计算结果，不是额外储能装置。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S144",
+      "profile_id": "FD20_POYNTING_POWER",
+      "pattern_id": "SINGLE_PARAMETER_SWEEP",
+      "primary_formula_ids": [
+        "poynting_vector"
+      ],
+      "focus": "穿窗功率的变化来自场变弱，还是窗口朝向改变",
+      "title": "转动一扇让能流穿过的窗",
+      "physical_picture": "一束均匀平面波穿过观察区，你只转动一块面积固定的虚拟窗口。窗口旁同时显示能流箭头和穿过窗口的功率，入射场保持原样。",
+      "thinking_prompt": "穿窗功率的变化来自场变弱，还是窗口朝向改变？",
+      "illustrative_extension": "把窗口换成几个拼接的小面片，探索投影与汇总；它们不应成为反射波的实体屏障。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S145",
+      "profile_id": "FD09_CAPACITANCE_ENERGY",
+      "pattern_id": "CONTROLLED_COMPARISON",
+      "primary_formula_ids": [
+        "electric_energy"
+      ],
+      "focus": "同一种几何变化在固定电荷与固定电压下为何给出不同储能趋势",
+      "title": "让两个电容器遵守不同的约定",
+      "physical_picture": "两套相同的平行板装置，一套保持电压，另一套断开电源保持电荷，再以相同方式改变板间距。把电压、电荷和储能的变化并排留下。",
+      "thinking_prompt": "同一种几何变化在固定电荷与固定电压下为何给出不同储能趋势？",
+      "illustrative_extension": "可以给供电端增加能量收支记录；先明确理想条件，不直接把储能变化当成机械功。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S146",
+      "profile_id": "FD18_MATERIAL_MAXWELL",
+      "pattern_id": "CONTROLLED_COMPARISON",
+      "primary_formula_ids": [
+        "linear_magnetic_medium"
+      ],
+      "focus": "相同的B是否意味着相同的H和磁化响应",
+      "title": "相同的磁感应强度配上不同的材料",
+      "physical_picture": "两块均匀线性材料被调到相同的磁感应强度，旁边分别显示磁场强度和磁化强度。比较为了维持这份相同，外部激励需要怎样调整。",
+      "thinking_prompt": "相同的B是否意味着相同的H和磁化响应？",
+      "illustrative_extension": "把材料摆成可交换的样片，探索哪种显示能区分本构量；不把线性关系外推到饱和区。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S147",
+      "profile_id": "FD26_TL_PROPAGATION",
+      "pattern_id": "CONTROLLED_COMPARISON",
+      "primary_formula_ids": [
+        "tl_speed_impedance"
+      ],
+      "focus": "相同传播速度能否保证相同特征阻抗",
+      "title": "两条一样快却不一样好接的线路",
+      "physical_picture": "两条理想线路把脉冲送到同样远的终点，传播速度保持一致，但单位长度电感与电容采用不同配比。接上同一负载后，比较端口是否仍表现相同。",
+      "thinking_prompt": "相同传播速度能否保证相同特征阻抗？",
+      "illustrative_extension": "把两条线画成并行跑道，给到达时间和端口比值分别留标记；跑道外形不替代线路参数。",
+      "supporting_profile_ids": [
+        "FD27_TL_TRANSIENT_REFLECTION"
+      ]
+    },
+    {
+      "catalog_scene_id": "ECE329-S148",
+      "profile_id": "FD02_COULOMB_SUPERPOSITION",
+      "pattern_id": "COMPONENT_DECOMPOSITION",
+      "primary_formula_ids": [
+        "electric_field_superposition"
+      ],
+      "focus": "合场很小能否说明每个源的作用都很小",
+      "title": "让一个测点的合场拆成贡献账本",
+      "physical_picture": "固定所有电荷和一个安全测点，逐个显示每个源对该点的矢量贡献，再把箭头首尾相接。某个分量被抵消时，仍保留各个源的贡献记录。",
+      "thinking_prompt": "合场很小能否说明每个源的作用都很小？",
+      "illustrative_extension": "把贡献箭头拖到独立的矢量画布上重新排列；这只改变作图顺序，不移动真实场源。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S149",
+      "profile_id": "FD08_DIELECTRIC_POLARIZATION",
+      "pattern_id": "COMPONENT_DECOMPOSITION",
+      "primary_formula_ids": [
+        "electric_displacement"
+      ],
+      "focus": "D中的真空项和极化项如何合成，又分别表示什么",
+      "title": "把电位移箭头拆成两层透明片",
+      "physical_picture": "同一块线性介质里，把真空项与极化项画在两层透明片上，叠起时恢复电位移箭头。保持场景参数固定，逐层查看每一项的来源。",
+      "thinking_prompt": "D中的真空项和极化项如何合成，又分别表示什么？",
+      "illustrative_extension": "用不同纹理区分两层，让色觉不同的观察者也能辨别；纹理不表示另一种材料。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S150",
+      "profile_id": "FD11_DRUDE_CONDUCTIVITY",
+      "pattern_id": "COMPONENT_DECOMPOSITION",
+      "primary_formula_ids": [
+        "drude_dc_conductivity"
+      ],
+      "focus": "载流子的电荷符号与它对电导的贡献符号是否是一回事",
+      "title": "让不同载流子分别留下电流轨迹",
+      "physical_picture": "一块材料里用不同颜色标出两类载流子的电流贡献。固定各类密度与碰撞条件，先分别显示，再把贡献合到同一块电流读数上。",
+      "thinking_prompt": "载流子的电荷符号与它对电导的贡献符号是否是一回事？",
+      "illustrative_extension": "交换两类载流子的显示颜色，观察解释是否仍成立；颜色不改变粒子参数。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S151",
+      "profile_id": "FD03_GAUSS_FLUX_SYMMETRY",
+      "pattern_id": "SPATIAL_SEARCH",
+      "primary_formula_ids": [
+        "gauss_integral"
+      ],
+      "focus": "零净通量能否排除盒内存在相互抵消的电荷",
+      "title": "用通量小盒子缩小隐藏电荷的范围",
+      "physical_picture": "把电荷位置暂时遮住，只允许移动不穿过电荷的闭合观察盒并读取净通量。你逐步改变包围范围，记录哪些盒子包含净电荷，哪些没有。",
+      "thinking_prompt": "零净通量能否排除盒内存在相互抵消的电荷？",
+      "illustrative_extension": "可以把调查记录铺成一张空间地图；每个盒子只标记净电荷证据，不自动显示全部源位置。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S152",
+      "profile_id": "FD04_ELECTROSTATIC_POTENTIAL",
+      "pattern_id": "SPATIAL_SEARCH",
+      "primary_formula_ids": [
+        "electrostatic_potential_gradient"
+      ],
+      "focus": "电势为零与电场为零为什么是两种不同的搜索目标",
+      "title": "寻找电势为零却仍有方向的地方",
+      "physical_picture": "一对异号电荷的位置锁定，你带着电势计与矢量探针寻找电势读数为零的位置。找到后停下，检查当地电场是否也消失，并保持电势参考约定一致。",
+      "thinking_prompt": "电势为零与电场为零为什么是两种不同的搜索目标？",
+      "illustrative_extension": "把找到的位置连成观察轨迹，探索这条轨迹和等势面的关系；不把它标成安全零场区。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S153",
+      "profile_id": "FD19_WAVE_PROPAGATION",
+      "pattern_id": "SPATIAL_SEARCH",
+      "primary_formula_ids": [
+        "tem_traveling_wave"
+      ],
+      "focus": "某一时刻同相位的位置与持续跟随同一波峰的路径有什么不同",
+      "title": "在传播中的波上找同一拍",
+      "physical_picture": "在均匀介质里冻结一个正弦行波快照，从一个参考点出发寻找同相位的位置。再允许时间前进，追踪这些位置怎样一起移动。",
+      "thinking_prompt": "某一时刻同相位的位置与持续跟随同一波峰的路径有什么不同？",
+      "illustrative_extension": "可用连线标出等相位点；连线是相位标记，不是绳子或场线。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S154",
+      "profile_id": "FD07_CONDUCTION_RELAXATION",
+      "pattern_id": "INVERSE_PARAMETER_INFERENCE",
+      "primary_formula_ids": [
+        "charge_relaxation"
+      ],
+      "focus": "怎样区分初始电荷量的变化与弛豫速度的变化",
+      "title": "从逐渐消退的电荷猜材料参数",
+      "physical_picture": "一块均匀导电介质的介电常数已知，电导率暂时隐藏。观察同一点在多个时刻的电荷密度，先提出电导率估计，再揭开参数与整段轨迹比较。",
+      "thinking_prompt": "怎样区分初始电荷量的变化与弛豫速度的变化？",
+      "illustrative_extension": "增加第二段不同初始电荷的记录，检验同一个材料参数能否解释两段过程。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S155",
+      "profile_id": "FD12_MAGNETIC_SOURCE_FIELD",
+      "pattern_id": "INVERSE_PARAMETER_INFERENCE",
+      "primary_formula_ids": [
+        "biot_savart"
+      ],
+      "focus": "一个测点拟合成功后，为什么还需要其他位置的读数",
+      "title": "隔着遮罩辨认导线里的电流",
+      "physical_picture": "直导线的几何与测点位置可见，电流大小和方向被遮住。你在多个位置读取磁场矢量，用同一电流猜测解释所有测点，最后再揭开源设置。",
+      "thinking_prompt": "一个测点拟合成功后，为什么还需要其他位置的读数？",
+      "illustrative_extension": "可以让同伴安排测点位置，比较哪组观测更能排除不同猜测；不隐藏必需的几何信息。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S156",
+      "profile_id": "FD22_CONDUCTING_WAVES",
+      "pattern_id": "INVERSE_PARAMETER_INFERENCE",
+      "primary_formula_ids": [
+        "conducting_medium_gamma_eta"
+      ],
+      "focus": "只看幅度衰减与同时看相位，分别能约束什么",
+      "title": "从幅度和相位的足迹辨认导电介质",
+      "physical_picture": "已知频率、介电常数和磁导率的一列波进入均匀导电介质，电导率被隐藏。沿深度记录幅度与相位，用完整传播关系检验同一个参数是否解释两类读数。",
+      "thinking_prompt": "只看幅度衰减与同时看相位，分别能约束什么？",
+      "illustrative_extension": "可以遮掉一个深度读数再预测它；有效深度和数值精度需要在后续设计中明确。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S157",
+      "profile_id": "FD01_FIELD_FOUNDATIONS",
+      "pattern_id": "PREDICT_OBSERVE_EXPLAIN",
+      "primary_formula_ids": [
+        "lorentz_force"
+      ],
+      "focus": "轨迹弯曲是否一定意味着速率增加",
+      "title": "先猜磁力会不会把粒子越推越快",
+      "physical_picture": "给定纯磁场中的带电粒子和初速度，先画出你预想的速率变化，再播放轨迹并比较速度与磁力方向。保持无电场、无碰撞的理想条件。",
+      "thinking_prompt": "轨迹弯曲是否一定意味着速率增加？",
+      "illustrative_extension": "把方向变化与速率变化分成两条观察记录；理想轨迹不承诺真实装置的无限约束能力。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S158",
+      "profile_id": "FD15_FARADAY_INDUCTION",
+      "pattern_id": "PREDICT_OBSERVE_EXPLAIN",
+      "primary_formula_ids": [
+        "faraday_generalized_emf"
+      ],
+      "focus": "磁通很大与磁通正在变化，哪一个决定此时的感应电动势",
+      "title": "让线圈停在磁通很多的地方",
+      "physical_picture": "先预测一个线圈移入磁场再完全停住后的电动势，随后播放运动与静止两段。把磁通读数和它的变化过程并排看，解释停止前后的差别。",
+      "thinking_prompt": "磁通很大与磁通正在变化，哪一个决定此时的感应电动势？",
+      "illustrative_extension": "可让线圈在不同位置停住，比较平台值不同但都不再变化的记录。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S159",
+      "profile_id": "FD27_TL_TRANSIENT_REFLECTION",
+      "pattern_id": "PREDICT_OBSERVE_EXPLAIN",
+      "primary_formula_ids": [
+        "tl_load_source_reflection"
+      ],
+      "focus": "下一次端口变化由哪条已发生的传播事件带来",
+      "title": "在回波到来以前画出端口的下一步",
+      "physical_picture": "在已知源端与负载端接的线路上，只展示脉冲已经走过的时空轨迹。你先补画下一次端口变化的时刻与方向，再播放一个往返并解释预测差异。",
+      "thinking_prompt": "下一次端口变化由哪条已发生的传播事件带来？",
+      "illustrative_extension": "把时间轴做成可揭开的折页，每次只揭开下一段；不得凭空增加反射事件。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S160",
+      "profile_id": "FD05_ELECTROSTATIC_BOUNDARY",
+      "pattern_id": "BOUNDARY_CONDITION_COMPARISON",
+      "primary_formula_ids": [
+        "electrostatic_boundary"
+      ],
+      "focus": "界面两侧D的法向跳变由哪一种电荷决定",
+      "title": "在材料交界处添一张自由电荷薄片",
+      "physical_picture": "保持两侧介质与远处激励的约定一致，在界面加入或移除给定的自由面电荷。跨界显示电位移法向分量的两侧值，分开记录材料差异与自由电荷贡献。",
+      "thinking_prompt": "界面两侧D的法向跳变由哪一种电荷决定？",
+      "illustrative_extension": "用透明薄片代表数学上的面电荷，厚度只是视觉辅助，不另行套用体电荷模型。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S161",
+      "profile_id": "FD06_POISSON_LAPLACE",
+      "pattern_id": "BOUNDARY_CONDITION_COMPARISON",
+      "primary_formula_ids": [
+        "poisson_equation"
+      ],
+      "focus": "边界条件相同还需要哪些前提，才能谈同一个电势解",
+      "title": "边框一样，里面却藏着不同的源",
+      "physical_picture": "两幅区域的边界电势完全相同，一幅内部无电荷，另一幅放入给定电荷。把两张电势图叠放，观察边界相同是否足以保证内部也相同。",
+      "thinking_prompt": "边界条件相同还需要哪些前提，才能谈同一个电势解？",
+      "illustrative_extension": "可以暂时遮住内部源，让差异图提示调查方向；揭晓后再核对源项。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S162",
+      "profile_id": "FD24_WAVE_INTERFACE",
+      "pattern_id": "BOUNDARY_CONDITION_COMPARISON",
+      "primary_formula_ids": [
+        "wave_reflection_transmission"
+      ],
+      "focus": "没有反射是否意味着进入另一侧后所有波形尺度都不变",
+      "title": "让波遇到阻抗相同而速度不同的邻居",
+      "physical_picture": "给界面两侧选择满足相同本征阻抗、不同波速的理想介质，在正入射条件下同时看回波与透射波的间距。保持频率和入射幅度固定。",
+      "thinking_prompt": "没有反射是否意味着进入另一侧后所有波形尺度都不变？",
+      "illustrative_extension": "可以给界面两边各放一把波长尺；尺子不改变边界，也不引入色散假设。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S163",
+      "profile_id": "FD13_CURRENT_SHEET_SOLENOID",
+      "pattern_id": "LIMIT_AND_APPROXIMATION_CHECK",
+      "primary_formula_ids": [
+        "long_solenoid_field"
+      ],
+      "focus": "长螺线管的内部场近似在什么观察范围内更合适",
+      "title": "从线圈中段走向理想模型的边缘",
+      "physical_picture": "在有限长度线圈旁叠放长螺线管近似的参考图。沿轴从中部走向端部，用电流元模型作对照，标出近似开始明显偏离的位置。",
+      "thinking_prompt": "长螺线管的内部场近似在什么观察范围内更合适？",
+      "illustrative_extension": "改变线圈长径比后重复这段旅程；误差容许范围留给实验设计确定。",
+      "supporting_profile_ids": [
+        "FD12_MAGNETIC_SOURCE_FIELD"
+      ]
+    },
+    {
+      "catalog_scene_id": "ECE329-S164",
+      "profile_id": "FD23_WAVE_POLARIZATION",
+      "pattern_id": "LIMIT_AND_APPROXIMATION_CHECK",
+      "primary_formula_ids": [
+        "circular_polarization"
+      ],
+      "focus": "有限显示分辨率下的看起来很圆，能否代替圆偏振条件",
+      "title": "把几乎圆的轨迹放到放大镜下",
+      "physical_picture": "从等幅、正交且相差四分之一周期的电场分量出发，只轻微改变其中一个幅度。叠放改变前后的端点轨迹，放大查看圆与椭圆的差别。",
+      "thinking_prompt": "有限显示分辨率下的看起来很圆，能否代替圆偏振条件？",
+      "illustrative_extension": "给轨迹加上可切换的等比例网格，检查显示拉伸是否掩盖差异。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S165",
+      "profile_id": "FD32_LOSSY_TRANSMISSION_LINE",
+      "pattern_id": "LIMIT_AND_APPROXIMATION_CHECK",
+      "primary_formula_ids": [
+        "lossy_line_gamma_z0"
+      ],
+      "focus": "低损近似对衰减与相位的适用范围是否同样宽",
+      "title": "给低损近似画一张误差地图",
+      "physical_picture": "同一条有损线路同时保留完整传播关系和低损近似的结果，在给定参数范围内比较衰减与相位误差。先找两者接近的区域，再走向偏离明显的区域。",
+      "thinking_prompt": "低损近似对衰减与相位的适用范围是否同样宽？",
+      "illustrative_extension": "让观察者自己选误差容许线；容许线是设计标准，不是新物理定律。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S166",
+      "profile_id": "FD03_GAUSS_FLUX_SYMMETRY",
+      "pattern_id": "MODEL_BREAKDOWN_COUNTEREXAMPLE",
+      "primary_formula_ids": [
+        "gauss_integral"
+      ],
+      "focus": "满足高斯定律为什么不保证场在所选面上处处相等",
+      "title": "把藏在平均数里的不均匀找出来",
+      "physical_picture": "固定总包围电荷，把偏心电荷放在球形高斯面内。总通量与逐块表面法向场同时显示，用它检查把平均值当成每一点场值的做法。",
+      "thinking_prompt": "满足高斯定律为什么不保证场在所选面上处处相等？",
+      "illustrative_extension": "把表面分成大小不同的小片，检验加权汇总；小片划分不改变真实场。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S167",
+      "profile_id": "FD28_TL_RESONANCE_STUBS",
+      "pattern_id": "MODEL_BREAKDOWN_COUNTEREXAMPLE",
+      "primary_formula_ids": [
+        "same_boundary_resonance"
+      ],
+      "focus": "两端边界不再同类时，原先那串谐振预测还能照搬吗",
+      "title": "给熟悉的谐波序列换掉一个端点",
+      "physical_picture": "先用同类端接的谐振规律预测一条线路，再把一端改成另一种理想端接。比较原先预测的位置与新边界允许的模式，指出旧规则失去的前提。",
+      "thinking_prompt": "两端边界不再同类时，原先那串谐振预测还能照搬吗？",
+      "illustrative_extension": "可以把两套预测标记叠在同一频率轴上；不把不满足边界的标记画成真实模式。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S168",
+      "profile_id": "FD31_TL_QUARTER_WAVE_MATCHING",
+      "pattern_id": "MODEL_BREAKDOWN_COUNTEREXAMPLE",
+      "primary_formula_ids": [
+        "quarter_wave_matching"
+      ],
+      "focus": "为实阻抗设计的单段匹配为什么不能直接承诺任意负载也匹配",
+      "title": "把为一个负载配好的接头交给另一个负载",
+      "physical_picture": "固定设计频率与四分之一波段的结构，把原来的实负载换成具有电抗的负载。检查原先的匹配结论还剩哪些前提，并观察残余反射。",
+      "thinking_prompt": "为实阻抗设计的单段匹配为什么不能直接承诺任意负载也匹配？",
+      "illustrative_extension": "允许提出额外调节元件作为新方案，但需另行确认模型与课程公式。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S169",
+      "profile_id": "FD16_INDUCTANCE_ENERGY",
+      "pattern_id": "TRANSIENT_PROCESS",
+      "primary_formula_ids": [
+        "rl_decay"
+      ],
+      "focus": "不同快慢的衰减在归一化时间上能否呈现同一种规律",
+      "title": "把同一段衰减放到两种时钟上",
+      "physical_picture": "两套线性RL回路采用不同的时间常数，分别记录断开激励后的电流衰减。先用实际时间并排播放，再按各自的时间常数缩放时间轴。",
+      "thinking_prompt": "不同快慢的衰减在归一化时间上能否呈现同一种规律？",
+      "illustrative_extension": "把初始电流也归一化，区分幅度差异与时间尺度差异；不把缩放当成真实加速。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S170",
+      "profile_id": "FD17_CHARGE_CONTINUITY_MAXWELL",
+      "pattern_id": "TRANSIENT_PROCESS",
+      "primary_formula_ids": [
+        "ampere_maxwell"
+      ],
+      "focus": "曲面换了以后，怎样保持对同一环路的磁场解释一致",
+      "title": "给充电电容器选两张不同的跨越面",
+      "physical_picture": "同一条环路张起两张曲面，一张穿过导线，另一张鼓进电容器间隙。在充电过程中分别追踪传导与位移项，比较它们对同一环流的解释。",
+      "thinking_prompt": "曲面换了以后，怎样保持对同一环路的磁场解释一致？",
+      "illustrative_extension": "把两张曲面做成可交替显隐的膜；膜不接触电路，也不传导电流。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S171",
+      "profile_id": "FD20_POYNTING_POWER",
+      "pattern_id": "TRANSIENT_PROCESS",
+      "primary_formula_ids": [
+        "poynting_theorem"
+      ],
+      "focus": "还存留在内部的场能为什么不能立刻算作损耗",
+      "title": "等一束波离开后再结算能量",
+      "physical_picture": "一个有限波包穿过虚拟控制体，分别记录流入、流出、内部场能变化及已定义的损耗项。暂停在波包仍在内部和已经离开两个时刻，比较收支。",
+      "thinking_prompt": "还存留在内部的场能为什么不能立刻算作损耗？",
+      "illustrative_extension": "把控制体拆成相邻两块，观察公共界面上的能流如何在总账中抵消。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S172",
+      "profile_id": "FD11_DRUDE_CONDUCTIVITY",
+      "pattern_id": "FREQUENCY_RESPONSE",
+      "primary_formula_ids": [
+        "drude_ac_conductivity"
+      ],
+      "focus": "频率响应的相位为碰撞时间尺度提供了什么额外线索",
+      "title": "在同一电流幅度背后寻找相位线索",
+      "physical_picture": "对均匀Drude材料扫动驱动频率，同时记录电流响应相对电场的幅值和相位。比较仅看幅值容易混淆的参数猜测，再用相位记录检验它们。",
+      "thinking_prompt": "频率响应的相位为碰撞时间尺度提供了什么额外线索？",
+      "illustrative_extension": "把两组猜测的轨迹叠在复平面上；最终参数识别仍需足够观测与已知条件。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S173",
+      "profile_id": "FD15_FARADAY_INDUCTION",
+      "pattern_id": "FREQUENCY_RESPONSE",
+      "primary_formula_ids": [
+        "faraday_differential"
+      ],
+      "focus": "同样的磁通摆幅在不同节奏下会带来怎样的电动势响应",
+      "title": "保持磁通摆幅，只改变摇动的节奏",
+      "physical_picture": "让固定回路内的磁通按正弦变化，锁定摆幅而扫描频率。把磁通与感应电动势同步显示，比较幅值和峰值出现的时刻。",
+      "thinking_prompt": "同样的磁通摆幅在不同节奏下会带来怎样的电动势响应？",
+      "illustrative_extension": "可以给两条记录加同步节拍标记；高频时需另行核对集中参数与场分布近似。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S174",
+      "profile_id": "FD29_TL_IMPEDANCE_TRANSFORM",
+      "pattern_id": "FREQUENCY_RESPONSE",
+      "primary_formula_ids": [
+        "quarter_wave_transformer"
+      ],
+      "focus": "物理长度不变时，四分之一波这个身份是否也一直不变",
+      "title": "让四分之一波接头离开自己的设计频率",
+      "physical_picture": "一段物理长度固定的理想变换线在设计频率下满足四分之一波条件。扫动频率，跟踪它的电长度和输入阻抗，比较只在设计点成立的关系与一般线路关系。",
+      "thinking_prompt": "物理长度不变时，四分之一波这个身份是否也一直不变？",
+      "illustrative_extension": "把设计点画成固定书签，让轨迹经过它；不预设额外的宽带匹配能力。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S175",
+      "profile_id": "FD04_ELECTROSTATIC_POTENTIAL",
+      "pattern_id": "MEASUREMENT_METHOD_COMPARISON",
+      "primary_formula_ids": [
+        "potential_difference"
+      ],
+      "focus": "两种读数不一致时，如何先检查采样而不是改写静电规律",
+      "title": "让两种仪表在同一对端点会合",
+      "physical_picture": "固定静电场和两个端点，一边直接读取端点电势差，另一边用离散采样近似沿路积分。逐步细化路径采样，区分物理上的路径无关与数值误差。",
+      "thinking_prompt": "两种读数不一致时，如何先检查采样而不是改写静电规律？",
+      "illustrative_extension": "可以交换曲折路径与平滑路径，比较达到相同精度所需的采样安排。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S176",
+      "profile_id": "FD14_MAGNETIC_VECTOR_POTENTIAL",
+      "pattern_id": "MEASUREMENT_METHOD_COMPARISON",
+      "primary_formula_ids": [
+        "magnetic_vector_potential"
+      ],
+      "focus": "两条计算路径的差异来自物理模型还是数值取样",
+      "title": "让磁场的两种算法在同一测点碰面",
+      "physical_picture": "对同一个已知稳恒电流分布，一边由电流元求磁场，另一边先求磁矢势再取旋度。用一致的几何与边界约定比较，逐步检查空间离散对结果的影响。",
+      "thinking_prompt": "两条计算路径的差异来自物理模型还是数值取样？",
+      "illustrative_extension": "把误差画成局部标记，寻找需要细化的区域；不把离散伪影当成磁源。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S177",
+      "profile_id": "FD30_TL_REFLECTION_VSWR_POWER",
+      "pattern_id": "MEASUREMENT_METHOD_COMPARISON",
+      "primary_formula_ids": [
+        "load_reflection_phasor"
+      ],
+      "focus": "相同驻波比是否足以说明两个负载相同",
+      "title": "只读波峰波谷会丢掉哪一半消息",
+      "physical_picture": "在同一条无损线路上，先只看电压极值比，再查看带相位参考的反射波。比较两种观测对负载候选的约束，明确仅有驻波比时还缺什么。",
+      "thinking_prompt": "相同驻波比是否足以说明两个负载相同？",
+      "illustrative_extension": "让不同负载候选占据同一条等幅轨迹，再用相位观测逐步缩小范围。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S178",
+      "profile_id": "FD06_POISSON_LAPLACE",
+      "pattern_id": "DESIGN_OPTIMIZATION",
+      "primary_formula_ids": [
+        "laplace_equation"
+      ],
+      "focus": "有限个边界调节量能否同时满足所有内部目标",
+      "title": "用边界上的旋钮照顾一块目标区域",
+      "physical_picture": "在无源均匀区域外布置可调电极边界，给区域内几个指定位置设定电势目标。你调整边界电势，观察满足一处目标是否会影响别处，并保留操作记录。",
+      "thinking_prompt": "有限个边界调节量能否同时满足所有内部目标？",
+      "illustrative_extension": "把未达到的目标显示为残差，允许比较折中方案；不承诺任意内部图案都可实现。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S179",
+      "profile_id": "FD12_MAGNETIC_SOURCE_FIELD",
+      "pattern_id": "DESIGN_OPTIMIZATION",
+      "primary_formula_ids": [
+        "biot_savart"
+      ],
+      "focus": "一个点达到目标后，周围区域是否也自动合适",
+      "title": "让一组电流既照顾中心又照顾旁边",
+      "physical_picture": "固定线圈几何与允许的电流范围，给中心测点设定磁场目标，同时观察邻近区域的偏差。调节电流组合，比较只满足中心与兼顾多个测点的方案。",
+      "thinking_prompt": "一个点达到目标后，周围区域是否也自动合适？",
+      "illustrative_extension": "可以由同伴重新布置检查点，检验方案是否依赖少数测点；不预设全空间均匀。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S180",
+      "profile_id": "FD25_PEC_STANDING_WAVE",
+      "pattern_id": "DESIGN_OPTIMIZATION",
+      "primary_formula_ids": [
+        "pec_standing_wave"
+      ],
+      "focus": "只选最低读数的位置，与选对位置误差更宽容的区域有什么区别",
+      "title": "给驻波里的器件选一个合适的位置",
+      "physical_picture": "在已知频率、入射幅度与理想导体边界下，给一个不扰动场的虚拟观察器规定允许的电场范围。移动安装位置，同时检查附近位置误差带来的变化。",
+      "thinking_prompt": "只选最低读数的位置，与选对位置误差更宽容的区域有什么区别？",
+      "illustrative_extension": "把安装误差画成一小段区间；虚拟观察器不等同于会散射场的真实器件。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S181",
+      "profile_id": "FD09_CAPACITANCE_ENERGY",
+      "pattern_id": "MULTI_SOLUTION_COMPARISON",
+      "primary_formula_ids": [
+        "parallel_plate_capacitance"
+      ],
+      "focus": "相同电容能否保证内部场和局部储能密度相同",
+      "title": "做出相同电容，却留下不同的内部场",
+      "physical_picture": "在平行板近似成立的范围内，用面积与间距的不同组合做出相同电容。施加同一电压后，比较电荷、平均场强与能量密度等已定义观测。",
+      "thinking_prompt": "相同电容能否保证内部场和局部储能密度相同？",
+      "illustrative_extension": "给每种方案加上几何约束卡片，比较占用空间；边缘场不能由均匀场公式直接保证。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S182",
+      "profile_id": "FD13_CURRENT_SHEET_SOLENOID",
+      "pattern_id": "MULTI_SOLUTION_COMPARISON",
+      "primary_formula_ids": [
+        "long_solenoid_field"
+      ],
+      "focus": "同一个场目标为何可能对应多组源参数",
+      "title": "不同绕法给出相同的中心磁场",
+      "physical_picture": "保持线性介质与长螺线管近似，用不同匝密度和电流组合满足同一个内部磁场目标。把这些方案并排放，再明确哪些附加指标尚需新模型才能比较。",
+      "thinking_prompt": "同一个场目标为何可能对应多组源参数？",
+      "illustrative_extension": "可以增加绕制空间作为几何约束；发热和电源代价必须先补充相应模型。"
+    },
+    {
+      "catalog_scene_id": "ECE329-S183",
+      "profile_id": "FD08_DIELECTRIC_POLARIZATION",
+      "pattern_id": "MULTI_SOLUTION_COMPARISON",
+      "primary_formula_ids": [
+        "linear_dielectric"
+      ],
+      "focus": "相同D能否唯一确定材料极化与内部电场",
+      "title": "让两块材料给出同样的电位移读数",
+      "physical_picture": "为两块不同线性介质选择不同电场，使它们的电位移读数相同。再展开各自的真空项与极化项，看相同的总读数由怎样的贡献组成。",
+      "thinking_prompt": "相同D能否唯一确定材料极化与内部电场？",
+      "illustrative_extension": "把两份贡献画成等长但分段不同的条带；条带长度只表示选定方向上的量。"
+    }
+  ]
+}

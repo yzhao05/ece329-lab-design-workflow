@@ -120,7 +120,7 @@ def latest_stage_one_scenes(history: Sequence[dict[str, Any]]) -> list[dict[str,
 
 
 def shown_exploration_option_ids(history: Sequence[dict[str, Any]]) -> set[str]:
-    """Collect every internally numbered exploration point already shown."""
+    """Collect exclusions, honoring explicit exhaustion boundaries in each pool."""
 
     shown: set[str] = set()
     for history_item in history:
@@ -133,11 +133,16 @@ def shown_exploration_option_ids(history: Sequence[dict[str, Any]]) -> set[str]:
         options = payload.get("alternative_ideas")
         if not isinstance(options, list):
             continue
-        shown.update(
-            str(option.get("option_id"))
-            for option in options
-            if isinstance(option, dict) and str(option.get("option_id") or "").strip()
-        )
+        for option in options:
+            if not isinstance(option, dict) or not str(option.get("option_id") or "").strip():
+                continue
+            if option.get("sampling_cycle_start") is True:
+                domain = str(option.get("sampling_cycle_domain") or "")
+                shown.difference_update(
+                    point["option_id"] for point in KNOWLEDGE.exploration_points
+                    if not domain or KNOWLEDGE._scene_matches_formula_domain(point, domain)
+                )
+            shown.add(str(option["option_id"]))
     return shown
 
 

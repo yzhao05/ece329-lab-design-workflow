@@ -16,18 +16,43 @@ This directory contains compact, deployable reference catalogs. Source PDFs are 
   profile distinguishes primary and supporting formulas and records supported
   variations, observations, and boundary conditions; all formula IDs resolve back to
   `formulas.json`.
-- `scene_formula_links.json`: many-to-many links between all internal exploration
-  scene IDs and formula-design profiles. It is queried independently and is not read
-  by Guided-mode scene sampling or rendering.
+- `scene_formula_links.json`: legacy exploration scene bindings to formula profiles.
+  The runtime merges these with the authored Guided extension before resolving
+  selections and filtering the sampling pool by course domain.
 - `experiment_design_patterns.json`: 15 finite experiment-design paradigms and an
   explicit applicability map for every formula profile. EMVR uses this layer to
   generate a coverage matrix and runtime experiment methods after formula
   confirmation; it does not sample the fixed scene catalog.
 - `scene_templates.json`: extensible Stage 1 physical-scene templates selected by catalog keywords, plus topic-independent fallback frames. New course topics are added as data instead of Python conditionals.
+- `guided_formula_pattern_scenes.json`: 45 authored Guided scenes covering all 32
+  formula profiles and all 15 applicable experiment paradigms. Each declares its
+  primary formulas, profile, pattern, distinctive question and complete physical
+  picture. Supporting profiles add explicit cross-formula evidence where needed.
+  These scenes use their own bound picture rather than a generic keyword fallback.
 - `source_manifest.json`: identity and extraction policy for the course-scope lecture notes.
 - `supplemental_sources.json`: enabled supplemental sources and multi-source Stage 1 relationship catalog.
 
-At startup, the workflow materializes a 138-item Stage 1 exploration catalog from all 117 lecture `brainstorm_axes` and all 21 supplemental `relationship_examples`. Entries receive stable internal IDs `ECE329-S001`–`ECE329-S138`. A turn samples three unseen entries, prioritizing the current topic, and relabels them only as `图景 A/B/C` for the student; internal IDs are never student-facing.
+At startup, the workflow materializes a **183-item Guided Stage 1 exploration catalog**:
+117 lecture axes + 21 supplemental relationships + 45 formula-pattern scenes.
+Legacy IDs `ECE329-S001`–`ECE329-S138` retain their meaning; new IDs are
+`ECE329-S139`–`ECE329-S183`. IDs are append-only. Each turn still presents three
+scenes, labeled A/B/C, with no internal IDs in student-facing text. The additions
+are selected applicable combinations, not an exhaustive 32 × 15 product: simply
+changing wording or attaching another paradigm label is not a new scene.
+
+Sampling prioritizes the current topic and exhausts unseen candidates in the
+eligible course domain before recycling. If one or two unseen entries remain,
+they appear first, followed by the start of a new cycle; a cycle marker in the
+stored alternatives resets only that pool's exclusions. The global pool supports
+61 three-scene batches per cycle. Counts in prompt metadata and public formula
+links derive from the merged catalog. EMVR retains its formula-first dynamic
+method generation and does not sample this catalog.
+
+To extend the pool, append a scene with a new stable ID, an applicable profile–pattern
+pair and a distinct physical question. Reuse canonical formula IDs and conditions;
+do not introduce unsupported quantitative claims. Validation checks references,
+applicability, IDs and duplicate titles/pictures/questions; editorial review must
+also check semantic overlap with existing lecture axes and scenes.
 
 ## Supplemental-source policy
 

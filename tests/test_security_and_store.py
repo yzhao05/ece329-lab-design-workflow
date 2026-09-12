@@ -342,7 +342,7 @@ class APISecurityTests(unittest.TestCase):
         )
 
         self.assertTrue(status.startswith("200"))
-        self.assertEqual(len(payload["scene_formula_links"]), 138)
+        self.assertEqual(len(payload["scene_formula_links"]), 183)
         first = payload["scene_formula_links"][0]
         self.assertTrue(first["profile_ids"])
         self.assertTrue(first["primary_formulas"])
