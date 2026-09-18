@@ -705,6 +705,48 @@ a:focus-visible {
   background: rgb(255 253 249 / 88%);
 }
 
+/* Native disclosures preserve keyboard and screen-reader expanded state. */
+.insight-fold > summary,
+.insight-field-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  list-style: none;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.insight-fold > summary::-webkit-details-marker { display: none; }
+.insight-fold > summary::after,
+.insight-field-toggle::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  margin: 0 6px 0 3px;
+  border-right: 2px solid var(--teal);
+  border-bottom: 2px solid var(--teal);
+  transform: rotate(-45deg);
+}
+.insight-fold[open] > summary::after,
+.insight-field-toggle[aria-expanded="true"]::after { transform: rotate(45deg); }
+.insight-fold > summary:focus-visible,
+.insight-field-toggle:focus-visible { outline: 2px solid var(--teal); outline-offset: 4px; border-radius: 4px; }
+.insight-card-fold > summary > .card-heading { flex: 1; min-width: 0; }
+.insight-card-fold > .insight-fold-body { padding-top: 12px; }
+.insight-section-fold > summary { color: var(--navy); font-size: .88rem; font-weight: 650; }
+.insight-section-fold > summary > * { margin: 0; min-width: 0; }
+.insight-section-fold > summary h3 { margin: 0; }
+.insight-section-fold > .insight-fold-body { padding-top: 7px; }
+.unity-summary > .insight-section-fold { margin-top: 12px; }
+.unity-drawing > .insight-section-fold > summary h3 { font-size: .9rem; }
+.quality-review-card > .insight-card-fold > .insight-fold-body { display: grid; gap: .9rem; }
+.design-notes .insight-section-fold > summary,
+.quality-issue-list .insight-section-fold > summary { font-size: inherit; }
+.insight-fold-body { min-width: 0; overflow-wrap: anywhere; }
+.insight-field-toggle { padding: 0; border: 0; width: 100%; background: none; color: inherit; font: inherit; text-align: left; }
+
 .card-heading {
   display: flex;
   align-items: flex-start;

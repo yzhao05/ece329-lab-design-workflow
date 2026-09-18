@@ -165,6 +165,7 @@ window.ECE329_LOCALES = {
   "停止时请填写具体原因，例如：总结不准确、暂时停用、被新经验替代。":"Give a reason for stopping, such as an inaccurate summary, a temporary pause, or replacement by a newer experience.",
   "请填写停止原因。":"Enter a reason for stopping.",
   "Unity 位置示意图":"Unity Layout Diagram",
+  "组件俯视图":"Component top view",
   "方法示意，非实际仿真；位置与尺寸不按比例":"Method diagram, not an actual simulation; positions and dimensions are not to scale",
   "已经明确的实验内容":"Established experiment details",
   "Unity 组件相对位置俯视图":"Top view of relative Unity component positions",

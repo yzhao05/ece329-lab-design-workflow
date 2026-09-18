@@ -996,6 +996,7 @@ function renderEvidence() {
   evidence.slice(0, 4).forEach((item) => {
     const card = document.createElement("div");
     card.className = "evidence-item";
+    card.dataset.itemKey = String(item.id || item.title || item.name || item.lecture || '') + ':' + formatPages(item.pages);
 
     const kicker = document.createElement("div");
     kicker.className = "evidence-kicker";
@@ -1064,6 +1065,7 @@ function renderTaskReport() {
   (report.sections || []).forEach((section) => {
     const details = document.createElement("details");
     details.className = "task-report-section";
+    details.dataset.sectionKey = 'report:' + (section.stage_id || section.title || 'section');
     if (section.stage_id === STAGES[state.stageIndex]?.[0] || state.reportReady) {
       details.open = true;
     }
@@ -2782,6 +2784,7 @@ function renderUnityLayout() {
     dom.chatInput.dispatchEvent(new Event('input'));
     dom.chatInput.focus();
   });
+  window.ECE329InsightFolds?.enhance(document.querySelector('.insight-panel'), `${state.designId || 'local'}:${state.mode}`);
 }
 
 dom.chatForm.addEventListener("submit", handleSubmit);
