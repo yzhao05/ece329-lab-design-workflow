@@ -53,22 +53,73 @@
     el.Previous.disabled = true;
     el.Next.disabled = true;
   }
-  async function request(path, options = {}) {
+  async function request(path, options = {}, resource = 'experiences') {
     if (!base) throw new Error("请先在工作台配置文件中设置课程服务地址。");
     if (!el.Token.value.trim()) throw new Error("请填写维护者令牌。");
     const controller = new AbortController();
     controllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-      const response = await fetch(`${base}/v1/feedback/experiences${path}`, { ...options, signal: controller.signal,
+      const response = await fetch(`${base}/v1/feedback/${resource}${path}`, { ...options, signal: controller.signal,
         headers: { "Content-Type": "application/json", "X-ECE329-Feedback-Admin-Token": el.Token.value.trim() } });
       const body = await response.json();
       if (!response.ok) throw new Error(response.status === 409 ? "记录已变化或与已有经验重复，请重新加载核对。"
+        : response.status === 404 && resource === 'tickets' && path.startsWith('?') ? "后端尚不支持全部反馈列表，请更新后端后重试。"
         : response.status === 401 ? "维护者令牌无效，或后端尚未配置审阅权限。" : body.detail || body.error || `HTTP ${response.status}`);
       return body;
     } finally { clearTimeout(timeout); controllers.delete(controller); }
   }
   const node = (tag, text) => { const item = document.createElement(tag); item.textContent = text; return item; };
+  const ticketLabels = {queued:'等待分析',running:'分析中',candidate:'已生成待审阅经验',active:'关联经验已启用',
+    rejected:'关联经验未采用',disabled:'关联经验已停用',deleted:'关联经验已删除',
+    failed:'分析失败',no_learning:'未提炼出可审阅经验',duplicate:'与已有经验重复'};
+  function renderTickets(items, version) {
+    el.Cards.replaceChildren();
+    for (const item of items) {
+      const card = node('article',''); card.className='experience-card';
+      card.append(node('h2',ticketLabels[item.status] || item.status), node('p',item.message),
+        node('p',`${item.id} · ${item.design_id} · ${item.attempts}/${item.max_attempts ?? 3}`));
+      if (item.error) card.append(node('p',item.error));
+      const details = node('details',''), detailBody = node('div','');
+      details.append(node('summary','查看分析结果与对话证据'),detailBody);
+      let fetching=false, loaded=false;
+      details.addEventListener('toggle',async()=>{
+        if (!details.open || fetching || loaded || version!==generation) return;
+        fetching=true; detailBody.textContent='正在读取……';
+        try {
+          const detail=await request(`/${encodeURIComponent(item.id)}`,{},'tickets');
+          if(version!==generation) return;
+          const analysis=detail.evidence.extraction_analysis;
+          const reason=analysis?.model_check?.issues || detail.evidence.extraction_candidate?.summary;
+          detailBody.replaceChildren(...(reason?[node('p',reason)]:[]),node('pre',JSON.stringify(detail.evidence,null,2)));
+          loaded=true;
+        } catch(error) {if(version===generation) detailBody.textContent=`读取失败：${error.message}`;}
+        finally {fetching=false;}
+      });
+      card.append(details);
+      if (item.experience) {
+        const open=node('button','查看关联经验'); open.type='button';open.className='ghost-button';
+        open.addEventListener('click',()=>{
+          if(version!==generation || reviewing || loading) return;
+          el.Filter.value=item.experience.status;offset=0;load(true,item.experience.id);
+        });card.append(open);
+      }
+      if(item.can_retry) {
+        const retry=node('button','重试分析');retry.type='button';retry.className='ghost-button';
+        retry.addEventListener('click',async()=>{
+          if(version!==generation || reviewing || loading) return;
+          reviewing=true;retry.disabled=true;
+          try {
+            await request(`/${encodeURIComponent(item.id)}/retry`,{method:'POST',body:'{}'},'tickets');
+            if(version===generation) await load();
+          }catch(error){if(version===generation) el.Status.textContent=`重试失败：${error.message}`;}
+          finally{reviewing=false;retry.disabled=false;}
+        });card.append(retry);
+      }
+      el.Cards.append(card);
+    }
+    if(!items.length) el.Cards.append(node('p','此筛选下没有反馈记录；可选择“全部反馈”查看其他处理状态。'));
+  }
   function render(items, version) {
     el.Cards.replaceChildren();
     for (const item of items) {
@@ -175,20 +226,32 @@
       card.append(actions);
       el.Cards.append(card);
     }
-    if (!items.length) el.Cards.append(node("p", "该状态下暂无经验。"));
+    if (!items.length) el.Cards.append(node("p", "该状态下暂无经验，不代表没有收到反馈。请切换到“全部反馈”查看分析状态。"));
   }
-  async function load(showStatus = true) {
+  async function load(showStatus = true, experienceId = null) {
     const version = ++generation;
     loading = true;
     el.Previous.disabled = true;
     el.Next.disabled = true;
     if (showStatus) el.Status.textContent = "正在读取……";
     try {
-      const result = await request(`?status=${encodeURIComponent(el.Filter.value)}&offset=${offset}`);
+      if(el.Filter.value.startsWith('feedback:')) {
+        const filter=el.Filter.value.slice('feedback:'.length);
+        const result=await request(`?offset=${offset}${filter==='all'?'':`&status=${encodeURIComponent(filter)}`}`,{},'tickets');
+        if(version!==generation) return;
+        renderTickets(result.feedback,version);
+        el.Previous.disabled=offset===0;el.Next.disabled=offset+result.feedback.length>=result.filtered_total;
+        const counts=Object.entries(result.counts).map(([status,count])=>`${ticketLabels[status]||status}: ${count}`).join(' · ');
+        el.Status.textContent=`反馈总数：${result.total}；当前筛选：${result.filtered_total}；本页：${result.feedback.length}。 ${counts}`;
+        if(!result.durable) el.Cards.append(node('p','当前后端使用内存存储，重启后记录会丢失。'));
+        if(!result.total) el.Cards.append(node('p','当前服务没有反馈记录。若已提交，请核对前后端服务地址和持久化存储；不要重复提交。'));
+        return;
+      }
+      const result = await request(experienceId ? `?experience_id=${encodeURIComponent(experienceId)}` : `?status=${encodeURIComponent(el.Filter.value)}&offset=${offset}`);
       if (version !== generation) return;
       render(result.experiences, version);
       el.Previous.disabled = offset === 0;
-      el.Next.disabled = result.experiences.length < 50;
+      el.Next.disabled = Boolean(experienceId) || result.experiences.length < 50;
       if (showStatus) el.Status.textContent = `已加载 ${result.experiences.length} 条经验，第 ${offset / 50 + 1} 页。`;
     } catch (error) { if (version === generation) { el.Cards.replaceChildren(); el.Status.textContent = `读取失败：${error.message}`; } }
     finally { if (version === generation) loading = false; }

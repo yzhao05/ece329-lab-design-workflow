@@ -1,5 +1,22 @@
 "use strict";
 window.ECE329_LOCALES = {
+  "全部反馈（含未生成经验）":"All feedback (including submissions without an experience)",
+  "等待分析的反馈":"Queued feedback", "分析中的反馈":"Feedback being analyzed",
+  "分析失败的反馈":"Failed analysis", "未提炼经验的反馈":"No experience extracted", "重复经验的反馈":"Duplicate experiences",
+  "待审阅经验":"Experiences awaiting review", "等待分析":"Queued", "分析中":"Analyzing",
+  "已生成待审阅经验":"Experience awaiting review", "关联经验已启用":"Related experience active",
+  "关联经验未采用":"Related experience rejected", "关联经验已停用":"Related experience disabled",
+  "关联经验已删除":"Related experience deleted", "分析失败":"Analysis failed",
+  "未提炼出可审阅经验":"No reviewable experience extracted", "与已有经验重复":"Duplicates an existing experience",
+  "查看分析结果与对话证据":"View analysis and conversation evidence", "查看关联经验":"View related experience",
+  "后端尚不支持全部反馈列表，请更新后端后重试。":"The backend does not support the feedback inbox yet. Update it and try again.",
+  "此筛选下没有反馈记录；可选择“全部反馈”查看其他处理状态。":"No feedback matches this filter. Select All feedback to see other processing states.",
+  "该状态下暂无经验，不代表没有收到反馈。请切换到“全部反馈”查看分析状态。":"No experiences match this status; feedback may still have been received. Select All feedback to inspect analysis status.",
+  "当前服务没有反馈记录。若已提交，请核对前后端服务地址和持久化存储；不要重复提交。":"This service has no feedback records. If you already submitted feedback, check the frontend/backend service address and persistent storage before resubmitting.",
+  "反馈总数：":"Total feedback: ", "；当前筛选：":"; Matching filter: ", "；本页：":"; On this page: ",
+  "分析未完成（":"Analysis incomplete (", "），请检查模型配置或稍后重试。":
+    "). Check the model configuration or retry later.",
+  "令牌只用于当前页面，不保存在浏览器存储中。全部反馈包含排队、失败、未提炼和重复记录；分析失败时可在这里重试，仍受十次尝试上限限制。点击加载记录刷新状态。":"The token is used only on this page and is not stored in the browser. All feedback includes queued, failed, unextracted and duplicate records. Failed analysis can be retried here, up to ten attempts. Click Load records to refresh.",
   "经验 JSON 格式有误，请先修正；已填写的修正内容仍保留。":"Fix the invalid experience JSON first; your corrections are still retained.",
   "切换字段会将已填写的修正同步到 JSON，启用时一并保存。摘要用于概述，实际指导设计的是适用条件、处理建议和验证方法，请同步核对。已启用修订供后续提炼参考，停用后停止引用。":"Switching fields copies your correction into the JSON; approval saves all edits. The summary is an overview; conditions, recommendations and verification guide the design, so check them together. Active corrections inform future extraction; disabling stops their retrieval.",
   "人工审阅：选择需要修正的字段":"Human review: select the field to correct",

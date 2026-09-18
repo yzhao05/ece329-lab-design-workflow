@@ -378,6 +378,25 @@ class WorkflowAPI:
                     self.feedback.start()
                     return self._respond(start_response, HTTPStatus.CREATED if created else HTTPStatus.OK, result)
 
+            inbox_match = re.fullmatch(r"/v1/feedback/tickets(?:/([a-f0-9]{32})(/retry)?)?", path)
+            if inbox_match and method in {'GET', 'POST'}:
+                token = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
+                if not self.settings.feedback_admin_token or not hmac.compare_digest(token.encode(), self.settings.feedback_admin_token.encode()):
+                    raise DesignAccessDenied('A feedback maintainer token is required')
+                ticket_id, retry = inbox_match.groups()
+                if method == 'GET' and ticket_id is None:
+                    self.feedback.start()
+                    query = parse_qs(environ.get('QUERY_STRING', ''))
+                    inbox = self.feedback.store.feedback_inbox(query.get('status', [None])[0], int(query.get('offset', ['0'])[0]))
+                    return self._respond(start_response, HTTPStatus.OK, inbox)
+                if method == 'GET' and ticket_id and not retry:
+                    return self._respond(start_response, HTTPStatus.OK, self.feedback.store.feedback_detail(ticket_id))
+                if method == 'POST' and ticket_id and retry:
+                    ticket = self.feedback.store.feedback_detail(ticket_id)
+                    self.feedback.store.retry(ticket['design_id'], ticket_id)
+                    self.feedback.start()
+                    return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
+
             review_match = re.fullmatch(r"/v1/feedback/experiences(?:/([a-f0-9]{32})/review)?", path)
             if review_match and method in {'GET', 'POST'}:
                 candidate = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
@@ -386,7 +405,7 @@ class WorkflowAPI:
                 experience_id = review_match.group(1)
                 if method == 'GET' and experience_id is None:
                     query = parse_qs(environ.get('QUERY_STRING', ''))
-                    items = self.feedback.store.experiences(query.get('status', [None])[0], int(query.get('offset', ['0'])[0]))
+                    items = self.feedback.store.experiences(query.get('status', [None])[0], int(query.get('offset', ['0'])[0]), query.get('experience_id', [None])[0])
                     return self._respond(start_response, HTTPStatus.OK, {'experiences': items})
                 if method == 'POST' and experience_id:
                     body = self._read_json(environ)

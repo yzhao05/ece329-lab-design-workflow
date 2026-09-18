@@ -8,6 +8,7 @@ import re
 import socket
 from copy import deepcopy
 from dataclasses import dataclass, field
+from http.client import HTTPException
 from threading import RLock
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
@@ -333,8 +334,10 @@ class OpenAIResponsesHTTPTransport:
                     error_object.get("code"), str
                 ):
                     error_code = error_object["code"]
-            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError, OSError, HTTPException):
                 pass
+            finally:
+                exc.close()
             raise ModelHTTPError(exc.code, error_code) from exc
         except URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
@@ -344,7 +347,9 @@ class OpenAIResponsesHTTPTransport:
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
             raise ModelTimeoutError(f"{self._provider} API timed out") from exc
-        except json.JSONDecodeError as exc:
+        except (OSError, HTTPException) as exc:
+            raise ModelConnectionError(f"The {self._provider} API connection was interrupted") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ModelOutputError(f"{self._provider} API returned invalid JSON") from exc
         if not isinstance(result, dict):
             raise ModelOutputError(f"{self._provider} API returned an unexpected payload")

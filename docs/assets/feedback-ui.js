@@ -37,7 +37,7 @@
       const body = document.createElement("p");
       body.textContent = ticket.message;
       const detail = document.createElement("small");
-      detail.textContent = `记录 ${ticket.id} · 设计版本 ${ticket.revision} · 分析 ${ticket.attempts}/3 次${ticket.durable ? "" : " · 内存模式，重启后丢失"}`;
+      detail.textContent = `记录 ${ticket.id} · 设计版本 ${ticket.revision} · 分析 ${ticket.attempts}/${ticket.max_attempts ?? 3} 次${ticket.durable ? "" : " · 内存模式，重启后丢失"}`;
       item.append(title, body, detail);
       if (ticket.error) {
         const error = document.createElement("p");

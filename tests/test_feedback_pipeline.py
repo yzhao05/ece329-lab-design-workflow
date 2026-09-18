@@ -209,7 +209,7 @@ def test_model_failure_is_recorded_and_retry_is_bounded(pipeline):
         raise RuntimeError('secret-api-key-must-not-leak')
     p.service.extractor = SimpleNamespace(extract=fail)
     _, _, ticket = submit(p)
-    for attempt in range(1, 4):
+    for attempt in range(1, 11):
         assert p.service.run_once()
         assert not p.service.run_once()  # Failure does not trigger a busy automatic retry.
         row = p.repo.tickets(p.session.design_id)[0]
@@ -217,7 +217,7 @@ def test_model_failure_is_recorded_and_retry_is_bounded(pipeline):
         assert 'secret-api-key' not in json.dumps(row)
         path = f"/v1/designs/{p.session.design_id}/feedback/{ticket['id']}/retry"
         status = call_api(p.api, 'POST', path, {}, request_headers=p.auth)[0]
-        assert status.startswith('202' if attempt < 3 else '400')
+        assert status.startswith('202' if attempt < 10 else '400')
     assert p.engine.get_prompt_packet(p.session.design_id, '电场如何计算')
 
 

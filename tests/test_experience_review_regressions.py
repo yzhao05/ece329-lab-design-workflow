@@ -80,7 +80,7 @@ def test_exhausted_queued_job_is_terminal_instead_of_polling_forever(pipeline):
     p = pipeline
     submit(p)
     with p.repo.connection() as db:
-        db.execute("UPDATE feedback_tickets SET status='queued',attempts=3")
+        db.execute("UPDATE feedback_tickets SET status='queued',attempts=10")
     assert p.repo.has_work()
     p.service._run()
     assert not p.repo.has_work()
