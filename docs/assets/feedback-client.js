@@ -53,10 +53,11 @@ window.FeedbackClient = class FeedbackClient {
   async list() {
     const result = await this.request(this.path(), { method: "GET" });
     if (!Array.isArray(result.feedback)) throw new Error("反馈记录响应无效");
+    this.analysisOptions = result.analysis_options || null;
     return result.feedback;
   }
 
-  retry(id) {
-    return this.request(this.path(`/${encodeURIComponent(id)}/retry`), { method: "POST", body: "{}" });
+  retry(id, model) {
+    return this.request(this.path(`/${encodeURIComponent(id)}/retry`), { method: "POST", body: JSON.stringify(model ? {model} : {}) });
   }
 };

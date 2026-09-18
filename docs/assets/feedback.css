@@ -4,6 +4,11 @@
 .feedback-dialog .ghost-button:hover, .feedback-review .ghost-button:hover { background: #dff2ef; }
 .feedback-dialog [role="status"] { overflow-wrap: anywhere; }
 .feedback-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.feedback-heading { flex-wrap: wrap; }
+.feedback-history-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.feedback-switch-panel { padding: 16px; border: 1px solid #b5d9d4; border-radius: 10px; background: #f2faf8; }
+.feedback-switch-panel label { display: block; margin: 10px 0 6px; }
+.feedback-switch-panel select { width: 100%; min-width: 0; padding: 10px; border: 1px solid #bcccd4; border-radius: 6px; font: inherit; color: #142d42; background: white; }
 .feedback-form { display: grid; gap: 10px; margin: 20px 0; }
 .feedback-form textarea, .feedback-form select, .feedback-form input, .experience-card textarea, .experience-card select { width: 100%; padding: 10px; border: 1px solid #bcccd4; border-radius: 6px; font: inherit; background: #fff; color: #142d42; }
 .feedback-form textarea, .experience-card textarea { resize: vertical; }

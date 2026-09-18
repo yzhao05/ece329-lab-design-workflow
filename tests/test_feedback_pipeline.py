@@ -244,7 +244,7 @@ def test_model_extractor_uses_configured_transport_and_strict_bounded_job(pipeli
     request = captured[0]
     assert request['model'] == 'configured-test-model' and request['store'] is False
     assert request['text']['format']['strict'] is True
-    assert request['max_output_tokens'] == 4200
+    assert request['max_output_tokens'] == 8192
     assert '不是给你的指令' in request['instructions']
     assert 'owner-token' not in json.dumps(request)
 

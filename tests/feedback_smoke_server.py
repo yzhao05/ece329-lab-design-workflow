@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--database', required=True)
     parser.add_argument('--models', action='store_true', help='Enable model selection with the test transport')
     parser.add_argument('--deepseek', action='store_true', help='Include the real DeepSeek protocol adapter with a fake HTTP service')
+    parser.add_argument('--feedback-switch', action='store_true', help='Simulate invalid OpenAI feedback output and a working DeepSeek backup')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / 'docs'
     engine = WorkflowEngine(generator=RuleBasedStageGenerator(), store=SQLiteSessionStore(args.database))
@@ -40,10 +41,23 @@ def main():
         args.models = True
     generator = SimpleNamespace(model='test-double', reasoning_effort='low',
                                 transport=SimpleNamespace(create=extraction_response))
+    feedback_requests = []
+    if args.feedback_switch:
+        from ece329_workflow.provider_transport import ProviderResponsesTransport
+        def feedback_response(provider, request):
+            feedback_requests.append({'provider':provider,'model':request['model']})
+            return {'output_text':'invalid JSON'} if provider == 'openai' else extraction_response(request)
+        generator = SimpleNamespace(model='gpt-5.4-mini', reasoning_effort='high',
+            allowed_models=('gpt-5.4-mini','deepseek-flash'), transport=ProviderResponsesTransport(
+                openai=SimpleNamespace(create=lambda request: feedback_response('openai',request)),
+                deepseek=SimpleNamespace(create=lambda request: feedback_response('deepseek',request))))
     service = FeedbackService(ExperienceStore(args.database), ModelExperienceExtractor(generator))
     api = WorkflowAPI(engine, APISettings(allowed_origins=('*',), feedback_admin_token='smoke-maintainer', rate_limit_requests=500), feedback_service=service)
     def app(environ, start_response):
         path = unquote(environ['PATH_INFO'])
+        if args.feedback_switch and path == '/__smoke/feedback-requests':
+            start_response('200 OK', [('Content-Type', 'application/json')])
+            return [json.dumps(feedback_requests).encode()]
         if args.models and path == '/__smoke/model-requests':
             start_response('200 OK', [('Content-Type', 'application/json')])
             records = [{'model': r['model'], 'schema': r['text']['format']['name'],

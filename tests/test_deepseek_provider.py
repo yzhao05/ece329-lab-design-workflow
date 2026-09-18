@@ -143,7 +143,7 @@ def test_feedback_extraction_uses_deepseek_without_openai_key():
     assert result['useful'] and len(chat.requests) == 2
     assert chat.requests[0]['model'] == 'deepseek-flash'
     assert chat.requests[0]['thinking']['type'] == 'disabled'
-    assert [request['max_tokens'] for request in chat.requests] == [4200, 1400]
+    assert [request['max_tokens'] for request in chat.requests] == [8192, 4096]
 
 
 @pytest.mark.parametrize('number', ['NaN', 'Infinity', '-Infinity', '1e999'])

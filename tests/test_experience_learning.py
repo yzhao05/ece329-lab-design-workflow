@@ -8,6 +8,7 @@ import pytest
 from ece329_workflow.experience import ExperienceStore, FeedbackService, ModelExperienceExtractor, evidence_snapshot
 from ece329_workflow.models import DesignSession, InteractionState, SessionConflict
 from ece329_workflow.experience_learning import workflow_evidence_state, validate_review_note
+from ece329_workflow.openai_generator import ModelOutputError
 from tests.test_feedback_pipeline import (candidate, extraction_draft, extraction_check, review_note,
                                          pipeline, extract_one, review, submit)
 from tests.test_security_and_store import workspace_temp_path, remove_sqlite_files
@@ -78,8 +79,9 @@ def test_invented_fact_reference_fails_without_repair_loop():
         draft['diagnosis']['facts'] = [{'evidence_ref': 'turn:999', 'observation': '未知事实'}]
         return {'output_text': json.dumps(draft)}
     extractor = ModelExperienceExtractor(SimpleNamespace(model='test', transport=SimpleNamespace(create=create)))
-    with pytest.raises(ValueError, match='reference'):
+    with pytest.raises(ModelOutputError) as error:
         extractor.extract({'evidence': {}})
+    assert error.value.feedback_reason == 'evidence_reference'
     assert len(calls) == 1
 
 

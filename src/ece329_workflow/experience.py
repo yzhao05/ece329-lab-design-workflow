@@ -6,6 +6,7 @@ from copy import deepcopy
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 from threading import Event, Lock, Thread
@@ -37,7 +38,7 @@ def experience_identity(value):
 
 
 def candidate_schema():
-    string_array = {'type': 'array', 'items': {'type': 'string'}}
+    string_array = {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 80}, 'minItems': 1, 'maxItems': 8}
     properties = {
         'useful': {'type': 'boolean'}, 'summary': {'type': 'string'},
         'category': {'type': 'string', 'enum': list(CATEGORIES)},
@@ -46,6 +47,10 @@ def candidate_schema():
         'modes': {'type': 'array', 'items': {'type': 'string', 'enum': [m.value for m in InteractionState]}},
         'stages': {'type': 'array', 'items': {'type': 'string', 'enum': [s.value for s in Stage]}},
     }
+    for field, limit in REVIEW_FIELDS.items():
+        properties[field].update(minLength=1, maxLength=limit)
+    for field, limit in [('modes', 2), ('stages', 13)]:
+        properties[field].update(minItems=1, maxItems=limit)
     return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
 
 
@@ -235,6 +240,7 @@ class ExperienceStore:
                 'category': payload['category'], 'revision': payload['reported_revision'],
                 'scope': payload.get('scope', 'global'), 'stage': payload.get('reported_stage', payload['evidence']['stage']),
                 'telemetry_id': payload.get('telemetry_id'),
+                'last_analysis': (payload.get('analysis_attempts') or [None])[-1],
                 'status': row['status'], 'attempts': row['attempts'], 'max_attempts': MAX_ATTEMPTS, 'error': row['error'],
                 'durable': self.durable, 'can_retry': row['status'] == 'failed' and row['attempts'] < MAX_ATTEMPTS}
 
@@ -274,12 +280,17 @@ class ExperienceStore:
                 raise SessionNotFound('Unknown feedback record')
             return {**self._public(row), 'evidence': json.loads(row['payload'])}
 
-    def retry(self, design_id, ticket_id):
+    def retry(self, design_id, ticket_id, model=None):
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT payload FROM feedback_tickets WHERE id=? AND design_id=?', (ticket_id, design_id)).fetchone()
+            payload = json.loads(row['payload']) if row else {}
+            payload['analysis_model'] = model
             cursor = db.execute("UPDATE feedback_tickets SET status='queued',error='' WHERE id=? AND design_id=? AND status='failed' AND attempts<?",
                                 (ticket_id, design_id, MAX_ATTEMPTS))
             if cursor.rowcount != 1:
                 raise ValueError('Feedback cannot be retried')
+            db.execute('UPDATE feedback_tickets SET payload=? WHERE id=?', (encode(payload), ticket_id))
 
     def has_work(self):
         with self.connection() as db:
@@ -509,20 +520,55 @@ class ExperienceStore:
 
 
 class ModelExperienceExtractor:
-    def __init__(self, generator):
+    def __init__(self, generator, environ=None):
+        from .openai_generator import ModelConfigurationError
         self.generator = generator
+        env = os.environ if environ is None else environ
+        self.reasoning = env.get('ECE329_FEEDBACK_REASONING_EFFORT', 'low')
+        if self.reasoning not in ('none', 'low', 'medium', 'high'):
+            raise ModelConfigurationError('ECE329_FEEDBACK_REASONING_EFFORT must be none, low, medium or high')
+        def budget(raw, name):
+            try:
+                value = int(raw)
+                if not 1024 <= value <= 32768: raise ValueError()
+            except (TypeError, ValueError):
+                raise ModelConfigurationError(name + ' must be an integer between 1024 and 32768') from None
+            return value
+        self.draft_tokens = budget(env.get('ECE329_FEEDBACK_MAX_OUTPUT_TOKENS', '8192'), 'ECE329_FEEDBACK_MAX_OUTPUT_TOKENS')
+        self.check_tokens = budget(env.get('ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS', '4096'), 'ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS')
+
+    def available_models(self):
+        """Capabilities, independent of the representatives chosen for automatic fallback."""
+        from .model_selection import model_provider
+        generator = getattr(self.generator, 'primary', self.generator)
+        primary = getattr(generator, 'model', None)
+        transport = getattr(generator, 'transport', None)
+        if transport is None:
+            return []
+        allowed = getattr(generator, 'allowed_models', None)
+        candidates = allowed if allowed is not None else [primary]
+        providers = getattr(transport, 'providers', None)
+        available = []
+        for model in dict.fromkeys(candidates):
+            if not model:
+                continue
+            provider = model_provider(model)
+            configured = providers.get(provider) is not None if providers is not None else provider == model_provider(primary)
+            if configured:
+                available.append(model)
+        return available
 
     def models(self):
         """Try the configured primary, then one allowed model per other provider."""
         from .model_selection import model_provider
         generator = getattr(self.generator, 'primary', self.generator)
         primary = getattr(generator, 'model', None)
-        selected = [primary]
-        seen = {model_provider(primary)}
-        providers = getattr(getattr(generator, 'transport', None), 'providers', {})
-        for model in getattr(generator, 'allowed_models', ()) or ():
+        available = self.available_models()
+        ordered = ([primary] if primary in available else []) + available
+        selected, seen = [], set()
+        for model in ordered:
             provider = model_provider(model)
-            if provider not in seen and providers.get(provider) is not None:
+            if provider not in seen:
                 selected.append(model)
                 seen.add(provider)
         return selected
@@ -536,25 +582,62 @@ class ModelExperienceExtractor:
         return max(300, 2 * max(timeouts, default=90) + 60)
 
     def extract(self, payload, *, model=None):
-        from .openai_generator import _extract_output_text, ModelConfigurationError
+        from .openai_generator import _extract_output_text, ModelConfigurationError, ModelOutputError
+        if model is not None and model not in self.available_models():
+            raise ModelConfigurationError('Selected feedback model is no longer available')
+        model = model or next(iter(self.models()), None)
+        if model is None:
+            raise ModelConfigurationError('No online feedback model is configured')
         generator = self.generator
         # A wrapper may provide the configured online generator as its primary.
         generator = getattr(generator, 'primary', generator)
         transport = getattr(generator, 'transport', None)
         if transport is None:
             raise ModelConfigurationError('Experience extraction needs the configured online model')
+        from .model_selection import model_details
         common = {
-            'model': model or generator.model,
-            'reasoning': {'effort': getattr(generator, 'reasoning_effort', 'low')},
+            'model': model,
+            'reasoning': {'effort': model_details(model, self.reasoning)['reasoning']},
             'store': False,
         }
         from .model_selection import model_provider
         deepseek = model_provider(common['model']) == 'deepseek'
+        evidence = payload.get('evidence', {})
+        refs = {ref for ref in ('reported_turn', 'recent_turns', 'current_state') if evidence.get(ref)}
+        refs |= {row['ref'] for row in evidence.get('event_chain', [])}
+        diagnostic_schema = diagnosis_schema()
+        if refs:
+            diagnostic_schema['properties']['facts']['items']['properties']['evidence_ref'] = {'type': 'string', 'enum': sorted(refs)}
+        else:
+            diagnostic_schema['properties']['facts']['maxItems'] = 0
+        def invalid(reason, phase):
+            error = ModelOutputError('Feedback output did not pass validation')
+            error.feedback_reason, error.feedback_phase = reason, phase
+            return error
+
         def request(body):
+            phase = 'check' if body['text']['format']['name'].endswith('_check') else 'draft'
             try:
-                return json.loads(_extract_output_text(transport.create(body)))
+                response = transport.create(body)
+                if response.get('status') == 'incomplete' or getattr(response, 'finish', None) == 'length':
+                    details = response.get('incomplete_details')
+                    reason = details.get('reason') if isinstance(details, dict) else None
+                    raise invalid('output_limit' if reason == 'max_output_tokens' or getattr(response, 'finish', None) == 'length' else 'incomplete_response', phase)
+                parsed = json.loads(_extract_output_text(response))
+                if phase == 'check':
+                    return validate_shape(parsed, check_schema())
+                return parsed
+            except json.JSONDecodeError:
+                raise invalid('invalid_json', phase) from None
+            except ValueError:
+                raise invalid('schema_validation', phase) from None
+            except ModelOutputError as exc:
+                if not getattr(exc, 'feedback_reason', None):
+                    exc.feedback_reason = 'empty_or_invalid_output'
+                exc.feedback_phase = phase
+                raise
             except Exception as exc:
-                exc.feedback_phase = 'check' if body['text']['format']['name'].endswith('_check') else 'draft'
+                exc.feedback_phase = phase
                 raise
 
         draft = request({
@@ -575,19 +658,19 @@ class ModelExperienceExtractor:
                 'diagnosis每条文本不超过1000字，数组最多6项；没有事实时facts为空，无推测或未知时相应数组为空。',
             'input': [{'role': 'user', 'content': [{'type': 'input_text', 'text': encode(payload)}]}],
             'text': {'format': {'type': 'json_schema', 'name': 'feedback_experience', 'strict': True,
-                                'schema': object_schema({'diagnosis': diagnosis_schema(), 'candidate': candidate_schema()})}},
-            'max_output_tokens': 4200,
-            **({'_workflow_output_cap': 4200} if deepseek else {}),
+                                'schema': object_schema({'diagnosis': diagnostic_schema, 'candidate': candidate_schema()})}},
+            'max_output_tokens': self.draft_tokens,
+            **({'_workflow_output_cap': self.draft_tokens} if deepseek else {}),
         })
-        if not isinstance(draft, dict) or set(draft) != {'diagnosis', 'candidate'}:
-            raise ValueError('Missing evidence diagnosis')
-        diagnosis = validate_shape(draft['diagnosis'], diagnosis_schema())
-        candidate = validate_candidate(draft['candidate'])
-        refs = {'reported_turn', 'recent_turns', 'current_state'}
-        evidence = payload.get('evidence', {})
-        refs = {ref for ref in refs if evidence.get(ref)} | {row['ref'] for row in evidence.get('event_chain', [])}
+        try:
+            if not isinstance(draft, dict) or set(draft) != {'diagnosis', 'candidate'}:
+                raise ValueError('Missing evidence diagnosis')
+            diagnosis = validate_shape(draft['diagnosis'], diagnosis_schema())
+            candidate = validate_candidate(draft['candidate'])
+        except ValueError:
+            raise invalid('schema_validation', 'draft') from None
         if any(fact['evidence_ref'] not in refs for fact in diagnosis['facts']):
-            raise ValueError('Unknown diagnosis evidence reference')
+            raise invalid('evidence_reference', 'draft')
         # One independent check, with no recursive repair or automatic re-generation.
         checked = request({
             **common,
@@ -599,10 +682,10 @@ class ModelExperienceExtractor:
             'input': [{'role': 'user', 'content': [{'type': 'input_text', 'text': encode({'evidence': evidence,
                        'user_report': payload.get('message', ''), 'draft': draft})}]}],
             'text': {'format': {'type': 'json_schema', 'name': 'feedback_experience_check', 'strict': True, 'schema': check_schema()}},
-            'max_output_tokens': 1400,
-            **({'_workflow_output_cap': 1400} if deepseek else {}),
+            'max_output_tokens': self.check_tokens,
+            **({'_workflow_output_cap': self.check_tokens} if deepseek else {}),
         })
-        checks = validate_shape(checked, check_schema())
+        checks = checked
         # Failed checks block learning; they are stored with the ticket for inspection.
         if not all(checks[key] for key in ('evidence_supported', 'positive_case_passes', 'negative_case_passes')):
             candidate['useful'] = False
@@ -619,6 +702,27 @@ class FeedbackService:
         self._stop = Event()
         self._thread = None
         self.background = background
+
+    def analysis_options(self):
+        from .model_selection import MODEL_LABELS, model_provider
+        models = self.extractor.models() if isinstance(self.extractor, ModelExperienceExtractor) else []
+        result = {'models': [{'id': model, 'provider': model_provider(model), 'label': MODEL_LABELS.get(model, model)}
+                            for model in models if model], 'max_attempts': MAX_ATTEMPTS}
+        if isinstance(self.extractor, ModelExperienceExtractor):
+            result['settings'] = {'reasoning_effort': self.extractor.reasoning,
+                                  'draft_max_output_tokens': self.extractor.draft_tokens,
+                                  'check_max_output_tokens': self.extractor.check_tokens}
+        return result
+
+    def retry(self, design_id, ticket_id, body):
+        if not isinstance(body, dict) or set(body) - {'model'}:
+            raise ValueError('Retry accepts only an optional analysis model')
+        model = body.get('model')
+        available = self.extractor.available_models() if isinstance(self.extractor, ModelExperienceExtractor) else []
+        if 'model' in body and (not isinstance(model, str) or model not in available):
+            raise ValueError('Selected feedback model is not available; refresh the list')
+        self.store.retry(design_id, ticket_id, model=model)
+        self.start()
 
     def start(self):
         if not self.background or not self.store.has_work():
@@ -645,7 +749,9 @@ class FeedbackService:
             return False
         payload = deepcopy(job['payload'])
         payload['reviewed_corrections'] = self.store.correction_examples(payload)
-        models = self.extractor.models() if online else [None]
+        models = [None]
+        if online:
+            models = [payload['analysis_model']] if payload.get('analysis_model') else (self.extractor.models() or [None])
         error = ''
         for index, model in enumerate(models):
             if index and (self._stop.is_set() or not self.store.reserve_fallback(job, lease)):
@@ -667,12 +773,20 @@ class FeedbackService:
                     code = 'model_output_invalid'
                 phase = getattr(exc, 'feedback_phase', 'analysis')
                 outcome.update(status='failed', code=code, phase=phase)
+                reason = getattr(exc, 'feedback_reason', '')
+                reasons = {'output_limit': '输出额度耗尽，结果被截断', 'incomplete_response': '模型响应未完成',
+                           'invalid_json': '结果不是有效 JSON', 'schema_validation': '经验字段未通过校验',
+                           'evidence_reference': '经验引用了不存在的证据', 'empty_or_invalid_output': '没有完整有效的结构化输出'}
+                if reason in reasons:
+                    outcome['reason'] = reason
                 LOGGER.warning('Feedback extraction failed ticket=%s provider=%s phase=%s code=%s',
                                job['id'], outcome['provider'], phase, code)
                 if not self.store.record_attempt(job, outcome):
                     return True
                 error = '分析未完成（' + outcome['provider'] + ' / ' + code + (
                     ' / HTTP ' + str(outcome['http_status']) if 'http_status' in outcome else '') + '），请检查模型配置或稍后重试。'
+                if reason in reasons:
+                    error += ' ' + phase + '：' + reasons[reason] + '。'
                 if retryable and index + 1 < len(models):
                     continue
                 break

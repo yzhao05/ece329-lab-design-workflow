@@ -366,10 +366,10 @@ class WorkflowAPI:
                 self._require_design_token(environ, design_id)
                 if method == 'GET' and ticket_id is None:
                     self.feedback.start()
-                    return self._respond(start_response, HTTPStatus.OK, {'feedback': self.feedback.store.tickets(design_id)})
+                    return self._respond(start_response, HTTPStatus.OK, {'feedback': self.feedback.store.tickets(design_id),
+                                                                          'analysis_options': self.feedback.analysis_options()})
                 if method == 'POST' and ticket_id:
-                    self.feedback.store.retry(design_id, ticket_id)
-                    self.feedback.start()
+                    self.feedback.retry(design_id, ticket_id, self._read_json(environ))
                     return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
                 if method == 'POST':
                     body = self._read_json(environ)
@@ -393,8 +393,7 @@ class WorkflowAPI:
                     return self._respond(start_response, HTTPStatus.OK, self.feedback.store.feedback_detail(ticket_id))
                 if method == 'POST' and ticket_id and retry:
                     ticket = self.feedback.store.feedback_detail(ticket_id)
-                    self.feedback.store.retry(ticket['design_id'], ticket_id)
-                    self.feedback.start()
+                    self.feedback.retry(ticket['design_id'], ticket_id, self._read_json(environ))
                     return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
 
             review_match = re.fullmatch(r"/v1/feedback/experiences(?:/([a-f0-9]{32})/review)?", path)

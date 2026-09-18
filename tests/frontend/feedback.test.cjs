@@ -86,6 +86,14 @@ test("list and retry use feedback routes without posting a design turn", async (
   assert.deepEqual(calls, [["/v1/designs/design-a/feedback", "GET"], ["/v1/designs/design-a/feedback/ticket-1/retry", "POST"]]);
 });
 
+test('manual analysis retry sends the selected model and reads server capabilities',async()=>{
+  const calls=[];
+  const client=makeClient(async(url,options)=>{calls.push([url,options]);return {feedback:[],analysis_options:{models:[{id:'deepseek-flash',provider:'deepseek'}]}};});
+  await client.list();await client.retry('ticket-1','deepseek-flash');
+  assert.equal(client.analysisOptions.models[0].provider,'deepseek');
+  assert.equal(JSON.parse(calls[1][1].body).model,'deepseek-flash');
+});
+
 test("browser storage failure does not prevent server submission", async () => {
   const storage = { get() { throw new Error("blocked"); }, set() { throw new Error("blocked"); }, delete() { throw new Error("blocked"); } };
   const client = makeClient(async () => ({ id: "ticket", design_id: "design-a", status: "candidate" }), storage);
@@ -104,6 +112,7 @@ class Element {
   showModal() { this.open = true; }
   close() { this.open = false; this.fire("close"); }
   focus() {}
+  setAttribute(name,value) { this[name]=value; }
   querySelectorAll(tag) { return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag)]); }
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -193,3 +202,77 @@ test("submission during a stale list request schedules one fresh read instead of
   await h.els.feedbackClose.fire('click');
   assert.equal(h.timers.size, 0);
 });
+
+test('alternative API panel targets one failed record and double click starts one retry',async()=>{
+  const h=uiHarness();let complete;
+  h.context.authorizedDesignApiRequest=async(url,options)=>{
+    h.calls.push([url,options]);
+    if(options.method==='POST') return new Promise(resolve=>{complete=resolve;});
+    return {feedback:[{id:'ticket-a',message:'失败反馈',can_retry:true,status:'failed',attempts:3,max_attempts:10,last_analysis:{provider:'openai'}}],
+      analysis_options:{models:[{id:'gpt-5.4-mini',provider:'openai',label:'GPT'},{id:'deepseek-flash',provider:'deepseek',label:'DeepSeek Flash'}]}};
+  };
+  await h.els.feedbackButton.fire('click');await flush();
+  await h.els.feedbackSwitch.fire('click');
+  assert.equal(h.els.feedbackSwitchPanel.hidden,false);
+  assert.equal(h.els.feedbackRetryTicket.value,'ticket-a');
+  assert.equal(h.els.feedbackRetryModel.value,'deepseek-flash');
+  assert.equal(h.calls.length,1); // Opening the panel is free.
+  const retry=h.els.feedbackSwitchRun.fire('click');await flush();
+  await h.els.feedbackSwitchRun.fire('click');
+  assert.equal(h.calls.filter(([,o])=>o.method==='POST').length,1);
+  assert.equal(JSON.parse(h.calls[1][1].body).model,'deepseek-flash');
+  assert.ok(h.calls[1][0].endsWith('/ticket-a/retry'));
+  complete({status:'queued'});await retry;
+  assert.ok(h.calls.every(([url])=>!url.endsWith('/turns')));
+});
+
+test('alternative retry stays unavailable when no other provider is configured',async()=>{
+  const h=uiHarness();
+  h.context.authorizedDesignApiRequest=async()=>({feedback:[{id:'ticket',message:'失败',status:'failed',can_retry:true,attempts:1}],
+    analysis_options:{models:[{id:'gpt-5.4-mini',provider:'openai',label:'GPT'}]}});
+  await h.els.feedbackButton.fire('click');await flush();await h.els.feedbackSwitch.fire('click');
+  assert.equal(h.els.feedbackSwitchRun.disabled,true);
+  assert.match(h.els.feedbackSwitchHint.textContent,/没有其他已配置/);
+});
+
+test('legacy backend cannot silently ignore a selected analysis model',async()=>{
+  const h=uiHarness();
+  await h.els.feedbackButton.fire('click');await flush();await h.els.feedbackSwitch.fire('click');
+  assert.equal(h.els.feedbackSwitchRun.disabled,true);
+  assert.match(h.els.feedbackSwitchHint.textContent,/更新后端/);
+  assert.equal(h.calls.length,1);
+});
+
+for (const transition of ['refresh', 'retry']) {
+  test(`${transition} never silently retargets the API switch to another feedback record`, async()=>{
+    const h=uiHarness();let finished=false;
+    h.context.authorizedDesignApiRequest=async(url,options)=>{
+      h.calls.push([url,options]);
+      if(options.method==='POST') {finished=true;return {status:'queued'};}
+      const ids=h.context.state.designId==='a' ? ['ticket-a','ticket-b'] : ['ticket-c'];
+      return {feedback:ids.map(id=>({id,message:'反馈',status:finished && id==='ticket-a'?'candidate':'failed',
+        can_retry:!(finished && id==='ticket-a'),attempts:1,last_analysis:{provider:'openai'}})),
+        analysis_options:{models:[{id:'gpt-5.4-mini',provider:'openai',label:'GPT'},
+          {id:'deepseek-flash',provider:'deepseek',label:'DeepSeek Flash'}]}};
+    };
+    await h.els.feedbackButton.fire('click');await flush();
+    await h.els.feedbackSwitch.fire('click');
+    assert.equal(h.els.feedbackRetryTicket.value,'ticket-a');
+    if(transition==='refresh') {
+      finished=true;await h.els.feedbackRefresh.fire('click');await flush();
+    } else {
+      await h.els.feedbackSwitchRun.fire('click');await flush();
+    }
+    assert.equal(h.els.feedbackRetryTicket.value,'ticket-a');
+    assert.equal(h.els.feedbackSwitchRun.disabled,true);
+    assert.match(h.els.feedbackSwitchHint.textContent,/请重新选择/);
+    await h.els.feedbackSwitchRun.fire('click');
+    assert.equal(h.calls.filter(([,o])=>o.method==='POST').length,transition==='retry'?1:0);
+    h.els.feedbackRetryTicket.value='ticket-b';await h.els.feedbackRetryTicket.fire('change');
+    assert.equal(h.els.feedbackSwitchRun.disabled,false);
+    h.context.state={designId:'b',sessionKind:'api'};h.context.designGeneration++;
+    await h.win.fire('ece329:design-changed');await h.els.feedbackButton.fire('click');await flush();
+    assert.equal(h.els.feedbackRetryTicket.value,'ticket-c');
+    assert.equal(h.els.feedbackSwitchRun.disabled,false);
+  });
+}

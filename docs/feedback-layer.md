@@ -57,7 +57,7 @@ python -m tools.export_feedback_candidates --database "实际数据库文件.sql
 
 1. **用户提交**：工作台右上角“反馈问题”及每条在线回答下方“反馈这条回答 / Report Problem”，两个 mode 共用。选择五类问题之一或“其他”，输入问题并选择会话、项目或全局候选范围；本地示例不可提交。反馈不会调用设计 turn 或推进阶段。成功提示必须收到后端回执，网络异常保留草稿、目标和 `request_id`；原内容重试不重复建单。
 2. **保存证据**：`POST /v1/designs/{id}/feedback` 使用该设计的 Bearer 令牌，返回记录 ID、状态、设计版本和持久化标识。保存反馈及服务器截取的当前规范字段（最多 8000 字符）和最近 4 轮对话（每轮用户 1500、助手 2000 字符），不读取客户端自报证据，不保存访问令牌。可传 `revision/stage` 标记历史回答，服务器从历史中匹配该轮原文摘录（用户 1500、助手 4000 字符），无法匹配时显式记录为空；未指定 stage 时按目标版本的历史 handled_stage 定位；记录 reported_mode 与提交时 mode，跨阶段或切换 mode 后不冒用当前归属。同时保存目标前一轮、目标轮、后一轮的事件链（各轮用户最多 2000、助手 4000 字符）及可用的前后阶段、待确认事项、字段来源记录。新产生的对话捕获状态；旧历史缺少的状态标为 null，不以当前状态补造。当前快照与历史目标分开。`telemetry_id` 必须属于该设计，供评测记录关联。
-3. **后台分析**：复用配置好的在线模型/transport，每次分析尝试最多两次严格 JSON Schema 调用：先生成证据诊断与候选（输出上限 4200 tokens），再检查证据支持及正反例（1400 tokens）；不沿用设计对话的模型 response ID。反馈是分析数据，不能直接成为模型指令。无在线模型或解析失败时保留记录并显示失败，不阻塞设计。证据不足或检查未通过时记录 `no_learning`，不生成可启用经验。诊断、检查结果保存在反馈记录的 `extraction_analysis` 中；候选审阅页可展开查看。模型案例检查不是实际工作流回放，标记固定为 `not_replayed`，不自动循环修复。
+3. **后台分析**：复用配置好的在线模型/transport，每次分析尝试最多两次严格 JSON Schema 调用：先生成证据诊断与候选（默认输出上限 8192 tokens），再检查证据支持及正反例（默认 4096 tokens）；不沿用设计对话的模型 response ID。反馈是分析数据，不能直接成为模型指令。无在线模型或解析失败时保留记录并显示失败，不阻塞设计。证据不足或检查未通过时记录 `no_learning`，不生成可启用经验。诊断、检查结果保存在反馈记录的 `extraction_analysis` 中；候选审阅页可展开查看。模型案例检查不是实际工作流回放，标记固定为 `not_replayed`，不自动循环修复。
 4. **审阅**：打开 `feedback-review.html`，输入独立维护者令牌，读取原始证据和历史审阅记录，核对/编辑候选 JSON，选择修正字段，依次填写原不恰当内容、人工修改后的正确内容、对经验层 Agent 所总结经验的处理意见，再启用或不采用。启用时后台将修正内容写入所选字段；其余字段以 JSON 为准。已启用经验可停用，停用后可重新启用。未审阅内容不进入检索；版本冲突返回 409，需刷新后核对。文本全用 `textContent`/表单值渲染。
 5. **指导设计**：每轮意图解析前和提交/阶段切换后的回复生成前，重新检索当前 mode、阶段、消息适用的已启用经验；补答也携带已检索经验。规则按 `EXP-...` ID 和版本进入既有 `feedback_guidance`，不要求学生阅读编号。启用/停用影响后续轮次，不追溯修改已经生成的回复、设计或 PDF，不会改模型权重、公式库或业务代码。
 
@@ -65,7 +65,7 @@ python -m tools.export_feedback_candidates --database "实际数据库文件.sql
 | --- | --- | --- |
 | `POST /v1/designs/{id}/feedback` | 设计 Bearer | `{message, category, request_id, revision?, stage?, scope?, telemetry_id?}`；新建 201，幂等重放 200 |
 | `GET /v1/designs/{id}/feedback` | 设计 Bearer | 最近 100 条反馈、处理状态、可否重试 |
-| `POST /v1/designs/{id}/feedback/{ticket}/retry` | 设计 Bearer | 仅重试失败且少于 10 次尝试的分析（含备用 API 尝试）；返回 202 |
+| `POST /v1/designs/{id}/feedback/{ticket}/retry` | 设计 Bearer | 仅重试失败且少于 10 次尝试的分析（含备用 API 尝试）；可传 {model} 指定分析模型，空对象沿用默认线路；返回 202 |
 | `GET /v1/feedback/tickets?status=failed&offset=0` | `X-ECE329-Feedback-Admin-Token` | 全部反馈收件箱，status 可省略；返回各状态数量和总数，每页 50 条 |
 | `GET /v1/feedback/tickets/{ticket}` | 同上 | 查看保存的对话证据、候选、检查结果及各次分析诊断 |
 | `POST /v1/feedback/tickets/{ticket}/retry` | 同上 | 维护者重试失败任务，沿用同一 10 次总额度，不推进设计 |
@@ -135,7 +135,7 @@ node --test tests/frontend/feedback.test.cjs
 
 本次升级无需新增环境变量，继续使用后端默认在线模型和 `ECE329_FEEDBACK_ADMIN_TOKEN`。需要同时部署前后端并重启后端；旧审阅页提交旧格式会收到要求刷新页面的错误。SQLite 沿用既有表结构，不清空数据。后台反馈分析独立于学生对话额度；每次分析最多两次模型调用，总计最多 10 次分析尝试（正常情况下最多 20 次模型调用），自动切换同样计数，无额外无限重试。
 
-审阅页的摘要是概述；实际注入设计提示的字段为 trigger/recommendation/verification，修正摘要时需同步核对规则正文。后台提炼的 4200/1400 输出上限也传给 DeepSeek 适配层，不再被提供商的默认额度下限覆盖。
+审阅页的摘要是概述；实际注入设计提示的字段为 trigger/recommendation/verification，修正摘要时需同步核对规则正文。后台提炼的 独立配置的输出上限（默认 8192/4096）也传给 DeepSeek 适配层，不再被提供商的默认额度下限覆盖。
 
 
 ## 反馈收件箱与 API 故障切换（2026-09-18）
@@ -146,6 +146,29 @@ node --test tests/frontend/feedback.test.cjs
 
 连接被重置、远端提前断开、响应体传输不完整也归入连接故障并进入有限切换；即使 HTTP 错误正文读取中断，仍保留 HTTP 状态用于诊断。维护者列表从同一数据库快照读取总数、状态计数、当前页和关联经验，避免多进程写入时出现“有记录却计数为 0”或错误分页。
 
-无需新增环境变量。继续配置 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`（已有默认值）及 `ECE329_ALLOWED_MODELS`；允许列表必须包含两个服务商可用的模型，才能跨服务商切换。首选仍为后端默认模型，备用按允许列表顺序选择，不会修改学生选择的对话模型。`OPENAI_TIMEOUT_SECONDS`、`DEEPSEEK_TIMEOUT_SECONDS` 控制各自超时。审阅需要 `ECE329_FEEDBACK_ADMIN_TOKEN`，持久化需要 `ECE329_DATABASE_PATH` 指向持久磁盘。
+自动切换无需新增必填环境变量；独立分析配置见下节。继续配置 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`（已有默认值）及 `ECE329_ALLOWED_MODELS`；允许列表必须包含两个服务商可用的模型，才能跨服务商切换。首选仍为后端默认模型，备用按允许列表顺序选择，不会修改学生选择的对话模型。`OPENAI_TIMEOUT_SECONDS`、`DEEPSEEK_TIMEOUT_SECONDS` 控制各自超时。审阅需要 `ECE329_FEEDBACK_ADMIN_TOKEN`，持久化需要 `ECE329_DATABASE_PATH` 指向持久磁盘。
 
 同时部署前端和后端后，原有 2/3 或 3/3 的失败记录会显示为 2/10、3/10，可直接重试，无需重复提交；不会自动消耗旧失败记录的剩余额度。前端优先显示后端返回的 `max_attempts`，兼容尚未升级的旧后端时仍显示其原 3 次限制。只更新前端时，全部反馈接口会明确提示需要升级后端。
+
+
+## 用户手动更换分析 API 与输出校验（2026-09-19）
+
+工作台“刷新状态”旁新增“更换分析 API”。展开后选择一条仍可重试的失败记录及另一服务商的模型，再点击“使用所选 API 重试”。展开和切换选项不调用模型；点击提交只重试所选记录，不改主对话模型、阶段或已保存设计，也不批量重跑反馈。两个 mode 共用此功能，支持中英文及手机布局。
+
+`GET /v1/designs/{id}/feedback` 新增 `analysis_options`，返回已配置的分析服务商及代表模型、思考强度、两步输出额度和总次数上限，不返回密钥。`last_analysis` 提供该记录最近一次实际分析的服务商、模型和安全错误分类。`POST .../feedback/{ticket}/retry` 接受可选的 `model`，维护者对应的 retry 路由也支持。后端校验允许模型、记录归属、失败状态和剩余额度；worker 执行时再次校验配置。用户明确选定模型时只尝试该模型，失败后不自动回到原服务商。普通“重试分析”仍使用默认模型与既有连接错误切换策略。
+
+刷新后，所选记录若已运行、完成或达到上限，面板保留该记录并禁用提交，要求用户重新选择；不能自动改选另一条失败记录。切换设计时清除旧选择。后台将“允许且已配置的模型”与“自动切换时每服务商的代表模型”分开：已排队的显式模型只要仍可用，就不受默认模型或允许列表顺序变化影响；模型确实被禁用时记录配置错误，不擅自替换。默认模型已不可用时跳过它；全部不可用时记录失败并停止，不误记为未提炼经验。
+
+截图中的 `model_output_invalid` 表示输出未通过解析或验证，不能据此判定余额不足。旧实现继承主对话思考强度且只有 4200/1400 输出额度，存在额度耗尽风险；这是一项代码配置风险，不能据此认定历史两条记录的唯一根因。OpenAI 的输出额度包括思考 token，耗尽时可能返回 incomplete，参见[官方说明](https://developers.openai.com/api/docs/guides/reasoning)。
+
+分析现在默认使用独立 low 思考强度、8192/4096 的两步输出额度，均有上限；DeepSeek 快速/思考预设仍保留其明示语义。JSON Schema 同步包含字段长度、数组数量和可引用证据 ID，减少远端返回与本地验证的规则差异。验证失败不会靠裁剪内容或跳过检查来生成经验。失败诊断进一步区分 output_limit、incomplete_response、invalid_json、schema_validation、evidence_reference 和 empty_or_invalid_output，并标记 draft/check 阶段。旧记录需要重试后才能得到细分诊断。
+
+新增的环境变量均可省略，默认值如下；token 配置允许 1024–32768，思考强度允许 none/low/medium/high：
+
+```dotenv
+ECE329_FEEDBACK_REASONING_EFFORT=low
+ECE329_FEEDBACK_MAX_OUTPUT_TOKENS=8192
+ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS=4096
+```
+
+备用服务商仍需对应 API 密钥以及 `ECE329_ALLOWED_MODELS` 中的模型。输出预算改变不会增加每次分析的调用数量（最多两次）或十次尝试上限，但输出较长时可能消耗更多 token。需要同时部署前后端并重启后端；旧后端缺少能力字段时，前端明确提示升级，禁止盲目提交模型选择。

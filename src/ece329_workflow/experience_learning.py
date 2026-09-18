@@ -14,11 +14,11 @@ def object_schema(properties):
 
 
 def diagnosis_schema():
-    text = {'type': 'string'}
-    texts = {'type': 'array', 'items': text}
+    text = {'type': 'string', 'minLength': 1, 'maxLength': 1000}
+    texts = {'type': 'array', 'items': text, 'maxItems': 6}
     case = object_schema({'input': text, 'expected': text})
     return object_schema({
-        'facts': {'type': 'array', 'items': object_schema({'evidence_ref': text, 'observation': text})},
+        'facts': {'type': 'array', 'maxItems': 6, 'items': object_schema({'evidence_ref': text, 'observation': text})},
         'user_report': text, 'expected_behavior': text,
         'hypotheses': texts, 'unknowns': texts,
         'applicability': text, 'exceptions': text,
@@ -31,7 +31,7 @@ def check_schema():
         'evidence_supported': {'type': 'boolean'},
         'positive_case_passes': {'type': 'boolean'},
         'negative_case_passes': {'type': 'boolean'},
-        'issues': {'type': 'string'},
+        'issues': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
     })
 
 

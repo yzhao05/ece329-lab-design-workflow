@@ -1,5 +1,23 @@
 "use strict";
 window.ECE329_LOCALES = {
+  "更换分析 API":"Change analysis API",
+  "所选记录当前不可重试，请重新选择。":"The selected record can no longer be retried. Please select another record.",
+  "当前后端尚不支持切换分析 API，请更新后端并刷新状态。":"This backend does not support switching the analysis API yet. Update the backend and refresh the status.",
+  "选择一条分析失败的反馈，使用所选 API 重试。仅重试这条记录，不更改对话模型，仍计入十次总额度。":"Select one failed feedback record and retry with the chosen API. This only retries that record, keeps your chat model, and counts toward the ten-attempt limit.",
+  "需要重试的反馈":"Feedback to retry",
+  "分析 API 与模型":"Analysis API and model",
+  "使用所选 API 重试":"Retry with selected API",
+  "没有可重试的失败记录；运行中或已达上限的记录不能重试。":"No failed records can be retried. Running records and exhausted attempts cannot be retried.",
+  "没有其他已配置的分析 API；请维护者检查备用 API 密钥及允许模型列表。":"No alternative analysis API is configured. Ask the maintainer to check the backup API key and allowed models.",
+  "点击下方按钮后开始分析；打开此面板不会调用模型。":"Analysis starts when you click the button below. Opening this panel makes no model calls.",
+  "已提交重试；请查看记录中的分析状态。":"Retry submitted. Check the analysis status in the feedback record.",
+  "输出额度耗尽，结果被截断":"Output limit reached; result truncated",
+  "模型响应未完成":"Model response incomplete",
+  "结果不是有效 JSON":"Invalid JSON output",
+  "经验字段未通过校验":"Experience fields failed validation",
+  "经验引用了不存在的证据":"Experience cited unavailable evidence",
+  "没有完整有效的结构化输出":"No complete valid structured output",
+
   "全部反馈（含未生成经验）":"All feedback (including submissions without an experience)",
   "等待分析的反馈":"Queued feedback", "分析中的反馈":"Feedback being analyzed",
   "分析失败的反馈":"Failed analysis", "未提炼经验的反馈":"No experience extracted", "重复经验的反馈":"Duplicate experiences",
