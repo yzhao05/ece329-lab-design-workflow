@@ -1,5 +1,18 @@
 "use strict";
 window.ECE329_LOCALES = {
+  "经验 JSON 格式有误，请先修正；已填写的修正内容仍保留。":"Fix the invalid experience JSON first; your corrections are still retained.",
+  "切换字段会将已填写的修正同步到 JSON，启用时一并保存。摘要用于概述，实际指导设计的是适用条件、处理建议和验证方法，请同步核对。已启用修订供后续提炼参考，停用后停止引用。":"Switching fields copies your correction into the JSON; approval saves all edits. The summary is an overview; conditions, recommendations and verification guide the design, so check them together. Active corrections inform future extraction; disabling stops their retrieval.",
+  "人工审阅：选择需要修正的字段":"Human review: select the field to correct",
+  "经验摘要":"Experience summary", "适用条件":"Applicable conditions", "处理建议":"Recommended action", "验证方法":"Verification method",
+  "1. Agent 原不恰当内容（原文；无需修改时保留原文）":"1. Inappropriate agent text (original; retain it if no correction is needed)",
+  "2. 人工修改后的正确内容（无需修改时复制原文）":"2. Corrected text from the reviewer (copy the original if no change is needed)",
+  "3. 对经验层 Agent 总结的经验的处理意见（至少 5 个字符）":"3. Reviewer's handling opinion on the experience agent's summary (at least 5 characters)",
+  "例如：修改后采用；归因应改为未承接确认，仅用于上一轮明确邀请确认继续的情形。未进行真实回放。":"For example: adopt after correction; attribute the issue to an unhandled confirmation, only when the previous reply explicitly invited confirmation to continue. No actual replay was run.",
+  "说明这条经验应如何修改、保留、限制适用范围或不予采用，以及经验总结需要改进的地方。实际处理结果由下方操作按钮决定。":"Explain how to revise, retain, limit or reject this experience, and how the summarization should improve. The action buttons below determine the actual status.",
+  "请先填写至少 5 个字符的经验处理意见。":"Enter a handling opinion of at least 5 characters first.",
+  "模型正反例检查不等于真实回放；检查依据见展开的设计证据。":"Model checks of positive and negative cases are not actual workflow replays. Expand the design evidence to inspect the checks.",
+  "启用时，修正内容会写入所选字段；其他字段以 JSON 为准。已启用的修订会供后续同类经验提炼参考，停用后停止引用。":"On approval, the correction replaces the selected field; other fields use the JSON editor. Active corrections inform future related experience extraction; disabling stops their retrieval.",
+  "请先填写人工修改后的正确内容；无需修改时复制原文。":"Enter the corrected text first; copy the original if no change is needed.",
   "思考强度":"Reasoning effort", "跟随模型策略":"Follow model strategy",
   "自动升级启用时，此处为基础预算；实际升级预算记录在评测中。":"With adaptive escalation enabled, this is the baseline budget; actual escalation budgets are recorded in evaluation telemetry.",
   "关闭（None）":"None", "低（Low）":"Low", "中（Medium）":"Medium", "高（High）":"High", "很高（XHigh）":"XHigh", "最高（Max）":"Max",

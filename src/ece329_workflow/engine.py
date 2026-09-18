@@ -250,6 +250,14 @@ def _cache_turn_response(
     from .telemetry import CURRENT_TRACE
     if (trace := CURRENT_TRACE.get()) is not None:
         response['telemetry_id'] = trace.data['id']
+        before = getattr(trace, 'feedback_state_before', None)
+        if (before and response.get('revision', 0) > before['revision'] and session.history
+                and session.history[-1].get('revision') == response.get('revision')
+                and session.history[-1].get('user_message') == request.message.strip()):
+            from .experience_learning import workflow_evidence_state
+            session.history[-1]['feedback_state_before'] = deepcopy(before)
+            session.history[-1]['feedback_state_after'] = workflow_evidence_state(session)
+            session.history[-1]['feedback_state_after']['completion_error'] = response.get('completion_error')
     if not request.turn_id:
         return
     cache = session.model_context.setdefault("turn_idempotency", [])
@@ -4497,6 +4505,8 @@ class WorkflowEngine:
             if 'model_config' in session.model_context or request.model_config is not None or request.model is not None:
                 runner._active_model_config = config
             trace = TurnTrace(session, request)
+            from .experience_learning import workflow_evidence_state
+            trace.feedback_state_before = workflow_evidence_state(session)
             trace.data['model_config'] = deepcopy(config)
             token = CURRENT_TRACE.set(trace)
             result = None

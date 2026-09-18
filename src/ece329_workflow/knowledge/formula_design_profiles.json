@@ -256,14 +256,13 @@
     },
     {
       "profile_id": "FD12_MAGNETIC_SOURCE_FIELD",
-      "title_zh": "稳恒电流产生的磁场",
+      "title_zh": "稳恒磁场（稳恒电流产生的磁场）",
       "course_block": "magnetism",
       "primary_formula_ids": ["biot_savart", "ampere_integral"],
       "supporting_formula_ids": ["ampere_magnetostatic"],
       "supported_variations": [
         {"quantity": "电流大小与方向", "symbols": ["I", "J"], "units": ["A", "A/m²"]},
-        {"quantity": "载流路径的形状、位置和尺度"},
-        {"quantity": "介质磁导率", "symbols": ["μ"], "units": ["H/m"]}
+        {"quantity": "载流路径的形状、位置和尺度"}
       ],
       "supported_observations": [
         {"quantity": "磁通密度与磁场强度", "symbols": ["B", "H"], "units": ["T", "A/m"]},
@@ -271,9 +270,10 @@
         {"quantity": "沿闭合路径的磁场环流"}
       ],
       "boundary_conditions": [
-        {"condition": "Biot-Savart与讲义中的安培定律形式用于稳恒电流。"},
-        {"condition": "用安培环路直接求场需要足够的对称性。"},
-        {"condition": "细导线表达把电流路径视为丝状电流。"}
+        {"condition": "稳恒指场源及各固定空间位置的场不随时间变化，不等于空间均匀；参数对照比较不同稳态，不包含切换瞬态。"},
+        {"condition": "这里的Biot-Savart式使用固定的μ₀，针对自由空间中的给定稳恒电流；μ₀不是可调材料参数。磁性介质需另选材料本构关系及相应边界模型。"},
+        {"condition": "dB是一个电流元的贡献，总磁场需沿给定电流分布积分或叠加；细导线视为丝状电流，观察点不能与理想电流丝重合。"},
+        {"condition": "这里的安培环路定律用于稳恒电流，定律本身不要求对称性；用环路积分直接求场通常需要足够的对称性。"}
       ]
     },
     {

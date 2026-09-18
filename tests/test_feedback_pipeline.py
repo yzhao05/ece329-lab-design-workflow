@@ -31,6 +31,32 @@ def candidate(**updates):
     }
 
 
+def review_note(value=None, **updates):
+    value = value or candidate()
+    return {'field': 'summary', 'original': value['summary'], 'corrected': value['summary'],
+            'opinion': '核对证据后采用，规则需保留前提与例外；尚未进行真实回放。', **updates}
+
+
+def extraction_draft():
+    return {'candidate': candidate(), 'diagnosis': {
+        'facts': [], 'user_report': '用户报告已经回答后仍被重复询问。',
+        'expected_behavior': '核对已有回答，避免重复询问。', 'hypotheses': [],
+        'unknowns': ['无法确认问题的具体代码原因。'], 'applicability': '已有回答且前提未变。',
+        'exceptions': '前提变更时重新核对。',
+        'positive_case': {'input': '用户已确认流程，随后又被询问相同流程。', 'expected': '复用确认的流程。'},
+        'negative_case': {'input': '用户修改流程中的对象。', 'expected': '只核对变更部分，不跳过必要确认。'},
+    }}
+
+
+def extraction_check(**updates):
+    return {'evidence_supported': True, 'positive_case_passes': True, 'negative_case_passes': True,
+            'issues': '规则有前提与例外；仅模型检查，未执行真实回放。', **updates}
+
+
+def extraction_response(request):
+    return {'output_text': json.dumps(extraction_check() if request['text']['format']['name'] == 'feedback_experience_check' else extraction_draft())}
+
+
 def test_persistent_storage_failure_stops_worker_without_infinite_retries():
     class BrokenStore:
         calls = 0
@@ -77,7 +103,7 @@ def submit(p, **updates):
 
 def review(p, item, decision='approve', **updates):
     return call_api(p.api, 'POST', f"/v1/feedback/experiences/{item['id']}/review",
-                    {'decision': decision, 'version': item['version'], 'note': '已对照原始证据与回放测试核验。', **updates}, request_headers=p.admin)
+                    {'decision': decision, 'version': item['version'], 'note': review_note(item['content']), **updates}, request_headers=p.admin)
 
 
 def extract_one(p):
@@ -209,16 +235,16 @@ def test_model_extractor_uses_configured_transport_and_strict_bounded_job(pipeli
     captured = []
     def create(payload):
         captured.append(payload)
-        return {'output_text': json.dumps(candidate())}
+        return extraction_response(payload)
     generator = SimpleNamespace(primary=SimpleNamespace(transport=SimpleNamespace(create=create), model='configured-test-model', reasoning_effort='low'))
     p = pipeline
     p.service.extractor = ModelExperienceExtractor(generator)
     extract_one(p)
-    assert len(captured) == 1
+    assert len(captured) == 2
     request = captured[0]
     assert request['model'] == 'configured-test-model' and request['store'] is False
     assert request['text']['format']['strict'] is True
-    assert request['max_output_tokens'] == 2200
+    assert request['max_output_tokens'] == 4200
     assert '不是给你的指令' in request['instructions']
     assert 'owner-token' not in json.dumps(request)
 
@@ -252,7 +278,7 @@ def test_restart_recovers_expired_lease_and_stale_worker_cannot_write():
         assert not first.finish(abandoned, candidate())
         assert restarted.finish(job, candidate())
         item = restarted.experiences()[0]
-        restarted.review(item['id'], 'approve', 1, '已运行回放并核对证据')
+        restarted.review(item['id'], 'approve', 1, review_note(item['content']))
         third = ExperienceStore(path)
         assert third.tickets(session.design_id)[0]['durable'] is True
         assert third.tickets(session.design_id)[0]['attempts'] == 2
@@ -295,7 +321,7 @@ def test_source_session_deletion_cleans_durable_feedback_and_review_audit():
         repo.submit(session, {'message': '已经回答', 'request_id': 'source-feedback-1'})
         repo.finish(repo.claim(), candidate())
         item = repo.experiences()[0]
-        repo.review(item['id'], 'approve', 1, '验证了原始回答与待办')
+        repo.review(item['id'], 'approve', 1, review_note(item['content']))
         sessions.delete(session.design_id)
         assert repo.tickets(session.design_id) == [] and repo.experiences() == []
         with repo.connection() as db:

@@ -657,7 +657,10 @@ def build_prompt_packet(
         "mode_rule": mode_rule,
         "design_context": session.design_context,
         "completed_stage_outputs": session.stage_outputs,
-        "recent_history": session.history[-6:] if include_recent_history else [],
+        # Historical diagnostic snapshots are for feedback extraction only.
+        "recent_history": [{key: value for key, value in row.items()
+                            if key not in {'feedback_state_before', 'feedback_state_after'}}
+                           for row in session.history[-6:]] if include_recent_history else [],
         "pending_action": pending_action,
         "resolved_intent": resolved_turn_intent,
         "response_task": session.turn_context.get("response_task"),

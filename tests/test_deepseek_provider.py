@@ -16,7 +16,7 @@ from ece329_workflow.openai_generator import (
 )
 from ece329_workflow.provider_transport import DeepSeekJSONTransport, ProviderResponsesTransport
 from tests.test_model_selection import ModelTransport, add_session, QUESTION
-from tests.test_feedback_pipeline import candidate
+from tests.test_feedback_pipeline import candidate, extraction_draft, extraction_check
 
 
 class ChatFixture:
@@ -32,8 +32,10 @@ class ChatFixture:
         if 'translations' in properties:
             from tests.localization_fixture import translations
             text = json.dumps(translations(payload['messages'][-1]['content'], 'into English' in payload['messages'][0]['content']))
-        elif 'useful' in properties:
-            text = json.dumps(candidate())
+        elif 'candidate' in properties:
+            text = json.dumps(extraction_draft())
+        elif 'evidence_supported' in properties:
+            text = json.dumps(extraction_check())
         else:
             name = ('ece329_context_intent' if 'resolved_value_json' in properties else
                     'ece329_compact_dialogue_acts' if 'actions' in properties else 'ece329_stage_output')
@@ -138,9 +140,10 @@ def test_feedback_extraction_uses_deepseek_without_openai_key():
     generator = OpenAIStageGenerator(model='deepseek-flash:fast', transport=ProviderResponsesTransport(
         deepseek=DeepSeekJSONTransport('fixture', http_transport=chat)))
     result = ModelExperienceExtractor(generator).extract({'message':'重复询问', 'evidence':{}})
-    assert result['useful'] and len(chat.requests) == 1
+    assert result['useful'] and len(chat.requests) == 2
     assert chat.requests[0]['model'] == 'deepseek-flash'
     assert chat.requests[0]['thinking']['type'] == 'disabled'
+    assert [request['max_tokens'] for request in chat.requests] == [4200, 1400]
 
 
 @pytest.mark.parametrize('number', ['NaN', 'Infinity', '-Infinity', '1e999'])

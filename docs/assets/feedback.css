@@ -5,7 +5,7 @@
 .feedback-dialog [role="status"] { overflow-wrap: anywhere; }
 .feedback-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .feedback-form { display: grid; gap: 10px; margin: 20px 0; }
-.feedback-form textarea, .feedback-form select, .feedback-form input, .experience-card textarea { width: 100%; padding: 10px; border: 1px solid #bcccd4; border-radius: 6px; font: inherit; background: #fff; color: #142d42; }
+.feedback-form textarea, .feedback-form select, .feedback-form input, .experience-card textarea, .experience-card select { width: 100%; padding: 10px; border: 1px solid #bcccd4; border-radius: 6px; font: inherit; background: #fff; color: #142d42; }
 .feedback-form textarea, .experience-card textarea { resize: vertical; }
 .feedback-form button { justify-self: start; }
 .feedback-history { list-style: none; padding: 0; }

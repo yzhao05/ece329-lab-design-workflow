@@ -728,7 +728,7 @@ def _format_formula_cards(cards: list[dict[str, Any]], topic: str) -> str:
             f"可选辅助：{optional_support or '无'}\n"
             f"可改变：{'、'.join(card['changed_quantities'][:4])}\n"
             f"可观察：{'、'.join(card['observed_quantities'][:4])}\n"
-            f"适用条件：{'；'.join(card['boundary_conditions'][:3])}"
+            f"适用条件：{'；'.join(card['boundary_conditions'])}"
         )
     paragraphs.append(
         "你更想围绕哪组公式展开？如果还不确定，我也可以先比较这些公式分别适合做成什么样的 Unity VR 实验；"

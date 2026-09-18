@@ -18,7 +18,7 @@ from ece329_workflow.experience import ExperienceStore, FeedbackService, ModelEx
 from ece329_workflow.generator import RuleBasedStageGenerator
 from ece329_workflow.security import APISettings
 from ece329_workflow.store import SQLiteSessionStore
-from tests.test_feedback_pipeline import candidate
+from tests.test_feedback_pipeline import extraction_response
 
 
 def main():
@@ -39,7 +39,7 @@ def main():
         engine = mixed
         args.models = True
     generator = SimpleNamespace(model='test-double', reasoning_effort='low',
-                                transport=SimpleNamespace(create=lambda _: {'output_text': json.dumps(candidate())}))
+                                transport=SimpleNamespace(create=extraction_response))
     service = FeedbackService(ExperienceStore(args.database), ModelExperienceExtractor(generator))
     api = WorkflowAPI(engine, APISettings(allowed_origins=('*',), feedback_admin_token='smoke-maintainer', rate_limit_requests=500), feedback_service=service)
     def app(environ, start_response):

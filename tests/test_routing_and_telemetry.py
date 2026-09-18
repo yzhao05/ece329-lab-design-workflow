@@ -13,7 +13,7 @@ from ece329_workflow.models import DesignSession, Stage, InteractionState, Sessi
 from ece329_workflow.openai_generator import OpenAIStageGenerator
 from ece329_workflow.security import APISettings
 from ece329_workflow.store import SQLiteSessionStore
-from tests.test_feedback_pipeline import candidate
+from tests.test_feedback_pipeline import candidate, review_note
 from tests.test_model_selection import make_engine, add_session, ModelTransport, QUESTION
 from tests.test_security_and_store import call_api, workspace_temp_path, remove_sqlite_files
 
@@ -128,7 +128,7 @@ def approve(repo, service, session, scope, request_id):
     ticket,_=repo.submit(session,{'message':'已经回答但重复询问','category':'answered_pending','request_id':request_id,'scope':scope})
     service.run_once()
     item=next(r for r in repo.experiences('candidate') if r['ticket_id']==ticket['id'])
-    repo.review(item['id'],'approve',1,'已在同类型会话验证通过')
+    repo.review(item['id'],'approve',1,review_note(item['content']))
     return item['id']
 
 
@@ -142,7 +142,7 @@ def test_session_project_global_scope_and_soft_delete_audit(research):
     assert len(retrieve(a.design_id,'course-a'))==3
     assert {r['scope'] for r in retrieve('other','course-a')}=={'project','global'}
     assert {r['scope'] for r in retrieve('other','course-b')}=={'global'}
-    research.repo.review(global_id,'delete',2,'确认错误经验，应停止引用')
+    research.repo.review(global_id,'delete',2,review_note())
     assert retrieve('other','course-b')==[]
     deleted=research.repo.experiences('deleted')[0]
     assert deleted['reviews'][-1]['decision']=='delete'
@@ -269,7 +269,7 @@ def test_review_retains_scope_and_rule_changes_for_each_version(research):
     research.service.run_once()
     item=next(r for r in research.repo.experiences('candidate') if r['ticket_id']==ticket['id'])
     edited={**item['content'],'recommendation':'在推进前先回应当前尚未完成的请求。'}
-    research.repo.review(item['id'],'approve',1,'已验证适用于当前课程项目',content=edited,scope='project')
+    research.repo.review(item['id'],'approve',1,review_note(item['content']),content=edited,scope='project')
     audit=research.repo.experiences('active')[0]['reviews'][0]['content']
     assert audit['previous']=={'scope':'session','rule':item['content']}
     assert audit['current']=={'scope':'project','rule':edited}
