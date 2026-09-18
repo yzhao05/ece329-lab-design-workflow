@@ -105,10 +105,13 @@ class DeepSeekJSONTransport:
         if not isinstance(usage, dict):
             usage = {}
         # Return final content only, never reasoning_content or a remote chain ID.
-        return SchemaCheckedResponse(text, schema, finish, {
+        result = SchemaCheckedResponse(text, schema, finish, {
             'input_tokens': usage.get('prompt_tokens'), 'output_tokens': usage.get('completion_tokens'),
             'input_tokens_details': {'cached_tokens': usage.get('prompt_cache_hit_tokens')},
+            'output_tokens_details': usage.get('completion_tokens_details'),
         })
+        result['model'] = response.get('model') if isinstance(response, dict) else None
+        return result
 
 
 class ProviderResponsesTransport:

@@ -3,6 +3,7 @@ from contextvars import ContextVar
 from time import perf_counter, time
 from uuid import uuid4
 import json
+from .usage import PriceBook, read_usage, summarize, agent_role
 
 CURRENT_TRACE = ContextVar('workflow_trace', default=None)
 
@@ -10,6 +11,7 @@ CURRENT_TRACE = ContextVar('workflow_trace', default=None)
 class TurnTrace:
     def __init__(self, session, request):
         self.started = perf_counter()
+        self.prices = PriceBook()
         self.data = {'id': uuid4().hex, 'design_id': session.design_id, 'turn_id': request.turn_id,
                      'created': time(), 'mode': session.interaction_state.value,
                      'initial_stage': session.current_stage.value, 'calls': [], 'stages': []}
@@ -21,10 +23,13 @@ class TurnTrace:
                          revision=result.get('revision') if result else None,
                          workflow_status=result.get('workflow_status') if result else None,
                          completion_error=bool(result and result.get('completion_error')))
+        self.data['final_stage'] = result.get('current_stage') if result else self.data['initial_stage']
+        self.data['handled_stage'] = result.get('handled_stage') if result else self.data['initial_stage']
         for key in ('input_tokens', 'output_tokens'):
             values = [call.get(key) for call in calls]
             self.data[key] = sum(values) if all(v is not None for v in values) else None
         self.data['retry_count'] = sum(event['retry_count'] for event in self.data['stages'])
+        self.data['usage'] = summarize(calls, self.data['latency_ms'])
         return self.data
 
 
@@ -56,18 +61,10 @@ class ObservedTransport:
                'experience_rule_ids': [r['id'] for r in self.session.turn_context.get('experience_rules', []) if r['id'] in serialized],
                'input_tokens': None, 'output_tokens': None, 'error_type': None}
         row['max_output_tokens'] = payload.get('max_output_tokens')
+        row['agent'] = agent_role(row['schema'])
         try:
             response = self.transport.create(payload)
-            usage = response.get('usage')
-            if not isinstance(usage, dict):
-                usage = {}
-            for key in ('input_tokens', 'output_tokens'):
-                value = usage.get(key)
-                if type(value) is int and value >= 0:
-                    row[key] = value
-            input_details = usage.get('input_tokens_details')
-            cached = input_details.get('cached_tokens') if isinstance(input_details, dict) else None
-            row['cached_input_tokens'] = cached if type(cached) is int and cached >= 0 else None
+            read_usage(response, row)
             return response
         except Exception as exc:
             row['error_type'] = type(exc).__name__
@@ -79,4 +76,5 @@ class ObservedTransport:
                     trace.data['output_budget_charged'] = self.budget.charged
             row['latency_ms'] = round((perf_counter() - start) * 1000, 2)
             if trace is not None:
+                trace.prices.apply(row)
                 trace.data['calls'].append(row)

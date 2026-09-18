@@ -3,9 +3,10 @@
 (() => {
   const el = Object.fromEntries(["Dialog", "Close", "Button", "Form", "Category", "Message", "Submit", "Status", "Refresh", "History", "Scope", "Target", "Switch", "SwitchPanel", "RetryTicket", "RetryModel", "SwitchHint", "SwitchRun"]
     .map(name => [name, document.getElementById(`feedback${name}`)]));
-  const labels = { queued: "已保存，等待分析", running: "后台分析中", candidate: "已提炼经验，等待审阅",
-    active: "经验已启用", rejected: "经审阅未采用", disabled: "经验已停用", duplicate: "分析完成：同类经验已存在",
-    no_learning: "分析完成，未提炼新经验", failed: "反馈已保存，分析未完成", deleted: '经验已删除，保留审阅记录' };
+  const labels = { queued: "已保存，等待分析", running: "后台分析中", candidate: "分析完成，已生成经验",
+    active: "分析完成，已生成经验", rejected: "分析完成，已生成经验", disabled: "分析完成，已生成经验", duplicate: "分析完成：同类经验已存在",
+    no_learning: "分析完成，未提炼新经验", failed: "反馈已保存，分析未完成", deleted: "分析完成，已生成经验" };
+  const experienceLabels = {candidate:'待审阅',active:'已启用',stopped:'已停止',rejected:'已停止',disabled:'已停止',deleted:'已停止'};
   let client = null;
   let generation = -1;
   let timer = null;
@@ -96,6 +97,11 @@
       const detail = document.createElement("small");
       detail.textContent = `记录 ${ticket.id} · 设计版本 ${ticket.revision} · 分析 ${ticket.attempts}/${ticket.max_attempts ?? 3} 次${ticket.durable ? "" : " · 内存模式，重启后丢失"}`;
       item.append(title, body, detail);
+      if (ticket.experience) {
+        const related = document.createElement('p');
+        related.textContent = `关联经验：${experienceLabels[ticket.experience.status] || ticket.experience.status}`;
+        item.append(related);
+      }
       if (ticket.error) {
         const error = document.createElement("p");
         error.textContent = ticket.error;

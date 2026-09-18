@@ -79,10 +79,10 @@
       originals.set(node, record);
       if (node.nodeValue !== record.rendered) node.nodeValue = record.rendered;
     }
-    for (const element of document.querySelectorAll('[placeholder],[title],[aria-label]')) {
+    for (const element of document.querySelectorAll('[placeholder],[title],[aria-label],optgroup[label]')) {
       if (element.closest('script,style,[data-i18n-ignore]')) continue;
       const records = attributes.get(element) || {};
-      for (const attr of ['placeholder','title','aria-label']) {
+      for (const attr of ['placeholder','title','aria-label','label']) {
         if (!element.hasAttribute(attr)) continue;
         const value = element.getAttribute(attr);
         let record = records[attr];
@@ -133,7 +133,7 @@
   retry?.addEventListener('click', () => { blocked = false; schedule(); setTimeout(flush,0); });
   window.ECE329I18n = {get language() {return language;}, text: translate, setLanguage, refresh:schedule,
     retry() {blocked=false; schedule(); setTimeout(flush,0);}};
-  new MutationObserver(schedule).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['placeholder','title','aria-label']});
+  new MutationObserver(schedule).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['placeholder','title','aria-label','label']});
   window.addEventListener('ece329:design-changed', () => { generation++; pending.clear(); blocked=false; schedule(); });
   schedule();
 })();

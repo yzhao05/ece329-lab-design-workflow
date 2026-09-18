@@ -85,20 +85,19 @@ def test_invented_fact_reference_fails_without_repair_loop():
     assert len(calls) == 1
 
 
-def test_api_enforces_pair_applies_correction_and_preserves_audit(pipeline):
+def test_api_enforces_pair_saves_manual_json_and_preserves_audit(pipeline):
     p = pipeline
     item = extract_one(p)
     assert review(p, item, note='旧格式不能产生结构化修订')[0].startswith('400')
     assert review(p, item, note=review_note(corrected=''))[0].startswith('400')
-    assert review(p, item, note=review_note(original='并不是原文'))[0].startswith('409')
     corrected = '上一轮邀请用户确认继续时，应承接“继续下一步”并推进对应待办。'
-    assert review(p, item, note=review_note(corrected=corrected))[0].startswith('200')
+    assert review(p, item, content=candidate(summary=corrected), note={'original': '原文中的不当片段', 'corrected': corrected, 'opinion': '修改后采用'})[0].startswith('200')
     active = p.repo.experiences('active')[0]
     assert active['content']['summary'] == corrected
     audit = active['reviews'][0]
     assert audit['content']['previous']['rule'] == item['content']
     assert json.loads(audit['note'])['corrected'] == corrected
-    assert json.loads(audit['note'])['opinion'] == review_note()['opinion']
+    assert json.loads(audit['note'])['opinion'] == '修改后采用'
     assert audit['content']['current']['rule']['summary'] == corrected
     assert review(p, item, note=review_note(corrected=corrected))[0].startswith('409')
 
@@ -107,7 +106,7 @@ def test_api_enforces_pair_applies_correction_and_preserves_audit(pipeline):
 def test_human_correction_reaches_next_extraction_and_disable_revokes(pipeline, mode):
     p = pipeline
     item = extract_one(p)
-    assert review(p, item, note=review_note(corrected='先检查上下文中的确认邀请，不能把未推进误判为缺少用户回答。'))[0].startswith('200')
+    assert review(p, item, content=candidate(summary='先检查上下文中的确认邀请，不能把未推进误判为缺少用户回答。'), note=review_note(corrected='先检查上下文中的确认邀请，不能把未推进误判为缺少用户回答。'))[0].startswith('200')
     session = p.engine.store.get(p.session.design_id)
     session.interaction_state = mode
     p.engine.store.save(session)
@@ -131,7 +130,7 @@ def test_human_correction_reaches_next_extraction_and_disable_revokes(pipeline, 
 def test_correction_examples_respect_scope_mode_stage_and_relevance(pipeline, scope):
     p = pipeline
     item = extract_one(p)
-    content = candidate(modes=['EMVR_DIRECT'], stages=['IDEA_BRAINSTORMING'])
+    content = candidate(modes=['EMVR_DIRECT'], stages=['IDEA_BRAINSTORMING'], summary='承接已展示内容的确认，不假定未填写信息。')
     assert review(p, item, content=content, scope=scope,
                   note=review_note(corrected='承接已展示内容的确认，不假定未填写信息。'))[0].startswith('200')
     payload = deepcopy(p.seen[0])
@@ -166,7 +165,7 @@ def test_corrections_survive_restart_and_deleting_source_removes_examples():
         job = repo.claim()
         repo.finish(job, candidate())
         item = repo.experiences()[0]
-        repo.review(item['id'], 'approve', 1, review_note(corrected='承接上一轮已展示的确认事项。'))
+        repo.review(item['id'], 'approve', 1, review_note(corrected='承接上一轮已展示的确认事项。'), content=candidate(summary='承接上一轮已展示的确认事项。'))
         repo.close()
         restarted = ExperienceStore(path)
         assert len(restarted.correction_examples(job['payload'])) == 1
@@ -206,5 +205,42 @@ def test_opinion_is_advice_not_an_automatic_status_command(pipeline):
     item = extract_one(pipeline)
     opinion = '暂不采用，需先限定范围并核对事实。'
     assert review(pipeline, item, 'reject', note=review_note(opinion=opinion))[0].startswith('200')
-    assert pipeline.repo.experiences('rejected')[0]['status'] == 'rejected'
+    assert pipeline.repo.experiences('stopped')[0]['status'] == 'stopped'
     assert json.loads(pipeline.repo.experiences('rejected')[0]['reviews'][0]['note'])['opinion'] == opinion
+
+
+@pytest.mark.parametrize('opinion', ['批准', '好', '没问题继续', '总结没问题，批准加入经验层。', 'Looks fine, proceed'])
+def test_short_natural_opinion_with_blank_corrections_is_accepted(pipeline, opinion):
+    item = extract_one(pipeline)
+    note = {'original': '', 'corrected': '', 'opinion': opinion}
+    assert review(pipeline, item, note=note)[0].startswith('200')
+    active = pipeline.repo.experiences('active')[0]
+    assert active['content'] == item['content']
+    assert json.loads(active['reviews'][0]['note']) == note
+    assert pipeline.repo.correction_examples(pipeline.seen[0]) == []
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_annotation_never_overwrites_manual_json(pipeline, legacy):
+    item = extract_one(pipeline)
+    note = {'original': 'summary 和 trigger 的不当片段', 'corrected': '这是说明，不是字段值', 'opinion': '修改后批准'}
+    if legacy:
+        note['field'] = 'summary'
+    edited = candidate(trigger='只有用户已经回答同一个问题时才适用。', summary='人工在 JSON 中编辑的摘要。')
+    assert review(pipeline, item, content=edited, note=note)[0].startswith('200')
+    assert pipeline.repo.experiences('active')[0]['content'] == edited
+    example = pipeline.repo.correction_examples(pipeline.seen[0])[0]
+    assert {change['field'] for change in example['changes']} == {'summary', 'trigger'}
+    assert all(change['corrected'] != note['corrected'] for change in example['changes'])
+
+
+@pytest.mark.parametrize('note', [
+    {'original': '', 'corrected': '', 'opinion': '  '},
+    {'original': '不当内容', 'corrected': '', 'opinion': '批准'},
+    {'original': '', 'corrected': '正确内容', 'opinion': '批准'},
+    {'original': [], 'corrected': '', 'opinion': '批准'},
+])
+def test_invalid_manual_review_does_not_mutate_candidate(pipeline, note):
+    item = extract_one(pipeline)
+    assert review(pipeline, item, note=note)[0].startswith('400')
+    assert pipeline.repo.experiences()[0] == item

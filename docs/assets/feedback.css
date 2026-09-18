@@ -26,3 +26,9 @@
 .experience-card pre { max-height: 360px; overflow: auto; padding: 12px; background: #f4f7f8; }
 .feedback-review button:disabled, .feedback-dialog button:disabled { opacity: .55; cursor: wait; }
 @media (max-width: 640px) { .topbar-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; } .feedback-dialog { padding: 16px; } }
+.workspace-title-row { display:flex; flex-wrap:wrap; align-items:baseline; gap:0.4rem 1rem; }
+.usage-time { font-size:0.8rem; font-weight:400; color:var(--muted, #657580); white-space:nowrap; }
+.reply-time { margin-left:0.9rem; }
+.usage-summary { line-height:1.8; overflow-wrap:anywhere; }
+.usage-model { font-weight:600; overflow-wrap:anywhere; }
+.usage-breakdown { margin-top:1rem; border-top:1px solid #d4e2e4; padding-top:0.75rem; }

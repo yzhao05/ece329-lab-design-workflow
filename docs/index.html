@@ -10,8 +10,8 @@
     <title>ECE329 Lab Studio</title>
     <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
     <link rel="manifest" href="site.webmanifest">
-    <link rel="stylesheet" href="assets/styles.css?v=20260912-effort-budget">
-    <link rel="stylesheet" href="assets/feedback.css?v=20260919-analysis-review">
+    <link rel="stylesheet" href="assets/styles.css?v=20260919-unity-layout">
+    <link rel="stylesheet" href="assets/feedback.css?v=20260919-usage-detail">
   </head>
   <body>
     <a class="skip-link" href="#chatInput">跳到消息输入框</a>
@@ -68,7 +68,7 @@
         <div class="conversation-header">
           <div>
             <p class="eyebrow">CURRENT WORKSPACE</p>
-            <h2 id="currentStageTitle">实验想法完善 · 想法探索与大纲雏形</h2>
+            <div class="workspace-title-row"><h2 id="currentStageTitle">实验想法完善 · 想法探索与大纲雏形</h2><span id="designActiveTime" class="usage-time" data-i18n-ignore></span></div>
           </div>
           <div class="mode-selector" aria-label="工作流模式">
             <span id="modeLabel">引导模式</span>
@@ -162,25 +162,14 @@
           </details>
         </section>
 
-        <section class="insight-card visualization-card">
+        <section id="unityLayoutCard" class="insight-card unity-layout-card" hidden>
           <div class="card-heading">
-            <div>
-              <p class="eyebrow">THEORY PREVIEW</p>
-              <h2>理论预测窗口</h2>
-            </div>
-            <span class="data-label">非实测</span>
+            <div><p class="eyebrow">UNITY LAYOUT</p><h2>Unity 位置示意图</h2></div>
           </div>
-
-          <div class="chart-wrap">
-            <canvas id="theoryChart" role="img" aria-label="理论预测曲线示意图"></canvas>
-            <div class="chart-legend"><span></span><span id="chartLegendLabel">理论预测</span></div>
-          </div>
-
-          <label class="slider-control" for="chartParameter">
-            <span>参数比例 <output id="parameterValue">1.00</output></span>
-            <input id="chartParameter" type="range" min="0.5" max="2" value="1" step="0.05">
-          </label>
-          <p id="chartDescription" class="chart-description">示意曲线用于预览网页交互。连接课程服务后，将依据当前实验采用的理论关系生成。</p>
+          <p class="unity-disclaimer">方法示意，非实际仿真；位置与尺寸不按比例</p>
+          <div data-unity-summary class="unity-summary" aria-label="已经明确的实验内容"></div>
+          <div data-unity-drawing class="unity-drawing" aria-label="Unity 组件相对位置俯视图"></div>
+          <div data-unity-questions class="unity-questions"></div>
         </section>
 
         <section class="insight-card design-notes-card">
@@ -289,12 +278,14 @@
     </noscript>
 
     <script src="assets/config.js?v=20260824-unified-semantics"></script>
-    <script src="assets/i18n-catalog.js?v=20260919-analysis-review"></script>
-    <script src="assets/i18n.js?v=20260912-review"></script>
-    <script src="assets/app.js?v=20260912-effort-budget"></script>
+    <script src="assets/i18n-catalog.js?v=20260919-layout-review"></script>
+    <script src="assets/i18n.js?v=20260919-experience-states"></script>
+    <script src="assets/usage-ui.js?v=20260919-usage-detail"></script>
+    <script src="assets/unity-layout.js?v=20260919-layout-review"></script>
+    <script src="assets/app.js?v=20260919-unity-layout"></script>
     <script src="assets/model-strategy.js?v=20260912-effort-budget"></script>
     <script src="assets/model-popover.js?v=20260912-effort-budget"></script>
     <script src="assets/feedback-client.js?v=20260919-analysis-review"></script>
-    <script src="assets/feedback-ui.js?v=20260919-analysis-review"></script>
+    <script src="assets/feedback-ui.js?v=20260919-experience-states"></script>
   </body>
 </html>

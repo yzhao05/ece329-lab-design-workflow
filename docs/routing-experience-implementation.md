@@ -6,7 +6,7 @@
 
 | 方案 | 已实现行为 | 主要代码 |
 | --- | --- | --- |
-| 反馈经验 | 逐回答反馈、结构化提炼、会话/项目/全局候选、审核/停用/软删除、同范围去重、版本审计、Top 3 检索 | `experience.py`、`feedback.py`、`feedback-client.js`、`feedback-ui.js`、`feedback-review.js` |
+| 反馈经验 | 逐回答反馈、结构化提炼、会话/项目/全局候选、审核/停止/重新启用、同范围去重、版本审计、Top 3 检索 | `experience.py`、`feedback.py`、`feedback-client.js`、`feedback-ui.js`、`feedback-review.js` |
 | 统一配置 | fast/balanced/reasoning 注册表、13 阶段默认能力映射、模型白名单与配置校验 | `model_routing.py`、`model_selection.py` |
 | 模型路由 | Recommended/Fast/High Quality/Custom、整体能力、逐阶段覆盖、固定模型、可选有限升级 | `model_routing.py`、`engine.py`、`model-strategy.js` |
 | API | 沿用 `/v1` 与设计 Bearer 鉴权，增加会话配置、相关经验、评测读取；配置版本冲突保护 | `api.py`、`security.py` |
@@ -52,7 +52,7 @@ ECE329_STAGE_POLICY={"THEORETICAL_FRAMEWORK":"reasoning","HYPOTHESIS":"reasoning
 | `GET /v1/designs/{id}/experiences/relevant?q=...` | 设计 Bearer，当前 mode/阶段/主题与范围检索，关闭经验时为空 |
 | `GET /v1/designs/{id}/telemetry?offset=0` | 设计 Bearer，每页最多 100 条，返回 `records/next_offset` |
 | `POST /v1/designs/{id}/feedback` | 设计 Bearer，反馈及可选目标版本/阶段/telemetry ID/范围 |
-| `GET /v1/feedback/experiences`、`POST /v1/feedback/experiences/{id}/review` | 独立维护者令牌，查看及审核/编辑/停用/软删除 |
+| `GET /v1/feedback/experiences`、`POST /v1/feedback/experiences/{id}/review` | 独立维护者令牌，查看及审核/编辑/停止/重新启用 |
 
 原创建与 turn 接口支持可选 `model_config`，结构如下：
 

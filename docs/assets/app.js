@@ -236,11 +236,7 @@ const dom = {
   sendButton: document.querySelector("#sendButton"),
   evidenceContent: document.querySelector("#evidenceContent"),
   designNotes: document.querySelector("#designNotes"),
-  chart: document.querySelector("#theoryChart"),
-  chartParameter: document.querySelector("#chartParameter"),
-  parameterValue: document.querySelector("#parameterValue"),
-  chartLegendLabel: document.querySelector("#chartLegendLabel"),
-  chartDescription: document.querySelector("#chartDescription"),
+  unityLayoutCard: document.querySelector("#unityLayoutCard"),
   taskReportCard: document.querySelector("#taskReportCard"),
   taskReportStatus: document.querySelector("#taskReportStatus"),
   taskReportIdea: document.querySelector("#taskReportIdea"),
@@ -295,7 +291,7 @@ function initialState() {
       },
     ],
     evidence: null,
-    visualization: null,
+    unityLayout: null,
     quickActions: [],
     notes: [],
     pendingOptionId: null,
@@ -338,7 +334,7 @@ function loadState() {
           : message
       ));
       if (!Array.isArray(saved.summarySections)) saved.summarySections = [];
-      return { ...initialState(), ...saved };
+      return { ...initialState(), ...saved, unityLayout: null };
     }
   } catch (error) {
     console.warn("Unable to restore local session", error);
@@ -759,7 +755,7 @@ function render() {
   renderTaskReport();
   renderQualityReview();
   renderMode();
-  drawChart();
+  renderUnityLayout();
 }
 
 function renderStages() {
@@ -816,6 +812,7 @@ function renderStages() {
   dom.progressPercent.textContent = `${progress}%`;
   dom.progressBar.style.width = `${progress}%`;
   dom.currentStageTitle.textContent = currentWorkspaceTitle(state.stageIndex);
+  window.ECE329Usage?.timing(document.getElementById('designActiveTime'), state.activeMs ?? null, true);
 }
 
 function workflowGroupIndex(stageIndex) {
@@ -882,6 +879,10 @@ function createMessageElement(message) {
   const meta = document.createElement("p");
   meta.className = "message-meta";
   meta.textContent = message.meta || (message.role === "user" ? "你" : "ECE329 Design Guide");
+  if(message.role==='assistant' && !message.typing && message.designId) {
+    const timing=document.createElement('span');timing.className='usage-time reply-time';
+    window.ECE329Usage?.timing(timing,message.replyMs ?? null);meta.append(timing);
+  }
 
   const bubble = document.createElement("div");
   bubble.className = "message-bubble";
@@ -1374,6 +1375,7 @@ function addMessage(role, text, tags = [], options = {}) {
     stage: options.stage,
     revision: options.revision,
     telemetryId: options.telemetryId,
+    replyMs: options.replyMs,
   };
   state.messages.push(message);
   saveState();
@@ -1716,6 +1718,12 @@ async function refreshConflictedRequest() {
 }
 
 function applyDesignSnapshot(design) {
+  state.activeMs=design.timing?.active_ms ?? null;
+  for(const message of state.messages) {
+    if(message.role!=='assistant' || message.designId!==design.design_id) continue;
+    const timing=design.reply_timings?.find(row=>row.id===message.telemetryId);
+    if(timing) message.replyMs=timing.reply_ms;
+  }
   applyRoutingReply(design);
   if (Object.hasOwn(design, "selected_model") && !state.pendingRequest) {
     state.selectedModel = design.selected_model || modelCatalog.default_model;
@@ -1731,6 +1739,7 @@ function applyDesignSnapshot(design) {
     state.sessionKind = "api";
   }
   state.mode = design.interaction_state || state.mode;
+  state.unityLayout = window.ECE329UnityLayout?.accept(state.unityLayout, design.unity_layout, state.designId, state.mode) || null;
   const index = STAGES.findIndex(([id]) => id === design.current_stage);
   if (index >= 0) state.stageIndex = index;
   if (design.task_report) state.taskReport = design.task_report;
@@ -2499,6 +2508,8 @@ function applyResponse(response, userMessage) {
     state.sessionKind = "api";
   }
   state.mode = response.interaction_state || state.mode;
+  state.unityLayout = window.ECE329UnityLayout?.accept(state.unityLayout, response.unity_layout, state.designId, state.mode) || null;
+  state.activeMs=response.timing?.active_ms ?? null;
   applyModelReply(response);
   applyRoutingReply(response);
 
@@ -2580,16 +2591,13 @@ function applyResponse(response, userMessage) {
     revision: response.revision,
     stage: handledStageId,
     telemetryId: response.telemetry_id,
+    replyMs: response.timing?.reply_ms,
   });
 
   if (!state.notes.some((note) => note.includes(userMessage.slice(0, 40)))) {
     state.notes.push(`你的输入：${userMessage.slice(0, 90)}`);
   }
 
-  if (response.visualization) {
-    state.visualization = response.visualization;
-    dom.chartDescription.textContent = response.visualization.disclaimer || "该图表示理论预测，不是实际测量数据。";
-  }
   state.pendingRequest = null;
   state.pendingOptionId = null;
   state.pendingUiAction = null;
@@ -2767,112 +2775,13 @@ function resetDesign() {
   showToast("已创建新的本地设计会话");
 }
 
-function drawChart() {
-  const canvas = dom.chart;
-  const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.round(rect.width * dpr);
-  canvas.height = Math.round(rect.height * dpr);
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
-
-  const width = rect.width;
-  const height = rect.height;
-  const pad = { top: 19, right: 8, bottom: 25, left: 31 };
-  const plotW = width - pad.left - pad.right;
-  const plotH = height - pad.top - pad.bottom;
-  const visualization = state.visualization || {};
-  const series = visualization.series?.[0] || {};
-  const apiPoints = normalizeChartPoints(series.points);
-  const hasApiPoints = apiPoints.length >= 2;
-  const xAxis = formatAxisLabel(visualization.x_axis, "主要自变量");
-  const yAxis = formatAxisLabel(visualization.y_axis, "响应");
-
-  canvas.dataset.source = hasApiPoints ? "api" : "demo";
-  dom.chartLegendLabel.textContent = series.label || (hasApiPoints ? "本次理论数据" : "理论预测");
-  dom.chartParameter.disabled = hasApiPoints;
-  dom.chartParameter.title = hasApiPoints ? "当前曲线使用本次理论预测的数据点；调整条件后需重新提交才能更新。" : "调整本地示意曲线参数";
-  if (visualization.disclaimer) dom.chartDescription.textContent = visualization.disclaimer;
-
-  ctx.clearRect(0, 0, width, height);
-  ctx.strokeStyle = "#dfe4e2";
-  ctx.lineWidth = 1;
-  ctx.font = "9px system-ui";
-  ctx.fillStyle = "#7b878f";
-
-  for (let i = 0; i <= 4; i += 1) {
-    const y = pad.top + (plotH * i) / 4;
-    ctx.beginPath();
-    ctx.moveTo(pad.left, y);
-    ctx.lineTo(width - pad.right, y);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "#aeb8b6";
-  ctx.beginPath();
-  ctx.moveTo(pad.left, pad.top);
-  ctx.lineTo(pad.left, height - pad.bottom);
-  ctx.lineTo(width - pad.right, height - pad.bottom);
-  ctx.stroke();
-
-  const displayY = window.ECE329I18n?.text(yAxis) || yAxis;
-  const displayX = window.ECE329I18n?.text(xAxis) || xAxis;
-  ctx.fillText(displayY, 2, pad.top + 2);
-  ctx.fillText(displayX, Math.max(pad.left, width - ctx.measureText(displayX).width - 4), height - 7);
-
-  const parameter = Number(dom.chartParameter.value);
-  dom.parameterValue.value = hasApiPoints ? "理论" : parameter.toFixed(2);
-  const gradient = ctx.createLinearGradient(pad.left, 0, width - pad.right, 0);
-  gradient.addColorStop(0, "#157f78");
-  gradient.addColorStop(1, "#74b7d9");
-  ctx.strokeStyle = gradient;
-  ctx.lineWidth = 2.4;
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-
-  if (hasApiPoints) {
-    const xs = apiPoints.map((point) => point.x);
-    const ys = apiPoints.map((point) => point.y);
-    const xMin = Math.min(...xs);
-    const xSpan = Math.max(Math.max(...xs) - xMin, Number.EPSILON);
-    const yMin = Math.min(...ys);
-    const ySpan = Math.max(Math.max(...ys) - yMin, Number.EPSILON);
-    apiPoints.forEach((point, index) => {
-      const x = pad.left + ((point.x - xMin) / xSpan) * plotW;
-      const y = pad.top + (1 - (point.y - yMin) / ySpan) * plotH;
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-  } else {
-    const points = 90;
-    for (let i = 0; i < points; i += 1) {
-      const ratio = i / (points - 1);
-      const x = pad.left + ratio * plotW;
-      const response = 0.48 + 0.34 * Math.sin(ratio * Math.PI * 2 * parameter) * Math.exp(-ratio * 0.22);
-      const y = pad.top + (1 - response) * plotH;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-  }
-  ctx.stroke();
-}
-
-function normalizeChartPoints(points) {
-  if (!Array.isArray(points)) return [];
-  return points
-    .map((point) => {
-      const x = Array.isArray(point) ? Number(point[0]) : Number(point?.x);
-      const y = Array.isArray(point) ? Number(point[1]) : Number(point?.y);
-      return { x, y };
-    })
-    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
-}
-
-function formatAxisLabel(axis, fallback) {
-  if (!axis?.label) return fallback;
-  return axis.unit && axis.unit !== "由当前设计定义" ? `${axis.label} (${axis.unit})` : axis.label;
+function renderUnityLayout() {
+  window.ECE329UnityLayout?.render(dom.unityLayoutCard, state.unityLayout, state.mode, question => {
+    if (dom.chatInput.value.trim()) { dom.chatInput.focus(); return; }
+    dom.chatInput.value = question + "\n";
+    dom.chatInput.dispatchEvent(new Event('input'));
+    dom.chatInput.focus();
+  });
 }
 
 dom.chatForm.addEventListener("submit", handleSubmit);
@@ -2897,7 +2806,6 @@ dom.modelSelect.addEventListener("change", () => {
   renderModelSelection();
 });
 dom.refreshModels.addEventListener("click", loadModelCatalog);
-dom.chartParameter.addEventListener("input", drawChart);
 dom.downloadReportButton.addEventListener("click", downloadTaskReport);
 dom.downloadBuilderInputButton.addEventListener("click", downloadBuilderInput);
 dom.downloadGuidedSummaryButton.addEventListener("click", downloadGuidedSummary);
@@ -2909,7 +2817,6 @@ dom.undoVersionButton.addEventListener("click", () => sendVersionAction(
   { action: "UNDO_LAST" },
   "撤销上一项设计修改",
 ));
-window.addEventListener("resize", drawChart);
 
 async function initializePage() {
   setBusy(true);
@@ -2965,6 +2872,5 @@ window.requestDisplayTranslation = async (texts, language) => {
   }
   return {language,translations:assembled.map(parts=>parts.join('\n'))};
 };
-window.addEventListener('ece329:translations-ready', drawChart);
-window.addEventListener('ece329:language-changed', () => { renderModelSelection(); drawChart(); });
+window.addEventListener('ece329:language-changed', () => { renderModelSelection(); renderUnityLayout(); });
 void initializePage();

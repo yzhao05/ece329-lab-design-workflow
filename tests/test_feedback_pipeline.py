@@ -200,7 +200,8 @@ def test_reject_never_enables_a_rule(pipeline):
     item = extract_one(p)
     assert review(p, item, 'reject')[0].startswith('200')
     assert p.repo.retrieve('EMVR_DIRECT', 'IDEA_BRAINSTORMING', '已经回答') == []
-    assert p.repo.tickets(p.session.design_id)[0]['status'] == 'rejected'
+    assert p.repo.tickets(p.session.design_id)[0]['status'] == 'candidate'
+    assert p.repo.tickets(p.session.design_id)[0]['experience']['status'] == 'stopped'
 
 
 def test_model_failure_is_recorded_and_retry_is_bounded(pipeline):

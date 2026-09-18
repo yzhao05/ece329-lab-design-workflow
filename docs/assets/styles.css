@@ -1320,3 +1320,23 @@ a:focus-visible {
   #reasoningSelect { grid-column: 1 / -1; grid-row: 5; }
   #modelBudgetHelp { grid-row: 6; }
 }
+
+/* EMVR method diagram: one card, current facts above local top-view relations. */
+.unity-layout-card[hidden] { display: none; }
+.unity-disclaimer,.unity-view-note { color: var(--muted, #526879); font-size: .85rem; line-height: 1.65; }
+.unity-summary h3,.unity-questions h3 { font-size: .9rem; margin: 14px 0 6px; }
+.unity-summary ul,.unity-questions ul { padding-left: 1.2em; margin: 0; font-size: .88rem; line-height: 1.65; overflow-wrap: anywhere; }
+.unity-drawing { border-top: 1px solid #d4e2df; margin-top: 18px; padding-top: 12px; }
+.unity-empty { min-height: 140px; display: grid; place-items: center; color: #607782; text-align: center; font-size: .88rem; }
+.unity-relation { margin: 12px 0; padding: 12px; background: #f4faf8; border: 1px solid #d5e6e1; border-radius: 12px; }
+.unity-relation figcaption { font-size: .84rem; overflow-wrap: anywhere; line-height: 1.6; }
+.unity-relation svg { display: block; width: 100%; height: auto; }
+.unity-object { fill: #fff; stroke: #147d77; stroke-width: 3; }
+.unity-observer { fill: #e7a34a; stroke: #173b4d; stroke-width: 2; }
+.unity-position-line { stroke: #71938e; stroke-width: 2; stroke-dasharray: 4 5; }
+.unity-object-labels,.unity-flow { display: flex; gap: 8px; align-items: center; justify-content: center; font-size: .8rem; overflow-wrap: anywhere; }
+.unity-object-labels span,.unity-flow span { min-width: 0; }
+.unity-questions { border-top: 1px solid #d4e2df; margin-top: 12px; }
+.unity-questions button { margin-top: 12px; }
+
+.unity-node-id { fill: #163c4f; font: 18px system-ui; }

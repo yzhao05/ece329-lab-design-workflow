@@ -60,16 +60,19 @@ def validate_review_note(note):
     if isinstance(note, dict) and set(note) == {'field', 'original', 'corrected', 'basis'}:
         note = {**note, 'opinion': note['basis']}
         del note['basis']
-    if not isinstance(note, dict) or set(note) != {'field', 'original', 'corrected', 'opinion'}:
-        raise ValueError('Review requires field, original, corrected and opinion; reload the review page')
-    if not isinstance(note['field'], str) or note['field'] not in REVIEW_FIELDS:
+    if not isinstance(note, dict) or set(note) not in (
+            {'original', 'corrected', 'opinion'}, {'field', 'original', 'corrected', 'opinion'}):
+        raise ValueError('Review requires original, corrected and opinion; reload the review page')
+    if 'field' in note and (not isinstance(note['field'], str) or note['field'] not in REVIEW_FIELDS):
         raise ValueError('Invalid review correction field')
-    for key, limit in [('original', REVIEW_FIELDS[note['field']]),
-                       ('corrected', REVIEW_FIELDS[note['field']]), ('opinion', 2000)]:
-        if not isinstance(note[key], str) or not note[key].strip() or len(note[key]) > limit:
-            raise ValueError('Review must include original text, corrected text and handling opinion')
-    if len(note['opinion'].strip()) < 5:
-        raise ValueError('Review handling opinion must contain at least 5 characters')
+    # Freeform annotations can describe several fields. They never patch the rule.
+    for key in ('original', 'corrected', 'opinion'):
+        if not isinstance(note[key], str) or len(note[key]) > 2000:
+            raise ValueError('Review text must be a string of at most 2000 characters')
+    if not note['opinion'].strip():
+        raise ValueError('Review requires a handling opinion')
+    if bool(note['original'].strip()) != bool(note['corrected'].strip()):
+        raise ValueError('Provide both original and corrected text, or leave both blank if no correction is needed')
     return {key: value.strip() for key, value in note.items()}
 
 

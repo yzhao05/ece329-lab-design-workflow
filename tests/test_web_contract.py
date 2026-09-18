@@ -31,7 +31,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('API_BASE_URL: ""', self.config_js)
 
     def test_student_facing_chart_copy_does_not_expose_internal_stage_number(self) -> None:
-        self.assertIn("依据当前实验采用的理论关系生成", self.index_html)
+        self.assertIn("方法示意，非实际仿真；位置与尺寸不按比例", self.index_html)
         self.assertNotIn("依据阶段5所选公式生成", self.index_html)
 
     def test_pages_build_injects_api_url_from_repository_variable(self) -> None:
@@ -73,11 +73,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(self.index_html.count("v=20260824-unified-semantics"), 1)
         self.assertIn(
-            "assets/styles.css?v=20260912-effort-budget",
+            "assets/styles.css?v=20260919-unity-layout",
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260912-effort-budget",
+            "assets/app.js?v=20260919-unity-layout",
             self.index_html,
         )
 
@@ -322,11 +322,12 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn("REQUEST_TIMEOUT_MS: 180000", self.config_js)
         self.assertIn('timedOut ? "client_timeout" : "request_aborted"', self.app_js)
 
-    def test_visualization_response_is_saved_and_points_are_normalized(self) -> None:
-        self.assertIn("state.visualization = response.visualization", self.app_js)
-        self.assertIn("function normalizeChartPoints(points)", self.app_js)
-        self.assertIn('canvas.dataset.source = hasApiPoints ? "api" : "demo"', self.app_js)
-        self.assertIn('id="chartLegendLabel"', self.index_html)
+    def test_unity_layout_replaces_placeholder_curve(self) -> None:
+        self.assertIn('state.unityLayout = window.ECE329UnityLayout?.accept', self.app_js)
+        self.assertIn('id="unityLayoutCard"', self.index_html)
+        self.assertIn('assets/unity-layout.js', self.index_html)
+        self.assertNotIn('id="theoryChart"', self.index_html)
+        self.assertNotIn('Math.sin(ratio', self.app_js)
 
     def test_stage_titles_show_emvr_only_in_emvr_mode(self) -> None:
         self.assertIn('["CONCEPTUAL_OR_VR_SETUP", "概念实验结构"]', self.app_js)

@@ -37,7 +37,7 @@ def test_explicit_mismatched_stage_is_not_silently_rebound(pipeline):
 def test_correction_retrieval_uses_historical_mode(pipeline):
     p = pipeline
     item = extract_one(p)
-    assert review(p, item, content=candidate(modes=['GUIDED_DESIGN']),
+    assert review(p, item, content=candidate(modes=['GUIDED_DESIGN'], summary='承接用户对已展示内容的确认。'),
                   note=review_note(corrected='承接用户对已展示内容的确认。'))[0].startswith('200')
     payload = deepcopy(p.seen[0])
     payload['evidence'].update(mode='EMVR_DIRECT', reported_mode='GUIDED_DESIGN')
@@ -92,7 +92,7 @@ def test_exhausted_queued_job_is_terminal_instead_of_polling_forever(pipeline):
 def test_legacy_basis_review_can_still_teach_from_audit(pipeline):
     p = pipeline
     item = extract_one(p)
-    review(p, item, note=review_note(corrected='核对确认对象并继续对应事项。'))
+    review(p, item, content=candidate(summary='核对确认对象并继续对应事项。'), note=review_note(corrected='核对确认对象并继续对应事项。'))
     with p.repo.connection() as db:
         row = db.execute('SELECT note FROM experience_reviews').fetchone()
         note = json.loads(row['note']); note['basis'] = note.pop('opinion')

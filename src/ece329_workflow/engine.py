@@ -243,6 +243,8 @@ def _cache_turn_response(
     request: TurnRequest,
     response: dict[str, Any],
 ) -> None:
+    from .unity_layout import unity_layout_snapshot
+    response['unity_layout'] = unity_layout_snapshot(session)
     response['selected_model'] = session.model_context.get('selected_model')
     response['model_config'] = deepcopy(session.model_context.get('model_config'))
     response['model_config_version'] = session.model_context.get('model_config_version', 0)
@@ -4445,6 +4447,8 @@ class WorkflowEngine:
         ):
             ensure_emvr_formula_flow(session)
         self.store.save(session)
+        if self.experience_store is not None:
+            self.experience_store.register_usage_design(session.design_id, state.value)
         result = self.process_turn(
             session.design_id,
             TurnRequest(message=idea.strip(), model=model, model_config=model_config, language=language),
@@ -4470,6 +4474,7 @@ class WorkflowEngine:
             session = self.store.get(design_id)
             cached = _cached_turn_response(session, request)
             if cached is not None:
+                self._attach_usage(cached, design_id)
                 return cached
             router = ModelRouter(self.generator)
             raw = request.model_config if request.model_config is not None else session.model_context.get('model_config')
@@ -4530,6 +4535,24 @@ class WorkflowEngine:
                                 self._telemetry.pop(next(iter(self._telemetry)))
                 except (sqlite3.Error, OSError):
                     logging.getLogger(__name__).warning('Telemetry persistence unavailable')
+                if result is not None:
+                    self._attach_usage(result, design_id, record)
+
+    def _attach_usage(self, result, design_id, record=None):
+        """Attach measured timing after work finishes, without rewriting design history."""
+        try:
+            if self.experience_store is not None:
+                record = record or self.experience_store.usage_run(result.get('telemetry_id'))
+                stats = self.experience_store.design_usage(design_id, record['created'] if record else None)
+                result['timing'] = {'reply_ms': record['latency_ms'] if record else None,
+                                    'active_ms': stats['dialogue']['active_ms'] if stats['dialogue']['run_count'] else None}
+            else:
+                record = record or self._telemetry.get(result.get('telemetry_id'))
+                result['timing'] = {'reply_ms': record['latency_ms'] if record else None,
+                    'active_ms': round(sum(r['latency_ms'] for r in self._telemetry.values()
+                        if r['design_id'] == design_id and (not record or r['created'] <= record['created'])), 2)}
+        except (sqlite3.Error, OSError):
+            result['timing'] = {'reply_ms': record['latency_ms'] if record else None, 'active_ms': None}
 
     def _process_turn_locked(
         self,
@@ -6785,6 +6808,15 @@ class WorkflowEngine:
     def get_design(self, design_id: str, include_history: bool = False) -> dict[str, Any]:
         session = self.store.get(design_id)
         result = session.to_dict(include_history=include_history)
+        from .unity_layout import unity_layout_snapshot
+        result["unity_layout"] = unity_layout_snapshot(session)
+        self._attach_usage(result, design_id)
+        if self.experience_store is not None:
+            try:
+                stats = self.experience_store.design_usage(design_id)
+                result['reply_timings'] = stats['replies']
+            except (sqlite3.Error, OSError):
+                result['reply_timings'] = []
         result["quality_review"] = public_quality_review(
             evaluate_design_quality(
                 session,

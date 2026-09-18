@@ -33,6 +33,7 @@ from .openai_generator import (
 )
 from .security import APISettings, FixedWindowRateLimiter
 from .experience import ExperienceStore, FeedbackService, ModelExperienceExtractor
+from .usage import measure_translation
 
 
 JsonHeaders = [
@@ -74,6 +75,11 @@ class WorkflowAPI:
         self.engine.project_id = self.settings.project_id
         self.feedback.store.project_id = self.settings.project_id
         self.feedback.start()
+
+    def _translation_usage(self, design_id):
+        session = self.engine.store.get(design_id) if design_id else None
+        return measure_translation(self.feedback.store, design_id,
+            session.interaction_state.value if session else 'unknown', session.current_stage.value if session else 'UNKNOWN')
 
     def __call__(
         self,
@@ -121,7 +127,8 @@ class WorkflowAPI:
                         raise DesignAccessDenied('A feedback maintainer token is required')
                 else:
                     self._require_admission_code(environ)
-                translated = self.translator.translate(body.get('texts'), body.get('language'), model)
+                with self._translation_usage(design_id):
+                    translated = self.translator.translate(body.get('texts'), body.get('language'), model)
                 return self._respond(start_response, HTTPStatus.OK, {'translations': translated, 'language': body['language']})
             if method == 'GET' and path == '/v1/models':
                 return self._respond(start_response, HTTPStatus.OK, {**self.engine.available_models(), 'routing': self.engine.model_configuration()})
@@ -305,7 +312,8 @@ class WorkflowAPI:
                 self._require_design_token(environ, design_id)
                 language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
                 from .localization import validate_language, english_pdf
-                body = english_pdf(self.engine, self.translator, design_id) if validate_language(language) == 'en' else self.engine.render_report_pdf(design_id)
+                with self._translation_usage(design_id):
+                    body = english_pdf(self.engine, self.translator, design_id) if validate_language(language) == 'en' else self.engine.render_report_pdf(design_id)
                 safe_name = f"ece329-emvr-{design_id}.pdf"
                 return self._respond_bytes(
                     start_response,
@@ -325,7 +333,8 @@ class WorkflowAPI:
                 self._require_design_token(environ, design_id)
                 language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
                 from .localization import validate_language, english_pdf
-                body = english_pdf(self.engine, self.translator, design_id, builder=True) if validate_language(language) == 'en' else self.engine.render_builder_input_pdf(design_id)
+                with self._translation_usage(design_id):
+                    body = english_pdf(self.engine, self.translator, design_id, builder=True) if validate_language(language) == 'en' else self.engine.render_builder_input_pdf(design_id)
                 safe_name = f"ece329-emvr-builder-gate1-{design_id}.pdf"
                 return self._respond_bytes(
                     start_response,
@@ -347,7 +356,8 @@ class WorkflowAPI:
                 language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
                 from .localization import validate_language
                 if validate_language(language) == 'en':
-                    body = self.translator.english_tree(body.decode('utf-8'), self.engine.store.get(design_id).model_context.get('selected_model')).encode('utf-8')
+                    with self._translation_usage(design_id):
+                        body = self.translator.english_tree(body.decode('utf-8'), self.engine.store.get(design_id).model_context.get('selected_model')).encode('utf-8')
                 safe_name = f"ece329-guided-summary-{design_id}.txt"
                 return self._respond_bytes(
                     start_response,
@@ -377,6 +387,22 @@ class WorkflowAPI:
                         result, created = self.feedback.store.submit(self.engine.store.get(design_id), body)
                     self.feedback.start()
                     return self._respond(start_response, HTTPStatus.CREATED if created else HTTPStatus.OK, result)
+
+            if path == '/v1/feedback/usage' and method == 'GET':
+                token = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
+                if not self.settings.feedback_admin_token or not hmac.compare_digest(token.encode(), self.settings.feedback_admin_token.encode()):
+                    raise DesignAccessDenied('A feedback maintainer token is required')
+                query = parse_qs(environ.get('QUERY_STRING', ''))
+                result = self.feedback.store.usage_inbox(int(query.get('offset', ['0'])[0]))
+                for item in result['designs']:
+                    try:
+                        session = self.engine.store.get(item['design_id'])
+                    except SessionNotFound:
+                        item['current_state'] = None
+                    else:
+                        item['current_state'] = {'stage': session.current_stage.value, 'status': session.status.value,
+                                                  'revision': session.revision, 'mode': session.interaction_state.value}
+                return self._respond(start_response, HTTPStatus.OK, result)
 
             inbox_match = re.fullmatch(r"/v1/feedback/tickets(?:/([a-f0-9]{32})(/retry)?)?", path)
             if inbox_match and method in {'GET', 'POST'}:
@@ -624,6 +650,7 @@ class WorkflowAPI:
                     "current_stage",
                     "interaction_state",
                     "quality_review",
+                    "unity_layout",
                     "task_report",
                     "report_ready",
                     "report_url",

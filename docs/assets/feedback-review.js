@@ -1,7 +1,7 @@
 "use strict";
 
 (() => {
-  const el = Object.fromEntries(["Login", "Token", "Filter", "Logout", "Status", "Cards", "Previous", "Next"]
+  const el = Object.fromEntries(["Login", "Token", "Filter", "Logout", "Status", "Cards", "Previous", "Next", "Usage"]
     .map(name => [name, document.getElementById(`review${name}`)]));
   const base = String(window.ECE329_CONFIG?.API_BASE_URL || "").trim().replace(/\/$/, "");
   window.requestDisplayTranslation = async (texts, language) => {
@@ -44,6 +44,7 @@
   let generation = 0;
   let loading = false;
   let reviewing = false;
+  let usageView = false;
   const controllers = new Set();
   function invalidate() {
     generation++;
@@ -70,8 +71,45 @@
     } finally { clearTimeout(timeout); controllers.delete(controller); }
   }
   const node = (tag, text) => { const item = document.createElement(tag); item.textContent = text; return item; };
-  const ticketLabels = {queued:'等待分析',running:'分析中',candidate:'已生成待审阅经验',active:'关联经验已启用',
-    rejected:'关联经验未采用',disabled:'关联经验已停用',deleted:'关联经验已删除',
+  function usageSummary(value) {
+    const item=node('p','');item.className='usage-summary';
+    window.ECE329Usage?.summary(item,value);return item;
+  }
+  function usageBreakdown(usage) {
+    const panel=node('details','');panel.className='usage-breakdown';
+    panel.append(node('summary','按阶段、Agent 和 API 模型查看'));
+    panel.append(node('p','阶段与模型用时按实际 API 调用计量；其余本地处理单列，避免重复计算。经验分析归入反馈目标阶段，翻译归入请求时所在阶段。'));
+    for(const stage of usage?.stages || []) {
+      const title=node('h4','');window.ECE329Usage?.identity(title,stage);
+      panel.append(title,usageSummary(stage.usage));
+      for(const row of (usage.breakdown || []).filter(row=>row.stage===stage.stage)) {
+        const name=node('p','');name.className='usage-model';window.ECE329Usage?.identity(name,row);
+        panel.append(name,usageSummary(row.usage));
+      }
+    }
+    if(!usage?.stages?.length) panel.append(node('p','尚无阶段明细。'));
+    return panel;
+  }
+  function renderUsage(result) {
+    el.Cards.replaceChildren();
+    el.Cards.append(node('p','费用是按后端配置单价计算的 USD 估算，实际扣费以服务商账单为准。活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。'));
+    for(const item of result.designs) {
+      const card=node('article','');card.className='experience-card';
+      card.append(node('h2',item.design_id),node('p',`${new Date(item.created*1000).toISOString()} · ${item.mode}`));
+      const stop=node('p','');window.ECE329Usage?.stopState(stop,item);card.append(stop);
+      if(!item.complete) card.append(node('p','此设计开始时尚未启用完整计量，仅展示已记录部分。'));
+      card.append(node('h3','合计'),usageSummary(item.usage),node('h3','设计对话'),usageSummary(item.usage.dialogue),
+        node('h3','经验提炼'),usageSummary(item.usage.feedback),node('h3','设计关联翻译'),usageSummary(item.usage.translation));
+      card.append(usageBreakdown(item.usage));
+      el.Cards.append(card);
+    }
+    if(!result.designs.length) el.Cards.append(node('p','暂无设计用量记录。'));
+    if(!result.durable) el.Cards.append(node('p','当前后端使用内存存储，重启后记录会丢失。'));
+  }
+  const experienceLabels = {candidate:'待审阅', active:'已启用', stopped:'已停止', rejected:'已停止', disabled:'已停止', deleted:'已停止'};
+  const experienceStatus = value => ['rejected','disabled','deleted'].includes(value) ? 'stopped' : value;
+  const ticketLabels = {queued:'等待分析',running:'分析中',candidate:'分析完成，已生成经验',
+    active:'分析完成，已生成经验',rejected:'分析完成，已生成经验',disabled:'分析完成，已生成经验',deleted:'分析完成，已生成经验',
     failed:'分析失败',no_learning:'未提炼出可审阅经验',duplicate:'与已有经验重复'};
   function renderTickets(items, version) {
     el.Cards.replaceChildren();
@@ -80,6 +118,7 @@
       card.append(node('h2',ticketLabels[item.status] || item.status), node('p',item.message),
         node('p',`${item.id} · ${item.design_id} · ${item.attempts}/${item.max_attempts ?? 3}`));
       if (item.error) card.append(node('p',item.error));
+      card.append(usageSummary(item.usage));
       const details = node('details',''), detailBody = node('div','');
       details.append(node('summary','查看分析结果与对话证据'),detailBody);
       let fetching=false, loaded=false;
@@ -97,11 +136,13 @@
         finally {fetching=false;}
       });
       card.append(details);
+      card.append(usageBreakdown(item.usage));
       if (item.experience) {
+        card.append(node('p', `关联经验：${experienceLabels[item.experience.status] || item.experience.status}`));
         const open=node('button','查看关联经验'); open.type='button';open.className='ghost-button';
         open.addEventListener('click',()=>{
           if(version!==generation || reviewing || loading) return;
-          el.Filter.value=item.experience.status;offset=0;load(true,item.experience.id);
+          el.Filter.value=experienceStatus(item.experience.status);offset=0;load(true,item.experience.id);
         });card.append(open);
       }
       if(item.can_retry) {
@@ -125,7 +166,8 @@
     for (const item of items) {
       const card = node("article", "");
       card.className = "experience-card";
-      card.append(node("h2", item.content.summary), node("p", `${item.id} · ${item.status} · 版本 ${item.version}`));
+      card.append(node("h2", item.content.summary), node("p", `${item.id} · ${experienceLabels[item.status] || item.status} · 版本 ${item.version}`));
+      card.append(usageSummary(item.usage));
       const scope = node('select', '');
       for (const [value, label] of [['session','本次设计'],['project','本课程项目'],['global','通用经验']]) {
         const option = node('option', label); option.value = value; scope.append(option);
@@ -133,7 +175,7 @@
       scope.value = item.evidence.scope || 'global';
       scope.id = `scope-${item.id}`;
       const scopeLabel = node('label', '审阅后的适用范围'); scopeLabel.htmlFor = scope.id;
-      scope.disabled = !['candidate','disabled'].includes(item.status);
+      scope.disabled = !['candidate','stopped'].includes(experienceStatus(item.status));
       card.append(scopeLabel, scope);
       const evidence = node("details", "");
       evidence.append(node("summary", "查看反馈原文、设计证据及审阅记录"), node("pre", JSON.stringify({ evidence: item.evidence, reviews: item.reviews }, null, 2)));
@@ -147,76 +189,56 @@
       note.rows = 3;
       note.maxLength = 2000;
       note.id = `note-${item.id}`;
-      const noteLabel = node("label", "3. 对经验层 Agent 总结的经验的处理意见（至少 5 个字符）");
+      const noteLabel = node("label", "3. 对经验层 Agent 总结的经验的处理意见");
       noteLabel.htmlFor = note.id;
-      note.placeholder = "例如：修改后采用；归因应改为未承接确认，仅用于上一轮明确邀请确认继续的情形。未进行真实回放。";
-      const field = node('select', '');
-      field.id = `correction-field-${item.id}`;
-      for (const [value, title] of [['summary','经验摘要'],['trigger','适用条件'],['recommendation','处理建议'],['verification','验证方法']]) {
-        const option = node('option', title); option.value = value; field.append(option);
-      }
-      field.value = 'summary';
-      const fieldLabel = node('label', '人工审阅：选择需要修正的字段'); fieldLabel.htmlFor = field.id;
+      note.placeholder = "如果没问题，请填写：总结没问题，批准加入经验层。也可用自己的话表达，如“没问题，继续”或“批准”。";
       const original = node('textarea', '');
-      original.id = `original-${item.id}`; original.rows = 3; original.readOnly = true;
-      original.value = item.content.summary;
-      const originalLabel = node('label', '1. Agent 原不恰当内容（原文；无需修改时保留原文）'); originalLabel.htmlFor = original.id;
+      original.id = `original-${item.id}`; original.rows = 3; original.maxLength = 2000;
+      const originalLabel = node('label', '1. Agent 原不恰当内容（请手动填写，可涉及多个字段；无需修改时留空）'); originalLabel.htmlFor = original.id;
       const corrected = node('textarea', '');
-      corrected.id = `corrected-${item.id}`; corrected.rows = 4; corrected.maxLength = 600;
-      const correctedLabel = node('label', '2. 人工修改后的正确内容（无需修改时复制原文）'); correctedLabel.htmlFor = corrected.id;
-      const drafts = {};
-      let previousField = field.value;
-      field.addEventListener('change', () => {
-        let content;
-        if (!editor.disabled) {
-          try {
-            content = JSON.parse(editor.value);
-            if (!content || typeof content !== 'object' || Array.isArray(content)) throw new Error();
-            if (corrected.value.trim()) content[previousField] = corrected.value.trim();
-          } catch {
-            field.value = previousField;
-            el.Status.textContent = '经验 JSON 格式有误，请先修正；已填写的修正内容仍保留。';
-            editor.focus(); return;
-          }
-          editor.value = JSON.stringify(content, null, 2);
-        }
-        drafts[previousField] = corrected.value; previousField = field.value;
-        original.value = item.content[field.value];
-        corrected.value = content && content[field.value] !== item.content[field.value]
-          ? content[field.value] : drafts[field.value] || '';
-        corrected.maxLength = {summary:600,trigger:140,recommendation:260,verification:120}[field.value];
-      });
+      corrected.id = `corrected-${item.id}`; corrected.rows = 4; corrected.maxLength = 2000;
+      const correctedLabel = node('label', '2. 人工修改后的正确内容（无需修改时留空）'); correctedLabel.htmlFor = corrected.id;
       card.append(evidence, node('p', '模型正反例检查不等于真实回放；检查依据见展开的设计证据。'), label, editor,
-        fieldLabel, field, originalLabel, original, correctedLabel, corrected,
-        node('p', '切换字段会将已填写的修正同步到 JSON，启用时一并保存。摘要用于概述，实际指导设计的是适用条件、处理建议和验证方法，请同步核对。已启用修订供后续提炼参考，停用后停止引用。'), noteLabel, note,
-        node('p', '说明这条经验应如何修改、保留、限制适用范围或不予采用，以及经验总结需要改进的地方。实际处理结果由下方操作按钮决定。'));
+        originalLabel, original, correctedLabel, corrected,
+        node('p', '请在上方“经验内容”JSON 中手动同步修改相关字段；下方审阅记录不会自动改写 JSON。请同时核对 summary、trigger、recommendation 和 verification。启用时保存 JSON 和审阅记录，实际 JSON 修订供后续提炼参考，停止后不再引用。'), noteLabel, note,
+        node('p', '说明这条经验应如何修改、保留或限制适用范围。停止时请说明原因，例如“总结不准确”“暂时停用”“被新经验替代”。实际处理结果由下方操作按钮决定。'));
       const actions = node("div", "");
       actions.className = "experience-actions";
-      const choices = item.status === "candidate" ? [["approve", "启用经验"], ["reject", "不采用"]]
-        : item.status === "active" ? [["disable", "停用经验"]] : item.status === "disabled" ? [["approve", "重新启用"]] : [];
-      if (item.status !== 'deleted') choices.push(['delete','删除经验']);
-      editor.disabled = !["candidate", "disabled"].includes(item.status);
+      const currentStatus = experienceStatus(item.status);
+      if (currentStatus === "active") note.placeholder = "停止时请填写具体原因，例如：总结不准确、暂时停用、被新经验替代。";
+      const choices = currentStatus === "candidate" ? [["approve", "启用经验"], ["stop", "停止"]]
+        : currentStatus === "active" ? [["stop", "停止"]] : currentStatus === "stopped" ? [["approve", "重新启用"]] : [];
+      editor.disabled = !["candidate", "stopped"].includes(currentStatus);
       note.disabled = !choices.length;
-      field.disabled = corrected.disabled = !choices.length;
+      original.disabled = corrected.disabled = !choices.length;
       for (const [decision, title] of choices) {
         const button = node("button", title);
         button.type = "button";
         button.className = "ghost-button";
         button.addEventListener("click", async () => {
           if (version !== generation || reviewing || loading) return;
-          if (!corrected.value.trim()) { el.Status.textContent = "请先填写人工修改后的正确内容；无需修改时复制原文。"; corrected.focus(); return; }
-          if (note.value.trim().length < 5) { el.Status.textContent = "请先填写至少 5 个字符的经验处理意见。"; note.focus(); return; }
+          if (Boolean(original.value.trim()) !== Boolean(corrected.value.trim())) { el.Status.textContent = "请成对填写原不当内容和正确内容；无需修改时两项均留空。"; (original.value.trim() ? corrected : original).focus(); return; }
+          if (!note.value.trim()) { el.Status.textContent = decision === "stop" ? "请填写停止原因。" : "请填写处理意见；无需修改时可填写：总结没问题，批准加入经验层。"; note.focus(); return; }
+          let content;
+          if (decision === "approve") {
+            try {
+              content = JSON.parse(editor.value);
+              if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error();
+            } catch {
+              el.Status.textContent = "经验 JSON 格式有误，请先修正；已填写的修正内容仍保留。";
+              editor.focus(); return;
+            }
+          }
           reviewing = true;
           const buttons = [...el.Cards.querySelectorAll("button")];
           buttons.forEach(control => { control.disabled = true; });
           try {
-            const content = decision === "approve" ? JSON.parse(editor.value) : undefined;
             const result = await request(`/${encodeURIComponent(item.id)}/review`, { method: "POST",
               body: JSON.stringify({ decision, version: item.version,
-                note: {field:field.value, original:original.value, corrected:corrected.value.trim(), opinion:note.value.trim()},
+                note: {original:original.value.trim(), corrected:corrected.value.trim(), opinion:note.value.trim()},
                 ...(decision === 'approve' ? {scope: scope.value} : {}), ...(content ? { content } : {}) }) });
             if (version !== generation) return;
-            el.Status.textContent = `已保存：${result.status}，版本 ${result.version}。`;
+            el.Status.textContent = `已保存：${experienceLabels[result.status] || result.status}，版本 ${result.version}。`;
             await load(false);
           } catch (error) { if (version === generation) el.Status.textContent = `审阅未确认成功：${error.message} 请重新加载记录核对状态。`; }
           finally { reviewing = false; if (version === generation) buttons.forEach(control => { control.disabled = false; }); }
@@ -224,6 +246,7 @@
         actions.append(button);
       }
       card.append(actions);
+      card.append(usageBreakdown(item.usage));
       el.Cards.append(card);
     }
     if (!items.length) el.Cards.append(node("p", "该状态下暂无经验，不代表没有收到反馈。请切换到“全部反馈”查看分析状态。"));
@@ -235,6 +258,13 @@
     el.Next.disabled = true;
     if (showStatus) el.Status.textContent = "正在读取……";
     try {
+      if(usageView) {
+        const result=await request(`?offset=${offset}`,{},'usage');
+        if(version!==generation) return;
+        renderUsage(result);el.Previous.disabled=offset===0;el.Next.disabled=offset+result.designs.length>=result.total;
+        el.Status.textContent=`${offset+1}–${offset+result.designs.length} / ${result.total}`;
+        return;
+      }
       if(el.Filter.value.startsWith('feedback:')) {
         const filter=el.Filter.value.slice('feedback:'.length);
         const result=await request(`?offset=${offset}${filter==='all'?'':`&status=${encodeURIComponent(filter)}`}`,{},'tickets');
@@ -256,8 +286,9 @@
     } catch (error) { if (version === generation) { el.Cards.replaceChildren(); el.Status.textContent = `读取失败：${error.message}`; } }
     finally { if (version === generation) loading = false; }
   }
-  el.Login.addEventListener("submit", event => { event.preventDefault(); if (reviewing) return; offset = 0; load(); });
-  el.Filter.addEventListener("change", () => { invalidate(); loading = false; offset = 0; el.Status.textContent = "点击“加载记录”查看所选状态。"; });
+  el.Login.addEventListener("submit", event => { event.preventDefault(); if (reviewing) return; usageView=false;offset = 0; load(); });
+  el.Usage.addEventListener('click',()=>{if(reviewing || loading) return;usageView=true;offset=0;load();});
+  el.Filter.addEventListener("change", () => { invalidate(); usageView=false;loading = false; offset = 0; el.Status.textContent = "点击“加载记录”查看所选状态。"; });
   el.Token.addEventListener("input", () => { invalidate(); loading = false; });
   el.Logout.addEventListener("click", () => { invalidate(); loading = false; el.Token.value = ""; el.Status.textContent = "令牌已清除。"; });
   el.Previous.addEventListener("click", () => { if (!loading && !reviewing) { offset = Math.max(0, offset - 50); load(); } });

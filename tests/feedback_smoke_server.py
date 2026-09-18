@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--models', action='store_true', help='Enable model selection with the test transport')
     parser.add_argument('--deepseek', action='store_true', help='Include the real DeepSeek protocol adapter with a fake HTTP service')
     parser.add_argument('--feedback-switch', action='store_true', help='Simulate invalid OpenAI feedback output and a working DeepSeek backup')
+    parser.add_argument('--usage', action='store_true', help='Attach deterministic token usage for accounting UI checks')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / 'docs'
     engine = WorkflowEngine(generator=RuleBasedStageGenerator(), store=SQLiteSessionStore(args.database))
@@ -51,6 +52,17 @@ def main():
             allowed_models=('gpt-5.4-mini','deepseek-flash'), transport=ProviderResponsesTransport(
                 openai=SimpleNamespace(create=lambda request: feedback_response('openai',request)),
                 deepseek=SimpleNamespace(create=lambda request: feedback_response('deepseek',request))))
+    if args.usage:
+        def meter(transport):
+            original = transport.create
+            def create(body):
+                response = original(body)
+                response['usage'] = {'input_tokens':1000,'output_tokens':100,'input_tokens_details':{'cached_tokens':200}}
+                return response
+            transport.create = create
+        if args.models:
+            meter(engine.generator.transport)
+        meter(generator.transport)
     service = FeedbackService(ExperienceStore(args.database), ModelExperienceExtractor(generator))
     api = WorkflowAPI(engine, APISettings(allowed_origins=('*',), feedback_admin_token='smoke-maintainer', rate_limit_requests=500), feedback_service=service)
     def app(environ, start_response):
