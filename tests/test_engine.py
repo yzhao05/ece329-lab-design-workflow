@@ -8,6 +8,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Lock
+from unittest.mock import patch
 
 from ece329_workflow.api import WorkflowAPI
 from ece329_workflow.builder_input import (
@@ -3632,6 +3633,14 @@ class WorkflowEngineTests(unittest.TestCase):
         )
 
     def test_combined_scenes_persist_and_standard_charge_cases_are_proposed(self) -> None:
+        for observation_note in (
+            "",
+            "；希望自动显示读数，并在面板标注“接下来先把两种情况放在一起比较：同种还是异种电荷变化更明显？”",
+        ):
+            with self.subTest(observation_note=observation_note):
+                self._assert_combined_scenes_persist(observation_note)
+
+    def _assert_combined_scenes_persist(self, observation_note: str) -> None:
         class SemanticSceneGenerator(RuleBasedStageGenerator):
             selected_ids: list[str] = []
             facet_updates: list[dict[str, str]] = []
@@ -3656,9 +3665,15 @@ class WorkflowEngineTests(unittest.TestCase):
         generator = SemanticSceneGenerator()
         engine = WorkflowEngine(generator=generator)
         self.engine = engine
-        first = engine.create_design(
-            "我想探究静电场，有关物体的电场线分布以及放在一起时的相互影响"
-        )
+        # Reproduce the CI draw, including a legitimate course title containing
+        # “还是”. Keep dialogue-contract tests independent of random design IDs.
+        scenes_by_id = {point['catalog_scene_id']: point for point in KNOWLEDGE.exploration_points}
+        fixed_scenes = [deepcopy(scenes_by_id[scene_id]) for scene_id in
+                        ('ECE329-S005', 'ECE329-S142', 'ECE329-S001')]
+        with patch.object(KNOWLEDGE, 'brainstorm_options', return_value=fixed_scenes):
+            first = engine.create_design(
+                "我想探究静电场，有关物体的电场线分布以及放在一起时的相互影响"
+            )
         original_scenes = first["stage_payload"]["exploration_scenes"]
         generator.selected_ids = [
             original_scenes[0]["course_anchor"]["option_id"],
@@ -3689,7 +3704,7 @@ class WorkflowEngineTests(unittest.TestCase):
         description = (
             "我想比较两个带同种电荷的源与两个带异种电荷的源逐渐靠近时，"
             "电场线的形状、幅度或空间分布的变化"
-        )
+        ) + observation_note
         generator.selected_ids = []
         generator.facet_updates = [
             {"facet_id": "research_question", "status": "CLEAR"}
@@ -3720,12 +3735,20 @@ class WorkflowEngineTests(unittest.TestCase):
         )
         self.assertIn("这组对照先作为建议保留：同种电荷与异种电荷", ready["assistant_message"])
         self.assertIn("如果符合你的想法，可以直接沿用", ready["assistant_message"])
-        self.assertNotIn("自动", ready["assistant_message"])
+        proposal = ready["assistant_message"].split("\n\n", 1)[0]
+        self.assertNotIn("自动", proposal)
         for relation in expected_relations:
             self.assertIn(relation["direction"], ready["assistant_message"])
-        self.assertLessEqual(ready["assistant_message"].count("？"), 1)
-        self.assertNotIn("还是", ready["assistant_message"])
-        self.assertNotIn("如果愿意", ready["assistant_message"])
+        # Course titles and the student's quoted idea may legitimately contain
+        # questions/alternatives. Only the live follow-up must ask one focus.
+        self.assertIn(scenes_by_id['ECE329-S142']['focus'], ready['assistant_message'])
+        follow_up_paragraph = ready['assistant_message'].rsplit('\n\n', 1)[-1]
+        _, follow_up_marker, follow_up = follow_up_paragraph.partition('接下来先把')
+        self.assertTrue(follow_up_marker, 'The next actionable question must be present')
+        self.assertIn('“学习目标”', follow_up)
+        self.assertEqual(follow_up.count('？'), 1)
+        self.assertNotIn('还是', follow_up)
+        self.assertNotIn('如果愿意', follow_up)
         self.assertLessEqual(len(ready["assistant_message"]), 1400)
         self.assertNotIn("实验想法完整性检查", ready["assistant_message"])
         self.assertIn("接下来先把", ready["assistant_message"])

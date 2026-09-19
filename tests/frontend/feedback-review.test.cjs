@@ -178,7 +178,7 @@ test('logout while saving does not display a late success or reload private evid
 });
 
 for(const [status, labels] of [
-  ['candidate',['启用经验','停止']], ['active',['停止']], ['stopped',['重新启用']],
+  ['candidate',['启用经验','停止经验']], ['active',['停止经验']], ['stopped',['重新启用']],
   ['rejected',['重新启用']], ['disabled',['重新启用']], ['deleted',['重新启用']]
 ]) test(`experience state ${status} exposes only the unified lifecycle actions`,async()=>{
   const h=harness({status});await h.els.reviewLogin.fire('submit');await flush();
@@ -193,10 +193,10 @@ for(const [status, labels] of [
     assert.equal(h.calls.filter(c=>c.options.method==='POST').length,0);
   }
   h.find('note-').value='暂时停用，等待进一步核对';
-  const button=buttons.find(b=>b.textContent==='停止') || buttons[0];
+  const button=buttons.find(b=>b.textContent==='停止经验') || buttons[0];
   const saving=button.fire('click');await flush();
   const body=JSON.parse(h.calls.find(c=>c.options.method==='POST').options.body);
-  assert.equal(body.decision,labels.includes('停止')?'stop':'approve');
+  assert.equal(body.decision,labels.includes('停止经验')?'stop':'approve');
   if(body.decision==='stop') {assert.equal(body.content,undefined);assert.equal(body.scope,undefined);}
   h.finish();await saving;
 });

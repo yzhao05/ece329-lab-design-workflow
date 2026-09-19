@@ -160,6 +160,7 @@ window.ECE329_LOCALES = {
   "已生成经验的反馈":"Feedback with generated experience",
   "已停止":"Stopped",
   "停止":"Stop",
+  "停止经验":"Stop experience",
   "分析完成，已生成经验":"Analysis complete, experience generated",
   "关联经验：":"Related experience: ",
   "停止时请填写具体原因，例如：总结不准确、暂时停用、被新经验替代。":"Give a reason for stopping, such as an inaccurate summary, a temporary pause, or replacement by a newer experience.",

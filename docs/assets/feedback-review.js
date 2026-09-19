@@ -206,8 +206,8 @@
       actions.className = "experience-actions";
       const currentStatus = experienceStatus(item.status);
       if (currentStatus === "active") note.placeholder = "停止时请填写具体原因，例如：总结不准确、暂时停用、被新经验替代。";
-      const choices = currentStatus === "candidate" ? [["approve", "启用经验"], ["stop", "停止"]]
-        : currentStatus === "active" ? [["stop", "停止"]] : currentStatus === "stopped" ? [["approve", "重新启用"]] : [];
+      const choices = currentStatus === "candidate" ? [["approve", "启用经验"], ["stop", "停止经验"]]
+        : currentStatus === "active" ? [["stop", "停止经验"]] : currentStatus === "stopped" ? [["approve", "重新启用"]] : [];
       editor.disabled = !["candidate", "stopped"].includes(currentStatus);
       note.disabled = !choices.length;
       original.disabled = corrected.disabled = !choices.length;
