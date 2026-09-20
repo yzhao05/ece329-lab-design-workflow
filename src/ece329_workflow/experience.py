@@ -79,17 +79,41 @@ def validate_candidate(raw):
     return deepcopy(raw)
 
 
+def _turn_evidence(row, user_limit=2000, assistant_limit=4000):
+    output = row.get('output') if isinstance(row.get('output'), dict) else {}
+    result = {'revision': row.get('revision'), 'stage': row.get('handled_stage'),
+              'mode': row.get('interaction_state'), 'recorded_fields': {}, 'truncated_fields': []}
+    for field, source, key, limit in (
+            ('user', row, 'user_message', user_limit),
+            ('assistant', output, 'assistant_message', assistant_limit),
+            ('student_task', output, 'student_task', 1200)):
+        recorded = key in source and source[key] is not None
+        text = str(source[key]) if recorded else ''
+        result[field] = text[:limit]
+        result['recorded_fields'][field] = recorded
+        if len(text) > limit:
+            result['truncated_fields'].append(field)
+    for field in ('warnings', 'assumptions'):
+        values = output.get(field)
+        result['recorded_fields'][field] = isinstance(values, list)
+        if isinstance(values, list):
+            result[field] = [str(value)[:1200] for value in values[:10]]
+            if len(values) > 10 or any(len(str(value)) > 1200 for value in values):
+                result['truncated_fields'].append(field)
+    return result
+
+
 def evidence_snapshot(session: DesignSession, reported_revision=None, reported_stage=None):
     from .feedback import snapshot, source_stamp
+    fields = encode(snapshot(session))
     evidence = {
         'mode': session.interaction_state.value, 'stage': session.current_stage.value,
         'source': source_stamp(session),
         'current_state': workflow_evidence_state(session),
-        'field_excerpt': encode(snapshot(session))[:8000],
-        'recent_turns': [{
-            'revision': row.get('revision'), 'user': str(row.get('user_message', ''))[:1500],
-            'assistant': str(row.get('output', {}).get('assistant_message', ''))[:2000],
-        } for row in session.history[-4:]],
+        'field_excerpt': fields[:8000],
+        'recent_turns': [_turn_evidence(row, 1500, 2000) for row in session.history[-4:]],
+        'evidence_schema_version': 2,
+        'field_excerpt_truncated': len(fields) > 8000,
     }
     target_index = next((i for i in range(len(session.history) - 1, -1, -1)
                         if session.history[i].get('revision') == reported_revision
@@ -101,13 +125,11 @@ def evidence_snapshot(session: DesignSession, reported_revision=None, reported_s
         for i in range(max(0, target_index - 1), min(len(session.history), target_index + 2)):
             row = session.history[i]
             evidence['event_chain'].append({
+                **_turn_evidence(row),
                 'ref': f'turn:{row.get("revision")}',
                 'position': 'reported' if i == target_index else ('before' if i < target_index else 'after'),
                 'revision': row.get('revision'), 'stage': row.get('handled_stage'),
                 'mode': row.get('interaction_state'),
-                'user': str(row.get('user_message', ''))[:2000],
-                'assistant': str(row.get('output', {}).get('assistant_message', ''))[:4000],
-                'student_task': str(row.get('output', {}).get('student_task', ''))[:1200],
                 'resolved_intent': deepcopy(row.get('resolved_intent')),
                 'state_before': deepcopy(row.get('feedback_state_before')),
                 'state_after': deepcopy(row.get('feedback_state_after')),
@@ -116,12 +138,7 @@ def evidence_snapshot(session: DesignSession, reported_revision=None, reported_s
                                        'current_state/field_excerpt are submission-time only, not the reported turn. '
                                        'Missing before/after turns are unavailable evidence, not proof of success or failure.')
     if reported_revision is not None:
-        evidence['reported_turn'] = ({
-            'revision': target['revision'], 'stage': target.get('handled_stage'),
-            'mode': target.get('interaction_state'),
-            'user': str(target.get('user_message', ''))[:1500],
-            'assistant': str(target.get('output', {}).get('assistant_message', ''))[:4000],
-        } if target else None)
+        evidence['reported_turn'] = _turn_evidence(target, 1500) if target else None
     return evidence
 
 
@@ -175,6 +192,13 @@ class ExperienceStore(UsageStore):
                     AFTER DELETE ON design_sessions BEGIN
                     DELETE FROM workflow_telemetry WHERE design_id=OLD.design_id;
                     END;''')
+        # Run before FeedbackService starts workers, using the production DB.
+        # This changes evidence presentation only; rules and approvals stay intact.
+        from .evidence_migrations import migrate_evidence
+        with self.connection() as db:
+            self.evidence_migration_summary = migrate_evidence(db)
+        if any(self.evidence_migration_summary.values()):
+            LOGGER.info('Experience evidence migration: %s', self.evidence_migration_summary)
 
     def record_telemetry(self, record):
         with self.connection() as db:
@@ -325,6 +349,7 @@ class ExperienceStore(UsageStore):
 
     def feedback_detail(self, ticket_id):
         with self.connection() as db:
+            db.execute('BEGIN')
             row = db.execute('SELECT * FROM feedback_tickets WHERE id=?', (ticket_id,)).fetchone()
             if row is None:
                 raise SessionNotFound('Unknown feedback record')
@@ -430,6 +455,9 @@ class ExperienceStore(UsageStore):
         if experience_id is not None and (not isinstance(experience_id, str) or not re.fullmatch('[a-f0-9]{32}', experience_id)):
             raise ValueError('Invalid experience reference')
         with self.connection() as db:
+            # A concurrent approval must not mix an older rule/version with
+            # newer review notes, scope or evidence in the same response.
+            db.execute('BEGIN')
             rows = db.execute('SELECT e.*,t.payload AS evidence FROM learned_experiences e JOIN feedback_tickets t ON t.id=e.ticket_id WHERE (? IS NULL OR e.status=?) AND (? IS NULL OR e.id=?) ORDER BY e.updated DESC,e.rowid DESC LIMIT 50 OFFSET ?', (status, status, experience_id, experience_id, offset))
             result = [{**dict(r), 'content': json.loads(r['content']), 'evidence': json.loads(r['evidence'])} for r in rows]
             for item in result:
@@ -580,6 +608,14 @@ class ModelExperienceExtractor:
         from .openai_generator import ModelConfigurationError
         self.generator = generator
         env = os.environ if environ is None else environ
+        from .model_selection import model_details
+        self.preferred_model = env.get('ECE329_FEEDBACK_MODEL', 'deepseek-flash').strip() or 'deepseek-flash'
+        try:
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', self.preferred_model):
+                raise ValueError()
+            model_details(self.preferred_model)
+        except ValueError:
+            raise ModelConfigurationError('ECE329_FEEDBACK_MODEL must be a supported model ID') from None
         self.reasoning = env.get('ECE329_FEEDBACK_REASONING_EFFORT', 'low')
         if self.reasoning not in ('none', 'low', 'medium', 'high'):
             raise ModelConfigurationError('ECE329_FEEDBACK_REASONING_EFFORT must be none, low, medium or high')
@@ -615,12 +651,14 @@ class ModelExperienceExtractor:
         return available
 
     def models(self):
-        """Try the configured primary, then one allowed model per other provider."""
+        """Prefer DeepSeek for feedback, independently of the dialogue model."""
         from .model_selection import model_provider
         generator = getattr(self.generator, 'primary', self.generator)
         primary = getattr(generator, 'model', None)
         available = self.available_models()
-        ordered = ([primary] if primary in available else []) + available
+        preferred = (self.preferred_model if self.preferred_model in available else
+                     next((model for model in available if model_provider(model) == 'deepseek'), None))
+        ordered = ([preferred] if preferred else []) + ([primary] if primary in available else []) + available
         selected, seen = [], set()
         for model in ordered:
             provider = model_provider(model)
@@ -784,7 +822,8 @@ class FeedbackService:
         from .model_selection import MODEL_LABELS, model_provider
         models = self.extractor.models() if isinstance(self.extractor, ModelExperienceExtractor) else []
         result = {'models': [{'id': model, 'provider': model_provider(model), 'label': MODEL_LABELS.get(model, model)}
-                            for model in models if model], 'max_attempts': MAX_ATTEMPTS}
+                            for model in models if model], 'max_attempts': MAX_ATTEMPTS,
+                  'default_model': models[0] if models else None}
         if isinstance(self.extractor, ModelExperienceExtractor):
             result['settings'] = {'reasoning_effort': self.extractor.reasoning,
                                   'draft_max_output_tokens': self.extractor.draft_tokens,

@@ -64,7 +64,10 @@ def main():
         if args.models:
             meter(engine.generator.transport)
         meter(generator.transport)
-    service = FeedbackService(ExperienceStore(args.database), ModelExperienceExtractor(generator))
+    # This fixture deliberately starts with failed OpenAI output to test an
+    # explicit user switch. Normal production extraction defaults to DeepSeek.
+    feedback_env = {'ECE329_FEEDBACK_MODEL': 'gpt-5.4-mini'} if args.feedback_switch else {}
+    service = FeedbackService(ExperienceStore(args.database), ModelExperienceExtractor(generator, feedback_env))
     api = WorkflowAPI(engine, APISettings(allowed_origins=('*',), feedback_admin_token='smoke-maintainer', rate_limit_requests=500), feedback_service=service)
     if args.final_review:
         from ece329_workflow.localization import DisplayTranslator

@@ -244,3 +244,23 @@ def test_invalid_manual_review_does_not_mutate_candidate(pipeline, note):
     item = extract_one(pipeline)
     assert review(pipeline, item, note=note)[0].startswith('400')
     assert pipeline.repo.experiences()[0] == item
+
+
+@pytest.mark.parametrize('mode', list(InteractionState))
+def test_evidence_excerpt_flags_distinguish_absent_empty_and_truncated_output(mode):
+    session = DesignSession('history-flags', mode, revision=2)
+    session.history = [
+        {'revision': 1, 'user_message': 'before', 'output': {}},
+        {'revision': 2, 'user_message': '继续', 'output': {'assistant_message': '', 'student_task': '位置' * 800,
+         'warnings': ['提示' * 900], 'assumptions': []}},
+    ]
+    evidence = evidence_snapshot(session, 2)
+    before, reported = evidence['event_chain']
+    assert before['recorded_fields']['assistant'] is False
+    assert reported['recorded_fields']['assistant'] is True and reported['assistant'] == ''
+    assert reported['truncated_fields'] == ['student_task', 'warnings']
+    assert len(reported['student_task']) == 1200 and len(reported['warnings'][0]) == 1200
+    assert reported['assumptions'] == []
+    assert evidence['evidence_schema_version'] == 2
+    assert evidence['reported_turn']['recorded_fields']['assistant'] is True
+    assert evidence['recent_turns'][0]['recorded_fields']['assistant'] is False

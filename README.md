@@ -484,3 +484,6 @@ EMVR Builder PDF 的本机目录定位、包内边界、内嵌资料和 Value �
 
 
 所有 PDF 下载入口都同时提供中文版与英文版：Guided 总结、EMVR 学生报告、EMVR Builder Gate 1 输入报告。按钮明确指定 `language=zh` 或 `language=en`，独立于界面语言；文件名带 `-zh.pdf` 或 `-en.pdf`。Guided 经 Final review 弹窗返回后保持最初选择的报告语言。英文版沿用现有后端翻译服务，不需要新增环境变量；翻译失败会明确显示下载失败，不以中文版冒充英文版。
+
+
+旧经验的证据展示格式在后端启动时自动迁移，保留原始 payload 备份，不调用模型、不改经验正文或审核结果。Render 自动部署或配置 GitHub Secret `RENDER_DEPLOY_HOOK_URL` 后，push 到 main 可触发新后端部署并执行迁移；必须继续使用原持久化数据库。配置及确认步骤见 [自动升级说明](DEPLOYMENT.md#automatic-upgrades-of-existing-feedback-evidence)。

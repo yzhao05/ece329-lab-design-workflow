@@ -8,7 +8,7 @@ import pytest
 
 from ece329_workflow.experience import ExperienceStore
 from ece329_workflow.openai_generator import OpenAIResponsesHTTPTransport, ModelHTTPError, ModelOutputError
-from tests.test_feedback_pipeline import pipeline, submit
+from tests.test_feedback_pipeline import pipeline, submit, candidate, review_note
 from tests.test_feedback_failover import configure
 from tests.test_security_and_store import workspace_temp_path, remove_sqlite_files
 
@@ -84,6 +84,52 @@ def test_inbox_counts_and_rows_share_snapshot_during_another_workers_write(pipel
         assert inserted and inbox['total'] == len(inbox['feedback']) == 1
         next_page = first.feedback_inbox()
         assert next_page['total'] == len(next_page['feedback']) == 2
+    finally:
+        if first: first.close()
+        if second: second.close()
+        remove_sqlite_files(path)
+
+
+@pytest.mark.parametrize('reader', ['experiences', 'feedback_detail'])
+def test_review_evidence_and_versions_share_snapshot_during_concurrent_approval(pipeline, monkeypatch, reader):
+    path = workspace_temp_path('.sqlite')
+    first = second = None
+    try:
+        first, second = ExperienceStore(path), ExperienceStore(path)
+        with first.connection() as db:
+            db.execute('PRAGMA journal_mode=WAL')
+        ticket, _ = first.submit(pipeline.session, {'message': 'snapshot review', 'request_id': 'review-snapshot-001'})
+        first.finish(first.claim(), candidate())
+        experience = first.experiences()[0]
+        original = first.connection
+        approved = False
+        @contextmanager
+        def connection():
+            nonlocal approved
+            with original() as db:
+                def concurrent_write(sql):
+                    nonlocal approved
+                    trigger = ('SELECT version,decision,note,content,created' if reader == 'experiences'
+                               else 'SELECT id,status FROM learned_experiences')
+                    if sql.startswith(trigger) and not approved:
+                        approved = True
+                        second.review(experience['id'], 'approve', experience['version'], review_note(),
+                                      content=candidate(summary='已核对的新经验摘要'), scope='session')
+                db.set_trace_callback(concurrent_write)
+                yield db
+        monkeypatch.setattr(first, 'connection', connection)
+        if reader == 'experiences':
+            old = first.experiences()[0]
+            assert approved and old['version'] == experience['version']
+            assert old['reviews'] == [] and old['content'] == experience['content']
+            new = first.experiences()[0]
+            assert new['version'] == experience['version'] + 1 and len(new['reviews']) == 1
+        else:
+            old = first.feedback_detail(ticket['id'])
+            assert approved and old['experience']['status'] == 'candidate'
+            assert old['evidence']['scope'] == 'global'
+            new = first.feedback_detail(ticket['id'])
+            assert new['experience']['status'] == 'active' and new['evidence']['scope'] == 'session'
     finally:
         if first: first.close()
         if second: second.close()

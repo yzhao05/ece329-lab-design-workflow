@@ -90,6 +90,7 @@ def workflow_evidence_state(session):
         'completed_stages': list(session.completed_stages),
         # This is a bounded excerpt, explicitly not a complete design snapshot.
         'pending_excerpt': json.dumps(pending, ensure_ascii=False)[:2000],
+        'pending_excerpt_truncated': len(json.dumps(pending, ensure_ascii=False)) > 2000,
         'confirmation_excerpt': json.dumps({'topic_lock': state.get('topic_lock'),
                                             'latest_field_provenance': latest}, ensure_ascii=False)[:4000],
     }

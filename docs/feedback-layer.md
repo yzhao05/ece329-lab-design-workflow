@@ -146,7 +146,7 @@ node --test tests/frontend/feedback.test.cjs
 
 提炼先还原事件链，再区分证据事实、用户报告、预期、推测及未知项，明确规则条件和例外，最后构造正反案例并进行独立模型检查。审阅修订用于改进后续同类总结，不修改模型权重，不回写旧候选；已经开始的分析使用开始时检索的示例。停止后新分析不再取该示例。原稿的模型检查不等于人工修改后的规则已经重新验证。
 
-本次升级无需新增环境变量，继续使用后端默认在线模型和 `ECE329_FEEDBACK_ADMIN_TOKEN`。需要同时部署前后端并重启后端；请刷新审阅页以使用新的手动编辑表单；后端不再执行旧表单的修正自动同步。SQLite 沿用既有表结构，不清空数据。后台反馈分析独立于学生对话额度；每次分析最多两次模型调用，总计最多 10 次分析尝试（正常情况下最多 20 次模型调用），自动切换同样计数，无额外无限重试。
+本次升级无需新增环境变量，继续使用已配置的在线服务和 `ECE329_FEEDBACK_ADMIN_TOKEN`。需要同时部署前后端并重启后端；请刷新审阅页以使用新的手动编辑表单；后端不再执行旧表单的修正自动同步。SQLite 沿用既有表结构，不清空数据。后台反馈分析独立于学生对话额度；每次分析最多两次模型调用，总计最多 10 次分析尝试（正常情况下最多 20 次模型调用），自动切换同样计数，无额外无限重试。
 
 审阅页的摘要是概述；实际注入设计提示的字段为 trigger/recommendation/verification，修正摘要时需同步核对规则正文。后台提炼的 独立配置的输出上限（默认 8192/4096）也传给 DeepSeek 适配层，不再被提供商的默认额度下限覆盖。
 
@@ -159,7 +159,7 @@ node --test tests/frontend/feedback.test.cjs
 
 连接被重置、远端提前断开、响应体传输不完整也归入连接故障并进入有限切换；即使 HTTP 错误正文读取中断，仍保留 HTTP 状态用于诊断。维护者列表从同一数据库快照读取总数、状态计数、当前页和关联经验，避免多进程写入时出现“有记录却计数为 0”或错误分页。
 
-自动切换无需新增必填环境变量；独立分析配置见下节。继续配置 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`（已有默认值）及 `ECE329_ALLOWED_MODELS`；允许列表必须包含两个服务商可用的模型，才能跨服务商切换。首选仍为后端默认模型，备用按允许列表顺序选择，不会修改学生选择的对话模型。`OPENAI_TIMEOUT_SECONDS`、`DEEPSEEK_TIMEOUT_SECONDS` 控制各自超时。审阅需要 `ECE329_FEEDBACK_ADMIN_TOKEN`，持久化需要 `ECE329_DATABASE_PATH` 指向持久磁盘。
+自动切换无需新增必填环境变量；独立分析配置见下节。继续配置 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`（已有默认值）及 `ECE329_ALLOWED_MODELS`；允许列表必须包含两个服务商可用的模型，才能跨服务商切换。经验提炼独立默认优先使用 `deepseek-flash`，可通过 `ECE329_FEEDBACK_MODEL` 覆盖；首选不可用时先选择其他已配置且允许的 DeepSeek 模型，再使用可用的其他服务商。DeepSeek 的连接或 API 失败会有限回退到已配置的 OpenAI，不会修改学生选择的对话模型。`OPENAI_TIMEOUT_SECONDS`、`DEEPSEEK_TIMEOUT_SECONDS` 控制各自超时。审阅需要 `ECE329_FEEDBACK_ADMIN_TOKEN`，持久化需要 `ECE329_DATABASE_PATH` 指向持久磁盘。
 
 同时部署前端和后端后，原有 2/3 或 3/3 的失败记录会显示为 2/10、3/10，可直接重试，无需重复提交；不会自动消耗旧失败记录的剩余额度。前端优先显示后端返回的 `max_attempts`，兼容尚未升级的旧后端时仍显示其原 3 次限制。只更新前端时，全部反馈接口会明确提示需要升级后端。
 
@@ -179,6 +179,7 @@ node --test tests/frontend/feedback.test.cjs
 新增的环境变量均可省略，默认值如下；token 配置允许 1024–32768，思考强度允许 none/low/medium/high：
 
 ```dotenv
+ECE329_FEEDBACK_MODEL=deepseek-flash
 ECE329_FEEDBACK_REASONING_EFFORT=low
 ECE329_FEEDBACK_MAX_OUTPUT_TOKENS=8192
 ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS=4096
@@ -200,3 +201,19 @@ Guided 第七步显示为“总结 PDF”，保留学生自己完成总结的教
 图片随反馈存入原有数据库，在维护者反馈证据和关联经验中显示。OpenAI 提炼与独立检查均接收图片；当前 DeepSeek 文本路由只接收文字证据并明确标注“无法检查截图”，不会把未读取图片当成证据。提炼所得经验仍需人工审阅启用。无需新增环境变量，须同步部署前后端，并更新 Python 依赖（显式增加 Pillow）。
 
 本地浏览器验收：启动 `tests/feedback_smoke_server.py --final-review --database <新的测试数据库>`，再运行 `node tools/verify_final_review_browser.cjs <本地服务地址>`。仅用于测试夹具，不针对正式部署。
+
+
+### 审阅证据的可读展示
+
+维护者页面将每条记录拆为独立控制的“对话与状态说明”（默认展开）和“原始 JSON 记录”（默认收起）。可读区依次展示原始反馈、前后对话、问题轮历史状态、Agent 诊断和反馈提交后的提炼尝试。所有说明使用本地字段映射，不调用模型补写事实；Agent 归纳的期望行为与用户原始反馈分开标注。历史状态缺失时不借用提交时状态。界面标签随语言切换，对话、反馈、分析原文和 JSON 不自动翻译。
+
+新证据包含 `evidence_schema_version: 2`、`recorded_fields` 和 `truncated_fields`，区分未记录、已记录为空和截断，并保留输出的 warnings、assumptions、student_task。旧记录缺少精确标记时明确说明限制，不能据旧空摘录认定原始回复为空。不推测历史数据，不改变设计工作流或提炼状态机。后端启动时会自动升级旧证据：仅从匹配且未超过反馈提交版本的已保存历史恢复缺失项，保留原证据、经验正文和审阅记录；无法恢复的字段仍为未知。迁移前 payload 保存在 `experience_evidence_migrations`，重复启动不重复处理。部署自动触发与持久化要求见 [DEPLOYMENT.md](../DEPLOYMENT.md#automatic-upgrades-of-existing-feedback-evidence)。
+
+原始 JSON 包含接口返回的完整记录及审阅信息；页面将图片数据替换为预览说明，复制和下载仍保留完整图片数据。鉴权沿用维护者接口，证据文本只作为文本渲染。审阅草稿仅保存在当前页面内存，折叠、刷新记录、切换筛选和语言不会清空；更换令牌或退出时清除。若服务器版本改变，保留已编辑草稿并要求核对新证据后显式接受当前版本，避免覆盖并发修改。浏览器整页重载不会恢复内存草稿。
+
+验证入口：`tests/frontend/feedback-review.test.cjs`、`tests/test_experience_learning.py`，以及使用本地测试服务和固定证据的 `tools/verify_review_evidence_browser.cjs`。
+
+
+经验提炼默认模型已独立于工作台对话模型；环境变量 `ECE329_FEEDBACK_MODEL` 可选，未设置即使用 `deepseek-flash`。要实际调用 DeepSeek，后端须配置 `DEEPSEEK_API_KEY`，且 `ECE329_ALLOWED_MODELS`（若显式设置）须包含该模型。`analysis_options.default_model` 返回当前真正可用的默认分析模型。人工重试中显式选择的模型继续优先，已完成经验不会自动重新生成。当前 DeepSeek 通道仅使用文字证据，截图仍保留给人工审阅；需模型读图时可以手动选择支持图片的 OpenAI 通道。
+
+审阅证据区的分区标题、状态、错误原因、迁移提示、展开收起和 JSON 操作标签均本地中英文切换。对话、反馈、Agent 分析原文和原始 JSON 保持原样，不用机器翻译替换证据。

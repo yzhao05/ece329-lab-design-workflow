@@ -4,10 +4,28 @@
   const el = Object.fromEntries(["Login", "Token", "Filter", "Logout", "Status", "Cards", "Previous", "Next", "Usage"]
     .map(name => [name, document.getElementById(`review${name}`)]));
   const base = String(window.ECE329_CONFIG?.API_BASE_URL || "").trim().replace(/\/$/, "");
+  const passwordError = () => Object.assign(new Error('密码错误'), {code:'invalid_password'});
+  function maintainerToken() {
+    const raw = el.Token.value;
+    // Keep malformed or oversized credentials out of HTTP headers. Never truncate them.
+    if (raw.length > 1024 || !/^[\x20-\x7e]+$/.test(raw) || !raw.trim()) throw passwordError();
+    return raw.trim();
+  }
+  function showFailure(target, error, prefix, suffix = '') {
+    if (error.code === 'invalid_password') {
+      target.textContent = '';
+      el.Status.textContent = '';
+      if (passwordAlertGeneration !== generation) {
+        passwordAlertGeneration = generation;
+        window.alert(window.ECE329I18n?.language === 'en' ? 'Incorrect password' : '密码错误');
+      }
+      el.Token.focus();
+    } else target.textContent = `${prefix}${error.message}${suffix}`;
+  }
   window.requestDisplayTranslation = async (texts, language) => {
     if (!base || !el.Token.value.trim()) throw new Error('Enter a maintainer token to translate review evidence.');
     const controller = new AbortController();
-    const token = el.Token.value.trim(), pieces = [], output = texts.map(()=>[]);
+    const token = maintainerToken(), pieces = [], output = texts.map(()=>[]);
     texts.forEach((text,index)=>{
       for (let start=0;start<text.length;) {
         let end=Math.min(start+4000,text.length);
@@ -42,56 +60,50 @@
   window.ECE329I18n?.refresh();
   let offset = 0;
   let generation = 0;
+  let passwordAlertGeneration = -1;
   let loading = false;
   let reviewing = false;
   let usageView = false;
   const controllers = new Set();
+  const drafts = new Map();
+  const editors = new Map();
+  function captureDrafts() { for (const [id, read] of editors) {const value=read();if(value)drafts.set(id,value);else drafts.delete(id);} }
+  function clearCards() { captureDrafts(); editors.clear(); el.Cards.replaceChildren(); }
   function appendEvidence(host, value) {
-    const screenshots=[];
-    const json=JSON.stringify(value,(key,item)=>{
-      if(key==='attachments' && Array.isArray(item)) {
-        screenshots.push(...item.filter(image=>/^data:image\/jpeg;base64,/.test(image.data_url || '')));
-        return item.map(image=>({role:image.role}));
-      }
-      return item;
-    },2);
-    host.append(node('pre',json));
-    if(screenshots.length) {
-      const gallery=node('div','');gallery.className='feedback-image-gallery';
-      for(const screenshot of screenshots) {
-        const figure=node('figure',''),image=node('img','');
-        image.src=screenshot.data_url;
-        image.alt={problem:'问题对话截图',before:'前文截图',after:'后文截图'}[screenshot.role] || '反馈截图';
-        figure.append(image,node('figcaption',image.alt));gallery.append(figure);
-      }
-      host.append(gallery);
-    }
+    window.ECE329ReviewEvidence.mount(host, value);
   }
   function invalidate() {
     generation++;
     for (const controller of controllers) controller.abort();
     controllers.clear();
-    el.Cards.replaceChildren();
+    clearCards();
     el.Previous.disabled = true;
     el.Next.disabled = true;
   }
   async function request(path, options = {}, resource = 'experiences') {
     if (!base) throw new Error("请先在工作台配置文件中设置课程服务地址。");
-    if (!el.Token.value.trim()) throw new Error("请填写维护者令牌。");
+    const token = maintainerToken();
     const controller = new AbortController();
     controllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), 30000);
     try {
-      const response = await fetch(`${base}/v1/feedback/${resource}${path}`, { ...options, signal: controller.signal,
-        headers: { "Content-Type": "application/json", "X-ECE329-Feedback-Admin-Token": el.Token.value.trim() } });
+      let response;
+      try {
+        response = await fetch(`${base}/v1/feedback/${resource}${path}`, { ...options, signal: controller.signal,
+          headers: { "Content-Type": "application/json", "X-ECE329-Feedback-Admin-Token": token } });
+      } catch (error) {
+        throw new Error(error.name === 'AbortError' ? '请求超时，请重试。' : '无法连接课程服务，请稍后重试。');
+      }
+      if ([401, 403, 431].includes(response.status)) throw passwordError();
       const body = await response.json();
       if (!response.ok) throw new Error(response.status === 409 ? "记录已变化或与已有经验重复，请重新加载核对。"
         : response.status === 404 && resource === 'tickets' && path.startsWith('?') ? "后端尚不支持全部反馈列表，请更新后端后重试。"
-        : response.status === 401 ? "维护者令牌无效，或后端尚未配置审阅权限。" : body.detail || body.error || `HTTP ${response.status}`);
+        : body.detail || body.error || `HTTP ${response.status}`);
       return body;
     } finally { clearTimeout(timeout); controllers.delete(controller); }
   }
   const node = (tag, text) => { const item = document.createElement(tag); item.textContent = text; return item; };
+  const sourceNode = (tag,text) => {const item=node(tag,text);item.setAttribute("data-i18n-ignore","");return item;};
   function usageSummary(value) {
     const item=node('p','');item.className='usage-summary';
     window.ECE329Usage?.summary(item,value);return item;
@@ -112,7 +124,7 @@
     return panel;
   }
   function renderUsage(result) {
-    el.Cards.replaceChildren();
+    clearCards();
     el.Cards.append(node('p','费用是按后端配置单价计算的 USD 估算，实际扣费以服务商账单为准。活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。'));
     for(const item of result.designs) {
       const card=node('article','');card.className='experience-card';
@@ -133,33 +145,28 @@
     active:'分析完成，已生成经验',rejected:'分析完成，已生成经验',disabled:'分析完成，已生成经验',deleted:'分析完成，已生成经验',
     failed:'分析失败',no_learning:'未提炼出可审阅经验',duplicate:'与已有经验重复'};
   function renderTickets(items, version) {
-    el.Cards.replaceChildren();
+    clearCards();
     for (const item of items) {
       const card = node('article',''); card.className='experience-card';
-      card.append(node('h2',ticketLabels[item.status] || item.status), node('p',item.message),
+      card.append(node('h2',ticketLabels[item.status] || item.status), sourceNode('p',item.message),
         node('p',`${item.id} · ${item.design_id} · ${item.attempts}/${item.max_attempts ?? 3}`));
       if (item.error) card.append(node('p',item.error));
       card.append(usageSummary(item.usage));
-      const details = node('details',''), detailBody = node('div','');
-      details.open = true;
-      details.append(node('summary','查看分析结果与对话证据'),detailBody);
+      const detailBody = node('div','');
       let fetching=false, loaded=false;
       const loadEvidence = async()=>{
-        if (!details.open || fetching || loaded || version!==generation) return;
+        if (fetching || loaded || version!==generation) return;
         fetching=true; detailBody.textContent='正在读取……';
         try {
           const detail=await request(`/${encodeURIComponent(item.id)}`,{},'tickets');
           if(version!==generation) return;
-          const analysis=detail.evidence.extraction_analysis;
-          const reason=analysis?.model_check?.issues || detail.evidence.extraction_candidate?.summary;
-          detailBody.replaceChildren(...(reason?[node('p',reason)]:[]));
-          appendEvidence(detailBody,detail.evidence);
+          detailBody.replaceChildren();
+          appendEvidence(detailBody,detail);
           loaded=true;
-        } catch(error) {if(version===generation) detailBody.textContent=`读取失败：${error.message}`;}
+        } catch(error) {if(version===generation) showFailure(detailBody,error,'读取失败：');}
         finally {fetching=false;}
       };
-      details.addEventListener('toggle',loadEvidence);
-      card.append(details);
+      card.append(detailBody);
       card.append(usageBreakdown(item.usage));
       if (item.experience) {
         card.append(node('p', `关联经验：${experienceLabels[item.experience.status] || item.experience.status}`));
@@ -177,7 +184,7 @@
           try {
             await request(`/${encodeURIComponent(item.id)}/retry`,{method:'POST',body:'{}'},'tickets');
             if(version===generation) await load();
-          }catch(error){if(version===generation) el.Status.textContent=`重试失败：${error.message}`;}
+          }catch(error){if(version===generation) showFailure(el.Status,error,'重试失败：');}
           finally{reviewing=false;retry.disabled=false;}
         });card.append(retry);
       }
@@ -187,11 +194,11 @@
     if(!items.length) el.Cards.append(node('p','此筛选下没有反馈记录；可选择“全部反馈”查看其他处理状态。'));
   }
   function render(items, version) {
-    el.Cards.replaceChildren();
+    clearCards();
     for (const item of items) {
       const card = node("article", "");
       card.className = "experience-card";
-      card.append(node("h2", item.content.summary), node("p", `${item.id} · ${experienceLabels[item.status] || item.status} · 版本 ${item.version}`));
+      card.append(sourceNode("h2", item.content.summary), node("p", `${item.id} · ${experienceLabels[item.status] || item.status} · 版本 ${item.version}`));
       card.append(usageSummary(item.usage));
       const scope = node('select', '');
       for (const [value, label] of [['session','本次设计'],['project','本课程项目'],['global','通用经验']]) {
@@ -202,10 +209,8 @@
       const scopeLabel = node('label', '审阅后的适用范围'); scopeLabel.htmlFor = scope.id;
       scope.disabled = !['candidate','stopped'].includes(experienceStatus(item.status));
       card.append(scopeLabel, scope);
-      const evidence = node("details", "");
-      evidence.open = true;
-      evidence.append(node("summary", "查看反馈原文、设计证据及审阅记录"));
-      appendEvidence(evidence,{evidence:item.evidence,reviews:item.reviews});
+      const evidence = node("div", "");
+      appendEvidence(evidence,item);
       const editor = node("textarea", "");
       editor.rows = 12;
       editor.value = JSON.stringify(item.content, null, 2);
@@ -229,6 +234,20 @@
         originalLabel, original, correctedLabel, corrected,
         node('p', '请在上方“经验内容”JSON 中手动同步修改相关字段；下方审阅记录不会自动改写 JSON。请同时核对 summary、trigger、recommendation 和 verification。启用时保存 JSON 和审阅记录，实际 JSON 修订供后续提炼参考，停止后不再引用。'), noteLabel, note,
         node('p', '说明这条经验应如何修改、保留或限制适用范围。停止时请说明原因，例如“总结不准确”“暂时停用”“被新经验替代”。实际处理结果由下方操作按钮决定。'));
+      const saved = drafts.get(item.id);
+      const controls = {content:editor,original,corrected,note,scope};
+      const initial=JSON.stringify(Object.fromEntries(Object.entries(controls).map(([key,control])=>[key,control.value])));
+      if (saved) for (const [key,control] of Object.entries(controls)) control.value=saved[key];
+      let reviewVersion=saved?.version ?? item.version;
+      const readDraft=()=>{const values=Object.fromEntries(Object.entries(controls).map(([key,control])=>[key,control.value]));return saved || JSON.stringify(values)!==initial ? {version:reviewVersion,...values} : null;};
+      if(reviewVersion!==item.version) {
+        const warning=node('p','记录版本已更新，草稿已保留。请核对新证据后再提交。');
+        const acknowledge=node('button','已核对新版本，继续使用草稿');acknowledge.type='button';acknowledge.className='ghost-button';
+        acknowledge.addEventListener('click',()=>{reviewVersion=item.version;drafts.set(item.id,readDraft());warning.textContent='';acknowledge.disabled=true;});
+        card.append(warning,acknowledge);
+      }
+      editors.set(item.id,readDraft);
+      for (const control of Object.values(controls)) for (const event of ['input','change']) control.addEventListener(event,captureDrafts);
       const actions = node("div", "");
       actions.className = "experience-actions";
       const currentStatus = experienceStatus(item.status);
@@ -244,6 +263,7 @@
         button.className = "ghost-button";
         button.addEventListener("click", async () => {
           if (version !== generation || reviewing || loading) return;
+          if(reviewVersion!==item.version) {el.Status.textContent='记录版本已更新，草稿已保留。请核对新证据后再提交。';return;}
           if (Boolean(original.value.trim()) !== Boolean(corrected.value.trim())) { el.Status.textContent = "请成对填写原不当内容和正确内容；无需修改时两项均留空。"; (original.value.trim() ? corrected : original).focus(); return; }
           if (!note.value.trim()) { el.Status.textContent = decision === "stop" ? "请填写停止原因。" : "请填写处理意见；无需修改时可填写：总结没问题，批准加入经验层。"; note.focus(); return; }
           let content;
@@ -261,13 +281,14 @@
           buttons.forEach(control => { control.disabled = true; });
           try {
             const result = await request(`/${encodeURIComponent(item.id)}/review`, { method: "POST",
-              body: JSON.stringify({ decision, version: item.version,
+              body: JSON.stringify({ decision, version: reviewVersion,
                 note: {original:original.value.trim(), corrected:corrected.value.trim(), opinion:note.value.trim()},
                 ...(decision === 'approve' ? {scope: scope.value} : {}), ...(content ? { content } : {}) }) });
             if (version !== generation) return;
             el.Status.textContent = `已保存：${experienceLabels[result.status] || result.status}，版本 ${result.version}。`;
+            editors.delete(item.id); drafts.delete(item.id);
             await load(false);
-          } catch (error) { if (version === generation) el.Status.textContent = `审阅未确认成功：${error.message} 请重新加载记录核对状态。`; }
+          } catch (error) { if (version === generation) showFailure(el.Status,error,'审阅未确认成功：',' 请重新加载记录核对状态。'); }
           finally { reviewing = false; if (version === generation) buttons.forEach(control => { control.disabled = false; }); }
         });
         actions.append(button);
@@ -279,6 +300,7 @@
     if (!items.length) el.Cards.append(node("p", "该状态下暂无经验，不代表没有收到反馈。请切换到“全部反馈”查看分析状态。"));
   }
   async function load(showStatus = true, experienceId = null) {
+    captureDrafts();
     const version = ++generation;
     loading = true;
     el.Previous.disabled = true;
@@ -310,14 +332,14 @@
       el.Previous.disabled = offset === 0;
       el.Next.disabled = Boolean(experienceId) || result.experiences.length < 50;
       if (showStatus) el.Status.textContent = `已加载 ${result.experiences.length} 条经验，第 ${offset / 50 + 1} 页。`;
-    } catch (error) { if (version === generation) { el.Cards.replaceChildren(); el.Status.textContent = `读取失败：${error.message}`; } }
+    } catch (error) { if (version === generation) { clearCards(); showFailure(el.Status,error,'读取失败：'); } }
     finally { if (version === generation) loading = false; }
   }
   el.Login.addEventListener("submit", event => { event.preventDefault(); if (reviewing) return; usageView=false;offset = 0; load(); });
   el.Usage.addEventListener('click',()=>{if(reviewing || loading) return;usageView=true;offset=0;load();});
   el.Filter.addEventListener("change", () => { invalidate(); usageView=false;loading = false; offset = 0; el.Status.textContent = "点击“加载记录”查看所选状态。"; });
-  el.Token.addEventListener("input", () => { invalidate(); loading = false; });
-  el.Logout.addEventListener("click", () => { invalidate(); loading = false; el.Token.value = ""; el.Status.textContent = "令牌已清除。"; });
+  el.Token.addEventListener("input", () => { invalidate(); drafts.clear(); loading = false; });
+  el.Logout.addEventListener("click", () => { invalidate(); drafts.clear(); loading = false; el.Token.value = ""; el.Status.textContent = "令牌已清除。"; });
   el.Previous.addEventListener("click", () => { if (!loading && !reviewing) { offset = Math.max(0, offset - 50); load(); } });
   el.Next.addEventListener("click", () => { if (!loading && !reviewing) { offset += 50; load(); } });
 })();

@@ -27,8 +27,62 @@ def configure(p, failure, *, primary='gpt-5.4-mini', backup=True, secondary_fail
     generator = SimpleNamespace(model=primary, reasoning_effort='medium',
         allowed_models=('gpt-5.4-mini', 'deepseek-flash', 'deepseek-v4-pro'),
         transport=ProviderResponsesTransport(**transports))
-    p.service.extractor = ModelExperienceExtractor(generator)
+    # These tests explicitly exercise either provider as the preferred route.
+    # The production default is tested separately below.
+    p.service.extractor = ModelExperienceExtractor(generator, environ={'ECE329_FEEDBACK_MODEL': primary})
     return calls, generator
+
+
+@pytest.mark.parametrize('mode', list(InteractionState))
+def test_default_feedback_uses_deepseek_for_draft_and_check_without_changing_chat(pipeline, mode):
+    p = pipeline
+    p.session.interaction_state = mode
+    p.engine.store.save(p.session)
+    calls, generator = configure(p, None)
+    p.service.extractor = ModelExperienceExtractor(generator, environ={})
+    assert p.service.extractor.models() == ['deepseek-flash', 'gpt-5.4-mini']
+    assert p.service.analysis_options()['default_model'] == 'deepseek-flash'
+    ticket = submit(p)[2]
+    p.service.run_once()
+    assert [provider for provider, _ in calls] == ['deepseek', 'deepseek']
+    assert generator.model == 'gpt-5.4-mini'
+    assert p.repo.feedback_detail(ticket['id'])['last_analysis']['model'] == 'deepseek-flash'
+
+
+def test_default_deepseek_connection_failure_falls_back_once_to_openai(pipeline):
+    p = pipeline
+    calls, generator = configure(p, None, secondary_failure=ModelConnectionError('offline'))
+    p.service.extractor = ModelExperienceExtractor(generator, environ={})
+    ticket = submit(p)[2]
+    p.service.run_once()
+    assert [provider for provider, _ in calls] == ['deepseek', 'openai', 'openai']
+    assert p.repo.feedback_detail(ticket['id'])['attempts'] == 2
+    assert not p.service.run_once()
+
+
+def test_deepseek_preference_respects_actual_availability_and_optional_override(pipeline):
+    _, generator = configure(pipeline, None)
+    extractor = ModelExperienceExtractor(generator, environ={})
+    generator.allowed_models = ('gpt-5.4-mini', 'deepseek-v4-pro')
+    assert extractor.models() == ['deepseek-v4-pro', 'gpt-5.4-mini']
+    generator.transport.providers['deepseek'] = None
+    assert extractor.models() == ['gpt-5.4-mini']
+    generator.transport.providers['deepseek'] = SimpleNamespace(create=extraction_response)
+    override = ModelExperienceExtractor(generator, environ={'ECE329_FEEDBACK_MODEL': 'gpt-5.4-mini'})
+    assert override.models() == ['gpt-5.4-mini', 'deepseek-v4-pro']
+
+
+def test_explicit_openai_retry_is_honored_under_deepseek_default(pipeline):
+    p = pipeline
+    calls, generator = configure(p, None, secondary_failure=ModelOutputError('bad output'))
+    p.service.extractor = ModelExperienceExtractor(generator, environ={})
+    ticket = submit(p)[2]
+    p.service.run_once()
+    assert p.repo.feedback_detail(ticket['id'])['status'] == 'failed'
+    p.service.retry(p.session.design_id, ticket['id'], {'model': 'gpt-5.4-mini'})
+    p.service.run_once()
+    assert [provider for provider, _ in calls] == ['deepseek', 'openai', 'openai']
+    assert p.repo.feedback_detail(ticket['id'])['status'] == 'candidate'
 
 
 @pytest.mark.parametrize('mode', list(InteractionState))

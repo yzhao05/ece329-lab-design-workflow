@@ -17,11 +17,11 @@ class Element {
 }
 const flush = () => new Promise(resolve=>setImmediate(resolve));
 function harness({filter='candidate', status='candidate', getResponse}={}) {
-  const els={}, calls=[];
+  const els={}, calls=[], alerts=[];
   let finish;
   const content={summary:'原经验摘要',trigger:'原适用条件',recommendation:'原处理建议',verification:'原验证方法'};
   const item={id:'a'.repeat(32),version:1,status,content,evidence:{scope:'global'},reviews:[]};
-  const context={window:{ECE329_CONFIG:{API_BASE_URL:'http://local.test'},addEventListener(){}},
+  const context={window:{ECE329_CONFIG:{API_BASE_URL:'http://local.test'},alert:message=>alerts.push(message),listeners:{},addEventListener(name,fn){this.listeners[name]=fn;}},
     document:{getElementById:id=>els[id]??=new Element('div'),createElement:tag=>new Element(tag)},
     AbortController,setTimeout,clearTimeout,
     fetch:async (url,options)=>{
@@ -29,13 +29,62 @@ function harness({filter='candidate', status='candidate', getResponse}={}) {
       if(options.method==='POST') return new Promise(resolve=>{finish=()=>resolve({ok:true,json:async()=>({status:'active',version:2})});});
       return {ok:true,json:async()=>getResponse ? getResponse(url) : {experiences:[item]}};
     }};
+  context.document.querySelectorAll=selector=>Object.values(els).flatMap(el=>el.querySelectorAll('div')).filter(el=>selector==='.review-evidence' && el.className==='review-evidence');
   vm.createContext(context);
-  for(const file of ['usage-ui','feedback-review']) vm.runInContext(fs.readFileSync(path.resolve(__dirname,`../../docs/assets/${file}.js`),'utf8'),context);
+  for(const file of ['usage-ui','review-evidence','feedback-review']) vm.runInContext(fs.readFileSync(path.resolve(__dirname,`../../docs/assets/${file}.js`),'utf8'),context);
   els.reviewToken.value='test-only';
   els.reviewFilter.value=filter;
   const find=id=>els.reviewCards.querySelectorAll('textarea').concat(els.reviewCards.querySelectorAll('select')).find(el=>el.id.startsWith(id));
-  return {els,calls,find,finish:()=>finish(),button:()=>els.reviewCards.querySelectorAll('button').find(el=>el.textContent==='启用经验')};
+  return {els,calls,alerts,context,item,find,finish:()=>finish(),button:()=>els.reviewCards.querySelectorAll('button').find(el=>el.textContent==='启用经验')};
 }
+
+for (const token of ['本密码', 'épassword', 'a'.repeat(1025), 'abc\nxyz', 'abc\u0000xyz', '   ']) {
+  test(`malformed maintainer password is rejected locally (${JSON.stringify(token.slice(0,12))})`,async()=>{
+    const h=harness();h.els.reviewToken.value=token;
+    await h.els.reviewLogin.fire('submit');await flush();
+    assert.deepEqual(h.alerts,['密码错误']);
+    assert.equal(h.calls.length,0);
+    assert.equal(h.els.reviewStatus.textContent,'');
+    assert.equal(h.els.reviewToken.focused,true);
+    assert.equal(h.els.reviewToken.value,token);
+    h.els.reviewToken.value='correct-token';
+    await h.els.reviewLogin.fire('submit');await flush();
+    assert.equal(h.calls.length,1);
+    assert.equal(h.els.reviewCards.children.length,1);
+  });
+}
+
+for (const status of [401,403,431]) test(`HTTP ${status} shows a simple password popup even with a non-JSON body`,async()=>{
+  const h=harness();h.context.fetch=async()=>({status,ok:false,json:async()=>{throw Error('Unexpected HTML');}});
+  h.context.window.ECE329I18n={language:'en'};
+  await h.els.reviewUsage.fire('click');await flush();
+  assert.deepEqual(h.alerts,['Incorrect password']);
+  assert.equal(h.els.reviewStatus.textContent,'');
+});
+
+test('network failures are not reported as incorrect passwords',async()=>{
+  const h=harness();h.context.fetch=async()=>{throw new TypeError('Failed to fetch');};
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.deepEqual(h.alerts,[]);
+  assert.match(h.els.reviewStatus.textContent,/无法连接课程服务/);
+  assert.doesNotMatch(h.els.reviewStatus.textContent,/TypeError|Failed to fetch|密码错误/);
+});
+
+test('valid long ASCII credentials are sent intact',async()=>{
+  const h=harness();const token='a'.repeat(1024);h.els.reviewToken.value=token;
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.deepEqual(h.alerts,[]);
+  assert.equal(h.calls[0].options.headers['X-ECE329-Feedback-Admin-Token'],token);
+});
+
+test('a late authentication failure cannot interrupt an edited credential',async()=>{
+  const h=harness();let finish;
+  h.context.fetch=()=>new Promise(resolve=>finish=resolve);
+  await h.els.reviewLogin.fire('submit');await flush();
+  h.els.reviewToken.value='new-token';await h.els.reviewToken.fire('input');
+  finish({status:401,ok:false});await flush();
+  assert.deepEqual(h.alerts,[]);
+});
 
 test('usage button uses the maintainer route, pagination and logout isolation',async()=>{
   const usage={run_count:1,call_count:2,input_tokens:2000,output_tokens:200,estimated_cost_usd:0.005,active_ms:61000};
@@ -104,7 +153,7 @@ test('all feedback shows both submissions even when no experiences were extracte
   assert.ok(h.els.reviewCards.querySelectorAll('p').some(item=>item.textContent.endsWith('2/10')));
   assert.ok(h.calls[0].url.includes('/v1/feedback/tickets?'));
   assert.equal(h.els.reviewCards.querySelectorAll('textarea').length,0);
-  assert.equal(h.els.reviewCards.querySelectorAll('button')[0].textContent,'重试分析');
+  assert.ok(h.els.reviewCards.querySelectorAll('button').some(b=>b.textContent==='重试分析'));
   assert.equal(h.els.reviewNext.disabled,true);
 });
 
@@ -118,10 +167,12 @@ test('feedback evidence opens and loads by default without duplicate toggle requ
   await h.els.reviewLogin.fire('submit');await flush();
   const details=h.els.reviewCards.querySelectorAll('details')[0];
   assert.equal(details.open,true);
-  assert.equal(details.querySelectorAll('pre').length,1);
+  assert.equal(details.querySelectorAll('pre').length,0);
+  const raw=h.els.reviewCards.querySelectorAll('details')[1];
+  assert.equal(raw.open,false);assert.equal(raw.querySelectorAll('pre').length,1);
   assert.equal(h.calls.length,2);await details.fire('toggle');
   assert.equal(h.calls.length,2);await details.fire('toggle');assert.equal(h.calls.length,2);
-  await h.els.reviewCards.querySelectorAll('button')[0].fire('click');await flush();
+  await h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='查看关联经验').fire('click');await flush();
   assert.ok(h.calls[2].url.endsWith('?experience_id='+experienceId));
 });
 
@@ -137,7 +188,7 @@ test('maintainer retry double click sends one request and refreshes without a de
     id,design_id:'design-a',message:'retry',attempts:2,max_attempts:10,status:'failed',can_retry:true
   }],total:1,filtered_total:1,counts:{failed:1},durable:true})});
   await h.els.reviewLogin.fire('submit');await flush();
-  const retry=h.els.reviewCards.querySelectorAll('button')[0];
+  const retry=h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='重试分析');
   const saving=retry.fire('click');await flush();await retry.fire('click');
   assert.equal(h.calls.filter(c=>c.options.method==='POST').length,1);
   assert.ok(h.calls.at(-1).url.endsWith(`/v1/feedback/tickets/${id}/retry`));
@@ -151,7 +202,7 @@ test('logging out during maintainer retry prevents late data from reappearing',a
     id:'b'.repeat(32),design_id:'design-a',message:'retry',attempts:2,max_attempts:10,status:'failed',can_retry:true
   }],total:1,filtered_total:1,counts:{failed:1},durable:true})});
   await h.els.reviewLogin.fire('submit');await flush();
-  const saving=h.els.reviewCards.querySelectorAll('button')[0].fire('click');await flush();
+  const saving=h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='重试分析').fire('click');await flush();
   await h.els.reviewLogout.fire('click');h.finish();await saving;
   assert.equal(h.els.reviewCards.children.length,0);
   assert.equal(h.calls.length,3);
@@ -184,7 +235,7 @@ for(const [status, labels] of [
   ['rejected',['重新启用']], ['disabled',['重新启用']], ['deleted',['重新启用']]
 ]) test(`experience state ${status} exposes only the unified lifecycle actions`,async()=>{
   const h=harness({status});await h.els.reviewLogin.fire('submit');await flush();
-  const buttons=h.els.reviewCards.querySelectorAll('button');
+  const buttons=h.els.reviewCards.querySelectorAll('button').filter(b=>['启用经验','停止经验','重新启用'].includes(b.textContent));
   assert.deepEqual(buttons.map(e=>e.textContent),labels);
   assert.equal(h.find('content-').disabled,status==='active');
   assert.equal(h.find('scope-').disabled,status==='active');
@@ -211,4 +262,137 @@ test('feedback outcome and related experience lifecycle are shown separately',as
   await h.els.reviewLogin.fire('submit');await flush();
   assert.equal(h.els.reviewCards.querySelectorAll('h2')[0].textContent,'分析完成，已生成经验');
   assert.ok(h.els.reviewCards.querySelectorAll('p').some(e=>e.textContent==='关联经验：已停止'));
+});
+
+
+test('folds, refresh, language changes and filters preserve isolated review drafts',async()=>{
+  const h=harness();await h.els.reviewLogin.fire('submit');await flush();
+  h.find('content-').value='{"summary":"manual draft"}';h.find('note-').value='人工意见';h.find('original-').value='原文';h.find('corrected-').value='修正';
+  const [read,raw]=h.els.reviewCards.querySelectorAll('details');
+  await read.querySelectorAll('button')[0].fire('click');assert.equal(read.open,false);assert.equal(raw.open,false);
+  await raw.querySelectorAll('button')[0].fire('click');assert.equal(raw.open,true);assert.equal(read.open,false);
+  h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
+  assert.equal(h.find('note-').value,'人工意见');
+  const [readEn,rawEn]=h.els.reviewCards.querySelectorAll('details');assert.equal(readEn.open,false);assert.equal(rawEn.open,true);
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.equal(h.find('content-').value,'{"summary":"manual draft"}');assert.equal(h.find('note-').value,'人工意见');
+  const firstId=h.item.id;h.item.id='b'.repeat(32);
+  await h.els.reviewFilter.fire('change');await h.els.reviewLogin.fire('submit');await flush();
+  assert.equal(h.find('note-').value,'');
+  h.item.id=firstId;await h.els.reviewLogin.fire('submit');await flush();assert.equal(h.find('note-').value,'人工意见');
+  await h.els.reviewLogout.fire('click');h.els.reviewToken.value='new-user';await h.els.reviewLogin.fire('submit');await flush();
+  assert.equal(h.find('note-').value,'');
+});
+
+test('refreshing a newer version keeps drafts but requires explicit version acknowledgement',async()=>{
+  const h=harness();await h.els.reviewLogin.fire('submit');await flush();h.find('note-').value='批准';
+  h.item.version=2;await h.els.reviewLogin.fire('submit');await flush();
+  assert.equal(h.find('note-').value,'批准');await h.button().fire('click');
+  assert.match(h.els.reviewStatus.textContent,/核对新证据/);assert.equal(h.calls.filter(c=>c.options.method==='POST').length,0);
+  await h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='已核对新版本，继续使用草稿').fire('click');
+  const saving=h.button().fire('click');await flush();assert.equal(JSON.parse(h.calls.at(-1).options.body).version,2);h.finish();await saving;
+});
+
+
+const treeText=el=>[el.textContent,...el.children.map(treeText)].join(' ');
+function evidenceFixture() {
+  const before={stage:'IDEA_BRAINSTORMING',pending_excerpt:JSON.stringify({type:'CONFIRM_OR_MODIFY',question:'请确认实验边界'})};
+  return {message:'继续没有推进 <img src=x onerror=alert(1)>',category:'answered_pending',
+    evidence:{evidence_schema_version:2,event_chain:[
+      {position:'before',revision:1,user:'我的原文',recorded_fields:{assistant:false}},
+      {position:'reported',revision:2,mode:'EMVR_DIRECT',stage:'IDEA_BRAINSTORMING',user:'继续。',assistant:'',recorded_fields:{assistant:true},
+       warnings:['还需补充'],student_task:'明确观察位置',resolved_intent:{intent:'ACCEPT_PREVIOUS_PROPOSAL'},
+       state_before:before,state_after:{...before,completion_error:'缺少观察位置'},truncated_fields:['user']}
+    ],current_state:{stage:'STUDENT_SYNTHESIS_OR_EMVR_OUTPUT'}},
+    extraction_analysis:{diagnosis:{facts:[{evidence_ref:'turn:2',observation:'Agent 认为阶段未前进'}],hypotheses:['可能未承接确认'],expected_behavior:'应继续推进',unknowns:['未确定根因'],applicability:'确认后',exceptions:'用户要求修改'},validation_status:'not_replayed'},
+    analysis_attempts:[{attempt:3,provider:'openai',model:'gpt-5.4-mini',phase:'check',status:'failed',code:'model_output_invalid'},{attempt:4,status:'completed'}],
+    attachments:[{role:'problem',data_url:'data:image/png;base64,test'}]};
+}
+
+test('readable evidence separates missing and empty bodies, historical states and extraction attempts',async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();await h.els.reviewLogin.fire('submit');await flush();
+  const readable=h.els.reviewCards.querySelectorAll('details')[0],text=treeText(readable);
+  for(const expected of ['回复正文未记录','该轮回复正文为空','阶段未变化','前后记录中的待办相同','总结 PDF','尚未进行回放验证','以下记录已截断','不是原对话故障的发生过程','OpenAI / gpt-5.4-mini','检查环节','未记录 / 未记录','<img src=x onerror=alert(1)>'])assert.ok(text.includes(expected),expected);
+  assert.equal(readable.querySelectorAll('img').length,1);
+  const source=readable.children[1];assert.equal(h.els.reviewCards.querySelectorAll('div').find(e=>e.className==='review-evidence')['data-i18n-ignore'],'');
+  h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
+  const english=treeText(h.els.reviewCards.querySelectorAll('details')[0]);
+  for(const expected of ['Conversation and state','Reply body not recorded','This turn has an empty reply body','Stage unchanged','继续。','可能未承接确认','No replay validation has been performed'])assert.ok(english.includes(expected),expected);
+  assert.equal(h.calls.length,1); // No translation/model call.
+});
+
+test('raw JSON retains all fields and images when copied; displayed JSON omits base64 only',async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();h.item.reviews=[{note:'原审阅意见'}];h.item.extra={unknown_field:42};let copied;
+  h.context.navigator={clipboard:{writeText:async text=>{copied=text;}}};
+  await h.els.reviewLogin.fire('submit');await flush();
+  const raw=h.els.reviewCards.querySelectorAll('details')[1];assert.equal(raw.open,false);
+  assert.ok(!raw.querySelectorAll('pre')[0].textContent.includes('base64,test'));
+  await raw.querySelectorAll('button').find(b=>b.textContent==='复制 JSON').fire('click');
+  assert.deepEqual(JSON.parse(copied),h.item);
+});
+
+for(const language of ['zh','en']) test(`malformed legacy evidence does not block review or lose raw records: ${language}`,async()=>{
+  const h=harness();h.context.window.ECE329I18n={language};
+  h.item.evidence=evidenceFixture();
+  h.item.evidence.evidence.event_chain.unshift(null,42,'legacy');
+  h.item.evidence.analysis_attempts=[null,false,{attempt:2,status:'completed'}];
+  let copied;h.context.navigator={clipboard:{writeText:async text=>{copied=text;}}};
+  await h.els.reviewLogin.fire('submit');await flush();
+  const panels=h.els.reviewCards.querySelectorAll('details');
+  assert.ok(h.find('content-'));
+  assert.match(treeText(panels[0]),language==='en'?/unsupported format/:/部分记录格式异常/);
+  assert.match(treeText(panels[0]),/继续。/);
+  await panels[1].querySelectorAll('button').find(b=>b.textContent===(language==='en'?'Copy JSON':'复制 JSON')).fire('click');
+  assert.deepEqual(JSON.parse(copied),h.item);
+  h.find('note-').value='保留审阅草稿';
+  h.item.evidence.evidence.event_chain=[];
+  h.item.evidence.evidence.reported_turn=null;
+  h.item.evidence.evidence.recent_turns=[null,{user:'最近的对话',assistant:''}];
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.equal(h.find('note-').value,'保留审阅草稿');
+  assert.match(treeText(h.els.reviewCards.querySelectorAll('details')[0]),/最近的对话/);
+});
+
+test('legacy empty excerpts are not asserted to be empty original replies and do not borrow submission state',async()=>{
+  const h=harness();h.item.evidence={evidence:{reported_turn:{assistant:'',user:'continue'},current_state:{stage:'HYPOTHESIS'}}};
+  await h.els.reviewLogin.fire('submit');await flush();const text=treeText(h.els.reviewCards.querySelectorAll('details')[0]);
+  assert.match(text,/原始正文是否为空未记录/);assert.match(text,/截断信息和历史状态仍为未知/);assert.doesNotMatch(text,/该轮回复正文为空|阶段未变化/);
+});
+
+test('an untouched editor refreshes to the latest server content without a spurious draft',async()=>{
+  const h=harness();await h.els.reviewLogin.fire('submit');await flush();h.item.version=2;h.item.content.summary='服务器更新';
+  await h.els.reviewLogin.fire('submit');await flush();assert.match(h.find('content-').value,/服务器更新/);
+  assert.ok(!h.els.reviewCards.querySelectorAll('button').some(b=>b.textContent==='已核对新版本，继续使用草稿'));
+});
+
+
+test('identical screenshots in different context roles retain all role previews',async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();const url=h.item.evidence.attachments[0].data_url;
+  h.item.evidence.attachments=['problem','before','after'].map(role=>({role,data_url:url}));
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.deepEqual(h.els.reviewCards.querySelectorAll('img').map(img=>img.alt),['问题对话截图','前文截图','后文截图']);
+});
+
+
+test('migrated legacy evidence shows upgrade limits without fabricating missing history',async()=>{
+  const h=harness();h.item.evidence={evidence:{evidence_schema_version:2,evidence_migration:{version:1,conflicting_fields_preserved:['turn:2:assistant']},reported_turn:{revision:2,assistant:'',recorded_fields:{},truncation_unknown_fields:['assistant']}}};
+  await h.els.reviewLogin.fire('submit');await flush();const text=treeText(h.els.reviewCards.querySelectorAll('details')[0]);
+  assert.match(text,/历史证据已自动升级/);assert.match(text,/部分历史字段不一致/);assert.match(text,/原始正文是否为空未记录/);assert.doesNotMatch(text,/该轮回复正文为空/);
+});
+
+
+for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT']) test(`migration and provider diagnostics switch both ways without translating evidence: ${mode}`,async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();
+  h.item.evidence.evidence.event_chain[1].mode=mode;
+  h.item.evidence.evidence.evidence_migration={version:1,conflicting_fields_preserved:['turn:2:assistant']};
+  h.item.evidence.analysis_attempts=[{attempt:1,provider:'deepseek',model:'deepseek-flash',phase:'check',status:'failed',code:'model_connection_error'}];
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.match(treeText(h.els.reviewCards.querySelectorAll('details')[0]),/模型连接失败/);
+  h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
+  const english=treeText(h.els.reviewCards.querySelectorAll('details')[0]);
+  for(const label of ['Historical evidence was upgraded automatically','Some historical fields conflict','Model connection failed','Checking','Reply body not recorded',mode==='GUIDED_DESIGN'?'Guided mode':'EMVR mode','继续。'])assert.ok(english.includes(label),label);
+  assert.doesNotMatch(english,/历史证据已自动升级|模型连接失败|问题前后对话/);
+  h.context.window.ECE329I18n.language='zh';h.context.window.listeners['ece329:language-changed']();
+  assert.match(treeText(h.els.reviewCards.querySelectorAll('details')[0]),/历史证据已自动升级/);
+  assert.equal(h.calls.length,1);
 });

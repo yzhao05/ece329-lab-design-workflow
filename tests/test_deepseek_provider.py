@@ -135,14 +135,19 @@ def test_deepseek_rejects_missing_fields_wrong_types_and_truncation(content, fin
             'type':'object','required':['answer'],'properties':{'answer':{'type':'integer'}}}}}}))
 
 
-def test_feedback_extraction_uses_deepseek_without_openai_key():
+@pytest.mark.parametrize('feedback_env,thinking', [
+    ({}, 'enabled'),
+    ({'ECE329_FEEDBACK_MODEL': 'deepseek-flash:fast'}, 'disabled'),
+])
+def test_feedback_extraction_uses_deepseek_without_openai_key(feedback_env, thinking):
     chat = ChatFixture()
     generator = OpenAIStageGenerator(model='deepseek-flash:fast', transport=ProviderResponsesTransport(
         deepseek=DeepSeekJSONTransport('fixture', http_transport=chat)))
-    result = ModelExperienceExtractor(generator).extract({'message':'重复询问', 'evidence':{}})
+    result = ModelExperienceExtractor(generator, environ=feedback_env).extract({'message':'重复询问', 'evidence':{}})
     assert result['useful'] and len(chat.requests) == 2
     assert chat.requests[0]['model'] == 'deepseek-flash'
-    assert chat.requests[0]['thinking']['type'] == 'disabled'
+    assert all(request['thinking']['type'] == thinking for request in chat.requests)
+    assert generator.model == 'deepseek-flash:fast'
     assert [request['max_tokens'] for request in chat.requests] == [8192, 4096]
 
 

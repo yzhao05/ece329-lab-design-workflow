@@ -122,3 +122,21 @@ a separate strong `ECE329_PROMPT_DEBUG_TOKEN` and send it in `X-ECE329-Debug-Tok
 The included SQLite store and in-process limiter are intended for one service instance. The Docker command intentionally runs one Gunicorn worker with multiple threads. Before scaling to multiple containers, replace SQLite with a shared database and the limiter with a shared service such as a gateway or Redis-backed limiter.
 
 The shared course code is admission control for a small class, not full user authentication. For an unrestricted public launch, put school SSO, an API gateway, or a bot challenge in front of `POST /v1/designs` and enforce an OpenAI project budget.
+
+
+## Automatic upgrades of existing feedback evidence
+
+`ExperienceStore` runs a local, transactional evidence migration during API startup, before feedback analysis workers start. Existing learned experiences already reference their source feedback ticket, so upgrading that ticket also upgrades the evidence displayed for the experience. No model is called and no learned rule, approval, review history, attempt count or model billing record is rewritten. Matching saved historical turns can restore missing context; submission-time state is never substituted for historical state. Unrecoverable fields remain unknown.
+
+The `experience_evidence_migrations` SQLite table records each processed ticket. Changed tickets retain their exact pre-migration payload in `previous_payload`; repeated startup does not reapply the migration. The backup follows source-ticket deletion. If original design history is no longer available, the saved feedback is still converted with explicit limitations. The maintainer reader identifies migrated records. New evidence already at schema version 2 is left unchanged.
+
+A Git push by itself only updates GitHub. The backend must deploy the new commit and keep the same persistent database:
+
+- If Render automatic deployment of `main` is already enabled, a successful Render deploy runs the migration automatically. No new backend variable is needed.
+- To have this repository trigger Render after the `test` and `container` jobs pass, copy the service's **Settings → Deploy Hook** URL into GitHub **Settings → Secrets and variables → Actions → New repository secret**, named `RENDER_DEPLOY_HOOK_URL`. Do not put this secret in the frontend or commit it. The workflow deploys only the latest `main` commit and sends its exact commit SHA. Use one deployment trigger to avoid duplicate deployments; turn off Render's direct automatic deployment if you choose the CI hook.
+- Without a hook, CI prints a warning and leaves backend deployment to your hosting configuration. The workflow does not claim that GitHub Pages updated the production database.
+- Keep `ECE329_DATABASE_PATH` on the existing persistent disk (for example `/data/ece329.sqlite3`). A different or ephemeral database cannot contain the old experiences.
+
+Check the `deploy-backend` job and then Render's successful deployment status. A hook acceptance only means the deploy was requested, not completed. Once the new backend starts, reload the maintainer record and look for “历史证据已自动升级”. For a server-side audit, inspect the migration table with your existing database administration tools. Do not expose a public migration endpoint or run migration against a fresh CI database as a substitute for upgrading production.
+
+Render deployment hooks: https://render.com/docs/deploy-hooks
