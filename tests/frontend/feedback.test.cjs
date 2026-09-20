@@ -111,6 +111,7 @@ class Element {
   replaceChildren(...items) { this.children = items; }
   showModal() { this.open = true; }
   close() { this.open = false; this.fire("close"); }
+  click() { return this.fire("click"); }
   focus() {}
   setAttribute(name,value) { this[name]=value; }
   querySelectorAll(tag) { return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag)]); }
@@ -134,6 +135,8 @@ function uiHarness() {
       return { feedback: [{ id: "record", design_id: context.state.designId, message: "<img src=x onerror=attack()>", status: "queued", revision: 1, attempts: 0, durable: true }] };
     },
   };
+  context.CustomEvent=class { constructor(type, options) { this.type=type;this.detail=options.detail; } };
+  win.dispatchEvent=event=>{for(const listener of win.listeners[event.type]||[])listener(event);return true;};
   vm.createContext(context);
   for (const name of ["feedback-client", "feedback-ui"]) vm.runInContext(fs.readFileSync(path.join(root, `docs/assets/${name}.js`), "utf8"), context);
   return { context, els, win, timers, calls, finish: value => resolveSubmit(value) };
@@ -276,3 +279,23 @@ for (const transition of ['refresh', 'retry']) {
     assert.equal(h.els.feedbackSwitchRun.disabled,false);
   });
 }
+
+
+test('saved Final review resumes download without another feedback history request',async()=>{
+  const h=uiHarness();let saved;
+  h.win.addEventListener('ece329:final-review-saved',event=>{saved=event.detail;});
+  h.win.dispatchEvent({type:'ece329:final-review',detail:{designId:'a'}});
+  await flush();
+  assert.equal(h.els.feedbackCategory.value,'final_review');
+  h.els.feedbackMessage.value='体验良好，确认完成评价';
+  await h.els.feedbackMessage.fire('input');
+  const submitting=h.els.feedbackForm.fire('submit');
+  await flush();
+  const getCount=h.calls.filter(([,options])=>options.method==='GET').length;
+  h.finish({id:'review',design_id:'a',category:'final_review',status:'queued',durable:true});
+  await submitting;
+  assert.equal(saved.designId,'a');
+  assert.equal(h.els.feedbackDialog.open,false);
+  assert.equal(h.timers.size,0);
+  assert.equal(h.calls.filter(([,options])=>options.method==='GET').length,getCount);
+});

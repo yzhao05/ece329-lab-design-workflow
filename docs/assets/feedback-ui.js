@@ -15,15 +15,18 @@
   let refreshPending = false;
   let reportTarget = {};
   let openingTarget = null;
+  let finalReviewEntry = false;
   let savedTickets = [];
   const current = bound => client === bound && generation === designGeneration && state.designId === bound?.designId;
   const status = text => { el.Status.textContent = text; };
   const stopPolling = () => { clearTimeout(timer); timer = null; };
   function controls(disabled) {
+    window.ECE329FeedbackImages?.disabled(disabled);
     for (const name of ["Message", "Category", "Submit", "Scope"]) el[name].disabled = disabled;
   }
   function saveDraft() {
-    if (client && current(client)) client.edit(el.Message.value, el.Category.value, {...reportTarget, scope: el.Scope.value || 'global'});
+    if (client && current(client)) client.edit(el.Message.value, el.Category.value, {...reportTarget, scope: el.Scope.value || 'global',
+      ...(window.ECE329FeedbackImages?.payload(el.Category.value) || {})});
   }
   function updateSwitcher(bound, preferOther = false) {
     if (!current(bound)) return;
@@ -168,6 +171,8 @@
     }
     el.Message.value = client.draft?.message || "";
     el.Category.value = client.draft?.category || "other";
+    if (finalReviewEntry) el.Category.value = 'final_review';
+    window.ECE329FeedbackImages?.restore(client.draft, el.Category.value);
     el.Scope.value = client.draft?.scope || 'global';
     reportTarget = openingTarget || Object.fromEntries(['stage','revision','telemetry_id'].filter(key => client.draft?.[key] != null).map(key => [key, client.draft[key]]));
     openingTarget = null;
@@ -183,6 +188,7 @@
     event.preventDefault();
     const bound = client;
     if (!current(bound) || bound.busy) return;
+    if (window.ECE329FeedbackImages?.validate(el.Category.value) === false) return;
     saveDraft();
     if (!bound.draft?.message.trim()) { status("请先描述问题。"); return; }
     controls(true);
@@ -191,17 +197,24 @@
       const receipt = await bound.submit();
       if (!current(bound)) return;
       el.Message.value = "";
+      window.ECE329FeedbackImages?.restore(null, el.Category.value);
       reportTarget = {};
       el.Target.textContent = '反馈目标：当前设计';
       status(`提交成功：反馈已保存，处理状态见下方记录。${receipt.durable ? "" : "当前后端使用内存存储，重启后记录会丢失。"}`);
       polls = 0;
-      await refresh();
+      if(current(bound) && finalReviewEntry && receipt.category === 'final_review') {
+        el.Dialog.close();
+        window.dispatchEvent(new CustomEvent('ece329:final-review-saved',{detail:{designId:bound.designId}}));
+      } else {
+        await refresh();
+      }
     } catch (error) {
       if (current(bound)) status(`尚未确认提交成功：${error.message}。内容已保留，可直接重试，不会重复创建记录。`);
     } finally { if (current(bound)) controls(false); }
   });
   el.Message.addEventListener("input", saveDraft);
-  el.Category.addEventListener("change", saveDraft);
+  el.Category.addEventListener("change", () => { window.ECE329FeedbackImages?.show(el.Category.value);saveDraft(); });
+  window.addEventListener('ece329:feedback-images-changed', saveDraft);
   el.Scope.addEventListener('change', saveDraft);
   el.Refresh.addEventListener("click", () => { polls = 0; refresh(); });
   el.Switch.addEventListener('click',()=>{
@@ -216,7 +229,7 @@
     await retryTicket(client,el.RetryTicket.value,el.RetryModel.value);
   });
   el.Close.addEventListener("click", () => el.Dialog.close());
-  el.Dialog.addEventListener("close", stopPolling);
+  el.Dialog.addEventListener("close", () => {stopPolling();finalReviewEntry=false;});
   window.addEventListener("ece329:design-changed", () => {
     stopPolling();
     el.Dialog.close();
@@ -224,6 +237,12 @@
     savedTickets = [];
     reportTarget = {};
     openingTarget = null;
+    finalReviewEntry = false;
+    window.ECE329FeedbackImages?.restore(null, 'other');
+  });
+  window.addEventListener('ece329:final-review', event => {
+    if(event.detail.designId !== state.designId || client?.busy) return;
+    finalReviewEntry=true;openingTarget={};el.Button.click();
   });
   window.addEventListener('ece329:report-output', event => {
     if (event.detail.designId !== state.designId || client?.busy) return;

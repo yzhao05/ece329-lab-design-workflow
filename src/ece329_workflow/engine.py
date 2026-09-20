@@ -6697,7 +6697,7 @@ class WorkflowEngine:
         ):
             response["guided_export_ready"] = True
             response["guided_export_url"] = (
-                f"/v1/designs/{session.design_id}/guided-summary.txt"
+                f"/v1/designs/{session.design_id}/guided-summary.pdf"
             )
         _cache_turn_response(session, request, response)
         self.store.save(session, expected_revision=expected_revision)
@@ -6795,7 +6795,7 @@ class WorkflowEngine:
                 response["builder_input_url"] = f"/v1/designs/{session.design_id}/builder-gate1-input.pdf"
         elif session.status is WorkflowStatus.COMPLETE:
             response.update(guided_export_ready=True,
-                            guided_export_url=f"/v1/designs/{session.design_id}/guided-summary.txt")
+                            guided_export_url=f"/v1/designs/{session.design_id}/guided-summary.pdf")
         _cache_turn_response(session, request, response)
         self.store.save(session, expected_revision=expected_revision)
         return response
@@ -6841,7 +6841,7 @@ class WorkflowEngine:
         elif session.status is WorkflowStatus.COMPLETE:
             result["guided_export_ready"] = True
             result["guided_export_url"] = (
-                f"/v1/designs/{session.design_id}/guided-summary.txt"
+                f"/v1/designs/{session.design_id}/guided-summary.pdf"
             )
         return result
 
@@ -6912,6 +6912,31 @@ class WorkflowEngine:
             f"{confirmed_record}\n"
         )
         return body.encode("utf-8")
+
+    def build_guided_summary_report(self, design_id: str) -> dict[str, Any]:
+        # Reuse the existing completion and student-authorship checks.
+        self.render_guided_summary_text(design_id)
+        session = self.store.get(design_id)
+        snapshot = stage_design_state_snapshot(session)
+        sections = [{'title': '实验想法完善', 'items': [
+            {'label': '已确认设计', 'value': format_design_summary(session)}]}]
+        for title, fields in (
+            ('变量与条件', [('independent_variable', '自变量'), ('observations', '观察量'), ('controlled_conditions', '控制条件')]),
+            ('概念实验流程', [('procedure_steps', '实验流程')]),
+            ('预期数据可视化', [('visualization_plan', '可视化方式')]),
+            ('可能结果及解释', [('result_interpretation', '结果解释')]),
+            ('设计价值与局限', [('design_value', '设计价值'), ('limitations', '局限与边界')]),
+        ):
+            sections.append({'title': title, 'items': [
+                {'label': label, 'value': str(snapshot[field])} for field, label in fields if snapshot.get(field)
+            ] or [{'label': '设计记录', 'value': '未记录独立条目，请参阅已确认设计及学生总结。'}]})
+        sections.append({'title': '总结 PDF', 'items': [{'label': '学生完成的总结',
+            'value': session.design_context['synthesis']['student_summary']}]})
+        return {'title': 'ECE329 引导模式实验设计总结', 'design_id': session.design_id,
+                'source_design': source_stamp(session), 'status': 'complete',
+                'idea': str(session.design_context.get('idea', {}).get('original', '')),
+                'sections': sections,
+                'disclaimer': '本报告记录课程实验设计及学生总结，不代表已完成实际实验、测量或 Unity 实现。'}
 
     def render_report_pdf(self, design_id: str) -> bytes:
         session = self.store.get(design_id)

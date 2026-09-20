@@ -1382,3 +1382,7 @@ a:focus-visible {
 .unity-questions button { margin-top: 12px; }
 
 .unity-node-id { fill: #163c4f; font: 18px system-ui; }
+
+/* Keep both report languages available in a narrow sidebar. */
+.report-language-buttons { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 8px; }
+.report-language-buttons .report-download-button { min-width: 0; overflow-wrap: anywhere; }

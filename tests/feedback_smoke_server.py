@@ -24,6 +24,7 @@ from tests.test_feedback_pipeline import extraction_response
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--database', required=True)
+    parser.add_argument('--final-review', action='store_true', help='Enable a completed Guided fixture')
     parser.add_argument('--models', action='store_true', help='Enable model selection with the test transport')
     parser.add_argument('--deepseek', action='store_true', help='Include the real DeepSeek protocol adapter with a fake HTTP service')
     parser.add_argument('--feedback-switch', action='store_true', help='Simulate invalid OpenAI feedback output and a working DeepSeek backup')
@@ -65,8 +66,35 @@ def main():
         meter(generator.transport)
     service = FeedbackService(ExperienceStore(args.database), ModelExperienceExtractor(generator))
     api = WorkflowAPI(engine, APISettings(allowed_origins=('*',), feedback_admin_token='smoke-maintainer', rate_limit_requests=500), feedback_service=service)
+    if args.final_review:
+        from ece329_workflow.localization import DisplayTranslator
+        from ece329_workflow.openai_generator import OpenAIStageGenerator
+        from tests.test_model_selection import ModelTransport
+        api.translator = DisplayTranslator(OpenAIStageGenerator(transport=ModelTransport()))
     def app(environ, start_response):
         path = unquote(environ['PATH_INFO'])
+        if args.final_review and path == '/__smoke/emvr-complete':
+            import hashlib
+            from tools.export_emvr37_review import reviewed_engine
+            _, session = reviewed_engine()
+            session.access_token_hash = hashlib.sha256(b'smoke-emvr-pdf').hexdigest()
+            engine.store.save(session)
+            result = engine.get_design(session.design_id)
+            result['design_access_token'] = 'smoke-emvr-pdf'
+            start_response('200 OK', [('Content-Type', 'application/json')])
+            return [json.dumps(result).encode()]
+        if args.final_review and path == '/__smoke/guided-complete':
+            from ece329_workflow.models import WorkflowStatus, Stage
+            created = engine.create_design('比较电流大小和磁场强度', interaction_state='GUIDED_DESIGN')
+            session = engine.store.get(created['design_id'])
+            session.status = WorkflowStatus.COMPLETE
+            session.current_stage_index = len(Stage) - 1
+            session.design_context['synthesis'] = {'student_summary': '我比较电流变化与磁场强度之间的关系。'}
+            engine.store.save(session)
+            result = engine.get_design(session.design_id)
+            result.update({key: created[key] for key in ('design_access_token', 'design_resume_token')})
+            start_response('200 OK', [('Content-Type', 'application/json')])
+            return [json.dumps(result).encode()]
         if args.feedback_switch and path == '/__smoke/feedback-requests':
             start_response('200 OK', [('Content-Type', 'application/json')])
             return [json.dumps(feedback_requests).encode()]

@@ -103,7 +103,7 @@ python -m http.server 4173 --directory docs
 4. 预期数据可视化窗口
 5. 可能结果及解释
 6. 设计价值、可行性与局限性
-7. 学生总结／EMVR最终方案
+7. 总结 PDF（Guided）／EMVR最终方案
 
 第1大阶段允许多轮发散、比较、组合和完善。方向收敛后形成实验大纲雏形，随后由完整性检查器同时评估七项内容。课程映射和理论依据由Agent依据课程资料补充；其余缺口在后续对话中按优先级逐轮明确。一条学生回复可以补齐多项，已经明确的内容不会被重新询问。七项全部明确后，工作流直接进入“变量与条件”。
 
@@ -300,7 +300,7 @@ GET /v1/designs/{design_id}?include_history=true    (需要Bearer令牌)
 DELETE /v1/designs/{design_id}                      (需要Bearer令牌)
 GET /v1/designs/{design_id}/report.pdf              (EMVR完成后可用，需要Bearer令牌)
 GET /v1/designs/{design_id}/builder-gate1-input.pdf (EMVR完成后可用，需要Bearer令牌)
-GET /v1/designs/{design_id}/guided-summary.txt      (GUIDED完成后可用，需要Bearer令牌)
+GET /v1/designs/{design_id}/guided-summary.pdf      (GUIDED完成且已提交当前版本Final review后可用，需要Bearer令牌)
 ```
 
 ## 真实模型全流程评测
@@ -369,6 +369,8 @@ X-ECE329-Debug-Token: <单独的调试令牌>
 除上述学生确认字段外，后端还要求 `experiment_outline_seed` 已形成，并且 `idea_development.complete=true`。缺少任一项时，即使请求 `complete_stage=true`，工作流仍停留在“实验想法完善”，继续补当前缺口。
 
 ## 引导状态第7大阶段（内部步骤13）
+
+第7大阶段前端名称为“总结 PDF”。学生总结完成后，使用 EMVR 学生报告的同一排版器导出当前设计记录与学生总结。首次下载弹窗要求提交 Final review；涉及具体对话问题时上传问题及前后文截图，保存成功即可下载，无需等待提炼。详见[反馈层说明](docs/feedback-layer.md#guided-总结-pdf-与-final-review)。
 
 第7大阶段不会输出完整 Proposal。系统逐部分要求学生总结，并只对学生草稿提供当前部分的反馈。全部总结由学生完成后，客户端可写入：
 
@@ -479,3 +481,6 @@ EMVR Builder PDF 的本机目录定位、包内边界、内嵌资料和 Value �
 阶段1会在后端持久保存 `topic_anchor`、`current_focus`、`focus_history`、已展示图景签名和当前待明确内容。网页按钮携带稳定 `option_id`，由确定性程序处理；学生键入的序号、指代、补充、拒绝、换例子或换题要求则统一交给结合上一问、待办和完整设计状态的语义解析器，不用关键词表猜测。明显的代码执行、提示注入和用途劫持只由安全规则拒绝。在线模型暂时不可用时，离线回退仅保守地把有实质内容的长回复绑定到当前开放问题，不推断“保留、继续、修改”等上下文决定。学生选定方向后，`alternative_ideas` 会变为空数组；后续请求参考只围绕已锁定方向展开，不会再次播放三幅图景。
 
 内置 `InMemorySessionStore` 会在进程重启后清空会话。生产配置使用 `ECE329_DATABASE_PATH` 启用SQLite，并已对同一 `design_id` 串行处理、使用乐观版本检查和持久化 `turn_id` 响应缓存；这适合Render上的单实例服务。若以后扩展到多个后端实例，应改用共享数据库和跨实例锁。创建接口的 `Idempotency-Key` 缓存是单进程缓存，主要覆盖浏览器超时重试；设计创建成功后的每轮 `turn_id` 幂等记录则随设计会话持久化。
+
+
+所有 PDF 下载入口都同时提供中文版与英文版：Guided 总结、EMVR 学生报告、EMVR Builder Gate 1 输入报告。按钮明确指定 `language=zh` 或 `language=en`，独立于界面语言；文件名带 `-zh.pdf` 或 `-en.pdf`。Guided 经 Final review 弹窗返回后保持最初选择的报告语言。英文版沿用现有后端翻译服务，不需要新增环境变量；翻译失败会明确显示下载失败，不以中文版冒充英文版。

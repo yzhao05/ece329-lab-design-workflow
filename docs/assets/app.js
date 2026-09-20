@@ -32,7 +32,7 @@ const STAGES = [
   ["EXPECTED_DATA_VISUALIZATION", "预期数据可视化"],
   ["RESULT_INTERPRETATION", "可能结果及解释"],
   ["DESIGN_VALUE_AND_LIMITATIONS", "设计价值与局限"],
-  ["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "学生总结"],
+  ["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "总结 PDF"],
 ];
 
 const IDEA_DEVELOPMENT_STAGE_IDS = Object.freeze(STAGES.slice(0, 7).map(([id]) => id));
@@ -242,7 +242,9 @@ const dom = {
   taskReportIdea: document.querySelector("#taskReportIdea"),
   taskReportSections: document.querySelector("#taskReportSections"),
   downloadReportButton: document.querySelector("#downloadReportButton"),
+  downloadReportEnglishButton: document.querySelector("#downloadReportEnglishButton"),
   downloadBuilderInputButton: document.querySelector("#downloadBuilderInputButton"),
+  downloadBuilderInputEnglishButton: document.querySelector("#downloadBuilderInputEnglishButton"),
   qualityReviewCard: document.querySelector("#qualityReviewCard"),
   qualityReviewStatus: document.querySelector("#qualityReviewStatus"),
   qualityCausalChain: document.querySelector("#qualityCausalChain"),
@@ -258,6 +260,7 @@ const dom = {
   undoVersionButton: document.querySelector("#undoVersionButton"),
   versionResults: document.querySelector("#versionResults"),
   downloadGuidedSummaryButton: document.querySelector("#downloadGuidedSummaryButton"),
+  downloadGuidedSummaryEnglishButton: document.querySelector("#downloadGuidedSummaryEnglishButton"),
   toast: document.querySelector("#toast"),
 };
 
@@ -348,6 +351,8 @@ function saveState() {
 
 function invalidateDesignRequests() {
   designGeneration += 1;
+  pendingGuidedDownload = null;
+  document.getElementById('summaryFeedbackGate').close();
   window.dispatchEvent(new Event("ece329:design-changed"));
   for (const controller of activeRequestControllers) controller.abort();
   activeRequestControllers.clear();
@@ -1085,7 +1090,9 @@ function renderTaskReport() {
     dom.taskReportSections.append(details);
   });
   dom.downloadReportButton.hidden = !state.reportReady || !state.reportUrl;
+  dom.downloadReportEnglishButton.hidden = dom.downloadReportButton.hidden;
   dom.downloadBuilderInputButton.hidden = !state.builderInputReady || !state.builderInputUrl;
+  dom.downloadBuilderInputEnglishButton.hidden = dom.downloadBuilderInputButton.hidden;
 }
 
 function renderQualityReview() {
@@ -1183,6 +1190,7 @@ function renderQualityReview() {
   dom.viewVersionsButton.disabled = !canUseVersions;
   dom.undoVersionButton.disabled = !canUseVersions;
   dom.downloadGuidedSummaryButton.hidden = !state.guidedExportReady || !state.guidedExportUrl;
+  dom.downloadGuidedSummaryEnglishButton.hidden = dom.downloadGuidedSummaryButton.hidden;
 }
 
 function renderVersionResults() {
@@ -1245,76 +1253,61 @@ function formatVersionValue(value) {
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
-async function downloadTaskReport() {
-  if (!state.designId || !state.reportUrl || !apiBase()) return;
-  dom.downloadReportButton.disabled = true;
-  dom.downloadReportButton.textContent = "正在生成 PDF…";
-  try {
-    const response = await authorizedDesignDownload(state.reportUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `ece329-emvr-${state.designId}.pdf`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    showToast("PDF 总结已下载");
-  } catch (error) {
-    console.warn("Unable to download EMVR report", error);
-    showToast("PDF 下载失败，请确认课程服务已更新后重试");
-  } finally {
-    dom.downloadReportButton.disabled = false;
-    dom.downloadReportButton.textContent = "下载学生版设计报告 PDF";
-  }
-}
+const reportDownloadsInFlight = new Set();
+let pendingGuidedDownload = null;
+async function downloadTaskReport(language = 'zh') { return downloadReportPdf('report', language); }
+async function downloadBuilderInput(language = 'zh') { return downloadReportPdf('builder', language); }
+async function downloadGuidedSummary(language = 'zh') { return downloadReportPdf('guided', language); }
 
-async function downloadBuilderInput() {
-  if (!state.designId || !state.builderInputUrl || !apiBase()) return;
-  dom.downloadBuilderInputButton.disabled = true;
-  dom.downloadBuilderInputButton.textContent = "正在生成 Builder 输入 PDF…";
+async function downloadReportPdf(kind, language) {
+  if (!['zh', 'en'].includes(language)) return;
+  const config = {
+    report: {url:state.reportUrl, stem:'Report', filename:'ece329-emvr'},
+    builder: {url:state.builderInputUrl, stem:'BuilderInput', filename:'ece329-emvr-builder-gate1'},
+    guided: {url:state.guidedExportUrl, stem:'GuidedSummary', filename:'ece329-guided-summary'},
+  }[kind];
+  if (!state.designId || !config?.url || !apiBase() || reportDownloadsInFlight.has(kind)) return;
+  const designId = state.designId, epoch = designGeneration;
+  const current = () => state.designId === designId && designGeneration === epoch;
+  const buttons = [dom[`download${config.stem}Button`], dom[`download${config.stem}EnglishButton`]];
+  const controller = new AbortController();
+  activeRequestControllers.add(controller);
+  const timeout = setTimeout(() => controller.abort(), Math.min(600000, Math.max(1000, Number(CONFIG.REQUEST_TIMEOUT_MS) || 180000)));
+  reportDownloadsInFlight.add(kind);
+  buttons.forEach(button => button.disabled = true);
   try {
-    const response = await authorizedDesignDownload(state.builderInputUrl);
+    const response = await authorizedDesignDownload(config.url.replace(/\.txt(?=\?|$)/, '.pdf'), language, controller.signal);
+    if (!current()) return;
+    if (kind === 'guided' && response.status === 409) {
+      const error = await response.json();
+      if (!current()) return;
+      if (error.error === 'FINAL_REVIEW_REQUIRED') {
+        pendingGuidedDownload = {designId, epoch, language};
+        document.getElementById('summaryFeedbackGate').showModal();
+        return;
+      }
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const blob = await response.blob();
+    if (!current()) return;
     const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
+    const link = document.createElement('a');
     link.href = url;
-    link.download = `ece329-emvr-builder-gate1-${state.designId}.pdf`;
+    link.download = `${config.filename}-${designId}-${language}.pdf`;
     document.body.append(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-    showToast("Builder Gate 1 输入 PDF 已下载");
+    if (kind === 'guided') pendingGuidedDownload = null;
+    showToast('PDF 总结已下载');
   } catch (error) {
-    console.warn("Unable to download Builder Gate 1 input", error);
-    showToast("Builder 输入 PDF 下载失败，请确认课程服务已更新后重试");
+    console.warn('Unable to download report PDF', error);
+    if (current()) showToast('PDF 下载失败，请确认课程服务已更新后重试');
   } finally {
-    dom.downloadBuilderInputButton.disabled = false;
-    dom.downloadBuilderInputButton.textContent = "下载 Builder Gate 1 输入 PDF";
-  }
-}
-
-async function downloadGuidedSummary() {
-  if (!state.designId || !state.guidedExportUrl || !apiBase()) return;
-  try {
-    const response = await authorizedDesignDownload(state.guidedExportUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `ece329-guided-summary-${state.designId}.txt`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    showToast("你的设计总结已导出");
-  } catch (error) {
-    console.warn("Unable to download guided summary", error);
-    showToast("总结导出失败，请稍后重试");
+    clearTimeout(timeout);
+    activeRequestControllers.delete(controller);
+    reportDownloadsInFlight.delete(kind);
+    buttons.forEach(button => button.disabled = false);
   }
 }
 
@@ -1660,8 +1653,11 @@ async function authorizedDesignApiRequest(path, options = {}) {
   }
 }
 
-async function authorizedDesignDownload(path) {
-  if (window.ECE329I18n) path += `${path.includes('?') ? '&' : '?'}language=${window.ECE329I18n.language}`;
+async function authorizedDesignDownload(path, language = window.ECE329I18n?.language || 'zh', signal) {
+  const [pathname, query = ''] = path.split('?');
+  const params = new URLSearchParams(query);
+  params.set('language', language);
+  path = `${pathname}?${params}`;
   const requestGeneration = designGeneration;
   let token = await ensureDesignAccessToken();
   if (requestGeneration !== designGeneration) {
@@ -1671,6 +1667,7 @@ async function authorizedDesignDownload(path) {
     throw new ApiError("Missing design access token", 401, "access_denied");
   }
   const request = () => fetch(`${apiBase()}${path}`, {
+    signal,
     headers: { Authorization: `Bearer ${token}` },
   });
   let response = await request();
@@ -1678,6 +1675,9 @@ async function authorizedDesignDownload(path) {
   if (requestGeneration !== designGeneration) return response;
   sessionStorage.removeItem(DESIGN_TOKEN_KEY);
   token = await ensureDesignAccessToken();
+  if (requestGeneration !== designGeneration || signal?.aborted) {
+    throw new DOMException("Design session changed or download cancelled", "AbortError");
+  }
   if (!token) return response;
   response = await request();
   return response;
@@ -2809,9 +2809,25 @@ dom.modelSelect.addEventListener("change", () => {
   renderModelSelection();
 });
 dom.refreshModels.addEventListener("click", loadModelCatalog);
-dom.downloadReportButton.addEventListener("click", downloadTaskReport);
-dom.downloadBuilderInputButton.addEventListener("click", downloadBuilderInput);
-dom.downloadGuidedSummaryButton.addEventListener("click", downloadGuidedSummary);
+dom.downloadReportButton.addEventListener("click", () => downloadTaskReport('zh'));
+dom.downloadReportEnglishButton.addEventListener("click", () => downloadTaskReport('en'));
+dom.downloadBuilderInputButton.addEventListener("click", () => downloadBuilderInput('zh'));
+dom.downloadBuilderInputEnglishButton.addEventListener("click", () => downloadBuilderInput('en'));
+dom.downloadGuidedSummaryButton.addEventListener("click", () => downloadGuidedSummary('zh'));
+dom.downloadGuidedSummaryEnglishButton.addEventListener("click", () => downloadGuidedSummary('en'));
+document.getElementById('summaryFeedbackGate').addEventListener('cancel', () => {pendingGuidedDownload = null;});
+document.getElementById('summaryFeedbackGo').addEventListener('click', () => {
+  document.getElementById('summaryFeedbackGate').close();
+  window.dispatchEvent(new CustomEvent('ece329:final-review', {detail:{designId:state.designId}}));
+});
+document.getElementById('summaryFeedbackCancel').addEventListener('click', () => {
+  pendingGuidedDownload = null;
+  document.getElementById('summaryFeedbackGate').close();dom.chatInput.focus();
+});
+window.addEventListener('ece329:final-review-saved', event => {
+  const pending = pendingGuidedDownload;
+  if (pending && event.detail.designId === pending.designId && pending.designId === state.designId && pending.epoch === designGeneration) void downloadGuidedSummary(pending.language);
+});
 dom.viewVersionsButton.addEventListener("click", () => sendVersionAction(
   { action: "VIEW_RECENT" },
   "查看最近的设计修改",

@@ -108,7 +108,7 @@ test('all feedback shows both submissions even when no experiences were extracte
   assert.equal(h.els.reviewNext.disabled,true);
 });
 
-test('feedback evidence loads on demand and linked experience uses an exact ID',async()=>{
+test('feedback evidence opens and loads by default without duplicate toggle requests',async()=>{
   const id='b'.repeat(32),experienceId='d'.repeat(32);
   const h=harness({filter:'feedback:all',getResponse:url=>url.endsWith('/'+id)
     ? {evidence:{extraction_candidate:{summary:'证据不足，未生成规则'}}}
@@ -117,7 +117,9 @@ test('feedback evidence loads on demand and linked experience uses an exact ID',
         total:1,filtered_total:1,counts:{duplicate:1},durable:true}});
   await h.els.reviewLogin.fire('submit');await flush();
   const details=h.els.reviewCards.querySelectorAll('details')[0];
-  assert.equal(h.calls.length,1); details.open=true;await details.fire('toggle');
+  assert.equal(details.open,true);
+  assert.equal(details.querySelectorAll('pre').length,1);
+  assert.equal(h.calls.length,2);await details.fire('toggle');
   assert.equal(h.calls.length,2);await details.fire('toggle');assert.equal(h.calls.length,2);
   await h.els.reviewCards.querySelectorAll('button')[0].fire('click');await flush();
   assert.ok(h.calls[2].url.endsWith('?experience_id='+experienceId));
@@ -140,7 +142,7 @@ test('maintainer retry double click sends one request and refreshes without a de
   assert.equal(h.calls.filter(c=>c.options.method==='POST').length,1);
   assert.ok(h.calls.at(-1).url.endsWith(`/v1/feedback/tickets/${id}/retry`));
   h.finish();await saving;
-  assert.equal(h.calls.filter(c=>c.options.method!=='POST').length,2);
+  assert.equal(h.calls.filter(c=>c.options.method!=='POST' && c.url.includes('?')).length,2);
   assert.ok(h.calls.every(c=>!c.url.includes('/v1/designs/')));
 });
 
@@ -152,7 +154,7 @@ test('logging out during maintainer retry prevents late data from reappearing',a
   const saving=h.els.reviewCards.querySelectorAll('button')[0].fire('click');await flush();
   await h.els.reviewLogout.fire('click');h.finish();await saving;
   assert.equal(h.els.reviewCards.children.length,0);
-  assert.equal(h.calls.length,2);
+  assert.equal(h.calls.length,3);
   assert.equal(h.els.reviewStatus.textContent,'令牌已清除。');
 });
 

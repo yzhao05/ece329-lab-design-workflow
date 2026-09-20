@@ -1,0 +1,73 @@
+"use strict";
+// Local fixture only: tests.feedback_smoke_server --final-review --database <new-db>
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+const fs=require('node:fs');
+const base=process.argv[2];
+if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base || ''))throw Error('Local fixture URL required');
+const output=path.resolve(__dirname,'../.test-tmp/final-review-browser');fs.mkdirSync(output,{recursive:true});
+(async()=>{
+  const browser=await chromium.launch({headless:true,executablePath:process.env.ECE329_SMOKE_BROWSER});
+  const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
+  const errors=[];context.on('page',page=>page.on('pageerror',error=>errors.push(error.message)));
+  try {
+    const page=await context.newPage();await page.goto(base);
+    const response=await context.request.get(`${base}/__smoke/guided-complete`);
+    assert.equal(response.status(),200);const design=await response.json();
+    await page.evaluate(design=>{invalidateDesignRequests();applyDesignSnapshot(design);saveState();render();},design);
+    await page.locator('#downloadGuidedSummaryButton').click();
+    await page.locator('#summaryFeedbackGate[open]').waitFor();
+    await page.screenshot({path:path.join(output,'gate.png')});
+    await page.locator('#summaryFeedbackCancel').click();
+    assert.equal(await page.locator('#summaryFeedbackGate').evaluate(el=>el.open),false);
+    await page.locator('#downloadGuidedSummaryEnglishButton').click();
+    await page.locator('#summaryFeedbackGo').click();
+    assert.equal(await page.locator('#feedbackCategory').inputValue(),'final_review');
+    await page.locator('#feedbackMessage').fill('已完成设计。某段对话出现重复提问，请结合截图核对。');
+    await page.locator('#feedbackHasProblem').check();
+    await page.locator('#feedbackSubmit').click();
+    assert.match(await page.locator('#feedbackImageStatus').innerText(),/三张截图/);
+    const png=await page.screenshot();
+    for(const role of ['Problem','Before','After'])await page.locator(`#feedbackImage${role}`).setInputFiles({name:role+'.png',mimeType:'image/png',buffer:png});
+    await page.waitForFunction(()=>document.querySelectorAll('#feedbackImagePreviews img').length===3);
+    await page.screenshot({path:path.join(output,'feedback.png')});
+    const downloaded=page.waitForEvent('download');await page.locator('#feedbackSubmit').click();
+    const download=await downloaded;assert.match(download.suggestedFilename(),/-en\.pdf$/);
+    await download.saveAs(path.join(output,'guided-summary-en.pdf'));
+    assert.equal(await page.locator('#feedbackDialog').evaluate(el=>el.open),false);
+    const chineseDownload=page.waitForEvent('download');
+    await page.locator('#downloadGuidedSummaryButton').click();
+    const chinese=await chineseDownload;assert.match(chinese.suggestedFilename(),/-zh\.pdf$/);
+    await chinese.saveAs(path.join(output,'guided-summary-zh.pdf'));
+    const tickets=await(await context.request.get(`${base}/v1/designs/${design.design_id}/feedback`,{headers:{Authorization:`Bearer ${design.design_access_token}`}})).json();
+    assert.equal(tickets.feedback.length,1);assert.equal(tickets.feedback[0].category,'final_review');
+    const review=await context.newPage();await review.goto(`${base}/feedback-review.html`);
+    await review.locator('#reviewToken').fill('smoke-maintainer');await review.locator('#reviewLogin button[type=submit]').click();
+    await review.waitForFunction(()=>document.querySelectorAll('.feedback-image-gallery img').length===3);
+    assert.equal(await review.locator('.feedback-image-gallery img').evaluateAll(images=>images.every(img=>img.complete&&img.naturalWidth>0)),true);
+    assert.ok(!(await review.locator('#reviewCards pre').first().textContent()).includes('base64'));
+    await review.screenshot({path:path.join(output,'maintainer.png')});
+    await page.locator('#languageToggle').click();
+    await page.waitForFunction(()=>document.querySelector('#downloadGuidedSummaryButton').textContent.includes('Download summary (Chinese PDF)'));
+    await page.locator('#feedbackButton').click();
+    await page.locator('#feedbackCategory').selectOption('final_review');
+    await page.waitForFunction(()=>document.querySelector('label[for=feedbackImageProblem]').textContent.includes('Conversation issue screenshot'));
+    await page.locator('#feedbackClose').click();
+    const emvrResponse=await context.request.get(`${base}/__smoke/emvr-complete`);
+    assert.equal(emvrResponse.status(),200);
+    const emvr=await emvrResponse.json();
+    await page.evaluate(design=>{invalidateDesignRequests();applyDesignSnapshot(design);saveState();render();},emvr);
+    for(const stem of ['Report','BuilderInput'])for(const [suffix,language] of [['','zh'],['English','en']]) {
+      const nextDownload=page.waitForEvent('download');
+      await page.locator(`#download${stem}${suffix}Button`).click();
+      const file=await nextDownload;assert.ok(file.suggestedFilename().endsWith(`-${language}.pdf`));
+      await file.saveAs(path.join(output,`${stem}-${language}.pdf`));
+    }
+    await page.screenshot({path:path.join(output,'bilingual-buttons.png')});
+    await page.setViewportSize({width:390,height:844});
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1));
+    assert.deepEqual(errors,[]);
+    console.log('PASS: gate, cancel, Final review preselection, required screenshots, saved feedback, PDF download, maintainer images, English UI and all six bilingual PDF buttons');
+  } finally {await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

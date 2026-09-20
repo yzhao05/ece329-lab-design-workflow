@@ -46,6 +46,27 @@
   let reviewing = false;
   let usageView = false;
   const controllers = new Set();
+  function appendEvidence(host, value) {
+    const screenshots=[];
+    const json=JSON.stringify(value,(key,item)=>{
+      if(key==='attachments' && Array.isArray(item)) {
+        screenshots.push(...item.filter(image=>/^data:image\/jpeg;base64,/.test(image.data_url || '')));
+        return item.map(image=>({role:image.role}));
+      }
+      return item;
+    },2);
+    host.append(node('pre',json));
+    if(screenshots.length) {
+      const gallery=node('div','');gallery.className='feedback-image-gallery';
+      for(const screenshot of screenshots) {
+        const figure=node('figure',''),image=node('img','');
+        image.src=screenshot.data_url;
+        image.alt={problem:'问题对话截图',before:'前文截图',after:'后文截图'}[screenshot.role] || '反馈截图';
+        figure.append(image,node('figcaption',image.alt));gallery.append(figure);
+      }
+      host.append(gallery);
+    }
+  }
   function invalidate() {
     generation++;
     for (const controller of controllers) controller.abort();
@@ -120,9 +141,10 @@
       if (item.error) card.append(node('p',item.error));
       card.append(usageSummary(item.usage));
       const details = node('details',''), detailBody = node('div','');
+      details.open = true;
       details.append(node('summary','查看分析结果与对话证据'),detailBody);
       let fetching=false, loaded=false;
-      details.addEventListener('toggle',async()=>{
+      const loadEvidence = async()=>{
         if (!details.open || fetching || loaded || version!==generation) return;
         fetching=true; detailBody.textContent='正在读取……';
         try {
@@ -130,11 +152,13 @@
           if(version!==generation) return;
           const analysis=detail.evidence.extraction_analysis;
           const reason=analysis?.model_check?.issues || detail.evidence.extraction_candidate?.summary;
-          detailBody.replaceChildren(...(reason?[node('p',reason)]:[]),node('pre',JSON.stringify(detail.evidence,null,2)));
+          detailBody.replaceChildren(...(reason?[node('p',reason)]:[]));
+          appendEvidence(detailBody,detail.evidence);
           loaded=true;
         } catch(error) {if(version===generation) detailBody.textContent=`读取失败：${error.message}`;}
         finally {fetching=false;}
-      });
+      };
+      details.addEventListener('toggle',loadEvidence);
       card.append(details);
       card.append(usageBreakdown(item.usage));
       if (item.experience) {
@@ -158,6 +182,7 @@
         });card.append(retry);
       }
       el.Cards.append(card);
+      void loadEvidence();
     }
     if(!items.length) el.Cards.append(node('p','此筛选下没有反馈记录；可选择“全部反馈”查看其他处理状态。'));
   }
@@ -178,7 +203,9 @@
       scope.disabled = !['candidate','stopped'].includes(experienceStatus(item.status));
       card.append(scopeLabel, scope);
       const evidence = node("details", "");
-      evidence.append(node("summary", "查看反馈原文、设计证据及审阅记录"), node("pre", JSON.stringify({ evidence: item.evidence, reviews: item.reviews }, null, 2)));
+      evidence.open = true;
+      evidence.append(node("summary", "查看反馈原文、设计证据及审阅记录"));
+      appendEvidence(evidence,{evidence:item.evidence,reviews:item.reviews});
       const editor = node("textarea", "");
       editor.rows = 12;
       editor.value = JSON.stringify(item.content, null, 2);

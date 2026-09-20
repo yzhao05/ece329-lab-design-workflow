@@ -73,11 +73,11 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(self.index_html.count("v=20260824-unified-semantics"), 1)
         self.assertIn(
-            "assets/styles.css?v=20260919-insight-folds",
+            "assets/styles.css?v=20260920-pdf-languages",
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260919-insight-folds",
+            "assets/app.js?v=20260920-review-fixes",
             self.index_html,
         )
 
@@ -125,8 +125,8 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertIn('id="downloadReportButton"', self.index_html)
         self.assertIn('id="downloadBuilderInputButton"', self.index_html)
         self.assertIn("function renderTaskReport()", self.app_js)
-        self.assertIn("function downloadTaskReport()", self.app_js)
-        self.assertIn("function downloadBuilderInput()", self.app_js)
+        self.assertIn("function downloadTaskReport(language = 'zh')", self.app_js)
+        self.assertIn("function downloadBuilderInput(language = 'zh')", self.app_js)
         self.assertIn("response.task_report", self.app_js)
         self.assertIn("response.report_ready === true", self.app_js)
         self.assertIn("response.builder_input_ready === true", self.app_js)
@@ -331,7 +331,7 @@ class WebFrontendContractTests(unittest.TestCase):
 
     def test_stage_titles_show_emvr_only_in_emvr_mode(self) -> None:
         self.assertIn('["CONCEPTUAL_OR_VR_SETUP", "概念实验结构"]', self.app_js)
-        self.assertIn('["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "学生总结"]', self.app_js)
+        self.assertIn('["STUDENT_SYNTHESIS_OR_EMVR_OUTPUT", "总结 PDF"]', self.app_js)
         self.assertIn('CONCEPTUAL_OR_VR_SETUP: "Unity VR模拟实验设计"', self.app_js)
         self.assertIn('STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "EMVR方案汇总"', self.app_js)
         self.assertIn('state.mode === "EMVR_DIRECT"', self.app_js)

@@ -11,12 +11,16 @@ class Element {
   append(child) { this.children.push(child); }
   replaceChildren(...children) { this.children = children; }
   querySelector() { return new Element(); }
+  click() { this.handlers.click?.(); }
+  remove() {}
+  showModal() {this.open=true;}
+  close() {this.open=false;}
 }
 function harness() {
   const elements = new Map();
   const storage = new Map();
   const adapter = { getItem: key => storage.get(key) || null, setItem: (key, val) => storage.set(key, val), removeItem: key => storage.delete(key) };
-  const context = { window: { ECE329_CONFIG: { API_BASE_URL: "https://api.test" }, addEventListener() {} },
+  const context = { window: { ECE329_CONFIG: { API_BASE_URL: "https://api.test" }, handlers: {}, addEventListener(name, handler) { (this.handlers[name] ||= []).push(handler); } },
     document: { querySelector: selector => { if (!elements.has(selector)) elements.set(selector, new Element()); return elements.get(selector); },
       getElementById: id => { const key = '#' + id; if (!elements.has(key)) elements.set(key, new Element()); return elements.get(key); }, createElement: () => new Element() },
     localStorage: adapter, sessionStorage: adapter, crypto, console, setTimeout, clearTimeout, structuredClone };
@@ -229,4 +233,90 @@ test('strategy controls expose 13 stages and persist owner config without a desi
   assert.equal(calls[0][1].method,'PATCH');
   assert.equal(h.elements.get('#modelStrategy').disabled,false);
   assert.equal(h.run('state.modelConfigVersion'),1);
+});
+
+
+function downloadHarness() {
+  const h=harness(), downloaded=[], requested=[];
+  h.context.AbortController=AbortController;
+  h.context.DOMException=DOMException;
+  h.context.URLSearchParams=URLSearchParams;
+  h.context.URL={createObjectURL:()=> 'blob:test',revokeObjectURL:()=>{}};
+  h.context.document.body={append:element=>downloaded.push(element.download)};
+  h.context.window.ECE329I18n={language:'en'};
+  h.context.fetch=async url=>{requested.push(url);return {ok:true,status:200,blob:async()=>({})};};
+  h.run(`state.designId='pdf-test';state.sessionKind='api';state.reportUrl='/v1/designs/pdf-test/report.pdf?language=wrong';
+    state.builderInputUrl='/v1/designs/pdf-test/builder-gate1-input.pdf';state.guidedExportUrl='/v1/designs/pdf-test/guided-summary.txt';
+    ensureDesignAccessToken=async()=> 'test-token';showToast=()=>{};`);
+  return {...h,downloaded,requested};
+}
+
+test('all six PDF buttons explicitly select language independently of UI language',async()=>{
+  const h=downloadHarness();
+  for(const stem of ['Report','BuilderInput','GuidedSummary'])for(const [suffix,language] of [['','zh'],['English','en']]) {
+    await h.elements.get(`#download${stem}${suffix}Button`).handlers.click();
+    const url=new URL(h.requested.at(-1));
+    assert.deepEqual(url.searchParams.getAll('language'),[language]);
+    assert.match(h.downloaded.at(-1),new RegExp(`-pdf-test-${language}\\.pdf$`));
+    assert.ok(!url.pathname.endsWith('.txt'));
+  }
+});
+
+test('Guided Final review resumes the originally requested English PDF',async()=>{
+  const h=downloadHarness();let saved=false;
+  h.context.fetch=async url=>{h.requested.push(url);return saved?{ok:true,status:200,blob:async()=>({})}:{ok:false,status:409,json:async()=>({error:'FINAL_REVIEW_REQUIRED'})};};
+  await h.run("downloadGuidedSummary('en')");
+  assert.equal(h.elements.get('#summaryFeedbackGate').open,true);
+  assert.equal(h.downloaded.length,0);
+  h.context.window.ECE329I18n.language='zh';saved=true;
+  h.context.window.handlers['ece329:final-review-saved'][0]({detail:{designId:'pdf-test'}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(new URL(h.requested.at(-1)).searchParams.get('language'),'en');
+  assert.match(h.downloaded[0],/-en\.pdf$/);
+});
+
+test('changing designs during PDF generation discards a late report',async()=>{
+  const h=downloadHarness();let finish;
+  h.context.fetch=()=>new Promise(resolve=>finish=resolve);
+  const downloading=h.run("downloadTaskReport('en')");
+  await new Promise(resolve=>setImmediate(resolve));
+  h.run("state.designId='another-design'");
+  finish({ok:true,status:200,blob:async()=>({})});await downloading;
+  assert.deepEqual(h.downloaded,[]);
+  assert.equal(h.elements.get('#downloadReportButton').disabled,false);
+  assert.equal(h.elements.get('#downloadReportEnglishButton').disabled,false);
+});
+
+
+test('PDF timeout releases both language buttons and allows a fresh retry',async()=>{
+  const h=downloadHarness();let expire,cleared=false;
+  h.context.setTimeout=fn=>{expire=fn;return 123;};
+  h.context.clearTimeout=id=>{cleared=id===123;};
+  h.context.fetch=(_,options)=>new Promise((resolve,reject)=>{
+    options.signal.addEventListener('abort',()=>reject(new DOMException('Timed out','AbortError')));
+  });
+  const downloading=h.run("downloadTaskReport('en')");
+  await new Promise(resolve=>setImmediate(resolve));
+  expire();await downloading;
+  assert.equal(cleared,true);
+  assert.equal(h.run('activeRequestControllers.size'),0);
+  assert.equal(h.run('reportDownloadsInFlight.size'),0);
+  assert.equal(h.elements.get('#downloadReportButton').disabled,false);
+  assert.equal(h.elements.get('#downloadReportEnglishButton').disabled,false);
+  h.context.fetch=async()=>({ok:true,status:200,blob:async()=>({})});
+  await h.run("downloadTaskReport('en')");
+  assert.equal(h.downloaded.length,1);
+});
+
+test('PDF authorization retry cannot reuse a new design token for the old URL',async()=>{
+  const h=downloadHarness();let finish,tokenCalls=0,fetchCalls=0;
+  h.context.nextToken=()=>++tokenCalls===1?Promise.resolve('old-token'):new Promise(resolve=>finish=resolve);
+  h.run('ensureDesignAccessToken=nextToken');
+  h.context.fetch=async()=>{fetchCalls++;return {status:401};};
+  const downloading=h.run("downloadTaskReport('en')");
+  await new Promise(resolve=>setImmediate(resolve));
+  h.run("designGeneration++;state.designId='new-design'");
+  finish('new-token');await downloading;
+  assert.equal(fetchCalls,1);
+  assert.equal(h.downloaded.length,0);
 });

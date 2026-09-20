@@ -2013,7 +2013,7 @@ class WorkflowEngineTests(unittest.TestCase):
                 Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT,
                 InteractionState.GUIDED_DESIGN,
             ),
-            "学生总结",
+            "总结 PDF",
         )
         self.assertEqual(
             stage_title(Stage.CONCEPTUAL_OR_VR_SETUP, InteractionState.EMVR_DIRECT),

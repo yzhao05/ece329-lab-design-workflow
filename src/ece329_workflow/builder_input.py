@@ -12,7 +12,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .builder_requirements import (
     LAB_ID_PATTERN,
@@ -34,6 +34,7 @@ from .models import DesignSession, InteractionState, Stage
 from .knowledge_base import KNOWLEDGE
 from .unity_blueprint import ROOM_ASSEMBLY_SOURCE, ROOM_LIGHTING_SOURCE, ROOM_LIGHTING_ASSET, ROOM_PREFAB_SOURCES
 from .reporting import (
+    english_pdf_text,
     _formula_expression_for_report,
     _pdf_safe_formula_text,
     effective_emvr_stage_payload,
@@ -1256,7 +1257,7 @@ def render_builder_review_pdf(
         if not rows or any(not _text(row.get(key)) for row in rows for key in ("key", "value", "status")):
             raise ValueError(f"Blank PDF field in {heading}")
     data = {"document": metadata}
-    font_name = "STSong-Light"
+    font_name = "Helvetica" if language == 'en' else "STSong-Light"
     try:
         pdfmetrics.getFont(font_name)
     except KeyError:
@@ -1321,7 +1322,7 @@ def render_builder_review_pdf(
     )
 
     def p(value: Any, style: ParagraphStyle = body_style) -> Paragraph:
-        return Paragraph(_paragraph_text(value), style)
+        return Paragraph(_paragraph_text(english_pdf_text(value) if language == 'en' else value), style)
 
     def field_table(rows: list[dict[str, str]]) -> Table:
         table_rows = [[p("Field ID", key_style), p("Value"), p("Status", key_style)]]
@@ -1399,7 +1400,7 @@ def render_builder_review_pdf(
         story.append(p(heading, heading_style))
         story.append(field_table(rows or [_field(f"{heading}.content", _UNRESOLVED)]))
 
-    story.append(KeepTogether([p("Handoff instructions", heading_style), *[p(f"• {note}") for note in notes]]))
+    story.extend([p("Handoff instructions", heading_style), *[p(f"• {note}") for note in notes]])
 
     def footer(canvas: Any, doc: Any) -> None:
         canvas.saveState()

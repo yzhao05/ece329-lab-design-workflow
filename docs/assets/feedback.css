@@ -32,3 +32,7 @@
 .usage-summary { line-height:1.8; overflow-wrap:anywhere; }
 .usage-model { font-weight:600; overflow-wrap:anywhere; }
 .usage-breakdown { margin-top:1rem; border-top:1px solid #d4e2e4; padding-top:0.75rem; }
+.feedback-image-gallery img,#feedbackImagePreviews img { max-width:100%; max-height:420px; object-fit:contain; border:1px solid #cbdcde; border-radius:8px; }
+#feedbackImages[hidden] { display:none; }
+#feedbackImages { display:grid; gap:10px; }
+#feedbackImagePreviews figure,.feedback-image-gallery figure { margin:12px 0; }

@@ -16,7 +16,7 @@ window.FeedbackClient = class FeedbackClient {
 
   edit(message, category, context = {}) {
     if (this.busy) return;
-    const extra = Object.fromEntries(['scope', 'stage', 'revision', 'telemetry_id'].filter(key => context[key] != null).map(key => [key, context[key]]));
+    const extra = Object.fromEntries(['scope', 'stage', 'revision', 'telemetry_id', 'attachments', 'has_problem'].filter(key => context[key] != null).map(key => [key, context[key]]));
     const previous = this.draft ? Object.fromEntries(Object.entries(this.draft).filter(([key]) => !['message', 'category', 'request_id'].includes(key))) : {};
     if (this.draft?.message === message && this.draft?.category === category && JSON.stringify(previous) === JSON.stringify(extra)) return;
     this.draft = { message, category, request_id: this.newId(), ...extra };
@@ -27,7 +27,11 @@ window.FeedbackClient = class FeedbackClient {
     try {
       if (this.draft) this.storage.setItem(this.storageKey, JSON.stringify(this.draft));
       else this.storage.removeItem(this.storageKey);
-    } catch (_) { /* Submission itself must work without browser storage. */ }
+    } catch (_) {
+      // A larger screenshot draft must not leave an older, different request
+      // behind to be replayed after refresh. The current tab retains its draft.
+      try { this.storage.removeItem(this.storageKey); } catch (_) {}
+    }
   }
 
   path(suffix = "") {

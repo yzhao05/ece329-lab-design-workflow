@@ -16,8 +16,8 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.platypus import (
+    CondPageBreak,
     Paragraph,
-    KeepTogether,
     SimpleDocTemplate,
     Spacer,
     Table,
@@ -498,6 +498,17 @@ def _unity_project_absolute_path(builder_root: str) -> str:
     return f"{root}{separator}UnityProject" if root else ""
 
 
+def english_pdf_text(value: Any) -> str:
+    """Normalize leftover full-width punctuation without altering math indices."""
+    text = str(value if value is not None else '')
+    text = ''.join(chr(ord(char) - 0xFEE0) if '\uff01' <= char <= '\uff5e' else char for char in text)
+    return text.translate(str.maketrans({
+        '。': '.', '、': ',', '「': '"', '」': '"', '『': '"', '』': '"',
+        '【': '[', '】': ']', '《': '<', '》': '>', '\u3000': ' ',
+        '\u2011': '-', '\u2013': '-', '\u2014': '-',
+    }))
+
+
 def _paragraph_text(value: Any) -> str:
     text = str(value or "")
     parts: list[str] = []
@@ -507,7 +518,16 @@ def _paragraph_text(value: Any) -> str:
         parts.append(f'<font name="Helvetica">{html.escape(match.group(0))}</font>')
         cursor = match.end()
     parts.append(html.escape(text[cursor:]))
-    return "".join(parts).replace("\n", "<br/>")
+    markup = "".join(parts).replace("\n", "<br/>")
+    # CID fonts can silently omit Unicode indices pasted into student prose.
+    # Render real subscripts/superscripts using supported Latin glyphs instead.
+    for glyphs, plain, tag in (
+        ('₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎', '0123456789+-=()', 'sub'),
+        ('⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾', '0123456789+-=()', 'super'),
+    ):
+        for glyph, replacement in zip(glyphs, plain):
+            markup = markup.replace(glyph, f'<{tag}><font name="Helvetica">{replacement}</font></{tag}>')
+    return markup
 
 
 def _plain(value: Any, *, depth: int = 0) -> str:
@@ -2210,7 +2230,13 @@ def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', pres
     if not report["sections"]:
         raise ValueError("The EMVR design does not have report content yet")
 
-    font_name = "STSong-Light"
+    return render_design_report_pdf(report, language=language)
+
+
+def render_design_report_pdf(report: dict[str, Any], *, language: str = 'zh') -> bytes:
+    """Shared student report typography for Guided and EMVR, with distinct data."""
+
+    font_name = "Helvetica" if language == 'en' else "STSong-Light"
     try:
         pdfmetrics.getFont(font_name)
     except KeyError:
@@ -2247,6 +2273,7 @@ def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', pres
         textColor=colors.HexColor("#0D7E78"),
         spaceBefore=5 * mm,
         spaceAfter=3 * mm,
+        keepWithNext=False,
     )
     body_style = ParagraphStyle(
         "ChineseBody",
@@ -2271,7 +2298,7 @@ def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', pres
                      '尚未填写':'Not provided',
                      '说明：本报告记录的是课程实验设计与Unity VR模拟规划，不代表已经完成Unity实现、真实测量或验收。':
                      'This report records an experiment design and Unity VR plan. It does not certify Unity implementation, actual measurements or acceptance.'}.get(str(value),value)
-        return Paragraph(_paragraph_text(value), style)
+        return Paragraph(_paragraph_text(english_pdf_text(value) if language == 'en' else value), style)
 
     story: list[Any] = [paragraph(report["title"], title_style)]
     summary_data = [
@@ -2281,7 +2308,7 @@ def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', pres
         [paragraph("报告状态", body_style), paragraph("已完成" if report["status"] == "complete" else "完善中", body_style)],
         [paragraph("实验想法", body_style), paragraph(report["idea"] or "尚未填写", body_style)],
     ]
-    summary = Table(summary_data, colWidths=[28 * mm, 130 * mm], hAlign="LEFT")
+    summary = Table(summary_data, colWidths=[28 * mm, 130 * mm], hAlign="LEFT", splitInRow=1)
     summary.setStyle(
         TableStyle(
             [
@@ -2311,6 +2338,11 @@ def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', pres
                 ]
             )
         if rows:
+            heading_height = section_flowables[0].wrap(document.width, document.height)[1]
+            label_height = rows[0][0].wrap(34 * mm - 10, document.height)[1]
+            # Reserve room for the heading and the start of the first row,
+            # without implicitly keeping a multi-page table with its heading.
+            story.append(CondPageBreak(heading_height + label_height + 2 * body_style.leading + 24))
             table = Table(
                 rows, colWidths=[34 * mm, 124 * mm], hAlign="LEFT",
                 repeatRows=0, splitInRow=1,
@@ -2330,13 +2362,15 @@ def render_emvr_report_pdf(session: DesignSession, *, language: str = 'zh', pres
                 )
             )
             section_flowables.append(table)
-        story.append(KeepTogether(section_flowables))
+        # Long student prose must flow across pages instead of moving an entire
+        # section to a new page and leaving the preceding page mostly empty.
+        story.extend(section_flowables)
 
     story.extend(
         [
             Spacer(1, 7 * mm),
             paragraph(
-                "说明：本报告记录的是课程实验设计与Unity VR模拟规划，不代表已经完成Unity实现、真实测量或验收。",
+                report.get('disclaimer', "说明：本报告记录的是课程实验设计与Unity VR模拟规划，不代表已经完成Unity实现、真实测量或验收。"),
                 small_style,
             ),
         ]

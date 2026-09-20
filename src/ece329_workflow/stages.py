@@ -157,7 +157,7 @@ STAGES_BY_ID = {definition.stage: definition for definition in STAGE_DEFINITIONS
 
 _GUIDED_STAGE_TITLES: dict[Stage, str] = {
     Stage.CONCEPTUAL_OR_VR_SETUP: "概念实验结构",
-    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "学生总结",
+    Stage.STUDENT_SYNTHESIS_OR_EMVR_OUTPUT: "总结 PDF",
 }
 
 _EMVR_STAGE_TITLES: dict[Stage, str] = {

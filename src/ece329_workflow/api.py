@@ -314,7 +314,7 @@ class WorkflowAPI:
                 from .localization import validate_language, english_pdf
                 with self._translation_usage(design_id):
                     body = english_pdf(self.engine, self.translator, design_id) if validate_language(language) == 'en' else self.engine.render_report_pdf(design_id)
-                safe_name = f"ece329-emvr-{design_id}.pdf"
+                safe_name = f"ece329-emvr-{design_id}-{language}.pdf"
                 return self._respond_bytes(
                     start_response,
                     HTTPStatus.OK,
@@ -335,7 +335,7 @@ class WorkflowAPI:
                 from .localization import validate_language, english_pdf
                 with self._translation_usage(design_id):
                     body = english_pdf(self.engine, self.translator, design_id, builder=True) if validate_language(language) == 'en' else self.engine.render_builder_input_pdf(design_id)
-                safe_name = f"ece329-emvr-builder-gate1-{design_id}.pdf"
+                safe_name = f"ece329-emvr-builder-gate1-{design_id}-{language}.pdf"
                 return self._respond_bytes(
                     start_response,
                     HTTPStatus.OK,
@@ -347,28 +347,46 @@ class WorkflowAPI:
                 )
 
             guided_export_match = re.fullmatch(
-                r"/v1/designs/([^/]+)/guided-summary\.txt", path
+                r"/v1/designs/([^/]+)/guided-summary\.(?:pdf|txt)", path
             )
             if method == "GET" and guided_export_match:
                 design_id = guided_export_match.group(1)
                 self._require_design_token(environ, design_id)
-                body = self.engine.render_guided_summary_text(design_id)
-                language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
-                from .localization import validate_language
-                if validate_language(language) == 'en':
-                    with self._translation_usage(design_id):
-                        body = self.translator.english_tree(body.decode('utf-8'), self.engine.store.get(design_id).model_context.get('selected_model')).encode('utf-8')
-                safe_name = f"ece329-guided-summary-{design_id}.txt"
-                return self._respond_bytes(
-                    start_response,
-                    HTTPStatus.OK,
-                    body,
-                    [
-                        ("Content-Type", "text/plain; charset=utf-8"),
-                        ("Content-Disposition", f'attachment; filename="{safe_name}"'),
-                    ],
-                )
-
+                with self.engine._lock_for_design(design_id):
+                    session = self.engine.store.get(design_id)
+                    self.engine.render_guided_summary_text(design_id)
+                    from .experience import final_review_content_fingerprint
+                    if not self.feedback.store.has_final_review(design_id, session.revision, final_review_content_fingerprint(session)):
+                        return self._respond(start_response, HTTPStatus.CONFLICT, {
+                            'error': 'FINAL_REVIEW_REQUIRED', 'message': '请先提交本次设计体验的 Final review，再下载总结 PDF。'})
+                    if path.endswith('.pdf'):
+                        from .reporting import render_design_report_pdf
+                        from .localization import validate_language
+                        language = validate_language(parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0])
+                        report = self.engine.build_guided_summary_report(design_id)
+                        if language == 'en':
+                            with self._translation_usage(design_id):
+                                report = self.translator.english_tree(report, session.model_context.get('selected_model'))
+                        return self._respond_bytes(start_response, HTTPStatus.OK,
+                            render_design_report_pdf(report, language=language), [
+                                ('Content-Type', 'application/pdf'),
+                                ('Content-Disposition', f'attachment; filename="ece329-guided-summary-{design_id}-{language}.pdf"')])
+                    body = self.engine.render_guided_summary_text(design_id)
+                    language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
+                    from .localization import validate_language
+                    if validate_language(language) == 'en':
+                        with self._translation_usage(design_id):
+                            body = self.translator.english_tree(body.decode('utf-8'), self.engine.store.get(design_id).model_context.get('selected_model')).encode('utf-8')
+                    safe_name = f"ece329-guided-summary-{design_id}.txt"
+                    return self._respond_bytes(
+                        start_response,
+                        HTTPStatus.OK,
+                        body,
+                        [
+                            ("Content-Type", "text/plain; charset=utf-8"),
+                            ("Content-Disposition", f'attachment; filename="{safe_name}"'),
+                        ],
+                    )
             design_match = re.fullmatch(r"/v1/designs/([^/]+)", path)
             feedback_match = re.fullmatch(r"/v1/designs/([^/]+)/feedback(?:/([a-f0-9]{32})/retry)?", path)
             if feedback_match and method in {"GET", "POST"}:
@@ -382,7 +400,8 @@ class WorkflowAPI:
                     self.feedback.retry(design_id, ticket_id, self._read_json(environ))
                     return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
                 if method == 'POST':
-                    body = self._read_json(environ)
+                    from .feedback_images import MAX_FEEDBACK_BODY
+                    body = self._read_json(environ, max_bytes=MAX_FEEDBACK_BODY)
                     with self.engine._lock_for_design(design_id):
                         result, created = self.feedback.store.submit(self.engine.store.get(design_id), body)
                     self.feedback.start()
@@ -590,14 +609,15 @@ class WorkflowAPI:
                 payload["upstream_error_code"] = exc.error_code
         return status, payload
 
-    def _read_json(self, environ: dict[str, Any]) -> dict[str, Any]:
+    def _read_json(self, environ: dict[str, Any], *, max_bytes=None) -> dict[str, Any]:
         raw_length = environ.get("CONTENT_LENGTH") or "0"
         length = int(raw_length)
         if length < 0:
             raise ValueError("CONTENT_LENGTH must not be negative")
-        if length > self.settings.max_body_bytes:
+        limit = self.settings.max_body_bytes if max_bytes is None else max_bytes
+        if length > limit:
             raise RequestTooLarge(
-                f"request body exceeds {self.settings.max_body_bytes} bytes"
+                f"request body exceeds {limit} bytes"
             )
         raw = environ["wsgi.input"].read(length) if length else b"{}"
         value = json.loads(raw.decode("utf-8"))
