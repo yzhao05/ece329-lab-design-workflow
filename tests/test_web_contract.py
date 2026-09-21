@@ -73,7 +73,7 @@ class WebFrontendContractTests(unittest.TestCase):
         self.assertNotIn("确认课程映射并继续小点3", self.app_js)
         self.assertEqual(self.index_html.count("v=20260824-unified-semantics"), 1)
         self.assertIn(
-            "assets/styles.css?v=20260920-pdf-languages",
+            "assets/styles.css?v=20260921-english-display",
             self.index_html,
         )
         self.assertIn(

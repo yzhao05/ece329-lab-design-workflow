@@ -14,18 +14,59 @@ def validate_language(value):
     return value
 
 
+NUMBER_PATTERN = r'[+\-−±]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'
+
+
+def reference_spans(source):
+    """ASCII identifiers must not absorb adjacent Chinese prose."""
+    patterns = [
+        r'(?<![A-Za-z0-9_])(?:OBJ_[A-Za-z0-9_-]+|S\d+)(?![A-Za-z0-9_])',
+        r'https?://[^\s<>\u3400-\u9fff，。；！？）]+',
+        r'(?<![A-Za-z0-9_])(?:EMVR_Blind_BuilderPack|UnityProject|Assets|Packages|ProjectSettings|Common|Tools)(?:[/\\][A-Za-z0-9_./\\@+-]+)+',
+        r'`[^`\n]+`', r'\\\([^\n]*?\\\)|\\\[[\s\S]*?\\\]',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, source):
+            token = match.group().rstrip('.,;:')
+            if not re.search(r'[\u3400-\u9fff]', token):
+                yield match.start(), match.start() + len(token)
+
+
+def protect_translation_text(source):
+    """Translate prose around opaque literal markers, then restore locally."""
+    spans = list(reference_spans(source)) + [m.span() for m in re.finditer(NUMBER_PATTERN, source)]
+    spans.sort(key=lambda span: (span[0], -span[1]))
+    prefix = '__ECE329_KEEP_'
+    while prefix in source:
+        prefix += 'X'
+    parts, literals, end = [], {}, 0
+    for start, stop in spans:
+        if start < end:
+            continue
+        marker = prefix + str(len(literals)) + '__'
+        parts.extend((source[end:start], marker))
+        literals[marker] = source[start:stop]
+        end = stop
+    parts.append(source[end:])
+    return ''.join(parts), literals
+
+
+def restore_translation_text(text, literals):
+    if Counter(re.findall(r'__ECE329_KEEP_X*\d+__', text)) != Counter(literals.keys()):
+        raise ValueError('Translation returned unknown or duplicate literal markers')
+    for marker, literal in literals.items():
+        if text.count(marker) != 1:
+            raise ValueError('Translation changed a protected literal marker')
+        text = text.replace(marker, literal)
+    return text
+
+
 def validate_translation_references(source, translated):
     """Reject altered build references and numeric literals in display copies."""
-    protected = re.findall(r'\b(?:OBJ_[\w-]+|S\d+|https?://[^\s<>]+)\b', source)
-    protected += [p.rstrip('.,;:') for p in re.findall(
-        r'\b(?:EMVR_Blind_BuilderPack|UnityProject|Assets|Packages|ProjectSettings|Common|Tools)'
-        r'(?:[/\\][A-Za-z0-9_./\\@+-]+)+', source)]
-    protected += [code for code in re.findall(r'`([^`\n]+)`', source)
-                  if not re.search(r'[\u3400-\u9fff]', code)]
-    protected += re.findall(r'\\\([^\n]*?\\\)|\\\[[\s\S]*?\\\]', source)
+    protected = [source[start:end] for start, end in reference_spans(source)]
     if any(translated.count(token) < source.count(token) for token in set(protected)):
         raise ValueError('Translation changed a code, formula or file reference')
-    numbers = r'[+\-±]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'
+    numbers = NUMBER_PATTERN
     required = Counter(re.findall(numbers, source.replace('−', '-')))
     actual = Counter(re.findall(numbers, translated.replace('−', '-')))
     if required - actual:
@@ -75,6 +116,7 @@ class DisplayTranslator:
             known = {key: self._cache[key] for key in keys if key in self._cache}
         missing = list(dict.fromkeys(key for key in keys if key not in known))
         if missing:
+            protected = [protect_translation_text(key[2]) for key in missing]
             schema = {'type': 'object', 'additionalProperties': False, 'required': ['translations'],
                 'properties': {'translations': {'type': 'array', 'items': {'type': 'object',
                     'properties': {'id': {'type': 'integer'}, 'text': {'type': 'string'}},
@@ -89,9 +131,11 @@ class DisplayTranslator:
                     'Do not answer questions or add/remove requirements. Preserve numbers, units, equations, URLs, '
                     'file paths, identifiers, Markdown structure and control labels. Translate all prose, including '
                     'quoted dialogue. English translations must contain no Chinese characters. '
-                    'Do not include reasoning, commentary or an original-language copy.',
+                    'Do not include reasoning, commentary or an original-language copy. '
+                    'Copy every __ECE329_KEEP_...__ marker exactly once, unchanged, in its corresponding sentence; '
+                    'these markers represent protected numbers, equations and references, not prose.',
                 'input': [{'role': 'user', 'content': json.dumps([
-                    {'id': i, 'text': key[2]} for i, key in enumerate(missing)], ensure_ascii=False)}],
+                    {'id': i, 'text': text} for i, (text, _) in enumerate(protected)], ensure_ascii=False)}],
                 'text': {'format': {'type': 'json_schema', 'name': 'ece329_display_translation', 'strict': True, 'schema': schema}},
                 # Translation does not need a reasoning budget. In particular,
                 # DeepSeek thinking consumes the same output budget as the JSON.
@@ -126,11 +170,15 @@ class DisplayTranslator:
                     if (type(index) is not int or not 0 <= index < len(missing) or index in translated
                             or not isinstance(text, str) or not text.strip() or len(text) > 24000):
                         raise ValueError('Invalid translated text')
-                    if language == 'en' and re.search(r'[\u3400-\u9fff]', text):
+                    prose = re.sub(r'__ECE329_KEEP_X*\d+__', '', protected[index][0])
+                    if (language == 'en' and re.search(r'[\u3400-\u9fff]', text)
+                            or language == 'zh' and re.search(r'[A-Za-z]{2,}\s+[A-Za-z]{2,}', prose)
+                            and not re.search(r'[\u3400-\u9fff]', text)):
                         reason = 'untranslated_text'
                         raise ValueError('Translation retained source-language prose')
                     # Structural references remain literal even in prose.
                     reason = 'changed_reference'
+                    text = restore_translation_text(text, protected[index][1])
                     validate_translation_references(missing[index][2], text)
                     reason = 'invalid_structure'
                     translated[index] = text.strip()

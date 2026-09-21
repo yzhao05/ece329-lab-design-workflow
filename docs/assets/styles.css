@@ -1,3 +1,31 @@
+.translation-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0;
+  padding: 8px 20px;
+  background: #fff4d6;
+  color: #183346;
+  overflow-wrap: anywhere;
+}
+.translation-status[hidden] { display: none; }
+.translation-status > span { flex: 1; min-width: 0; }
+.translation-status > button {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin-left: auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 26px;
+  cursor: pointer;
+}
+.translation-status > button:hover { background: #eee0bd; }
+.translation-status > button:focus-visible { outline: 2px solid currentColor; }
+
 :root {
   color-scheme: light;
   --ink: #102235;

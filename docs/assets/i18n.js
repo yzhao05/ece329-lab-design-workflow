@@ -11,18 +11,24 @@
   }
   const ordered = [...dictionary].sort((a,b) => b[0].length-a[0].length);
   const originals = new WeakMap(), attributes = new WeakMap();
-  const cache = new Map(), pending = new Set();
-  let scheduled = false, busy = false, blocked = false, generation = 0;
+  const cache = new Map(), pending = new Set(), failed = new Set();
+  let scheduled = false, busy = false, blocked = false, paused = false, dismissed = false, generation = 0;
   const cjk = /[\u3400-\u9fff]/;
   const retry = document.getElementById('translationRetry');
   const toggle = document.getElementById('languageToggle');
   let failureCode = '';
-  const status = document.createElement('p');
+  const status = document.createElement('div');
   status.id = 'translationStatus';
   status.setAttribute('data-i18n-ignore', '');
-  status.setAttribute('role', 'status');
   status.hidden = true;
-  status.style.cssText = 'margin:0;padding:8px 20px;background:#fff4d6;color:#183346;overflow-wrap:anywhere;';
+  status.className = 'translation-status';
+  const statusCopy = document.createElement('span'), closeStatus = document.createElement('button');
+  statusCopy.setAttribute('role', 'status');
+  closeStatus.id = 'translationStatusClose';
+  closeStatus.type = 'button';
+  closeStatus.textContent = '×';
+  closeStatus.addEventListener('click', () => { dismissed = true; status.hidden = true; });
+  status.append(statusCopy, closeStatus);
   const main = document.querySelector('main');
   if (main) main.before(status); else if (retry) retry.after(status);
   const failures = {
@@ -53,8 +59,8 @@
     if (exact !== null && !forceChinese) return text.replace(text.trim(), exact);
     const id = key(text);
     if (cache.has(id)) return cache.get(id);
-    pending.add(text);
-    if (!busy && !blocked) setTimeout(flush, 30);
+    if (!failed.has(text)) pending.add(text);
+    if (!busy && !paused && !failed.has(text)) setTimeout(flush, 30);
     // Keep the conversation readable while waiting, and on failure. Never
     // replace source evidence with a repeated error or cache it as a translation.
     return text;
@@ -66,7 +72,7 @@
     const boundary = element.closest('[data-i18n-ignore],[data-i18n-translate]');
     return Boolean(boundary && !boundary.hasAttribute('data-i18n-translate'));
   }
-  function renderRecord(record, forceChinese = false) {
+  function renderRecord(record, forceChinese = false, englishOnly = false) {
     // Live nodes retain their completed translation even after the shared LRU
     // evicts it. Otherwise a page with >2000 strings requeues itself forever.
     record.translations ||= {};
@@ -74,6 +80,12 @@
     const result = translate(record.source, forceChinese);
     if (cache.has(key(record.source)) || (!forceChinese && local(record.source.trim()) !== null)) {
       record.translations[language] = result;
+    }
+    if (englishOnly && language === 'en' && cjk.test(result)) {
+      return paused || failed.has(record.source) ? 'Translation unavailable. Use Retry translation.' : 'Translating…';
+    }
+    if (forceChinese && !cache.has(key(record.source))) {
+      return paused || failed.has(record.source) ? '翻译暂不可用，请重试。' : '正在翻译…';
     }
     return result;
   }
@@ -92,12 +104,14 @@
       const label = language === 'en' ? 'Retry translation' : '重试翻译';
       if (retry.textContent !== label) retry.textContent = label;
     }
-    status.hidden = !blocked && !busy && !pending.size;
+    status.hidden = dismissed || (!blocked && !busy && !pending.size);
+    const closeLabel = language === 'en' ? 'Dismiss translation notice' : '关闭翻译提示';
+    if (closeStatus.getAttribute('aria-label') !== closeLabel) closeStatus.setAttribute('aria-label', closeLabel);
     const detail = failures[failureCode] || ['翻译暂不可用，请重试；若持续失败，请检查后端翻译日志。', 'Translation is unavailable. Retry; if it persists, check the backend translation logs.'];
     const statusText = blocked
-      ? (language === 'en' ? 'Untranslated content is shown in its original language. ' : '未翻译内容保留原文。') + detail[language === 'en' ? 1 : 0]
-      : (language === 'en' ? 'Translating… Original text remains visible while waiting.' : '正在翻译，等待期间保留原文。');
-    if (status.textContent !== statusText) status.textContent = statusText;
+      ? (language === 'en' ? 'Some content could not be translated. ' : '部分内容尚未完成翻译。') + detail[language === 'en' ? 1 : 0]
+      : (language === 'en' ? 'Translating display text…' : '正在翻译显示内容…');
+    if (statusCopy.textContent !== statusText) statusCopy.textContent = statusText;
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let node;
     while ((node = walker.nextNode())) {
@@ -110,7 +124,7 @@
       const force = language === 'zh' && !cjk.test(record.source)
         && (prose ? /[a-z]/i.test(record.source) : /[a-z]{3} [a-z]{3}/i.test(record.source)
           && Boolean(node.parentElement.closest('.message-bubble')) && record.source.split(/\s+/).length > 8);
-      record.rendered = renderRecord(record, force);
+      record.rendered = renderRecord(record, force, Boolean(node.parentElement.closest('[data-i18n-english-only],[data-i18n-translate]')));
       originals.set(node, record);
       if (node.nodeValue !== record.rendered) node.nodeValue = record.rendered;
     }
@@ -122,7 +136,7 @@
         const value = element.getAttribute(attr);
         let record = records[attr];
         if (!record || value !== record.rendered) record = {source:value};
-        record.rendered = renderRecord(record);
+        record.rendered = renderRecord(record, false, Boolean(element.closest('[data-i18n-english-only]')));
         records[attr] = record;
         if (value !== record.rendered) element.setAttribute(attr,record.rendered);
       }
@@ -131,7 +145,7 @@
   }
   function schedule() { if (!scheduled) { scheduled = true; queueMicrotask(scan); } }
   async function flush() {
-    if (busy || blocked || !pending.size) return;
+    if (busy || paused || !pending.size) return;
     if (!window.requestDisplayTranslation) return; // App wires transport after loading.
     busy = true;
     schedule();
@@ -155,28 +169,33 @@
         failureCode = error?.details?.translation_reason || error?.code || (error?.name === 'AbortError' ? 'client_timeout' : '');
         if (failureCode === 'model_output_invalid') failureCode = 'invalid_structure';
         if (failureCode === 'rate_limit_exceeded') failureCode = 'model_rate_limited';
+        batch.forEach(text => { failed.add(text); pending.delete(text); });
+        // A rejected text batch must not block unrelated sidebar or chat text.
+        // Transport failures pause the queue; validation failures skip this batch.
+        paused = !['invalid_structure','changed_reference','untranslated_text','output_truncated'].includes(failureCode);
       }
     } finally {
       busy = false;
       schedule();
       window.dispatchEvent(new Event('ece329:translations-ready'));
-      if (!blocked && pending.size) setTimeout(flush, 30);
+      if (!paused && pending.size) setTimeout(flush, 30);
     }
   }
   function setLanguage(value) {
     if (!['zh','en'].includes(value)) return;
-    language = value; generation++; blocked = false; pending.clear();
+    language = value; generation++; blocked = false; paused = false; dismissed = false; pending.clear(); failed.clear();
     try { localStorage.setItem(KEY,language); } catch {}
     schedule();
     window.dispatchEvent(new Event('ece329:language-changed'));
   }
   // Drop queued/stale work when the owner replaces a review record or credentials.
   // Keep successful text translations cached; they never modify source records.
-  function reset() { generation++; pending.clear(); blocked=false; schedule(); }
+  function reset() { generation++; pending.clear(); failed.clear(); blocked=false; paused=false; dismissed=false; schedule(); }
   toggle?.addEventListener('click', () => setLanguage(language === 'en' ? 'zh' : 'en'));
-  retry?.addEventListener('click', () => { blocked = false; schedule(); setTimeout(flush,0); });
+  function retryTranslation() { failed.clear(); blocked=false; paused=false; dismissed=false; schedule(); setTimeout(flush,0); }
+  retry?.addEventListener('click', retryTranslation);
   window.ECE329I18n = {get language() {return language;}, text: translate, setLanguage, refresh:schedule, reset,
-    retry() {blocked=false; schedule(); setTimeout(flush,0);}};
+    retry: retryTranslation};
   new MutationObserver(schedule).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['placeholder','title','aria-label','label']});
   window.addEventListener('ece329:design-changed', reset);
   schedule();
