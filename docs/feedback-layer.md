@@ -59,7 +59,7 @@ python -m tools.export_feedback_candidates --database "实际数据库文件.sql
 
 1. **用户提交**：工作台右上角“反馈问题”及每条在线回答下方“反馈这条回答 / Report Problem”，两个 mode 共用。选择五类问题之一或“其他”，输入问题并选择会话、项目或全局候选范围；本地示例不可提交。反馈不会调用设计 turn 或推进阶段。成功提示必须收到后端回执，网络异常保留草稿、目标和 `request_id`；原内容重试不重复建单。
 2. **保存证据**：`POST /v1/designs/{id}/feedback` 使用该设计的 Bearer 令牌，返回记录 ID、状态、设计版本和持久化标识。保存反馈及服务器截取的当前规范字段（最多 8000 字符）和最近 4 轮对话（每轮用户 1500、助手 2000 字符），不读取客户端自报证据，不保存访问令牌。可传 `revision/stage` 标记历史回答，服务器从历史中匹配该轮原文摘录（用户 1500、助手 4000 字符），无法匹配时显式记录为空；未指定 stage 时按目标版本的历史 handled_stage 定位；记录 reported_mode 与提交时 mode，跨阶段或切换 mode 后不冒用当前归属。同时保存目标前一轮、目标轮、后一轮的事件链（各轮用户最多 2000、助手 4000 字符）及可用的前后阶段、待确认事项、字段来源记录。新产生的对话捕获状态；旧历史缺少的状态标为 null，不以当前状态补造。当前快照与历史目标分开。`telemetry_id` 必须属于该设计，供评测记录关联。
-3. **后台分析**：复用配置好的在线模型/transport，每次分析尝试最多两次严格 JSON Schema 调用：先生成证据诊断与候选（默认输出上限 8192 tokens），再检查证据支持及正反例（默认 4096 tokens）；不沿用设计对话的模型 response ID。反馈是分析数据，不能直接成为模型指令。无在线模型或解析失败时保留记录并显示失败，不阻塞设计。证据不足或检查未通过时记录 `no_learning`，不生成可启用经验。诊断、检查结果保存在反馈记录的 `extraction_analysis` 中；候选审阅页可展开查看。模型案例检查不是实际工作流回放，标记固定为 `not_replayed`，不自动循环修复。
+3. **后台分析**：复用配置好的在线模型/transport，每次分析尝试最多两次严格 JSON Schema 调用：先生成证据诊断与候选（默认输出上限 8192 tokens），再检查证据支持及正反例（默认 8192 tokens）；不沿用设计对话的模型 response ID。反馈是分析数据，不能直接成为模型指令。无在线模型或解析失败时保留记录并显示失败，不阻塞设计。证据不足或检查未通过时记录 `no_learning`，不生成可启用经验。诊断、检查结果保存在反馈记录的 `extraction_analysis` 中；候选审阅页可展开查看。模型案例检查不是实际工作流回放，标记固定为 `not_replayed`，不自动循环修复。
 4. **审阅**：打开 `feedback-review.html`，输入独立维护者令牌，读取原始证据和历史审阅记录。维护者手动编辑经验 JSON，并填写不当原文、正确内容及处理意见（无需修改时前两项留空）。审阅记录不会自动覆盖 JSON。经验只有待审阅、已启用、已停止三个状态：待审阅可启用或停止，已启用可停止，已停止可编辑后重新启用。停止原因写入处理意见，内容和历史始终保留。只有已启用经验进入检索；版本冲突返回 409，需刷新后核对。文本全用 `textContent`/表单值渲染。
 5. **指导设计**：每轮意图解析前和提交/阶段切换后的回复生成前，重新检索当前 mode、阶段、消息适用的已启用经验；补答也携带已检索经验。规则按 `EXP-...` ID 和版本进入既有 `feedback_guidance`，不要求学生阅读编号。启用/停止影响后续轮次，不追溯修改已经生成的回复、设计或 PDF，不会改模型权重、公式库或业务代码。
 
@@ -148,7 +148,7 @@ node --test tests/frontend/feedback.test.cjs
 
 本次升级无需新增环境变量，继续使用已配置的在线服务和 `ECE329_FEEDBACK_ADMIN_TOKEN`。需要同时部署前后端并重启后端；请刷新审阅页以使用新的手动编辑表单；后端不再执行旧表单的修正自动同步。SQLite 沿用既有表结构，不清空数据。后台反馈分析独立于学生对话额度；每次分析最多两次模型调用，总计最多 10 次分析尝试（正常情况下最多 20 次模型调用），自动切换同样计数，无额外无限重试。
 
-审阅页的摘要是概述；实际注入设计提示的字段为 trigger/recommendation/verification，修正摘要时需同步核对规则正文。后台提炼的 独立配置的输出上限（默认 8192/4096）也传给 DeepSeek 适配层，不再被提供商的默认额度下限覆盖。
+审阅页的摘要是概述；实际注入设计提示的字段为 trigger/recommendation/verification，修正摘要时需同步核对规则正文。后台提炼的 独立配置的输出上限（默认 8192/8192）也传给 DeepSeek 适配层，不再被提供商的默认额度下限覆盖。
 
 
 ## 反馈收件箱与 API 故障切换（2026-09-18）
@@ -174,7 +174,7 @@ node --test tests/frontend/feedback.test.cjs
 
 截图中的 `model_output_invalid` 表示输出未通过解析或验证，不能据此判定余额不足。旧实现继承主对话思考强度且只有 4200/1400 输出额度，存在额度耗尽风险；这是一项代码配置风险，不能据此认定历史两条记录的唯一根因。OpenAI 的输出额度包括思考 token，耗尽时可能返回 incomplete，参见[官方说明](https://developers.openai.com/api/docs/guides/reasoning)。
 
-分析现在默认使用独立 low 思考强度、8192/4096 的两步输出额度，均有上限；DeepSeek 快速/思考预设仍保留其明示语义。JSON Schema 同步包含字段长度、数组数量和可引用证据 ID，减少远端返回与本地验证的规则差异。验证失败不会靠裁剪内容或跳过检查来生成经验。失败诊断进一步区分 output_limit、incomplete_response、invalid_json、schema_validation、evidence_reference 和 empty_or_invalid_output，并标记 draft/check 阶段。旧记录需要重试后才能得到细分诊断。
+草案默认使用独立 low 思考强度，检查默认使用 none；两步输出额度均为 8192，均有上限。DeepSeek 快速/思考预设用于草案，检查按独立配置执行。JSON Schema 同步包含字段长度、数组数量和可引用证据 ID，减少远端返回与本地验证的规则差异。验证失败不会靠裁剪内容或跳过检查来生成经验。失败诊断进一步区分 output_limit、incomplete_response、invalid_json、schema_validation、evidence_reference 和 empty_or_invalid_output，并标记 draft/check 阶段。旧记录需要重试后才能得到细分诊断。
 
 新增的环境变量均可省略，默认值如下；token 配置允许 1024–32768，思考强度允许 none/low/medium/high：
 
@@ -182,7 +182,8 @@ node --test tests/frontend/feedback.test.cjs
 ECE329_FEEDBACK_MODEL=deepseek-flash
 ECE329_FEEDBACK_REASONING_EFFORT=low
 ECE329_FEEDBACK_MAX_OUTPUT_TOKENS=8192
-ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS=4096
+ECE329_FEEDBACK_CHECK_REASONING_EFFORT=none
+ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS=8192
 ```
 
 备用服务商仍需对应 API 密钥以及 `ECE329_ALLOWED_MODELS` 中的模型。输出预算改变不会增加每次分析的调用数量（最多两次）或十次尝试上限，但输出较长时可能消耗更多 token。需要同时部署前后端并重启后端；旧后端缺少能力字段时，前端明确提示升级，禁止盲目提交模型选择。
@@ -235,3 +236,10 @@ Guided 第七步显示为“总结 PDF”，保留学生自己完成总结的教
 提炼模型的输入仅包含本次反馈、设计证据和已批准的修正示例等分析材料；历史 `analysis_attempts`、调用配置与费用、旧提炼结果不会重新进入下一次提炼输入。数据库和原始 JSON 仍完整保留这些运行记录。Guided 与 EMVR 使用同一提炼、诊断与重试链路；工作流不会因反馈提炼或重试而自动推进。旧上下文列表和尝试记录为 `null` 时按缺失记录处理，不生成额外失败或虚构历史。
 
 经验阅读译文支持短英文正文切回中文，不沿用普通聊天长句的字数门槛。切换语言、清除或更换维护者令牌、替换当前记录时取消旧翻译请求；响应返回后再次核对上下文，过期结果不会进入当前显示。响应必须为等长的非空字符串数组，格式错误停止处理，需显式重试。已完成的翻译缓存继续复用。
+
+
+### 检查输出截断修复
+
+检查环节不再继承草案的思考设置或模型预设，独立使用 `ECE329_FEEDBACK_CHECK_REASONING_EFFORT`（默认 `none`，支持 none/low/medium/high）。草案仍使用 `ECE329_FEEDBACK_REASONING_EFFORT`，对话设置不变。检查默认输出上限提高为 8192，要求简短检查 JSON；Schema、证据核对和正反例检查仍保留。请求用量记录保存各环节实际请求的强度与上限。
+
+已有部署若显式设置了 `ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS=4096`，更新代码不会覆盖该值；建议修改为 `8192`，并增加 `ECE329_FEEDBACK_CHECK_REASONING_EFFORT=none` 后重启后端。截图中的 `parse_check / output_limit` 证明检查返回被截断，不能仅凭截图确定思考实际占用了多少 tokens。修改降低这一类风险，不保证服务商永不截断；再次失败仍记录诊断并由用户手动重试，不增加模型调用次数或放宽十次总上限。旧失败记录不会自动重新分析。

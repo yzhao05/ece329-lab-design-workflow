@@ -96,8 +96,8 @@ def test_analysis_outcomes_complete_without_becoming_system_errors(pipeline, kin
     assert last['elapsed_ms'] >= 0 and last['design_revision'] == 2
     assert all(step['status'] == 'completed' for step in last['phases'])
     assert len(calls) == 2
-    assert [c['max_output_tokens'] for c in last['calls']] == [8192, 4096]
-    assert all(c['reasoning_effort'] == 'low' for c in last['calls'])
+    assert [c['max_output_tokens'] for c in last['calls']] == [8192, 8192]
+    assert [c['reasoning_effort'] for c in last['calls']] == ['low', 'none']
 
 
 @pytest.mark.parametrize('method', ['record_attempt', 'finish', 'record_feedback_usage'])

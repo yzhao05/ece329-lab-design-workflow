@@ -124,7 +124,7 @@
     } finally { clearTimeout(timeout); controllers.delete(controller); }
   }
   const node = (tag, text) => { const item = document.createElement(tag); item.textContent = text; return item; };
-  const sourceNode = (tag,text) => {const item=node(tag,text);item.setAttribute("data-i18n-ignore","");return item;};
+  const translatedNode = (tag,text) => {const item=node(tag,text);item.setAttribute("data-i18n-translate","");return item;};
   function usageSummary(value) {
     const item=node('p','');item.className='usage-summary';
     window.ECE329Usage?.summary(item,value);return item;
@@ -169,7 +169,7 @@
     clearCards();
     for (const item of items) {
       const card = node('article',''); card.className='experience-card';
-      card.append(node('h2',ticketLabels[item.status] || item.status), sourceNode('p',item.message),
+      card.append(node('h2',ticketLabels[item.status] || item.status), translatedNode('p',item.message),
         node('p',`${item.id} · ${item.design_id} · ${item.attempts}/${item.max_attempts ?? 3}`));
       if (item.error && !item.last_analysis?.diagnostic) card.append(node('p',item.error));
       card.append(usageSummary(item.usage));

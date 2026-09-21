@@ -32,6 +32,7 @@ const record={id:'a'.repeat(32),version:1,status:'candidate',extra_field:{preser
     await context.addInitScript(()=>localStorage.setItem('ece329-interface-language','zh'));
     const page=await context.newPage(),errors=[],translated=[];
     page.on('pageerror',error=>errors.push(error.message));
+    await page.route('**/assets/config.js?*',route=>route.fulfill({contentType:'application/javascript',body:'window.ECE329_CONFIG={API_BASE_URL:"https://review-fixture.invalid"};'}));
     await page.route('**/v1/feedback/experiences?*',route=>route.fulfill({json:{experiences:[record]}}));
     await page.route('**/v1/localization',route=>{const body=route.request().postDataJSON();translated.push(...body.texts);return route.fulfill({json:{language:body.language,translations:body.texts.map(text=>'Translated analysis '+text.replace(/[\u3400-\u9fff]/g,''))}});});
     await page.goto(base+'/feedback-review.html');
@@ -79,7 +80,9 @@ const record={id:'a'.repeat(32),version:1,status:'candidate',extra_field:{preser
     await page.locator('#languageToggle').click();await page.waitForFunction(()=>document.querySelector('.review-evidence').textContent.includes('Conversation and state'));
     assert.equal(await diagnostic.locator('details').evaluate(el=>el.open),true);
     await diagnostic.locator('summary button').click();
-    assert.match(await readable.innerText(),/This turn has an empty reply body/);assert.match(await readable.innerText(),/继续。/);
+    assert.match(await readable.innerText(),/This turn has an empty reply body/);
+    await page.waitForFunction(()=>[...document.querySelectorAll('.evidence-bubble [data-i18n-translate]')].every(n=>!/[\u3400-\u9fff]/.test(n.textContent)&&n.textContent!=='Translating…'));
+    assert.doesNotMatch(await viewer.locator('.evidence-turn-reported').innerText(),/[\u3400-\u9fff]/);
     assert.match(await readable.innerText(),/Model connection failed/);
     assert.match(await diagnostic.innerText(),/Trigger: Field exceeds the length limit.*168 \/ 140 characters/);
     assert.match(await diagnostic.innerText(),/Check:.*shorten/);
@@ -88,9 +91,12 @@ const record={id:'a'.repeat(32),version:1,status:'candidate',extra_field:{preser
     await page.setViewportSize({width:390,height:844});await viewer.evaluate(el=>el.scrollIntoView({block:'start'}));await page.screenshot({path:path.join(output,'evidence-en-mobile.png')});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1));
     await page.waitForFunction(()=>document.querySelector('.evidence-analysis').textContent.includes('Translated analysis'));
-    assert.ok(!translated.some(text=>text==='继续。'));
+    assert.ok(translated.some(text=>text.includes('观察位置需要明确')));
     assert.ok(translated.some(text=>text.includes('可能没有处理推进信号')));
+    await page.locator('#languageToggle').click();
+    await viewer.locator('.evidence-turn-reported').getByText('继续。',{exact:true}).waitFor();
+    assert.equal(await page.locator('#note-'+record.id).inputValue(),'审阅草稿保留');
     assert.deepEqual(errors,[]);
-    console.log('PASS: independent folds, draft refresh/language retention, literal evidence, JSON copy/download, image preview and narrow layout');
+    console.log('PASS: independent folds, draft refresh/language retention, translated display and original JSON copy/download, image preview and narrow layout');
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

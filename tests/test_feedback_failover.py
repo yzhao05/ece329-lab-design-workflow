@@ -230,3 +230,38 @@ def test_failed_evidence_check_is_not_retried_on_a_more_agreeable_model(pipeline
     row = p.repo.feedback_detail(ticket['id'])
     assert len(calls) == 2 and row['status'] == 'no_learning' and row['attempts'] == 1
     assert not row['can_retry'] and p.repo.experiences() == []
+
+
+@pytest.mark.parametrize('mode', list(InteractionState))
+@pytest.mark.parametrize('primary', ['deepseek-flash', 'gpt-5.4-mini'])
+def test_check_truncation_stays_failed_and_manual_retries_stop_at_ten(pipeline, mode, primary):
+    p = pipeline
+    p.session.interaction_state = mode
+    p.engine.store.save(p.session)
+    calls, generator = configure(p, None, primary=primary)
+    requests = []
+    def truncated_check(body):
+        requests.append(body)
+        if body['text']['format']['name'].endswith('_check'):
+            return {'status':'incomplete','incomplete_details':{'reason':'max_output_tokens'},
+                    'usage':{'input_tokens':12,'output_tokens':8192}}
+        return extraction_response(body)
+    generator.transport.providers['deepseek' if primary.startswith('deepseek') else 'openai'] = SimpleNamespace(create=truncated_check)
+    ticket = submit(p)[2]
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        assert p.service.run_once()
+        assert not p.service.run_once()
+        row = p.repo.feedback_detail(ticket['id'])
+        assert row['status'] == 'failed' and row['attempts'] == attempt
+        assert row['experience'] is None
+        assert row['last_analysis']['phase'] == 'parse_check'
+        assert row['last_analysis']['reason'] == 'output_limit'
+        assert row['last_analysis']['calls'][-1]['reasoning_effort'] == 'none'
+        assert row['last_analysis']['calls'][-1]['output_tokens'] == 8192
+        assert len(requests) == attempt * 2 and calls == []  # No automatic backup or repair.
+        if attempt < MAX_ATTEMPTS:
+            p.service.retry(p.session.design_id, ticket['id'], {})
+    assert not row['can_retry']
+    with pytest.raises(ValueError, match='cannot be retried'):
+        p.service.retry(p.session.design_id, ticket['id'], {})
+    assert p.service.analysis_options()['settings']['check_reasoning_effort'] == 'none'

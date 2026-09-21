@@ -57,3 +57,11 @@ test('backend exceptions remain backend errors and untrusted strings remain text
   const h=harness(row);h.en();assert.match(h.host.text,/Backend processing exception/);
   assert.equal(h.host.find('img').length,0);assert.match(h.host.children[0].text,/<img onerror=attack\(\)>/);
 });
+
+
+test('check truncation points to independent checker settings in both languages',()=>{
+  const row=failure('output_limit');row.phase='parse_check';const h=harness(row);
+  for(const text of ['ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS','ECE329_FEEDBACK_CHECK_REASONING_EFFORT','8192','none','重启'])assert.ok(h.host.text.includes(text),text);
+  h.en();assert.match(h.host.text,/Restart the backend/);
+  assert.match(h.host.text,/changing the draft cap does not change the check cap/);
+});

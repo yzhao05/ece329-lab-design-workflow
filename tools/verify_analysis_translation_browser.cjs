@@ -12,11 +12,12 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
       const record={id:'f'.repeat(32),version:1,status:'candidate',reviews:[],
         content:{summary:'经验摘要需推进流程',trigger:'确认前一方案后',recommendation:'询问具体缺项',verification:'核对阶段变化'},
         evidence:{scope:'global',message:'反馈原文保持不变',evidence:{mode,evidence_schema_version:2,event_chain:[
-          {position:'reported',ref:'turn:2',revision:2,mode,stage:'IDEA_BRAINSTORMING',user:'用户原始确认',assistant:'助手原始回复',recorded_fields:{user:true,assistant:true}}]},
+          {position:'reported',ref:'turn:2',revision:2,mode,stage:'IDEA_BRAINSTORMING',user:'用户原始确认',assistant:'助手原始回复',warnings:['对照情形还没有确定'],assumptions:['探针不会改变场'],student_task:'明确观察位置',recorded_fields:{user:true,assistant:true,warnings:true,assumptions:true,student_task:true}}]},
           extraction_analysis:{diagnosis:{expected_behavior:'根据当前阶段继续询问缺项',facts:[{evidence_ref:'turn:2',observation:'观察到没有推进流程'}],
             hypotheses:['可能没有处理推进请求'],applicability:'前一方案已确认',exceptions:'用户要求修改时',unknowns:['具体原因尚未核实']},
             model_check:{evidence_supported:true,issues:'仍需人工核对'},validation_status:'not_replayed'}}};
       let calls=0,failed=false;const inputs=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
+      await page.route('**/assets/config.js?*',r=>r.fulfill({contentType:'application/javascript',body:`window.ECE329_CONFIG={API_BASE_URL:"https://review-fixture.invalid"};`}));
       await page.route('**/v1/feedback/experiences?*',r=>r.fulfill({json:{experiences:[record]}}));
       await page.route('**/v1/localization',r=>{
         calls++;const body=r.request().postDataJSON();inputs.push(...body.texts);
@@ -34,12 +35,14 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
       await page.locator('#languageToggle').click();await waitEnglish();
       assert.match(await page.locator('.evidence-analysis').innerText(),/turn:2/);
       assert.doesNotMatch(await page.locator('.evidence-analysis').innerText(),/[\u3400-\u9fff]/);
-      assert.match(await page.locator('.evidence-turn-reported').innerText(),/用户原始确认|助手原始回复/);
+      assert.doesNotMatch(await page.locator('.evidence-turn-reported').innerText(),/[\u3400-\u9fff]/);
       assert.equal(await editor.inputValue(),original);assert.equal(await note.inputValue(),'我的审阅草稿');
       assert.ok(inputs.includes('观察到没有推进流程'));
-      assert.ok(!inputs.some(t=>['用户原始确认','助手原始回复','反馈原文保持不变','turn:2'].includes(t)));
+      for(const text of ['用户原始确认','助手原始回复','反馈原文保持不变','对照情形还没有确定','探针不会改变场','明确观察位置'])assert.ok(inputs.includes(text),text);
+      assert.ok(!inputs.includes('turn:2'));
       const oldCalls=calls;
       await page.locator('#languageToggle').click();await page.waitForFunction(()=>document.querySelector('.evidence-analysis').textContent.includes('根据当前阶段继续询问缺项'));
+      for(const text of ['用户原始确认','助手原始回复','对照情形还没有确定','探针不会改变场','明确观察位置'])assert.ok((await page.locator('.evidence-turn-reported').innerText()).includes(text));
       await page.locator('#languageToggle').click();await waitEnglish();await page.waitForTimeout(200);
       assert.equal(calls,oldCalls,'A language round trip must reuse translations');
       failed=true;record.evidence.extraction_analysis.diagnosis.expected_behavior='新分析正文需要翻译';
@@ -47,7 +50,7 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
       await page.locator('#translationStatus').filter({hasText:'Some content could not be translated.'}).waitFor();
       assert.doesNotMatch(await page.locator('.evidence-analysis').innerText(),/[\u3400-\u9fff]/);
       assert.match(await page.locator('.evidence-analysis').innerText(),/Translation unavailable/);
-      assert.match(await page.locator('.evidence-turn-reported').innerText(),/用户原始确认|助手原始回复/);
+      assert.doesNotMatch(await page.locator('.evidence-turn-reported').innerText(),/[\u3400-\u9fff]/);
       await page.locator('#translationStatusClose').click();
       await page.evaluate(()=>window.ECE329I18n.refresh());
       assert.equal(await page.locator('#translationStatus').isVisible(),false);
@@ -75,8 +78,17 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
       await page.locator('#languageToggle').click();
       await page.locator('.evidence-analysis').getByText('Ask for missing information.',{exact:true}).waitFor();
       assert.equal(await note.inputValue(),'我的审阅草稿');
+      // Ticket summary uses the same display-only translation path as its expanded evidence.
+      const ticket={id:record.id,design_id:'design_test',message:'反馈卡片中文正文',status:'candidate',attempts:1,max_attempts:10};
+      await page.route('**/v1/feedback/tickets?*',r=>r.fulfill({json:{feedback:[ticket],counts:{candidate:1},total:1,filtered_total:1,durable:true}}));
+      await page.route('**/v1/feedback/tickets/'+record.id,r=>r.fulfill({json:record}));
+      await page.locator('#reviewFilter').selectOption('feedback:all');
+      await page.locator('#reviewLogin button[type=submit]').click();
+      await page.waitForFunction(()=>{const n=document.querySelector('.experience-card > p[data-i18n-translate]');return n&&n.textContent.startsWith('English analysis');});
+      await page.locator('#languageToggle').click();
+      await page.getByText(ticket.message,{exact:true}).waitFor();
       assert.deepEqual(errors,[]);await context.close();
     }
-    console.log('PASS: Guided and EMVR analysis prose translates; source evidence/JSON/drafts remain intact; cache and bounded explicit retry verified');
+    console.log('PASS: Guided and EMVR analysis prose translates; readable feedback/chat translates both ways; raw JSON/drafts remain intact; cache and bounded explicit retry verified');
   }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

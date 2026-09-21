@@ -388,14 +388,15 @@ function evidenceFixture() {
     attachments:[{role:'problem',data_url:'data:image/png;base64,test'}]};
 }
 
-for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT'])test(`analysis prose opts into translation without translating evidence or IDs: ${mode}`,async()=>{
+for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT'])test(`readable analysis and conversation opt into translation without changing IDs or editors: ${mode}`,async()=>{
   const h=harness();h.item.evidence=evidenceFixture();h.item.evidence.evidence.mode=mode;
   await h.els.reviewLogin.fire('submit');await flush();
   const opted=h.els.reviewCards.querySelectorAll('p').filter(el=>Object.hasOwn(el,'data-i18n-translate')).map(el=>el.textContent);
   assert.ok(opted.includes('应继续推进'));
   assert.ok(opted.includes('Agent 认为阶段未前进'));
   assert.ok(opted.includes(h.item.content.trigger));
-  assert.ok(!opted.includes('继续。') && !opted.includes('turn:2'));
+  for(const text of ['继续。','还需补充','明确观察位置',h.item.evidence.message])assert.ok(opted.includes(text),text);
+  assert.ok(!opted.includes('turn:2'));
   assert.equal(h.find('content-').value,JSON.stringify(h.item.content,null,2));
 });
 

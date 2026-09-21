@@ -146,9 +146,11 @@ def test_feedback_extraction_uses_deepseek_without_openai_key(feedback_env, thin
     result = ModelExperienceExtractor(generator, environ=feedback_env).extract({'message':'重复询问', 'evidence':{}})
     assert result['useful'] and len(chat.requests) == 2
     assert chat.requests[0]['model'] == 'deepseek-flash'
-    assert all(request['thinking']['type'] == thinking for request in chat.requests)
+    assert chat.requests[0]['thinking']['type'] == thinking
+    assert chat.requests[1]['thinking']['type'] == 'disabled'
+    assert 'reasoning_effort' not in chat.requests[1]
     assert generator.model == 'deepseek-flash:fast'
-    assert [request['max_tokens'] for request in chat.requests] == [8192, 4096]
+    assert [request['max_tokens'] for request in chat.requests] == [8192, 8192]
 
 
 @pytest.mark.parametrize('number', ['NaN', 'Infinity', '-Infinity', '1e999'])
@@ -191,3 +193,64 @@ def test_schema_rejection_enters_existing_single_repair_and_preserves_usage():
     trace = engine.telemetry_records(session.design_id)[0]
     assert trace['input_tokens'] == len(chat.requests)*120
     assert trace['retry_count'] == 1
+
+
+@pytest.mark.parametrize('mode', ['GUIDED_DESIGN', 'EMVR_DIRECT'])
+@pytest.mark.parametrize('model', ['deepseek-flash', 'deepseek-flash:reasoning'])
+def test_feedback_checker_does_not_inherit_thinking_or_truncate_its_json(mode, model):
+    class ThinkingLimitedChat(ChatFixture):
+        def create(self, body):
+            response = super().create(body)
+            if len(self.requests) == 2 and body['thinking']['type'] == 'enabled':
+                response['choices'][0].update(finish_reason='length', message={'content': ''})
+            return response
+    chat = ThinkingLimitedChat()
+    generator = OpenAIStageGenerator(model=model, transport=ProviderResponsesTransport(
+        deepseek=DeepSeekJSONTransport('fixture', http_transport=chat)))
+    calls, trace = [], {}
+    extractor = ModelExperienceExtractor(generator, {'ECE329_FEEDBACK_MODEL': model})
+    result = extractor.extract({'message': 'continue', 'evidence': {'mode': mode}}, usage_calls=calls, diagnostics=trace)
+    assert result['useful'] is True
+    assert len(chat.requests) == len(calls) == 2
+    assert chat.requests[0]['thinking']['type'] == 'enabled'
+    assert chat.requests[1]['thinking']['type'] == 'disabled'
+    assert chat.requests[1]['max_tokens'] == 8192
+    assert calls[1]['reasoning_effort'] == 'none'
+
+
+@pytest.mark.parametrize('effort', ['none', 'high'])
+def test_feedback_checker_respects_explicit_independent_settings(effort):
+    chat = ChatFixture()
+    generator = OpenAIStageGenerator(model='deepseek-flash:reasoning', transport=ProviderResponsesTransport(
+        deepseek=DeepSeekJSONTransport('fixture', max_output_tokens=16384, http_transport=chat)))
+    extractor = ModelExperienceExtractor(generator, {'ECE329_FEEDBACK_MODEL': generator.model,
+        'ECE329_FEEDBACK_CHECK_REASONING_EFFORT': effort, 'ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS': '2048'})
+    extractor.extract({'message': 'continue', 'evidence': {}})
+    assert chat.requests[1]['thinking']['type'] == ('disabled' if effort == 'none' else 'enabled')
+    assert chat.requests[1]['max_tokens'] == 2048
+    assert chat.requests[0]['reasoning_effort'] == 'high'
+    assert len(chat.requests) == 2
+
+
+def test_truncated_feedback_check_is_rejected_without_recursive_retry():
+    class TruncatedChat(ChatFixture):
+        def create(self, body):
+            response = super().create(body)
+            if len(self.requests) == 2:
+                response['choices'][0]['finish_reason'] = 'length'
+            return response
+    chat = TruncatedChat()
+    generator = OpenAIStageGenerator(model='deepseek-flash', transport=ProviderResponsesTransport(
+        deepseek=DeepSeekJSONTransport('fixture', http_transport=chat)))
+    calls, trace = [], {}
+    with pytest.raises(ModelOutputError) as caught:
+        ModelExperienceExtractor(generator, {}).extract({'message':'continue','evidence':{}}, usage_calls=calls, diagnostics=trace)
+    assert caught.value.feedback_reason == 'output_limit'
+    assert caught.value.feedback_phase == 'parse_check'
+    assert len(chat.requests) == len(calls) == 2
+    assert calls[-1]['output_tokens'] == 32
+
+
+def test_invalid_checker_reasoning_is_rejected_before_any_call():
+    with pytest.raises(ModelConfigurationError, match='ECE329_FEEDBACK_CHECK_REASONING_EFFORT'):
+        ModelExperienceExtractor(None, {'ECE329_FEEDBACK_CHECK_REASONING_EFFORT': 'invalid'})

@@ -1,6 +1,6 @@
 "use strict";
 
-// Original evidence stays verbatim; only Agent-analysis prose opts into display translation.
+// Readable prose is a translated display copy; raw evidence and editors remain verbatim.
 (() => {
   const views = new WeakMap();
   const own = (value, key) => value != null && Object.prototype.hasOwnProperty.call(value, key);
@@ -74,7 +74,7 @@
       const ul=node('ul'); for (const item of value) { const li=node('li');li.append(valueNode(item,translateProse));ul.append(li); } return ul;
     }
     if (value && typeof value === 'object') {
-      const dl=node('dl'); for (const [key,item] of Object.entries(value)) {dl.append(node('dt',name(key)));const dd=node('dd');dd.append(valueNode(['stage','type','intent','status','phase'].includes(key) && typeof item==='string' ? name(item) : item,translateProse && ['observation','issues','input','expected'].includes(key)));dl.append(dd);} return dl;
+      const dl=node('dl'); for (const [key,item] of Object.entries(value)) {dl.append(node('dt',name(key)));const dd=node('dd');dd.append(valueNode(['stage','type','intent','status','phase'].includes(key) && typeof item==='string' ? name(item) : item,translateProse && ['observation','issues','input','expected','question','message','detail','reason','student_task','warnings','assumptions'].includes(key)));dl.append(dd);} return dl;
     }
     const text=node('p',valueText(value));
     if(translateProse && typeof value==='string' && value.trim())text.setAttribute('data-i18n-translate','');
@@ -107,11 +107,11 @@
   function renderTurn(host, row, position) {
     const turn=node('article');turn.className='evidence-turn'+(position==='reported'?' evidence-turn-reported':'');
     turn.append(node('h5',`${name(position)} · ${t('版本','Revision')} ${valueText(row.revision)} · ${name(row.stage)} · ${name(row.mode)}`));
-    const user=node('div');user.className='evidence-bubble evidence-user';user.append(node('strong',t('用户','User')),node('p',recorded(row,'user')?valueText(row.user):missing()));
-    const agent=node('div');agent.className='evidence-bubble evidence-agent';agent.append(node('strong','ECE329 Agent'),node('p',bodyText(row)));
-    field(agent,'提示','Warnings',recorded(row,'warnings')?row.warnings:undefined);
-    field(agent,'假设／补充说明','Assumptions / notes',recorded(row,'assumptions')?row.assumptions:undefined);
-    field(agent,'下一步任务','Next task',recorded(row,'student_task')?row.student_task:undefined);
+    const user=node('div');user.className='evidence-bubble evidence-user';user.append(node('strong',t('用户','User')),valueNode(recorded(row,'user')?row.user:undefined,true));
+    const agent=node('div');agent.className='evidence-bubble evidence-agent';agent.append(node('strong','ECE329 Agent'),recorded(row,'assistant') && row.assistant ? valueNode(row.assistant,true) : node('p',bodyText(row)));
+    field(agent,'提示','Warnings',recorded(row,'warnings')?row.warnings:undefined,true);
+    field(agent,'假设／补充说明','Assumptions / notes',recorded(row,'assumptions')?row.assumptions:undefined,true);
+    field(agent,'下一步任务','Next task',recorded(row,'student_task')?row.student_task:undefined,true);
     turn.append(user,agent);
     if (list(row.truncated_fields).length) turn.append(node('p',t('以下记录已截断：','Truncated fields: ')+row.truncated_fields.map(name).join(', ')));
     host.append(turn);
@@ -160,7 +160,7 @@
     for(const row of rows) {
       const block=node('div');block.className='evidence-difference';block.append(node('h5',row.path));
       const key=row.path.split('.').at(-1),display=value=>['stage','type','status','intent'].includes(key)&&typeof value==='string'?name(value):value;
-      field(block,'之前','Before',display(row.before));field(block,'之后','After',display(row.after));host.append(block);
+      field(block,'之前','Before',display(row.before),/question|proposal|detail|message/.test(row.path));field(block,'之后','After',display(row.after),/question|proposal|detail|message/.test(row.path));host.append(block);
     }
   }
   function renderState(host, snapshot, target, view) {
@@ -202,7 +202,7 @@
     if(error!=null&&error!=='') {
       // Quote only a short check result. Full result remains in the details/JSON.
       const brief=typeof error==='string'?error.slice(0,200):t('已记录结构化返回值，见详情','A structured result is recorded; see details');
-      s.append(node('p',t('完成检查返回：','Completion check returned: ')+brief+(typeof error==='string'&&error.length>200?'…':'')));
+      const result=node('div');result.append(node('span',t('完成检查返回：','Completion check returned: ')),valueNode(brief+(typeof error==='string'&&error.length>200?'…':''),typeof error==='string'));s.append(result);
     }else s.append(node('p',own(after,'completion_error')?t('完成检查未返回阻塞信息。','The completion check returned no blocking information.'):t('完成检查结果未记录。','Completion-check result not recorded.')));
     if(Array.isArray(after.missing_fields)||isRecord(error)&&Array.isArray(error.missing_fields)) {
       field(s,'检查明确记录的缺项','Explicitly recorded missing fields',after.missing_fields ?? error.missing_fields);
@@ -213,7 +213,7 @@
     details.parentElement?.setAttribute('data-evidence-detail','technical');
     diffDetails(details,delta.filter(row=>!/^completion_error(\.|$)/.test(row.path)));
     field(details,'意图解析明细','Intent details',target?.resolved_intent);
-    field(details,'完整完成检查返回值','Full completion-check result',error);
+    field(details,'完整完成检查返回值','Full completion-check result',error,true);
     details.append(node('p',t('这里只列变化字段；两份完整状态、未变化的字段映射和对话原文保留在原始 JSON 中。','Only changed fields are listed here. Full snapshots, unchanged field mappings and conversation evidence remain in raw JSON.')));
     const current=fold(s,t('反馈提交时的状态（单独比较）','State at feedback submission (separate comparison)'),view.submissionOpen,open=>view.submissionOpen=open);
     current.parentElement?.setAttribute('data-evidence-detail','submission');
@@ -233,9 +233,9 @@
       if(list(snapshot.evidence_migration.conflicting_fields_preserved).length)host.append(node('p',t('部分历史字段不一致，已保留原证据；请核对原始 JSON 中的迁移记录。','Some historical fields conflict. Original evidence was preserved; inspect the migration record in the raw JSON.')));
     }
     const feedback=section(host,'用户反馈','User feedback');
-    field(feedback,'原始反馈','Original feedback',payload.message ?? record.message);
+    field(feedback,'原始反馈','Original feedback',payload.message ?? record.message,true);
     field(feedback,'问题类型','Issue category',name(payload.category ?? record.category));
-    field(feedback,'用户明确填写的期望行为','Expected behavior explicitly recorded from the user',payload.expected_behavior);
+    field(feedback,'用户明确填写的期望行为','Expected behavior explicitly recorded from the user',payload.expected_behavior,true);
     const target=list(snapshot.event_chain).filter(isRecord).find(row=>row.position==='reported') || (isRecord(snapshot.reported_turn)?snapshot.reported_turn:null);
     renderState(host,snapshot,target,view);
     const chat=section(host,'问题前后对话','Conversation around the reported turn');
@@ -278,6 +278,7 @@
     host.replaceChildren();
     const read=fold(host,t('对话与状态说明','Conversation and state'),state.readOpen,open=>state.readOpen=open);
     readable(read,state.record,state);
+    read.append(node('p',t('反馈和对话按当前界面语言显示，译文仅供阅读；核对原文请查看原始 JSON。','Feedback and conversations follow the interface language. Translations are reading aids; consult raw JSON for the original evidence.')));
     const raw=fold(host,t('原始 JSON 记录','Raw JSON record'),state.rawOpen,open=>state.rawOpen=open);
     const images=[];
     const compact=JSON.stringify(state.record,function(key,value){

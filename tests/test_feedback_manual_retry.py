@@ -158,8 +158,8 @@ def test_feedback_budget_and_reasoning_are_independent_and_configurable():
     generator = SimpleNamespace(model='test',reasoning_effort='high',transport=SimpleNamespace(create=create))
     extractor = ModelExperienceExtractor(generator, {})
     extractor.extract({'evidence':{'current_state':{'stage':'test'}}})
-    assert [r['max_output_tokens'] for r in requests] == [8192,4096]
-    assert all(r['reasoning']['effort'] == 'low' for r in requests)
+    assert [r['max_output_tokens'] for r in requests] == [8192,8192]
+    assert [r['reasoning']['effort'] for r in requests] == ['low', 'none']
     schema = requests[0]['text']['format']['schema']
     assert schema['properties']['candidate']['properties']['trigger']['maxLength'] == 140
     assert schema['properties']['diagnosis']['properties']['facts']['items']['properties']['evidence_ref']['enum'] == ['current_state']

@@ -60,7 +60,12 @@
       const length=Number.isFinite(d.actual_length)&&Number.isFinite(d.limit)?` (${d.actual_length} / ${d.limit}${['max_length','min_length'].includes(d.reason)?t(' 字符',' characters'):''})`:'';
       const fields={'candidate.trigger':['触发条件','Trigger'],'candidate.summary':['经验摘要','Summary'],'candidate.recommendation':['处理建议','Recommendation'],'candidate.verification':['验证方法','Verification']};
       host.append(node('p',(fields[d.field_path]?t(...fields[d.field_path])+t('：',': '):'')+t(words[0],words[1])+length));
-      host.append(node('p',t('检查建议：','Check: ')+t(words[2],words[3])));
+      let advice=t(words[2],words[3]);
+      if(d.reason==='output_limit' && ['check','request_check','parse_check','validate_check'].includes(row.phase)) {
+        advice=t('检查 ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS（建议 8192）及 ECE329_FEEDBACK_CHECK_REASONING_EFFORT（建议 none）；更新配置并重启后端后手动重试。检查环节只需简短 JSON 结果，提高草案上限不会改变检查上限。',
+          'Check ECE329_FEEDBACK_CHECK_MAX_OUTPUT_TOKENS (suggested: 8192) and ECE329_FEEDBACK_CHECK_REASONING_EFFORT (suggested: none). Restart the backend after updating settings, then retry manually. The checker only needs concise JSON; changing the draft cap does not change the check cap.');
+      }
+      host.append(node('p',t('检查建议：','Check: ')+advice));
     }
     if(row.input_evidence_truncated)host.append(node('p',t('输入证据摘录已截断：核对原始记录和后端摘录上限，补充较短的关键上下文。此标记不等于模型上下文超限。','Input evidence excerpts were truncated: check original records and backend excerpt limits, and supply shorter key context. This does not establish a model context-limit error.')));
     const details=node('details');details.open=state.fold.open;const summary=node('summary'),button=node('button');button.type='button';button.className='ghost-button';
