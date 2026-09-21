@@ -441,6 +441,24 @@ class WorkflowAPI:
                     self.feedback.retry(ticket['design_id'], ticket_id, self._read_json(environ))
                     return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
 
+            rule_admin = re.fullmatch(r'/v1/feedback/(?:experiences/([a-f0-9]{32})/(draft|replay|restore)|executions)', path)
+            if rule_admin and method in {'POST','GET'}:
+                candidate = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
+                if not self.settings.feedback_admin_token or not hmac.compare_digest(candidate.encode(), self.settings.feedback_admin_token.encode()):
+                    raise DesignAccessDenied('A feedback maintainer token is required')
+                from .experience_admin import generate_draft, replay_draft, restore_draft, execution_records
+                identity, action = rule_admin.groups()
+                if method=='GET' and identity is None:
+                    offset=int(parse_qs(environ.get('QUERY_STRING','')).get('offset',['0'])[0])
+                    return self._respond(start_response, HTTPStatus.OK, execution_records(self.feedback.store,offset))
+                if method=='POST' and identity:
+                    body=self._read_json(environ)
+                    allowed={'version','content','note','scope','restore_version'}
+                    if set(body)-allowed: raise ValueError('Unknown rule authoring field')
+                    result=(generate_draft(self.feedback,identity,body) if action=='draft' else
+                            replay_draft(self.feedback.store,identity,body) if action=='replay' else
+                            restore_draft(self.feedback.store,identity,body))
+                    return self._respond(start_response,HTTPStatus.OK,result)
             review_match = re.fullmatch(r"/v1/feedback/experiences(?:/([a-f0-9]{32})/review)?", path)
             if review_match and method in {'GET', 'POST'}:
                 candidate = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
@@ -453,9 +471,9 @@ class WorkflowAPI:
                     return self._respond(start_response, HTTPStatus.OK, {'experiences': items})
                 if method == 'POST' and experience_id:
                     body = self._read_json(environ)
-                    if set(body) - {'decision', 'version', 'note', 'content', 'scope'}:
+                    if set(body) - {'decision', 'version', 'note', 'content', 'scope', 'validation_id', 'draft_id'}:
                         raise ValueError('Unknown review field')
-                    result = self.feedback.store.review(experience_id, body.get('decision'), body.get('version'), body.get('note'), body.get('content'), body.get('scope'))
+                    result = self.feedback.store.review(experience_id, body.get('decision'), body.get('version'), body.get('note'), body.get('content'), body.get('scope'), body.get('validation_id'), body.get('draft_id'))
                     return self._respond(start_response, HTTPStatus.OK, result)
             if method == "GET" and design_match:
                 self._require_design_token(environ, design_match.group(1))

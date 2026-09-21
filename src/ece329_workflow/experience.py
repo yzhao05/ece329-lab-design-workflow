@@ -41,8 +41,10 @@ def fingerprint(value):
 
 
 def experience_identity(value):
-    return fingerprint({k: sorted(set(value[k])) if k in ('modes', 'stages', 'keywords') else value[k].strip()
-                        for k in ('category', 'trigger', 'recommendation', 'verification', 'modes', 'stages', 'keywords')})
+    identity = {k: sorted(set(value[k])) if k in ('modes', 'stages', 'keywords') else value[k].strip()
+                for k in ('category', 'trigger', 'recommendation', 'verification', 'modes', 'stages', 'keywords')}
+    if 'execution' in value: identity['execution'] = value['execution']
+    return fingerprint(identity)
 
 
 def candidate_schema():
@@ -64,6 +66,11 @@ def candidate_schema():
 
 def validate_candidate(raw):
     from .feedback_diagnostics import validate
+    from .experience_rules import validate_contract
+    if isinstance(raw, dict) and 'execution' in raw:
+        value = validate({k:v for k,v in raw.items() if k != 'execution'}, candidate_schema(), 'candidate')
+        value['execution'] = validate_contract(raw['execution'])
+        return value
     return validate(raw, candidate_schema(), 'candidate')
 
 
@@ -127,6 +134,9 @@ def evidence_snapshot(session: DesignSession, reported_revision=None, reported_s
                                        'Missing before/after turns are unavailable evidence, not proof of success or failure.')
     if reported_revision is not None:
         evidence['reported_turn'] = _turn_evidence(target, 1500) if target else None
+        evidence['replay'] = {'state_before': deepcopy(target.get('experience_replay_before')),
+                              'intent': deepcopy(target.get('experience_replay_intent')),
+                              'message': target.get('user_message')} if target else None
     return evidence
 
 
@@ -141,6 +151,12 @@ class ExperienceStore(UsageStore):
         with self.connection() as db:
             self.init_usage(db)
             db.executescript('''
+                CREATE TABLE IF NOT EXISTS experience_validations (
+                    id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL, report TEXT NOT NULL, created REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS experience_drafts (
+                    id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+                    record TEXT NOT NULL, created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS feedback_tickets (
                     id TEXT PRIMARY KEY, design_id TEXT NOT NULL, request_id TEXT NOT NULL,
                     request_hash TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL,
@@ -159,6 +175,11 @@ class ExperienceStore(UsageStore):
                 CREATE TABLE IF NOT EXISTS workflow_telemetry (
                     id TEXT PRIMARY KEY, design_id TEXT NOT NULL, created REAL NOT NULL, record TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS telemetry_design ON workflow_telemetry(design_id, created);
+                CREATE TRIGGER IF NOT EXISTS experience_authoring_deleted
+                    AFTER DELETE ON learned_experiences BEGIN
+                    DELETE FROM experience_validations WHERE experience_id=OLD.id;
+                    DELETE FROM experience_drafts WHERE experience_id=OLD.id;
+                    END;
             ''')
             # Idempotent upgrade: preserve all content and historical decisions.
             # Bump versions so an already-open legacy review cannot overwrite it.
@@ -460,6 +481,8 @@ class ExperienceStore(UsageStore):
             rows = db.execute('SELECT e.*,t.payload AS evidence FROM learned_experiences e JOIN feedback_tickets t ON t.id=e.ticket_id WHERE (? IS NULL OR e.status=?) AND (? IS NULL OR e.id=?) ORDER BY e.updated DESC,e.rowid DESC LIMIT 50 OFFSET ?', (status, status, experience_id, experience_id, offset))
             result = [{**dict(r), 'content': json.loads(r['content']), 'evidence': json.loads(r['evidence'])} for r in rows]
             for item in result:
+                item['validations'] = [dict(r, report=json.loads(r['report'])) for r in db.execute(
+                    'SELECT * FROM experience_validations WHERE experience_id=? ORDER BY created DESC LIMIT 10', (item['id'],))]
                 item['usage'] = self._ticket_usage(db, item['ticket_id'])
                 item['reviews'] = [{**dict(r), 'content': json.loads(r['content'])} for r in db.execute('SELECT version,decision,note,content,created FROM experience_reviews WHERE experience_id=? ORDER BY version', (item['id'],))]
             return result
@@ -472,7 +495,7 @@ class ExperienceStore(UsageStore):
             return identity
         return fingerprint([identity, scope, payload.get('project_id') if scope == 'project' else payload.get('scope_design_id')])
 
-    def review(self, experience_id, decision, version, note, content=None, scope=None):
+    def review(self, experience_id, decision, version, note, content=None, scope=None, validation_id=None, draft_id=None):
         note = validate_review_note(note)
         if scope is not None and scope not in ('session', 'project', 'global'):
             raise ValueError('Invalid experience scope')
@@ -491,7 +514,7 @@ class ExperienceStore(UsageStore):
                 raise SessionNotFound('Unknown experience')
             if row['version'] != version:
                 raise SessionConflict('Experience changed; reload before reviewing')
-            allowed = {'approve': {'candidate', 'stopped'}, 'stop': {'candidate', 'active'},
+            allowed = {'approve': {'candidate', 'stopped', 'active'}, 'stop': {'candidate', 'active'},
                        'reject': {'candidate'}, 'disable': {'active'},
                        'delete': {'candidate', 'stopped', 'active'}}
             if row['status'] not in allowed[decision]:
@@ -508,6 +531,20 @@ class ExperienceStore(UsageStore):
             previous = {'rule': json.loads(row['content']), 'scope': payload.get('scope', 'global')}
             if scope is not None:
                 payload['scope'] = scope
+            validation = None
+            if decision == 'approve' and value.get('execution'):
+                from .experience_replay import VERIFIER_VERSION
+                validation = db.execute('SELECT * FROM experience_validations WHERE id=? AND experience_id=?',
+                                        (validation_id, experience_id)).fetchone()
+                binding = fingerprint({'content': value, 'scope': payload.get('scope', 'global')})
+                if (validation is None or validation['base_version'] != version or validation['content_hash'] != binding
+                        or json.loads(validation['report']).get('status') != 'passed'
+                        or json.loads(validation['report']).get('verifier_version') != VERIFIER_VERSION):
+                    raise ValueError('rule_validation_required: replay this exact draft and scope before approval')
+            if draft_id:
+                draft = db.execute('SELECT * FROM experience_drafts WHERE id=? AND experience_id=?', (draft_id, experience_id)).fetchone()
+                if draft is None or draft['base_version'] != version:
+                    raise SessionConflict('Draft belongs to a different source version')
             identity = self.scoped_identity(value, payload)
             if db.execute('SELECT 1 FROM learned_experiences WHERE digest=? AND id<>?', (identity, experience_id)).fetchone():
                 raise SessionConflict('This experience duplicates another entry; reload and review that entry')
@@ -517,10 +554,62 @@ class ExperienceStore(UsageStore):
             db.execute('INSERT INTO experience_reviews VALUES(?,?,?,?,?,?)',
                        (experience_id, version + 1, decision, encode(note),
                         encode({'previous': previous, 'current': {'rule': value, 'scope': payload.get('scope', 'global')},
-                                'project_id': payload['project_id'], 'scope_design_id': payload['scope_design_id']}), time.time()))
+                                'project_id': payload['project_id'], 'scope_design_id': payload['scope_design_id'],
+                                'source': {'draft_id': draft_id, 'validation_id': validation_id,
+                                           'validation_kind': 'isolated_simulated_replay' if validation else 'not_replayed'}}), time.time()))
             # Review changes the experience lifecycle, not the extraction outcome.
             db.execute('UPDATE feedback_tickets SET payload=? WHERE id=?', (encode(payload), row['ticket_id']))
             return {'id': experience_id, 'status': status, 'version': version + 1}
+
+    def rule_is_current(self, rule):
+        with self.connection() as db:
+            return bool(db.execute("SELECT 1 FROM learned_experiences WHERE id=? AND version=? AND status='active'",
+                                   (rule['id'].removeprefix('EXP-'), rule['version'])).fetchone())
+
+    def select_rules(self, session, message, categories=()):
+        from .experience_rules import settings, token_bound
+        from .dialogue_state import current_pending_action
+        limits = settings()
+        pending = current_pending_action(session) or {}
+        ranked, decisions = [], []
+        query = message.casefold()
+        with self.connection() as db:
+            rows = db.execute('SELECT e.id,e.version,e.status,e.content,t.payload,t.design_id FROM learned_experiences e JOIN feedback_tickets t ON t.id=e.ticket_id ORDER BY e.id')
+            for row in rows:
+                value, source = json.loads(row['content']), json.loads(row['payload'])
+                scope = source.get('scope', 'global')
+                reason = None
+                if row['status'] != 'active': reason = 'not_active'
+                elif scope == 'session' and row['design_id'] != session.design_id: reason = 'scope_mismatch'
+                elif scope == 'project' and source.get('project_id') != self.project_id: reason = 'scope_mismatch'
+                elif session.interaction_state.value not in value['modes']: reason = 'mode_mismatch'
+                elif session.current_stage.value not in value['stages']: reason = 'stage_mismatch'
+                lexical = sum(k.casefold() in query for k in value['keywords'])
+                structural = bool(pending.get('candidate_answer')) and (value.get('execution') or value['category'] in ('cross_stage_edit', 'answered_pending'))
+                structural = structural or bool(pending.get('repeat_count')) and value['category'] == 'answered_pending'
+                score = 10 * bool(value.get('execution') and structural) + 3 * bool(structural) + 2 * (value['category'] in categories) + lexical
+                if reason is None and not score: reason = 'not_relevant'
+                entry = {'rule_id': 'EXP-' + row['id'], 'version': row['version']}
+                if reason:
+                    decisions.append({**entry, 'reason': reason}); continue
+                packet = {'id': entry['rule_id'], 'version': row['version'], 'scope': scope,
+                          'match_basis': 'workflow_state' if structural else 'text',
+                          'rule': {k:v for k,v in value.items() if k != 'execution'},
+                          'instruction': f"适用：{value['trigger']}；处理：{value['recommendation']}；核对：{value['verification']}"}
+                if value.get('execution'): packet['execution'] = value['execution']
+                ranked.append((score, packet))
+        ranked.sort(key=lambda r: (-r[0], r[1]['id']))
+        selected, used = [], 0
+        for _, packet in ranked:
+            size = token_bound(packet)
+            reason = 'candidate_limit' if len(selected) >= limits['candidates'] else 'budget_excluded' if used + size > limits['token_budget'] else 'selected'
+            decisions.append({'rule_id': packet['id'], 'version': packet['version'], 'reason': reason, 'token_upper_bound': size})
+            if reason == 'selected': selected.append(packet); used += size
+        # Bound diagnostics too; counts retain reasons excluded from detail.
+        counts = {reason: sum(d['reason'] == reason for d in decisions) for reason in {d['reason'] for d in decisions}}
+        details = sorted(decisions, key=lambda d: d['reason'] != 'selected')[:120]
+        return selected, details + [{'reason': 'retrieval_totals', 'counts': counts, 'budget': limits,
+                                     'omitted_details': max(0, len(decisions)-len(details))}]
 
     def correction_examples(self, payload):
         """Only currently active approvals, within their reviewed scope, guide extraction."""
@@ -577,7 +666,7 @@ class ExperienceStore(UsageStore):
                 del ranked[3:]
         return [item for _, item in ranked]
 
-    def retrieve(self, mode, stage, message, categories=(), *, design_id=None, project_id=None, topic=''):
+    def retrieve(self, mode, stage, message, categories=(), *, design_id=None, project_id=None, topic='', allow_scope_fallback=False):
         ranked = []
         query = (message + ' ' + topic).casefold()
         with self.connection() as db:
@@ -594,9 +683,10 @@ class ExperienceStore(UsageStore):
             for row in rows:
                 item = json.loads(row['content'])
                 score = (3 if item['category'] in categories else 0) + sum(k.casefold() in query for k in item['keywords'])
-                if score:
+                if score or allow_scope_fallback:
                     scope = json.loads(row['payload']).get('scope', 'global')
                     ranked.append((score, {'id': 'EXP-' + row['id'], 'version': row['version'], 'scope': scope,
+                                          'match_basis': 'text' if score else 'mode_stage_scope',
                                           'instruction': f"适用：{item['trigger']}；处理：{item['recommendation']}；核对：{item['verification']}"}))
                     ranked.sort(key=lambda r: r[0], reverse=True)
                     del ranked[3:]
@@ -711,6 +801,10 @@ class ModelExperienceExtractor:
             'message', 'category', 'reported_revision', 'reported_stage', 'scope',
             'project_id', 'scope_design_id', 'telemetry_id', 'topic', 'evidence',
             'reviewed_corrections', 'attachments', 'has_problem') if key in payload})
+        if isinstance(model_payload.get('evidence'), dict):
+            # Replay state is for the local sandbox, not extra model context.
+            # Keep the existing bounded evidence excerpts for extraction.
+            model_payload['evidence'].pop('replay', None)
         if images:
             model_payload['attachments'] = [{'ref': f'attachment:{i}', 'role': item['role']} for i, item in enumerate(images)]
             model_payload['image_evidence_available'] = not deepseek

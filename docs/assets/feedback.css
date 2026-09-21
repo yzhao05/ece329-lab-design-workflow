@@ -66,4 +66,8 @@
 .feedback-attempt { border-top:1px solid #dce5e8; padding:10px 0; overflow-wrap:anywhere; }
 .feedback-attempt > details > summary { display:flex; justify-content:space-between; align-items:center; gap:12px; cursor:pointer; }
 .feedback-attempt pre { white-space:pre-wrap; max-height:300px; overflow:auto; }
+.rule-authoring { min-width:0; margin:16px 0; display:flex; flex-wrap:wrap; gap:12px; }
+.rule-authoring > details,.rule-authoring > p { flex-basis:100%; min-width:0; }
+.rule-authoring pre,.experience-execution pre { white-space:pre-wrap; overflow-wrap:anywhere; max-width:100%; max-height:320px; overflow:auto; font-size:.8rem; }
+.rule-authoring textarea { box-sizing:border-box; width:100%; min-width:0; }
 @media(max-width:640px) { .evidence-body {padding:0 10px 10px;} .evidence-bubble {max-width:100%;} .evidence-turn {padding:8px;} .review-evidence > details > summary {padding:10px;} }

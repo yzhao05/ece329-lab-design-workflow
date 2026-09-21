@@ -114,6 +114,7 @@ CONTROL_TARGETS = frozenset(
         "ACCEPT",
         "REJECT",
         "ADVANCE",
+        "KEEP_CURRENT",
         "RETURN",
         "SET_GUIDED_MODE",
         "SET_EMVR_MODE",
@@ -121,6 +122,42 @@ CONTROL_TARGETS = frozenset(
         "REQUEST_NEW_TOPIC",
     }
 )
+
+
+def keeps_current_design(acts: Any, message: str) -> bool:
+    """A semantic no-edit/continue decision, grounded in the entire current turn.
+
+    No command vocabulary: the resolver labels intent; source coverage prevents
+    a lone 'continue' clause from swallowing an accompanying unresolved edit.
+    """
+    if not isinstance(acts, list) or not acts or not isinstance(message, str):
+        return False
+    targets, covered = set(), set()
+    for act in acts:
+        if not isinstance(act, dict) or act.get('type') != 'CONTROL':
+            return False
+        if act.get('target') not in {'KEEP_CURRENT', 'ADVANCE'}:
+            return False
+        try:
+            if not 0.8 <= float(act.get('confidence', 0)) <= 1:
+                return False
+        except (ValueError, TypeError):
+            return False
+        source = act.get('source_text')
+        if not isinstance(source, str) or not source.strip():
+            return False
+        start, end = act.get('source_start'), act.get('source_end')
+        if type(start) is int and type(end) is int and 0 <= start < end <= len(message):
+            if message[start:end] != source:
+                return False
+        else:
+            if message.count(source) != 1:
+                return False
+            start, end = message.index(source), message.index(source) + len(source)
+        covered.update(range(start, end))
+        targets.add(act['target'])
+    return targets == {'KEEP_CURRENT', 'ADVANCE'} and all(
+        not char.isalnum() or index in covered for index, char in enumerate(message))
 
 
 def _text(value: Any) -> str:

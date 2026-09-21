@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--deepseek', action='store_true', help='Include the real DeepSeek protocol adapter with a fake HTTP service')
     parser.add_argument('--feedback-switch', action='store_true', help='Simulate invalid OpenAI feedback output and a working DeepSeek backup')
     parser.add_argument('--usage', action='store_true', help='Attach deterministic token usage for accounting UI checks')
+    parser.add_argument('--rule-authoring', action='store_true', help='Deterministic controlled-rule revision fixture')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1] / 'docs'
     engine = WorkflowEngine(generator=RuleBasedStageGenerator(), store=SQLiteSessionStore(args.database))
@@ -44,6 +45,15 @@ def main():
     generator = SimpleNamespace(model='test-double', reasoning_effort='low',
                                 transport=SimpleNamespace(create=extraction_response))
     feedback_requests = []
+    if args.rule_authoring:
+        from tests.test_feedback_pipeline import candidate
+        from ece329_workflow.experience_rules import contract
+        def revision_response(request):
+            if request['text']['format']['name']=='feedback_rule_revision':
+                return {'output_text':json.dumps({'candidate_json':json.dumps(candidate(execution=contract())), 'unsupported_actions':[]})}
+            return extraction_response(request)
+        generator=SimpleNamespace(model='deepseek-flash',allowed_models=('deepseek-flash',),
+                                  transport=SimpleNamespace(create=revision_response))
     if args.feedback_switch:
         from ece329_workflow.provider_transport import ProviderResponsesTransport
         def feedback_response(provider, request):

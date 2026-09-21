@@ -231,17 +231,17 @@ test('logout while saving does not display a late success or reload private evid
 });
 
 for(const [status, labels] of [
-  ['candidate',['启用经验','停止经验']], ['active',['停止经验']], ['stopped',['重新启用']],
+  ['candidate',['启用经验','停止经验']], ['active',['批准修订并启用','停止经验']], ['stopped',['重新启用']],
   ['rejected',['重新启用']], ['disabled',['重新启用']], ['deleted',['重新启用']]
 ]) test(`experience state ${status} exposes only the unified lifecycle actions`,async()=>{
   const h=harness({status});await h.els.reviewLogin.fire('submit');await flush();
-  const buttons=h.els.reviewCards.querySelectorAll('button').filter(b=>['启用经验','停止经验','重新启用'].includes(b.textContent));
+  const buttons=h.els.reviewCards.querySelectorAll('button').filter(b=>['启用经验','停止经验','重新启用','批准修订并启用'].includes(b.textContent));
   assert.deepEqual(buttons.map(e=>e.textContent),labels);
-  assert.equal(h.find('content-').disabled,status==='active');
-  assert.equal(h.find('scope-').disabled,status==='active');
+  assert.equal(h.find('content-').disabled,false);
+  assert.equal(h.find('scope-').disabled,false);
   if (status==='active') {
     assert.match(h.find('note-').placeholder,/停止时请填写具体原因/);
-    await buttons[0].fire('click');
+    await buttons.find(b=>b.textContent==='停止经验').fire('click');
     assert.equal(h.els.reviewStatus.textContent,'请填写停止原因。');
     assert.equal(h.calls.filter(c=>c.options.method==='POST').length,0);
   }

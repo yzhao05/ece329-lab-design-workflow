@@ -62,6 +62,11 @@ class ObservedTransport:
                'input_tokens': None, 'output_tokens': None, 'error_type': None}
         row['max_output_tokens'] = payload.get('max_output_tokens')
         row['agent'] = agent_role(row['schema'])
+        from .experience_rules import CURRENT_RULE_RUN
+        if (run := CURRENT_RULE_RUN.get()) is not None:
+            for rule in self.session.turn_context.get('experience_rules', []):
+                run.record('injection', 'injected' if rule['id'] in row['experience_rule_ids'] else 'not_injected', rule,
+                           request_schema=row['schema'])
         try:
             response = self.transport.create(payload)
             read_usage(response, row)

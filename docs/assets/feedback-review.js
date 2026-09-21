@@ -81,6 +81,7 @@
   let loading = false;
   let reviewing = false;
   let usageView = false;
+  let executionView = false;
   const controllers = new Set();
   const drafts = new Map();
   const editors = new Map();
@@ -106,7 +107,7 @@
     const token = maintainerToken();
     const controller = new AbortController();
     controllers.add(controller);
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), /\/(draft|replay)$/.test(path) ? 120000 : 30000);
     try {
       let response;
       try {
@@ -117,6 +118,12 @@
       }
       if ([401, 403, 431].includes(response.status)) throw passwordError();
       const body = await response.json();
+      if (!response.ok && typeof body.detail === 'string') {
+        const detail=body.detail;
+        if(detail.startsWith('rule_validation_required:'))body.detail='可执行规则需要对当前 JSON、范围和版本重新回放验证。';
+        else if(detail.startsWith('unsupported_rule_'))body.detail='规则包含尚未支持的动作或条件，需要代码维护。';
+        else if(detail.startsWith('advisory_only:'))body.detail='当前是建议类经验，请先添加受支持的执行规则再回放。';
+      }
       if (!response.ok) throw new Error(response.status === 409 ? "记录已变化或与已有经验重复，请重新加载核对。"
         : response.status === 404 && resource === 'tickets' && path.startsWith('?') ? "后端尚不支持全部反馈列表，请更新后端后重试。"
         : body.detail || body.error || `HTTP ${response.status}`);
@@ -229,7 +236,7 @@
       scope.value = item.evidence.scope || 'global';
       scope.id = `scope-${item.id}`;
       const scopeLabel = node('label', '审阅后的适用范围'); scopeLabel.htmlFor = scope.id;
-      scope.disabled = !['candidate','stopped'].includes(experienceStatus(item.status));
+      scope.disabled = !['candidate','active','stopped'].includes(experienceStatus(item.status));
       card.append(scopeLabel, scope);
       const evidence = node("div", "");
       appendEvidence(evidence,item);
@@ -261,7 +268,8 @@
       const initial=JSON.stringify(Object.fromEntries(Object.entries(controls).map(([key,control])=>[key,control.value])));
       if (saved) for (const [key,control] of Object.entries(controls)) control.value=saved[key];
       let reviewVersion=saved?.version ?? item.version;
-      const readDraft=()=>{const values=Object.fromEntries(Object.entries(controls).map(([key,control])=>[key,control.value]));return saved || JSON.stringify(values)!==initial ? {version:reviewVersion,...values} : null;};
+      let authoring;
+      const readDraft=()=>{const values=Object.fromEntries(Object.entries(controls).map(([key,control])=>[key,control.value]));return saved || authoring || JSON.stringify(values)!==initial ? {version:reviewVersion,...values,authoring:authoring?.capture()} : null;};
       if(reviewVersion!==item.version) {
         const warning=node('p','记录版本已更新，草稿已保留。请核对新证据后再提交。');
         const acknowledge=node('button','已核对新版本，继续使用草稿');acknowledge.type='button';acknowledge.className='ghost-button';
@@ -269,14 +277,16 @@
         card.append(warning,acknowledge);
       }
       editors.set(item.id,readDraft);
+      authoring=window.ECE329RuleAuthoring?.mount(card,{item,controls,request,isCurrent:()=>version===generation,
+        getVersion:()=>reviewVersion,saved:saved?.authoring,capture:captureDrafts,status:el.Status});
       for (const control of Object.values(controls)) for (const event of ['input','change']) control.addEventListener(event,captureDrafts);
       const actions = node("div", "");
       actions.className = "experience-actions";
       const currentStatus = experienceStatus(item.status);
       if (currentStatus === "active") note.placeholder = "停止时请填写具体原因，例如：总结不准确、暂时停用、被新经验替代。";
       const choices = currentStatus === "candidate" ? [["approve", "启用经验"], ["stop", "停止经验"]]
-        : currentStatus === "active" ? [["stop", "停止经验"]] : currentStatus === "stopped" ? [["approve", "重新启用"]] : [];
-      editor.disabled = !["candidate", "stopped"].includes(currentStatus);
+        : currentStatus === "active" ? [["approve", "批准修订并启用"],["stop", "停止经验"]] : currentStatus === "stopped" ? [["approve", "重新启用"]] : [];
+      editor.disabled = !["candidate", "active", "stopped"].includes(currentStatus);
       note.disabled = !choices.length;
       original.disabled = corrected.disabled = !choices.length;
       for (const [decision, title] of choices) {
@@ -304,6 +314,7 @@
           try {
             const result = await request(`/${encodeURIComponent(item.id)}/review`, { method: "POST",
               body: JSON.stringify({ decision, version: reviewVersion,
+                ...(decision==='approve'?authoring?.approval():{}),
                 note: {original:original.value.trim(), corrected:corrected.value.trim(), opinion:note.value.trim()},
                 ...(decision === 'approve' ? {scope: scope.value} : {}), ...(content ? { content } : {}) }) });
             if (version !== generation) return;
@@ -329,6 +340,15 @@
     el.Next.disabled = true;
     if (showStatus) el.Status.textContent = "正在读取……";
     try {
+      if(executionView) {
+        const result=await request(`?offset=${offset}`,{},'executions');
+        if(version!==generation)return;
+        clearCards();window.ECE329RuleAuthoring?.execution(el.Cards,result.records,id=>{
+          if(reviewing||loading)return;executionView=false;usageView=false;offset=0;load(true,id);
+        });
+        el.Previous.disabled=offset===0;el.Next.disabled=result.records.length<50;
+        el.Status.textContent='';return;
+      }
       if(usageView) {
         const result=await request(`?offset=${offset}`,{},'usage');
         if(version!==generation) return;
@@ -357,9 +377,10 @@
     } catch (error) { if (version === generation) { clearCards(); showFailure(el.Status,error,'读取失败：'); } }
     finally { if (version === generation) loading = false; }
   }
-  el.Login.addEventListener("submit", event => { event.preventDefault(); if (reviewing) return; usageView=false;offset = 0; load(); });
-  el.Usage.addEventListener('click',()=>{if(reviewing || loading) return;usageView=true;offset=0;load();});
-  el.Filter.addEventListener("change", () => { invalidate(); usageView=false;loading = false; offset = 0; el.Status.textContent = "点击“加载记录”查看所选状态。"; });
+  el.Login.addEventListener("submit", event => { event.preventDefault(); if (reviewing) return; executionView=false;usageView=false;offset = 0; load(); });
+  el.Usage.addEventListener('click',()=>{if(reviewing || loading) return;executionView=false;usageView=true;offset=0;load();});
+  document.getElementById('reviewExecutions')?.addEventListener('click',()=>{if(reviewing||loading)return;executionView=true;usageView=false;offset=0;load();});
+  el.Filter.addEventListener("change", () => { invalidate(); executionView=false;usageView=false;loading = false; offset = 0; el.Status.textContent = "点击“加载记录”查看所选状态。"; });
   el.Token.addEventListener("input", () => { invalidate(); drafts.clear(); loading = false; });
   el.Logout.addEventListener("click", () => { invalidate(); drafts.clear(); loading = false; el.Token.value = ""; el.Status.textContent = "令牌已清除。"; });
   el.Previous.addEventListener("click", () => { if (!loading && !reviewing) { offset = Math.max(0, offset - 50); load(); } });

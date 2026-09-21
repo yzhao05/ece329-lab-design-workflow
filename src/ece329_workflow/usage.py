@@ -234,9 +234,13 @@ class UsageStore:
         return result
 
     def _ticket_usage(self, db, ticket_id):
-        result = self._summarize_runs(db.execute('SELECT record FROM usage_runs WHERE ticket_id=?', (ticket_id,)))
+        rows = list(db.execute('SELECT record FROM usage_runs WHERE ticket_id=?', (ticket_id,)))
+        result = self._summarize_runs(rows)
+        # Authoring costs belong to the feedback, but cannot fill gaps in its
+        # historical extraction-attempt accounting.
+        extraction_count = sum(json.loads(row['record']).get('purpose') != 'rule_revision' for row in rows)
         ticket = db.execute('SELECT attempts FROM feedback_tickets WHERE id=?', (ticket_id,)).fetchone()
-        self._completeness(result, ticket is not None and result['run_count'] >= ticket['attempts'])
+        self._completeness(result, ticket is not None and extraction_count >= ticket['attempts'])
         return result
 
     @staticmethod

@@ -130,6 +130,12 @@ def guidance(session: DesignSession, message: str, *, limit: int = 3, max_chars:
     # Only reviewed rules enter prompts; raw candidates and reports never do.
     rows = []
     used = 0
+    packets = session.turn_context.get('experience_rules', [])
+    if any('rule' in packet for packet in packets):
+        # These packets already passed the bounded whole-rule selector. Do not
+        # run them through the legacy 650-character instruction budget.
+        return {'version': RULE_VERSION, 'rules': deepcopy(packets),
+                'authority': 'advisory reviewed candidates; assess semantic applicability and explicit exceptions; only backend allowlisted actions may change workflow; user requirements and validated state take precedence'}
     for learned in session.turn_context.get('experience_rules', []):
         instruction = learned.get('instruction', '')
         if instruction and used + len(instruction) <= max_chars and len(rows) < min(max(limit, 0), 5):

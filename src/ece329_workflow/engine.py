@@ -57,6 +57,7 @@ from .emvr_formula_flow import (
     public_formula_flow_state,
 )
 from .dialogue_acts import (
+    keeps_current_design,
     DESIGN_ACT_FIELDS,
     STAGE_ACT_FIELDS,
     apply_stage_field_updates,
@@ -243,6 +244,9 @@ def _cache_turn_response(
     request: TurnRequest,
     response: dict[str, Any],
 ) -> None:
+    from .experience_rules import CURRENT_RULE_RUN
+    if (run := CURRENT_RULE_RUN.get()) is not None:
+        run.hook('before_reply', session, response=response)
     from .unity_layout import unity_layout_snapshot
     response['unity_layout'] = unity_layout_snapshot(session)
     response['selected_model'] = session.model_context.get('selected_model')
@@ -260,6 +264,9 @@ def _cache_turn_response(
             session.history[-1]['feedback_state_before'] = deepcopy(before)
             session.history[-1]['feedback_state_after'] = workflow_evidence_state(session)
             session.history[-1]['feedback_state_after']['completion_error'] = response.get('completion_error')
+            session.history[-1]['experience_replay_before'] = deepcopy(getattr(trace, 'experience_replay_before', None))
+            run = CURRENT_RULE_RUN.get()
+            session.history[-1]['experience_replay_intent'] = deepcopy(getattr(run, 'source_intent', None))
     if not request.turn_id:
         return
     cache = session.model_context.setdefault("turn_idempotency", [])
@@ -3771,13 +3778,22 @@ class WorkflowEngine:
         if self.experience_store is not None:
             from .feedback import categories
             try:
-                session.turn_context['experience_rules'] = self.experience_store.retrieve(
-                    session.interaction_state.value, session.current_stage.value, message, categories(message),
-                    design_id=session.design_id, project_id=self.project_id,
-                    topic=str(session.design_context.get('idea', {}).get('original', ''))[:500])
+                if callable(getattr(self.experience_store, 'select_rules', None)):
+                    rules, decisions = self.experience_store.select_rules(session, message, categories(message))
+                else:
+                    rules = self.experience_store.retrieve(session.interaction_state.value, session.current_stage.value,
+                        message, categories(message), design_id=session.design_id, project_id=self.project_id)
+                    decisions = []
+                session.turn_context['experience_rules'] = rules
+                from .experience_rules import CURRENT_RULE_RUN
+                if (run := CURRENT_RULE_RUN.get()) is not None:
+                    run.select(rules, decisions)
             except (sqlite3.Error, OSError, ValueError):
                 session.turn_context['experience_rules'] = []
                 logging.getLogger(__name__).warning('Experience retrieval unavailable; using curated guidance')
+                from .experience_rules import CURRENT_RULE_RUN
+                if (run := CURRENT_RULE_RUN.get()) is not None:
+                    run.select([], [{'reason':'configuration_or_store_unavailable'}])
             self._refresh_experience_chain(session, enabled=True)
 
     @staticmethod
@@ -4092,6 +4108,29 @@ class WorkflowEngine:
                 pending,
                 carried_context,
             )
+            keep_current = isinstance(semantic, dict) and keeps_current_design(
+                semantic.get("dialogue_acts"), message
+            )
+            from .experience_rules import CURRENT_RULE_RUN, decline_candidate
+            run = CURRENT_RULE_RUN.get()
+            if run:
+                run.source_intent = {k: deepcopy(semantic.get(k)) for k in ('intent', 'dialogue_acts', 'source', 'confidence', 'actions_authoritative')} if isinstance(semantic, dict) else None
+                run.hook('after_intent', session, semantic)
+                run.hook('before_pending', session, semantic)
+                if run.blocked:
+                    keep_current = False
+                    semantic = resolved_intent(UserIntent.UNCLEAR, source='EXPERIENCE_ACTION_BLOCKED')
+            if keep_current:
+                # The current user explicitly declines uncommitted candidates.
+                # History retains their text; none is written into design fields.
+                pending = (current_pending_action(session) if run and run.applied else
+                           decline_candidate(session, pending))
+                semantic = resolved_intent(
+                    UserIntent.ADVANCE_STAGE, confidence=0.99,
+                    source="SEMANTIC_KEEP_CURRENT", dialogue_acts=semantic["dialogue_acts"],
+                    semantic_updates={"control_actions": ["KEEP_CURRENT", "ADVANCE"]},
+                    actions_authoritative=True,
+                )
             validated = validate_resolved_intent(semantic, pending)
             validated = _reconcile_explicit_emvr_edits(session, message, pending, validated)
             recovered = recover_repeated_pending_answer(
@@ -4174,6 +4213,7 @@ class WorkflowEngine:
                 }
                 and pending_type in {"CONFIRM_STAGE_OR_MODIFY", "CONFIRM_OR_MODIFY"}
                 and not _is_explicit_emvr_confirmation(compact_control)
+                and not keep_current
                 and not _has_persistent_turn_updates(validated)
                 and not _has_user_question_or_feedback(validated)
             ):
@@ -4512,6 +4552,9 @@ class WorkflowEngine:
             trace = TurnTrace(session, request)
             from .experience_learning import workflow_evidence_state
             trace.feedback_state_before = workflow_evidence_state(session)
+            from .experience_rules import RuleRun, CURRENT_RULE_RUN, capture_replay
+            trace.experience_replay_before = capture_replay(session)
+            rule_token = CURRENT_RULE_RUN.set(RuleRun(session, request.message, trace, self.experience_store))
             trace.data['model_config'] = deepcopy(config)
             token = CURRENT_TRACE.set(trace)
             result = None
@@ -4521,10 +4564,13 @@ class WorkflowEngine:
                 return result
             except Exception as exc:
                 error = exc
+                if (run := CURRENT_RULE_RUN.get()) is not None:
+                    run.record('verification', 'backend_failure', error_type=type(exc).__name__)
                 raise
             finally:
                 record = trace.finish(result, error)
                 CURRENT_TRACE.reset(token)
+                CURRENT_RULE_RUN.reset(rule_token)
                 try:
                     if self.experience_store is not None:
                         self.experience_store.record_telemetry(record)
@@ -4534,7 +4580,7 @@ class WorkflowEngine:
                             while len(self._telemetry) > 1000:
                                 self._telemetry.pop(next(iter(self._telemetry)))
                 except (sqlite3.Error, OSError):
-                    logging.getLogger(__name__).warning('Telemetry persistence unavailable')
+                    logging.getLogger(__name__).warning('Telemetry persistence unavailable: trace=%s design=%s', record['id'], design_id)
                 if result is not None:
                     self._attach_usage(result, design_id, record)
 
@@ -7475,6 +7521,9 @@ class WorkflowEngine:
 
     @staticmethod
     def _advance(session: DesignSession, handled_stage: Stage) -> None:
+        from .experience_rules import CURRENT_RULE_RUN
+        if (run := CURRENT_RULE_RUN.get()) is not None:
+            run.hook('before_advance', session)
         dialogue = session.model_context.get("dialogue_state", {})
         if isinstance(dialogue, dict):
             dialogue.pop("pending_action", None)

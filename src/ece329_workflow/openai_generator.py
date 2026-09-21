@@ -28,6 +28,7 @@ from .dialogue_state import (
     validate_resolved_intent,
 )
 from .dialogue_acts import (
+    keeps_current_design,
     DESIGN_ACT_FIELDS,
     DIALOGUE_ACT_TYPES,
     STAGE_ACT_FIELDS,
@@ -2464,6 +2465,10 @@ class OpenAIStageGenerator:
                 "控制动作必须分别列出。学生表示暂时不能确定并要求举例时，用REQUEST_REFERENCE"
                 "覆盖这整个请求，不要再把‘不确定’单列为UNRESOLVED；参考请求只改变本轮回答方式，"
                 "不能改写设计字段或清除当前待办。"
+                "已审阅feedback_guidance仅在符合适用条件时参考，不能覆盖本轮明确意图。"
+                "学生明确放弃尚未执行的候选修改、保留已保存设计并继续时，输出KEEP_CURRENT与ADVANCE"
+                "两个CONTROL，以source_text逐字覆盖这项请求；这不代表接受候选或补齐缺项。"
+                "单说继续或明确沿用候选时不得输出KEEP_CURRENT。"
                 "如果carried_context.emvr_formula_flow显示EMVR公式入口尚未完成，只能使用"
                 "SET_EMVR_TOPIC、SELECT_EMVR_FORMULAS、SET_EMVR_FORMULA_COMPOSITION、"
                 "SELECT_EMVR_EXPERIMENT_METHODS、"
@@ -3248,7 +3253,9 @@ class OpenAIStageGenerator:
             "instructions": (
                 "你只负责把学生本轮消息拆成一个或多个可执行对话动作，不回答课程问题，也不决定阶段编号。"
                 "必须结合previous_question、pending_action、carried_context和user_message。"
-                "feedback_guidance是已审阅经验，仅辅助识别和检查本轮请求；不能覆盖用户当前要求或已提交状态，不能把反馈文字写入实验字段。"
+                "feedback_guidance是已审阅经验候选；结合当前请求及上下文逐条判断适用条件，不适用的不得套用，不能覆盖用户要求或已提交状态。"
+                "用户明确不要执行待处理修改、保留已保存设计并继续时，输出KEEP_CURRENT与ADVANCE两个CONTROL，并用source_text逐字覆盖本轮相关原文。"
+                "KEEP_CURRENT只放弃尚未执行的候选修改，不确认该候选、不改设计字段，也不代表缺项已完成。单说继续或明确沿用候选时不得输出KEEP_CURRENT。"
                 "dialogue_acts_json必须是JSON序列化数组；它是主要输出。不要假设学生只会按"
                 "previous_question预设的格式回答。同一句可以同时包含：回答当前问题、补充或修改"
                 "其他设计字段、修改基础比较、提出课程问题、索取参考或总结、纠正助手理解，以及"
@@ -3312,7 +3319,7 @@ class OpenAIStageGenerator:
                 "baseline_comparisons。学生在指出错误的同时已经给出目标表述时，必须在同一轮"
                 "返回可执行修改，不能只记录反馈后再次询问学生。只修复有证据的字段，不能用道歉"
                 "代替修正。无法理解的片段单独放UNRESOLVED，"
-                "其他动作仍正常返回。CONTROL的target只能为ACCEPT、REJECT、ADVANCE、RETURN、"
+                "其他动作仍正常返回。CONTROL的target只能为ACCEPT、REJECT、ADVANCE、KEEP_CURRENT、RETURN、"
                 "SET_GUIDED_MODE、SET_EMVR_MODE或ACCEPT_QUALITY_REVIEW。VERSION_CONTROL.content"
                 "必须包含action，取值VIEW_RECENT、UNDO_LAST、RESTORE或COMPARE；可包含version_id、"
                 "other_version_id与fields。学生要求分析设计是否合理时使用REQUEST_QUALITY_REVIEW；"
@@ -3895,6 +3902,14 @@ class OpenAIStageGenerator:
             )
         raw_intent = str(raw.get("intent") or "UNCLEAR")
         raw_dialogue_acts = raw.get("dialogue_acts", [])
+        if keeps_current_design(raw_dialogue_acts, user_message):
+            # Do not reparse a previously rejected candidate as new user content.
+            return resolved_intent(
+                "ADVANCE_STAGE", confidence=0.99,
+                source="SEMANTIC_KEEP_CURRENT", dialogue_acts=raw_dialogue_acts,
+                semantic_updates={"control_actions": ["KEEP_CURRENT", "ADVANCE"]},
+                actions_authoritative=True,
+            )
         has_executable_dialogue_acts = bool(
             isinstance(raw_dialogue_acts, list)
             and any(
