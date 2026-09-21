@@ -601,6 +601,9 @@ class WorkflowAPI:
             "retryable": retryable,
         }
         phase = str(getattr(exc, "phase", "") or "").strip()
+        translation_reason = getattr(exc, 'translation_reason', None)
+        if translation_reason in {'invalid_structure', 'output_truncated', 'untranslated_text', 'changed_reference'}:
+            payload['translation_reason'] = translation_reason
         if phase:
             payload["phase"] = phase
         if isinstance(exc, ModelHTTPError):

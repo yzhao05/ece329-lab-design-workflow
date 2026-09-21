@@ -4,7 +4,7 @@ import json
 import re
 from threading import RLock
 
-from .model_selection import generator_for_model, primary_generator, model_details
+from .model_selection import generator_for_model, primary_generator, model_provider
 from .openai_generator import ModelConfigurationError, ModelOutputError, _extract_output_text
 
 
@@ -93,9 +93,29 @@ class DisplayTranslator:
                 'input': [{'role': 'user', 'content': json.dumps([
                     {'id': i, 'text': key[2]} for i, key in enumerate(missing)], ensure_ascii=False)}],
                 'text': {'format': {'type': 'json_schema', 'name': 'ece329_display_translation', 'strict': True, 'schema': schema}},
-                'max_output_tokens': 12000, 'reasoning': {'effort': model_details(generator.model, 'low')['reasoning']},
+                # Translation does not need a reasoning budget. In particular,
+                # DeepSeek thinking consumes the same output budget as the JSON.
+                # Do not inherit a conversation model's thinking preset here.
+                'max_output_tokens': 12000,
+                'reasoning': {'effort': 'none' if model_provider(generator.model) == 'deepseek' else 'low'},
             })
+            reason = 'invalid_structure'
             try:
+                if not isinstance(response, dict):
+                    raise ValueError('Invalid translation response')
+                details = response.get('incomplete_details')
+                output = response.get('output', [])
+                if (details is not None and not isinstance(details, dict)
+                        or not isinstance(output, list)
+                        or any(isinstance(item, dict) and not isinstance(item.get('content', []), list) for item in output)
+                        or response.get('output_text') is not None and not isinstance(response['output_text'], str)):
+                    raise ValueError('Invalid translation response fields')
+                if (getattr(response, 'finish', None) == 'length'
+                        or (details or {}).get('reason') == 'max_output_tokens'):
+                    reason = 'output_truncated'
+                    raise ValueError('Translation output was truncated')
+                if response.get('status') == 'incomplete':
+                    raise ValueError('Translation response was incomplete')
                 raw = json.loads(_extract_output_text(response))
                 rows = raw['translations']
                 if not isinstance(rows, list) or len(rows) != len(missing):
@@ -104,16 +124,22 @@ class DisplayTranslator:
                 for row in rows:
                     index, text = row['id'], row['text']
                     if (type(index) is not int or not 0 <= index < len(missing) or index in translated
-                            or not isinstance(text, str) or not text.strip() or len(text) > 24000
-                            or language == 'en' and re.search(r'[\u3400-\u9fff]', text)):
+                            or not isinstance(text, str) or not text.strip() or len(text) > 24000):
                         raise ValueError('Invalid translated text')
+                    if language == 'en' and re.search(r'[\u3400-\u9fff]', text):
+                        reason = 'untranslated_text'
+                        raise ValueError('Translation retained source-language prose')
                     # Structural references remain literal even in prose.
+                    reason = 'changed_reference'
                     validate_translation_references(missing[index][2], text)
+                    reason = 'invalid_structure'
                     translated[index] = text.strip()
                 for index, key in enumerate(missing):
                     known[key] = translated[index]
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ModelOutputError('Display translation was incomplete; retry explicitly') from exc
+            except (KeyError, TypeError, ValueError, ModelOutputError) as exc:
+                error = ModelOutputError('Display translation did not pass validation; retry explicitly')
+                error.translation_reason = reason
+                raise error from exc
             with self._lock:
                 for key in missing:
                     self._cache[key] = known[key]

@@ -77,7 +77,7 @@ class WebFrontendContractTests(unittest.TestCase):
             self.index_html,
         )
         self.assertIn(
-            "assets/app.js?v=20260920-review-fixes",
+            "assets/app.js?v=20260921-translation-review",
             self.index_html,
         )
 

@@ -129,6 +129,28 @@ test('display translation batches short texts and never submits a design turn', 
   assert.equal(result.translations.length,4);
 });
 
+for (const mode of ['GUIDED_DESIGN','EMVR_DIRECT']) {
+  for (const value of [null,42,{},'', '仍是中文']) test(`${mode}: malformed translation parts cannot become display strings: ${JSON.stringify(value)}`, async()=>{
+    const h=harness();let calls=0;
+    h.run(`state.mode='${mode}'`);
+    h.context.translateFixture=()=>{calls++;return {translations:[value]};};
+    h.run('apiRequest=translateFixture');
+    await assert.rejects(h.run("window.requestDisplayTranslation(['正文'],'en')"),error=>error.code==='model_output_invalid');
+    assert.equal(calls,1);
+  });
+  for (const change of ['language','design']) test(`${mode}: ${change} change stops remaining translation batches`,async()=>{
+    const h=harness();let calls=0,finish;
+    h.context.translateFixture=()=>{calls++;return new Promise(resolve=>finish=resolve);};
+    h.run(`state.mode='${mode}';apiRequest=translateFixture;renderModelSelection=()=>{};renderUnityLayout=()=>{}`);
+    const request=h.run("window.requestDisplayTranslation(['正文'.repeat(4500)],'en')");
+    const rejected=assert.rejects(request,/Translation context changed/);
+    if(change==='language')h.context.window.handlers['ece329:language-changed'].forEach(fn=>fn());
+    else h.run('designGeneration++');
+    finish({translations:['Old translation']});await rejected;
+    assert.equal(calls,1);
+  });
+}
+
 for (const mode of ['EMVR_DIRECT', 'GUIDED_DESIGN']) {
   test(`${mode}: conflict refresh rebases frozen retry onto current server settings`, async () => {
     const h = harness(); enableRouting(h);

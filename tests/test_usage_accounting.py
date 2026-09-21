@@ -17,6 +17,22 @@ from tests.test_security_and_store import call_api, workspace_temp_path
 RATES = {'input': 2, 'cached_input': 0.5, 'output': 8}
 
 
+@pytest.mark.parametrize('reported_mode', list(InteractionState))
+def test_feedback_usage_belongs_to_reported_mode_not_submission_mode(pipeline, reported_mode):
+    p = pipeline
+    ticket = submit(p)[2]
+    current = next(mode for mode in InteractionState if mode != reported_mode)
+    with p.repo.connection() as db:
+        payload = json.loads(db.execute('SELECT payload FROM feedback_tickets WHERE id=?', (ticket['id'],)).fetchone()[0])
+        payload['evidence'].update(reported_mode=reported_mode.value, mode=current.value)
+        db.execute('UPDATE feedback_tickets SET payload=? WHERE id=?', (json.dumps(payload), ticket['id']))
+    assert p.service.run_once()
+    with p.repo.connection() as db:
+        rows = db.execute('SELECT record FROM usage_runs WHERE ticket_id=?', (ticket['id'],)).fetchall()
+    assert rows and all(json.loads(row['record'])['mode'] == reported_mode.value for row in rows)
+    assert not p.service.run_once()
+
+
 def test_provider_specific_usage_prices_and_reasoning_tokens_are_not_mixed():
     prices = PriceBook({'ECE329_MODEL_PRICING_JSON': json.dumps({
         'openai/shared-model': RATES, 'deepseek/shared-model': {'input':1,'cached_input':0.1,'output':2}})})

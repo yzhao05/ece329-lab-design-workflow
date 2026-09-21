@@ -50,17 +50,25 @@
       for(let start=0;start<pieces.length;) {
         if(controller.signal.aborted || version!==generation || el.Token.value.trim()!==token) throw new Error('Review context changed');
         const batch=[];let size=0;
-        while(start<pieces.length && batch.length<24 && size+pieces[start].text.length<=12000) {
+        while(start<pieces.length && batch.length<24 && size+pieces[start].text.length<=6000) {
           size+=pieces[start].text.length;batch.push(pieces[start++]);
         }
         const response = await fetch(`${base}/v1/localization`,{method:'POST',signal:controller.signal,
           headers:{'Content-Type':'application/json','X-ECE329-Feedback-Admin-Token':token},
           body:JSON.stringify({texts:batch.map(p=>p.text),language})});
-        if (!response.ok) throw new Error('Translation unavailable');
         const result=await response.json();
+        if (!response.ok) {
+          const error = new Error('Translation unavailable');
+          error.code = result?.error;
+          error.details = {translation_reason: result?.translation_reason};
+          throw error;
+        }
         if(controller.signal.aborted || version!==generation || el.Token.value.trim()!==token) throw new Error('Review context changed');
-        if(!Array.isArray(result.translations) || result.translations.length!==batch.length
-            || result.translations.some(text=>typeof text!=='string'||!text.trim())) throw new Error('Incomplete translation');
+        if(!Array.isArray(result?.translations) || result.translations.length!==batch.length
+            || result.translations.some(text=>typeof text!=='string'||!text.trim()
+              || language==='en' && /[\u3400-\u9fff]/.test(text))) {
+          throw Object.assign(new Error('Incomplete translation'), {code:'model_output_invalid'});
+        }
         batch.forEach((piece,i)=>output[piece.index].push(result.translations[i]));
       }
       return {language,translations:output.map(parts=>parts.join('\n'))};

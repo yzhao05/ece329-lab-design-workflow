@@ -2855,8 +2855,15 @@ async function initializePage() {
   }
 }
 
+let displayTranslationGeneration = 0;
 window.requestDisplayTranslation = async (texts, language) => {
   const generation = designGeneration, designId = state.designId;
+  const translationGeneration = displayTranslationGeneration;
+  const checkContext = () => {
+    if (generation !== designGeneration || translationGeneration !== displayTranslationGeneration) {
+      throw new Error('Translation context changed');
+    }
+  };
   const model = modelForNewRequest();
   const pieces = [], assembled = texts.map(() => []);
   texts.forEach((text,index) => {
@@ -2878,18 +2885,26 @@ window.requestDisplayTranslation = async (texts, language) => {
   });
   if (pieces.length > 96) throw new Error('Translation is too large');
   for (let start = 0; start < pieces.length;) {
-    if (generation !== designGeneration) throw new Error('Design changed');
+    checkContext();
     const group = []; let size = 0;
-    while (start < pieces.length && group.length < 24 && size + pieces[start].text.length <= 12000) {
+    while (start < pieces.length && group.length < 24 && size + pieces[start].text.length <= 6000) {
       size += pieces[start].text.length; group.push(pieces[start++]);
     }
     const body = JSON.stringify({texts:group.map(p=>p.text),language,...(designId ? {design_id:designId} : {}),...(model ? {model} : {})});
     const result = await (designId ? authorizedDesignApiRequest('/v1/localization', {method:'POST',body})
       : apiRequest('/v1/localization', {method:'POST',body,headers:courseAccessHeaders()}));
-    if (!Array.isArray(result.translations) || result.translations.length !== group.length) throw new Error('Incomplete translation');
+    checkContext();
+    if (!Array.isArray(result?.translations) || result.translations.length !== group.length
+        || result.translations.some(text => typeof text !== 'string' || !text.trim()
+          || language === 'en' && /[\u3400-\u9fff]/.test(text))) {
+      throw Object.assign(new Error('Incomplete translation'), {code:'model_output_invalid'});
+    }
     group.forEach((piece,i) => assembled[piece.index].push(result.translations[i]));
   }
   return {language,translations:assembled.map(parts=>parts.join('\n'))};
 };
-window.addEventListener('ece329:language-changed', () => { renderModelSelection(); renderUnityLayout(); });
+window.addEventListener('ece329:language-changed', () => {
+  displayTranslationGeneration++;
+  renderModelSelection(); renderUnityLayout();
+});
 void initializePage();

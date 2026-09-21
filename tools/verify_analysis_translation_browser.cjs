@@ -44,7 +44,7 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
       assert.equal(calls,oldCalls,'A language round trip must reuse translations');
       failed=true;record.evidence.extraction_analysis.diagnosis.expected_behavior='新分析正文需要翻译';
       await page.locator('#reviewLogin button[type=submit]').click();
-      await page.getByText('Translation unavailable. Use Retry translation.',{exact:true}).waitFor();
+      await page.locator('#translationStatus').filter({hasText:'Untranslated content is shown in its original language.'}).waitFor();
       const failedCalls=calls;await page.waitForTimeout(250);assert.equal(calls,failedCalls,'Failure must not cause a retry loop');
       failed=false;await page.locator('#translationRetry').click();await waitEnglish();
       assert.equal(await note.inputValue(),'我的审阅草稿');assert.equal(await editor.inputValue(),original);

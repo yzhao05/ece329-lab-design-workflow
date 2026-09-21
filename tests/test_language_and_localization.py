@@ -33,13 +33,14 @@ def test_language_reaches_generation_persists_and_is_part_of_idempotency(mode):
 
 
 @pytest.mark.parametrize('mode', list(InteractionState))
-def test_display_translation_is_authorized_cached_and_never_advances_design(mode):
+@pytest.mark.parametrize('model', ['deepseek-flash', 'deepseek-flash:fast', 'deepseek-flash:reasoning', 'deepseek-v4-pro'])
+def test_display_translation_is_authorized_cached_and_never_advances_design(mode, model):
     engine, _, chat = mixed_engine()
     session = add_session(engine, mode)
     api = WorkflowAPI(engine)
     before = engine.store.get(session.design_id)
     body = {'texts':['模型设置', '恢复 OBJ_01 后完成 S2'], 'language':'en',
-            'design_id':session.design_id, 'model':'deepseek-flash:fast'}
+            'design_id':session.design_id, 'model':model}
     assert call_api(api,'POST','/v1/localization',body)[0].startswith('401')
     headers = {'Authorization':'Bearer model-owner'}
     status, _, result = call_api(api,'POST','/v1/localization',body,request_headers=headers)
@@ -47,10 +48,48 @@ def test_display_translation_is_authorized_cached_and_never_advances_design(mode
     assert result['translations'][0] == 'Model settings'
     assert 'OBJ_01' in result['translations'][1] and 'S2' in result['translations'][1]
     assert len(chat.requests) == 1 and chat.requests[0]['thinking']['type'] == 'disabled'
+    assert 'reasoning_effort' not in chat.requests[0]
     assert call_api(api,'POST','/v1/localization',body,request_headers=headers)[2] == result
     assert len(chat.requests) == 1
     assert engine.store.get(session.design_id) == before
     assert not engine.telemetry_records(session.design_id)  # Translation is not a design turn.
+
+
+@pytest.mark.parametrize('response,reason', [
+    (None, 'invalid_structure'),
+    ({'incomplete_details':'private'}, 'invalid_structure'),
+    ({'output':None}, 'invalid_structure'),
+    ({'output':[{'content':None}]}, 'invalid_structure'),
+    ({'output_text':42}, 'invalid_structure'),
+    ({'status':'incomplete','output_text':json.dumps({'translations':[{'id':0,'text':'Object OBJ_01'}]})}, 'invalid_structure'),
+    ({'output_text': '{'}, 'invalid_structure'),
+    ({'output_text': ''}, 'invalid_structure'),
+    ({'output_text': '{', 'incomplete_details': {'reason':'max_output_tokens'}}, 'output_truncated'),
+    ({'output_text': json.dumps({'translations':[{'id':0,'text':'中文 OBJ_01'}]})}, 'untranslated_text'),
+    ({'output_text': json.dumps({'translations':[{'id':0,'text':'Missing object'}]}), 'incomplete_details':None}, 'changed_reference'),
+])
+def test_translation_diagnostics_are_safe_and_do_not_retry(response, reason):
+    calls = []
+    def create(payload):
+        calls.append(payload)
+        return response
+    service = DisplayTranslator(OpenAIStageGenerator(transport=SimpleNamespace(create=create)))
+    with pytest.raises(ModelOutputError) as caught:
+        service.translate(['对象 OBJ_01'], 'en')
+    assert caught.value.translation_reason == reason
+    status, payload = WorkflowAPI._model_error_response(caught.value, 'test-correlation')
+    assert status == 502 and payload['translation_reason'] == reason
+    assert 'OBJ_01' not in json.dumps(payload)
+    assert len(calls) == 1
+
+
+def test_deepseek_truncation_has_specific_diagnostic():
+    from ece329_workflow.provider_transport import SchemaCheckedResponse
+    response = SchemaCheckedResponse('{', {}, 'length', {})
+    service = DisplayTranslator(OpenAIStageGenerator(transport=SimpleNamespace(create=lambda _: response)))
+    with pytest.raises(ModelOutputError) as caught:
+        service.translate(['对象'], 'en')
+    assert caught.value.translation_reason == 'output_truncated'
 
 
 @pytest.mark.parametrize('language', ['fr', '', 1, {}, []])

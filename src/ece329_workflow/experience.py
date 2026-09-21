@@ -900,7 +900,7 @@ class FeedbackService:
         evidence = payload.get('evidence')
         evidence = evidence if isinstance(evidence, dict) else {}
         record = {'id': uuid4().hex, 'design_id': job['design_id'], 'created': time.time(),
-                  'mode': evidence.get('mode', 'unknown'), 'calls': calls}
+                  'mode': evidence.get('reported_mode') or evidence.get('mode') or 'unknown', 'calls': calls}
         record['stage'] = payload.get('reported_stage') or evidence.get('stage', 'UNKNOWN')
         record['stage_basis'] = 'feedback_target'
         outcome['calls'] = calls

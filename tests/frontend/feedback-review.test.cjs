@@ -516,7 +516,7 @@ for(const action of ['logout','token','reload','language'])test(`pending display
   assert.equal(count,1);
 });
 
-for(const translations of [[42],{length:1,0:'Fake array'},['']])test(`malformed display translation stops once: ${JSON.stringify(translations)}`,async()=>{
+for(const translations of [[42],{length:1,0:'Fake array'},[''],['仍是中文'],[null],[{}]])test(`malformed display translation stops once: ${JSON.stringify(translations)}`,async()=>{
   const h=harness();let calls=0;
   h.context.fetch=async()=>{calls++;return {ok:true,json:async()=>({translations})};};
   await assert.rejects(h.context.window.requestDisplayTranslation(['分析正文'],'en'),/Incomplete translation/);
