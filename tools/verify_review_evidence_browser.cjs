@@ -33,7 +33,7 @@ const record={id:'a'.repeat(32),version:1,status:'candidate',extra_field:{preser
     const page=await context.newPage(),errors=[],translated=[];
     page.on('pageerror',error=>errors.push(error.message));
     await page.route('**/v1/feedback/experiences?*',route=>route.fulfill({json:{experiences:[record]}}));
-    await page.route('**/v1/localization',route=>{const body=route.request().postDataJSON();translated.push(...body.texts);return route.fulfill({json:{language:body.language,translations:body.texts}});});
+    await page.route('**/v1/localization',route=>{const body=route.request().postDataJSON();translated.push(...body.texts);return route.fulfill({json:{language:body.language,translations:body.texts.map(text=>'Translated analysis '+text.replace(/[\u3400-\u9fff]/g,''))}});});
     await page.goto(base+'/feedback-review.html');
     await page.locator('#reviewToken').fill('test-maintainer');await page.locator('#reviewFilter').selectOption('candidate');
     await page.locator('#reviewLogin button[type=submit]').click();
@@ -87,7 +87,9 @@ const record={id:'a'.repeat(32),version:1,status:'candidate',extra_field:{preser
     assert.equal(await page.locator('#note-'+record.id).inputValue(),'审阅草稿保留');
     await page.setViewportSize({width:390,height:844});await viewer.evaluate(el=>el.scrollIntoView({block:'start'}));await page.screenshot({path:path.join(output,'evidence-en-mobile.png')});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1));
-    assert.ok(!translated.some(text=>text.includes('继续。')||text.includes('可能没有处理推进信号')));
+    await page.waitForFunction(()=>document.querySelector('.evidence-analysis').textContent.includes('Translated analysis'));
+    assert.ok(!translated.some(text=>text==='继续。'));
+    assert.ok(translated.some(text=>text.includes('可能没有处理推进信号')));
     assert.deepEqual(errors,[]);
     console.log('PASS: independent folds, draft refresh/language retention, literal evidence, JSON copy/download, image preview and narrow layout');
   } finally {await browser.close();}

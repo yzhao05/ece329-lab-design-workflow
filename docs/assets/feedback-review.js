@@ -4,6 +4,12 @@
   const el = Object.fromEntries(["Login", "Token", "Filter", "Logout", "Status", "Cards", "Previous", "Next", "Usage"]
     .map(name => [name, document.getElementById(`review${name}`)]));
   const base = String(window.ECE329_CONFIG?.API_BASE_URL || "").trim().replace(/\/$/, "");
+  const translationControllers = new Set();
+  function cancelTranslations() {
+    for(const controller of translationControllers)controller.abort();
+    translationControllers.clear();
+  }
+  window.addEventListener('ece329:language-changed',cancelTranslations);
   const passwordError = () => Object.assign(new Error('密码错误'), {code:'invalid_password'});
   function maintainerToken() {
     const raw = el.Token.value;
@@ -25,7 +31,7 @@
   window.requestDisplayTranslation = async (texts, language) => {
     if (!base || !el.Token.value.trim()) throw new Error('Enter a maintainer token to translate review evidence.');
     const controller = new AbortController();
-    const token = maintainerToken(), pieces = [], output = texts.map(()=>[]);
+    const token = maintainerToken(), version = generation, pieces = [], output = texts.map(()=>[]);
     texts.forEach((text,index)=>{
       for (let start=0;start<text.length;) {
         let end=Math.min(start+4000,text.length);
@@ -38,10 +44,11 @@
       }
     });
     const timeout = setTimeout(()=>controller.abort(),90000);
+    translationControllers.add(controller);
     try {
       if(pieces.length>96) throw new Error('Review display is too large');
       for(let start=0;start<pieces.length;) {
-        if(el.Token.value.trim()!==token) throw new Error('Review credentials changed');
+        if(controller.signal.aborted || version!==generation || el.Token.value.trim()!==token) throw new Error('Review context changed');
         const batch=[];let size=0;
         while(start<pieces.length && batch.length<24 && size+pieces[start].text.length<=12000) {
           size+=pieces[start].text.length;batch.push(pieces[start++]);
@@ -51,11 +58,13 @@
           body:JSON.stringify({texts:batch.map(p=>p.text),language})});
         if (!response.ok) throw new Error('Translation unavailable');
         const result=await response.json();
-        if(result.translations?.length!==batch.length) throw new Error('Incomplete translation');
+        if(controller.signal.aborted || version!==generation || el.Token.value.trim()!==token) throw new Error('Review context changed');
+        if(!Array.isArray(result.translations) || result.translations.length!==batch.length
+            || result.translations.some(text=>typeof text!=='string'||!text.trim())) throw new Error('Incomplete translation');
         batch.forEach((piece,i)=>output[piece.index].push(result.translations[i]));
       }
       return {language,translations:output.map(parts=>parts.join('\n'))};
-    } finally {clearTimeout(timeout);}
+    } finally {clearTimeout(timeout);translationControllers.delete(controller);}
   };
   window.ECE329I18n?.refresh();
   let offset = 0;
@@ -68,7 +77,11 @@
   const drafts = new Map();
   const editors = new Map();
   function captureDrafts() { for (const [id, read] of editors) {const value=read();if(value)drafts.set(id,value);else drafts.delete(id);} }
-  function clearCards() { captureDrafts(); editors.clear(); el.Cards.replaceChildren(); }
+  function clearCards() {
+    captureDrafts(); editors.clear(); el.Cards.replaceChildren();
+    cancelTranslations();
+    window.ECE329I18n?.reset?.();
+  }
   function appendEvidence(host, value) {
     window.ECE329ReviewEvidence.mount(host, value);
   }
@@ -198,7 +211,8 @@
     for (const item of items) {
       const card = node("article", "");
       card.className = "experience-card";
-      card.append(sourceNode("h2", item.content.summary), node("p", `${item.id} · ${experienceLabels[item.status] || item.status} · 版本 ${item.version}`));
+      const summary=node('h2',item.content.summary);summary.setAttribute('data-i18n-translate','');
+      card.append(summary, node("p", `${item.id} · ${experienceLabels[item.status] || item.status} · 版本 ${item.version}`));
       card.append(usageSummary(item.usage));
       const scope = node('select', '');
       for (const [value, label] of [['session','本次设计'],['project','本课程项目'],['global','通用经验']]) {

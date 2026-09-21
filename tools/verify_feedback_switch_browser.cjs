@@ -30,6 +30,9 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base || '')) throw new Error('Local fixtu
       const before=await (await context.request.get(`${base}/__smoke/feedback-requests`)).json();
       await page.locator('#feedbackSwitch').click();
       await page.locator('#feedbackSwitchPanel').waitFor({state:'visible'});
+      // The failure diagnostic can be saved before finish() releases the lease.
+      // Wait for the next status refresh rather than racing can_retry=false.
+      await page.waitForFunction(()=>!document.getElementById('feedbackSwitchRun').disabled);
       assert.equal(await page.locator('#feedbackRetryModel').inputValue(),'deepseek-flash');
       const selectedTicket=await page.locator('#feedbackRetryTicket').inputValue();
       assert.equal(await page.locator('#feedbackSwitchRun').isEnabled(),true);

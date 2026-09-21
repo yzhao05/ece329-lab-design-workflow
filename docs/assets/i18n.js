@@ -37,7 +37,11 @@
       : (blocked ? '翻译暂不可用，请重试。' : '正在翻译…');
   }
   function skip(element) {
-    return !element || element.closest('script,style,textarea,[data-i18n-ignore]');
+    if (!element || element.closest('script,style,textarea')) return true;
+    // A prose leaf may opt into display translation inside a protected evidence
+    // region. Sibling evidence, IDs, JSON and editor contents remain literal.
+    const boundary = element.closest('[data-i18n-ignore],[data-i18n-translate]');
+    return Boolean(boundary && !boundary.hasAttribute('data-i18n-translate'));
   }
   function renderRecord(record, forceChinese = false) {
     // Live nodes retain their completed translation even after the shared LRU
@@ -73,8 +77,10 @@
       if (!record || node.nodeValue !== record.rendered) record = {source: node.nodeValue};
       // English replies received while English was selected can also be read
       // in Chinese. User input controls and original stored messages stay intact.
-      const force = language === 'zh' && !cjk.test(record.source) && /[a-z]{3} [a-z]{3}/i.test(record.source)
-        && Boolean(node.parentElement.closest('.message-bubble')) && record.source.split(/\s+/).length > 8;
+      const prose = Boolean(node.parentElement.closest('[data-i18n-translate]'));
+      const force = language === 'zh' && !cjk.test(record.source)
+        && (prose ? /[a-z]/i.test(record.source) : /[a-z]{3} [a-z]{3}/i.test(record.source)
+          && Boolean(node.parentElement.closest('.message-bubble')) && record.source.split(/\s+/).length > 8);
       record.rendered = renderRecord(record, force);
       originals.set(node, record);
       if (node.nodeValue !== record.rendered) node.nodeValue = record.rendered;
@@ -129,11 +135,14 @@
     schedule();
     window.dispatchEvent(new Event('ece329:language-changed'));
   }
+  // Drop queued/stale work when the owner replaces a review record or credentials.
+  // Keep successful text translations cached; they never modify source records.
+  function reset() { generation++; pending.clear(); blocked=false; schedule(); }
   toggle?.addEventListener('click', () => setLanguage(language === 'en' ? 'zh' : 'en'));
   retry?.addEventListener('click', () => { blocked = false; schedule(); setTimeout(flush,0); });
-  window.ECE329I18n = {get language() {return language;}, text: translate, setLanguage, refresh:schedule,
+  window.ECE329I18n = {get language() {return language;}, text: translate, setLanguage, refresh:schedule, reset,
     retry() {blocked=false; schedule(); setTimeout(flush,0);}};
   new MutationObserver(schedule).observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['placeholder','title','aria-label','label']});
-  window.addEventListener('ece329:design-changed', () => { generation++; pending.clear(); blocked=false; schedule(); });
+  window.addEventListener('ece329:design-changed', reset);
   schedule();
 })();

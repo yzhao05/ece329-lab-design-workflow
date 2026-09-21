@@ -21,7 +21,7 @@ function harness({filter='candidate', status='candidate', getResponse}={}) {
   let finish;
   const content={summary:'原经验摘要',trigger:'原适用条件',recommendation:'原处理建议',verification:'原验证方法'};
   const item={id:'a'.repeat(32),version:1,status,content,evidence:{scope:'global'},reviews:[]};
-  const context={window:{ECE329_CONFIG:{API_BASE_URL:'http://local.test'},alert:message=>alerts.push(message),listeners:{},addEventListener(name,fn){this.listeners[name]=fn;}},
+  const context={window:{ECE329_CONFIG:{API_BASE_URL:'http://local.test'},alert:message=>alerts.push(message),listeners:{},addEventListener(name,fn){const old=this.listeners[name];this.listeners[name]=()=>{old?.();fn();};}},
     document:{getElementById:id=>els[id]??=new Element('div'),createElement:tag=>new Element(tag)},
     AbortController,setTimeout,clearTimeout,
     fetch:async (url,options)=>{
@@ -388,6 +388,17 @@ function evidenceFixture() {
     attachments:[{role:'problem',data_url:'data:image/png;base64,test'}]};
 }
 
+for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT'])test(`analysis prose opts into translation without translating evidence or IDs: ${mode}`,async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();h.item.evidence.evidence.mode=mode;
+  await h.els.reviewLogin.fire('submit');await flush();
+  const opted=h.els.reviewCards.querySelectorAll('p').filter(el=>Object.hasOwn(el,'data-i18n-translate')).map(el=>el.textContent);
+  assert.ok(opted.includes('应继续推进'));
+  assert.ok(opted.includes('Agent 认为阶段未前进'));
+  assert.ok(opted.includes(h.item.content.trigger));
+  assert.ok(!opted.includes('继续。') && !opted.includes('turn:2'));
+  assert.equal(h.find('content-').value,JSON.stringify(h.item.content,null,2));
+});
+
 test('diagnostic debug fold survives language rendering and does not leak to another record',async()=>{
   const h=harness();h.item.evidence=evidenceFixture();await h.els.reviewLogin.fire('submit');await flush();
   const attempt=()=>h.els.reviewCards.querySelectorAll('div').find(el=>el.className==='feedback-attempt');
@@ -485,4 +496,29 @@ for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT']) test(`migration and provider 
   h.context.window.ECE329I18n.language='zh';h.context.window.listeners['ece329:language-changed']();
   assert.match(treeText(h.els.reviewCards.querySelectorAll('details')[0]),/历史证据已自动升级/);
   assert.equal(h.calls.length,1);
+});
+
+for(const action of ['logout','token','reload','language'])test(`pending display translation is cancelled and cannot return after ${action}`,async()=>{
+  const h=harness();await h.els.reviewLogin.fire('submit');await flush();
+  const originalFetch=h.context.fetch;let resolve,signal,count=0;
+  h.context.fetch=(url,options)=>{
+    if(!url.endsWith('/v1/localization'))return originalFetch(url,options);
+    count++;signal=options.signal;return new Promise(done=>resolve=done);
+  };
+  const pending=h.context.window.requestDisplayTranslation(['分析正文'],'en');
+  const rejected=assert.rejects(pending,/Review context changed/);
+  if(action==='logout')await h.els.reviewLogout.fire('click');
+  if(action==='token'){h.els.reviewToken.value='another-token';await h.els.reviewToken.fire('input');}
+  if(action==='reload'){await h.els.reviewLogin.fire('submit');await flush();}
+  if(action==='language')h.context.window.listeners['ece329:language-changed']();
+  assert.equal(signal.aborted,true);
+  resolve({ok:true,json:async()=>({translations:['Stale analysis']})});await rejected;
+  assert.equal(count,1);
+});
+
+for(const translations of [[42],{length:1,0:'Fake array'},['']])test(`malformed display translation stops once: ${JSON.stringify(translations)}`,async()=>{
+  const h=harness();let calls=0;
+  h.context.fetch=async()=>{calls++;return {ok:true,json:async()=>({translations})};};
+  await assert.rejects(h.context.window.requestDisplayTranslation(['分析正文'],'en'),/Incomplete translation/);
+  assert.equal(calls,1);
 });

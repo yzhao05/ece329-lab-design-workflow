@@ -1,6 +1,6 @@
 "use strict";
 
-// Evidence is rendered locally and verbatim. Never send it to display translation.
+// Original evidence stays verbatim; only Agent-analysis prose opts into display translation.
 (() => {
   const views = new WeakMap();
   const own = (value, key) => value != null && Object.prototype.hasOwnProperty.call(value, key);
@@ -68,17 +68,19 @@
     if (typeof value === 'boolean') return value ? t('是','Yes') : t('否','No');
     return String(value);
   }
-  function valueNode(value) {
+  function valueNode(value, translateProse = false) {
     if (Array.isArray(value)) {
       if (!value.length) return node('p',t('记录为空列表','Recorded as an empty list'));
-      const ul=node('ul'); for (const item of value) { const li=node('li');li.append(valueNode(item));ul.append(li); } return ul;
+      const ul=node('ul'); for (const item of value) { const li=node('li');li.append(valueNode(item,translateProse));ul.append(li); } return ul;
     }
     if (value && typeof value === 'object') {
-      const dl=node('dl'); for (const [key,item] of Object.entries(value)) {dl.append(node('dt',name(key)));const dd=node('dd');dd.append(valueNode(['stage','type','intent','status','phase'].includes(key) && typeof item==='string' ? name(item) : item));dl.append(dd);} return dl;
+      const dl=node('dl'); for (const [key,item] of Object.entries(value)) {dl.append(node('dt',name(key)));const dd=node('dd');dd.append(valueNode(['stage','type','intent','status','phase'].includes(key) && typeof item==='string' ? name(item) : item,translateProse && ['observation','issues','input','expected'].includes(key)));dl.append(dd);} return dl;
     }
-    return node('p',valueText(value));
+    const text=node('p',valueText(value));
+    if(translateProse && typeof value==='string' && value.trim())text.setAttribute('data-i18n-translate','');
+    return text;
   }
-  function field(host, zh, en, value) { const block=node('div');block.className='evidence-field';block.append(node('h5',t(zh,en)),valueNode(value));host.append(block); }
+  function field(host, zh, en, value, translateProse=false) { const block=node('div');block.className='evidence-field';block.append(node('h5',t(zh,en)),valueNode(value,translateProse));host.append(block); }
   function section(host, zh, en) { const s=node('section');s.className='evidence-section';s.append(node('h4',t(zh,en)));host.append(s);return s; }
   function recordList(host, value) {
     const rows=list(value), valid=rows.filter(isRecord);
@@ -250,11 +252,13 @@
     if(snapshot.history_limitations) chat.append(node('p',t('历史状态缺失时显示“未记录”。摘录可能不完整，缺少相邻对话不能证明成功或失败。','Missing historical states are shown as not recorded. Excerpts may be incomplete; missing neighboring turns do not prove success or failure.')));
     const results=section(host,'经验层的分析结果','Experience-layer analysis');
     results.append(node('p',t('以下是 Agent 的分析，不是独立确认的原始事实。','The following is Agent analysis, not independently verified source facts.')));
-    field(results,'Agent 归纳的期望行为（需核对原文）','Agent interpretation of expected behavior (verify against the original)',diagnosis.expected_behavior);
-    for(const [key,zh,en] of [['facts','归纳的事实（Agent）','Summarized facts (Agent)'],['hypotheses','原因假设','Cause hypotheses'],['applicability','适用条件','Applicability'],['exceptions','例外','Exceptions'],['unknowns','待核实事项','Unverified items']])field(results,zh,en,diagnosis[key]);
+    results.className+=' evidence-analysis';
+    results.append(node('p',t('分析正文可随界面语言翻译，仅供阅读；原始内容保留在 JSON 和编辑框中。','Analysis prose is translated for reading; original content remains in JSON and editors.')));
+    field(results,'Agent 归纳的期望行为（需核对原文）','Agent interpretation of expected behavior (verify against the original)',diagnosis.expected_behavior,true);
+    for(const [key,zh,en] of [['facts','归纳的事实（Agent）','Summarized facts (Agent)'],['hypotheses','原因假设','Cause hypotheses'],['applicability','适用条件','Applicability'],['exceptions','例外','Exceptions'],['unknowns','待核实事项','Unverified items']])field(results,zh,en,diagnosis[key],true);
     const candidate=payload.extraction_candidate || record.content;
-    if(candidate)for(const [key,zh,en] of [['summary','经验摘要','Experience summary'],['trigger','经验触发条件','Experience trigger'],['recommendation','处理建议','Recommendation'],['verification','建议的验证方法（不是已完成验证）','Proposed verification (not completed validation)']])field(results,zh,en,candidate[key]);
-    field(results,'模型检查（不是回放）','Model checks (not replay)',analysis.model_check);
+    if(candidate)for(const [key,zh,en] of [['summary','经验摘要','Experience summary'],['trigger','经验触发条件','Experience trigger'],['recommendation','处理建议','Recommendation'],['verification','建议的验证方法（不是已完成验证）','Proposed verification (not completed validation)']])field(results,zh,en,candidate[key],true);
+    field(results,'模型检查（不是回放）','Model checks (not replay)',analysis.model_check,true);
     results.append(node('p',analysis.validation_status==='not_replayed'?t('尚未进行回放验证','No replay validation has been performed'):analysis.validation_status?t('回放验证状态请核对原始记录','Check the original record for replay-validation status'):t('未记录已完成的回放验证','No completed replay validation is recorded')));
     if(analysis.validation_status && analysis.validation_status!=='not_replayed')field(results,'验证状态原值','Recorded validation status',analysis.validation_status);
     const attempts=section(host,'经验提炼记录','Experience extraction history');
