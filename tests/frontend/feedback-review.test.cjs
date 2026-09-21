@@ -31,7 +31,7 @@ function harness({filter='candidate', status='candidate', getResponse}={}) {
     }};
   context.document.querySelectorAll=selector=>Object.values(els).flatMap(el=>el.querySelectorAll('div')).filter(el=>selector==='.review-evidence' && el.className==='review-evidence');
   vm.createContext(context);
-  for(const file of ['usage-ui','review-evidence','feedback-review']) vm.runInContext(fs.readFileSync(path.resolve(__dirname,`../../docs/assets/${file}.js`),'utf8'),context);
+  for(const file of ['usage-ui','feedback-diagnostics','review-evidence','feedback-review']) vm.runInContext(fs.readFileSync(path.resolve(__dirname,`../../docs/assets/${file}.js`),'utf8'),context);
   els.reviewToken.value='test-only';
   els.reviewFilter.value=filter;
   const find=id=>els.reviewCards.querySelectorAll('textarea').concat(els.reviewCards.querySelectorAll('select')).find(el=>el.id.startsWith(id));
@@ -168,7 +168,7 @@ test('feedback evidence opens and loads by default without duplicate toggle requ
   const details=h.els.reviewCards.querySelectorAll('details')[0];
   assert.equal(details.open,true);
   assert.equal(details.querySelectorAll('pre').length,0);
-  const raw=h.els.reviewCards.querySelectorAll('details')[1];
+  const raw=rootPanels(h)[1];
   assert.equal(raw.open,false);assert.equal(raw.querySelectorAll('pre').length,1);
   assert.equal(h.calls.length,2);await details.fire('toggle');
   assert.equal(h.calls.length,2);await details.fire('toggle');assert.equal(h.calls.length,2);
@@ -268,12 +268,12 @@ test('feedback outcome and related experience lifecycle are shown separately',as
 test('folds, refresh, language changes and filters preserve isolated review drafts',async()=>{
   const h=harness();await h.els.reviewLogin.fire('submit');await flush();
   h.find('content-').value='{"summary":"manual draft"}';h.find('note-').value='人工意见';h.find('original-').value='原文';h.find('corrected-').value='修正';
-  const [read,raw]=h.els.reviewCards.querySelectorAll('details');
+  const [read,raw]=rootPanels(h);
   await read.querySelectorAll('button')[0].fire('click');assert.equal(read.open,false);assert.equal(raw.open,false);
   await raw.querySelectorAll('button')[0].fire('click');assert.equal(raw.open,true);assert.equal(read.open,false);
   h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
   assert.equal(h.find('note-').value,'人工意见');
-  const [readEn,rawEn]=h.els.reviewCards.querySelectorAll('details');assert.equal(readEn.open,false);assert.equal(rawEn.open,true);
+  const [readEn,rawEn]=rootPanels(h);assert.equal(readEn.open,false);assert.equal(rawEn.open,true);
   await h.els.reviewLogin.fire('submit');await flush();
   assert.equal(h.find('content-').value,'{"summary":"manual draft"}');assert.equal(h.find('note-').value,'人工意见');
   const firstId=h.item.id;h.item.id='b'.repeat(32);
@@ -294,7 +294,86 @@ test('refreshing a newer version keeps drafts but requires explicit version ackn
 });
 
 
+const rootPanels=h=>h.els.reviewCards.querySelectorAll('div').find(el=>el.className==='review-evidence').children.filter(el=>el.tag==='details');
 const treeText=el=>[el.textContent,...el.children.map(treeText)].join(' ');
+const visibleText=el=>el.tag==='details'&&!el.open?treeText(el.children[0]):[el.textContent,...el.children.map(visibleText)].join(' ');
+const eventPanel=h=>rootPanels(h)[0].querySelectorAll('section').find(el=>el.className.includes('evidence-event-summary'));
+function confirmationFixture() {
+  const data=evidenceFixture();
+  const action={action_id:'action_9_old',type:'CONFIRM_STAGE_OR_MODIFY',stage:'IDEA_BRAINSTORMING',
+    status:'PENDING',question:'请核对实验设计边界的完整原文。',proposal:{items:[{field:'observations',value:'电磁波的传播速度与波长'}]},
+    answer_fields:['research_object','observations'],allowed_intents:['ACCEPT_PREVIOUS_PROPOSAL'],
+    editable_field_bindings:[{canonical_field:'observations',visible_labels:['观察量']}],created_at_revision:9};
+  const confirmation={topic_lock:{locked:false,preserved_fields:[]},latest_field_provenance:{}};
+  const before={revision:9,stage:'IDEA_BRAINSTORMING',completed_stages:[],pending_excerpt:JSON.stringify(action),confirmation_excerpt:JSON.stringify(confirmation)};
+  const after={...before,revision:10,pending_excerpt:JSON.stringify({...action,action_id:'action_10_new',created_at_revision:10}),
+    confirmation_excerpt:JSON.stringify({...confirmation,topic_lock:{...confirmation.topic_lock,preserved_fields:['IDEA_BRAINSTORMING']}}),completion_error:'请先结合当前VR实验回答这一问。'};
+  data.evidence.event_chain[0].assistant=action.question+'\n'+action.proposal.items[0].value;
+  data.evidence.event_chain[0].recorded_fields={assistant:true};
+  Object.assign(data.evidence.event_chain[1],{state_before:before,state_after:after,resolved_intent:{intent:'ACCEPT_PREVIOUS_PROPOSAL',advance_requested:true}});
+  data.evidence.current_state={...after,revision:11,updated_at:'later'};
+  delete data.evidence.current_state.completion_error;
+  return data;
+}
+
+test('confirmation summary preserves changed action identity without repeating snapshots or dialogue',async()=>{
+  const h=harness();h.item.evidence=confirmationFixture();
+  await h.els.reviewLogin.fire('submit');await flush();
+  const panel=eventPanel(h),text=visibleText(panel);
+  for(const expected of ['9 → 10','接受前一方案','记录了推进请求','阶段、确认问题、方案内容未变化','待办标识已更换','待处理','该轮回复正文为空','未记录结构化的具体缺项'])assert.ok(text.includes(expected),expected);
+  assert.doesNotMatch(text,/action_9_old|action_10_new|editable_field_bindings|allowed_intents|research_object|请核对实验设计边界的完整原文|电磁波的传播速度与波长|继续。/);
+  const folds=panel.querySelectorAll('details');assert.deepEqual(folds.map(el=>el.open),[false,false]);
+  assert.match(treeText(folds[0]),/action_9_old/);assert.match(treeText(folds[0]),/action_10_new/);
+  assert.match(treeText(folds[0]),/confirmation.topic_lock.preserved_fields/);
+  assert.match(treeText(folds[1]),/提交时状态与问题轮结束状态一致/);
+  assert.doesNotMatch(treeText(folds[1]),/电磁波的传播速度与波长/);
+  assert.equal(visibleText(rootPanels(h)[0]).split('请核对实验设计边界的完整原文。').length-1,1);
+  assert.equal(visibleText(rootPanels(h)[0]).split('继续。').length-1,1);
+});
+
+test('structured comparison ignores object key order and runtime timestamps, not proposal values or action IDs',async()=>{
+  const h=harness();h.item.evidence=confirmationFixture();
+  const snapshot=h.item.evidence.evidence,original=JSON.parse(snapshot.current_state.pending_excerpt);
+  snapshot.current_state.pending_excerpt=JSON.stringify(Object.fromEntries(Object.entries({...original,created_at_revision:99,updated_at:'tomorrow'}).reverse()));
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.match(treeText(eventPanel(h).querySelectorAll('details')[1]),/提交时状态与问题轮结束状态一致/);
+  snapshot.current_state.pending_excerpt=JSON.stringify({...original,action_id:'action_11_changed',proposal:{revision:'experimental variable'}});
+  await h.els.reviewLogin.fire('submit');await flush();
+  const submission=treeText(eventPanel(h).querySelectorAll('details')[1]);
+  assert.doesNotMatch(submission,/提交时状态与问题轮结束状态一致/);
+  assert.match(submission,/pending_action.action_id/);assert.match(submission,/experimental variable/);
+});
+
+test('unknown and truncated states cannot support equality or invented missing fields',async()=>{
+  const h=harness();h.item.evidence=confirmationFixture();
+  const snapshot=h.item.evidence.evidence,turn=snapshot.event_chain[1];
+  turn.state_before.pending_excerpt_truncated=true;turn.state_after.pending_excerpt_truncated=true;
+  snapshot.current_state={...turn.state_after};delete turn.resolved_intent;
+  await h.els.reviewLogin.fire('submit');await flush();
+  const panel=eventPanel(h),text=visibleText(panel);
+  assert.doesNotMatch(text,/确认问题、方案内容未变化|接受前一方案|记录了推进请求/);
+  assert.match(text,/待办状态摘录已截断/);
+  assert.doesNotMatch(treeText(panel.querySelectorAll('details')[1]),/提交时状态与问题轮结束状态一致/);
+  turn.state_after.missing_fields=['observation_location'];
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.match(visibleText(eventPanel(h)),/检查明确记录的缺项\s+observation_location/);
+  assert.doesNotMatch(visibleText(eventPanel(h)),/research_object/);
+});
+
+test('nested state folds retain language state, do not affect drafts and reset for another record',async()=>{
+  const h=harness();h.item.evidence=confirmationFixture();await h.els.reviewLogin.fire('submit');await flush();
+  h.find('note-').value='手写审阅草稿';
+  await eventPanel(h).querySelectorAll('details')[0].querySelectorAll('button')[0].fire('click');
+  h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
+  const panel=eventPanel(h);assert.deepEqual(panel.querySelectorAll('details').map(el=>el.open),[true,false]);
+  assert.match(visibleText(panel),/pending-action ID changed/);
+  assert.equal(h.find('note-').value,'手写审阅草稿');
+  h.item.id='d'.repeat(32);h.item.evidence={evidence:{}};
+  await h.els.reviewLogin.fire('submit');await flush();
+  assert.doesNotMatch(treeText(eventPanel(h)),/action_9_old|action_10_new/);
+  assert.deepEqual(eventPanel(h).querySelectorAll('details').map(el=>el.open),[false,false]);
+  assert.equal(h.find('note-').value,'');
+});
 function evidenceFixture() {
   const before={stage:'IDEA_BRAINSTORMING',pending_excerpt:JSON.stringify({type:'CONFIRM_OR_MODIFY',question:'请确认实验边界'})};
   return {message:'继续没有推进 <img src=x onerror=alert(1)>',category:'answered_pending',
@@ -309,15 +388,26 @@ function evidenceFixture() {
     attachments:[{role:'problem',data_url:'data:image/png;base64,test'}]};
 }
 
+test('diagnostic debug fold survives language rendering and does not leak to another record',async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();await h.els.reviewLogin.fire('submit');await flush();
+  const attempt=()=>h.els.reviewCards.querySelectorAll('div').find(el=>el.className==='feedback-attempt');
+  await attempt().querySelectorAll('button')[0].fire('click');
+  h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
+  assert.equal(attempt().querySelectorAll('details')[0].open,true);
+  assert.match(treeText(attempt()),/Debug details/);
+  h.item.id='e'.repeat(32);await h.els.reviewLogin.fire('submit');await flush();
+  assert.equal(attempt().querySelectorAll('details')[0].open,false);
+});
+
 test('readable evidence separates missing and empty bodies, historical states and extraction attempts',async()=>{
   const h=harness();h.item.evidence=evidenceFixture();await h.els.reviewLogin.fire('submit');await flush();
   const readable=h.els.reviewCards.querySelectorAll('details')[0],text=treeText(readable);
-  for(const expected of ['回复正文未记录','该轮回复正文为空','阶段未变化','前后记录中的待办相同','总结 PDF','尚未进行回放验证','以下记录已截断','不是原对话故障的发生过程','OpenAI / gpt-5.4-mini','检查环节','未记录 / 未记录','<img src=x onerror=alert(1)>'])assert.ok(text.includes(expected),expected);
+  for(const expected of ['回复正文未记录','该轮回复正文为空','阶段、确认问题未变化','待办标识未记录完整','总结 PDF','尚未进行回放验证','以下记录已截断','不是原对话故障的发生过程','OpenAI / gpt-5.4-mini','检查环节','未记录 / 未记录','<img src=x onerror=alert(1)>'])assert.ok(text.includes(expected),expected);
   assert.equal(readable.querySelectorAll('img').length,1);
   const source=readable.children[1];assert.equal(h.els.reviewCards.querySelectorAll('div').find(e=>e.className==='review-evidence')['data-i18n-ignore'],'');
   h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
   const english=treeText(h.els.reviewCards.querySelectorAll('details')[0]);
-  for(const expected of ['Conversation and state','Reply body not recorded','This turn has an empty reply body','Stage unchanged','继续。','可能未承接确认','No replay validation has been performed'])assert.ok(english.includes(expected),expected);
+  for(const expected of ['Conversation and state','Reply body not recorded','This turn has an empty reply body','Stage, Confirmation question unchanged','继续。','可能未承接确认','No replay validation has been performed'])assert.ok(english.includes(expected),expected);
   assert.equal(h.calls.length,1); // No translation/model call.
 });
 
@@ -325,7 +415,7 @@ test('raw JSON retains all fields and images when copied; displayed JSON omits b
   const h=harness();h.item.evidence=evidenceFixture();h.item.reviews=[{note:'原审阅意见'}];h.item.extra={unknown_field:42};let copied;
   h.context.navigator={clipboard:{writeText:async text=>{copied=text;}}};
   await h.els.reviewLogin.fire('submit');await flush();
-  const raw=h.els.reviewCards.querySelectorAll('details')[1];assert.equal(raw.open,false);
+  const raw=rootPanels(h)[1];assert.equal(raw.open,false);
   assert.ok(!raw.querySelectorAll('pre')[0].textContent.includes('base64,test'));
   await raw.querySelectorAll('button').find(b=>b.textContent==='复制 JSON').fire('click');
   assert.deepEqual(JSON.parse(copied),h.item);
@@ -338,7 +428,7 @@ for(const language of ['zh','en']) test(`malformed legacy evidence does not bloc
   h.item.evidence.analysis_attempts=[null,false,{attempt:2,status:'completed'}];
   let copied;h.context.navigator={clipboard:{writeText:async text=>{copied=text;}}};
   await h.els.reviewLogin.fire('submit');await flush();
-  const panels=h.els.reviewCards.querySelectorAll('details');
+  const panels=rootPanels(h);
   assert.ok(h.find('content-'));
   assert.match(treeText(panels[0]),language==='en'?/unsupported format/:/部分记录格式异常/);
   assert.match(treeText(panels[0]),/继续。/);

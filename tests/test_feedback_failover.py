@@ -99,7 +99,7 @@ def test_connection_failure_uses_other_configured_provider(pipeline, mode, prima
     assert row['status'] == 'candidate' and row['attempts'] == 2 and row['max_attempts'] == 10
     history = row['evidence']['analysis_attempts']
     assert [h['status'] for h in history] == ['failed', 'completed']
-    assert history[0]['code'] == 'model_connection_error' and history[0]['phase'] == 'draft'
+    assert history[0]['code'] == 'model_connection_error' and history[0]['phase'] == 'request_draft'
     assert len(calls) == 3 and calls[0][0] != calls[1][0] == calls[2][0]
     assert 'private-key-and-body' not in json.dumps(row)
     assert generator.model == primary  # Never change the shared dialogue generator.
@@ -129,7 +129,7 @@ def test_invalid_output_is_diagnosable_and_does_not_trigger_provider_loop(pipeli
     p.service.run_once()
     row = p.repo.feedback_detail(ticket['id'])
     assert len(calls) == 1 and row['status'] == 'failed' and row['can_retry']
-    assert 'model_output_invalid' in row['error']
+    assert ('model_output_invalid' if isinstance(error, ModelOutputError) else 'internal_error') in row['error']
 
 
 def test_no_unconfigured_or_disallowed_backup(pipeline):
@@ -143,8 +143,11 @@ def test_no_unconfigured_or_disallowed_backup(pipeline):
     assert p.service.extractor.models() == ['gpt-5.4-mini']
 
 
-def test_ten_attempts_total_including_automatic_backup_and_manual_retry(pipeline):
+@pytest.mark.parametrize('mode', list(InteractionState))
+def test_ten_attempts_total_including_automatic_backup_and_manual_retry(pipeline, mode):
     p = pipeline
+    p.session.interaction_state = mode
+    p.engine.store.save(p.session)
     calls, _ = configure(p, ModelHTTPError(503), secondary_failure=ModelHTTPError(429))
     ticket = submit(p)[2]
     for expected in range(2, MAX_ATTEMPTS + 1, 2):
@@ -207,7 +210,7 @@ def test_critic_connection_failure_restarts_analysis_on_backup(pipeline):
     p.service.run_once()
     row = p.repo.feedback_detail(ticket['id'])
     assert len(calls) == 4 and row['status'] == 'candidate' and row['attempts'] == 2
-    assert row['evidence']['analysis_attempts'][0]['phase'] == 'check'
+    assert row['evidence']['analysis_attempts'][0]['phase'] == 'request_check'
 
 
 def test_failed_evidence_check_is_not_retried_on_a_more_agreeable_model(pipeline):

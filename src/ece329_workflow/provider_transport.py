@@ -111,6 +111,7 @@ class DeepSeekJSONTransport:
             'output_tokens_details': usage.get('completion_tokens_details'),
         })
         result['model'] = response.get('model') if isinstance(response, dict) else None
+        result.transport_metadata = getattr(response, 'transport_metadata', {})
         return result
 
 

@@ -57,4 +57,13 @@
 .evidence-user { margin-left:auto; background:#e0f2ef; }
 .evidence-agent { background:white; }
 .review-evidence pre { font-size:.8rem; max-width:100%; }
+.review-evidence .evidence-body .evidence-fold { margin:12px 0; border-top:1px solid #dce5e8; }
+.review-evidence .evidence-body .evidence-fold > summary { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; cursor:pointer; list-style:none; }
+.review-evidence .evidence-fold > summary::-webkit-details-marker { display:none; }
+.evidence-state-changes { padding-left:20px; line-height:1.7; }
+.evidence-difference { overflow-wrap:anywhere; border-bottom:1px solid #dce5e8; padding:8px 0; }
+.evidence-difference > h5 { margin:6px 0; }
+.feedback-attempt { border-top:1px solid #dce5e8; padding:10px 0; overflow-wrap:anywhere; }
+.feedback-attempt > details > summary { display:flex; justify-content:space-between; align-items:center; gap:12px; cursor:pointer; }
+.feedback-attempt pre { white-space:pre-wrap; max-height:300px; overflow:auto; }
 @media(max-width:640px) { .evidence-body {padding:0 10px 10px;} .evidence-bubble {max-width:100%;} .evidence-turn {padding:8px;} .review-evidence > details > summary {padding:10px;} }

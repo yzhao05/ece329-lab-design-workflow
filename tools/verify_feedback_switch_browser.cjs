@@ -21,7 +21,12 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base || '')) throw new Error('Local fixtu
       await page.locator('#feedbackButton').click();
       await page.locator('#feedbackMessage').fill(`${mode}：继续下一步没有推进当前流程`);
       await page.locator('#feedbackSubmit').click();
-      await page.locator('#feedbackHistory').filter({hasText:'model_output_invalid'}).waitFor();
+      await page.locator('#feedbackHistory').filter({hasText:'模型正文不是有效 JSON'}).waitFor();
+      assert.match(await page.locator('#feedbackHistory').innerText(),/解析草案失败/);
+      assert.match(await page.locator('#feedbackHistory').innerText(),/检查建议/);
+      await page.evaluate(()=>window.ECE329I18n.setLanguage('en'));
+      assert.match(await page.locator('#feedbackHistory').innerText(),/Model body is not valid JSON/);
+      await page.evaluate(()=>window.ECE329I18n.setLanguage('zh'));
       const before=await (await context.request.get(`${base}/__smoke/feedback-requests`)).json();
       await page.locator('#feedbackSwitch').click();
       await page.locator('#feedbackSwitchPanel').waitFor({state:'visible'});
@@ -36,7 +41,7 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base || '')) throw new Error('Local fixtu
       const retryRequest=page.waitForRequest(r=>r.url().endsWith('/retry') && r.method()==='POST');
       await page.locator('#feedbackSwitchRun').click();
       assert.equal((await retryRequest).postDataJSON().model,'deepseek-flash');
-      await page.locator('#feedbackHistory').filter({hasText:/等待审阅|同类经验/}).waitFor();
+      await page.locator('#feedbackHistory').filter({hasText:/已生成经验|同类经验/}).waitFor();
       assert.match(await page.locator('#feedbackHistory').innerText(),/分析 2\/10 次/);
       assert.equal(await page.locator('#feedbackRetryTicket').inputValue(),selectedTicket);
       assert.equal(await page.locator('#feedbackSwitchRun').isDisabled(),true);

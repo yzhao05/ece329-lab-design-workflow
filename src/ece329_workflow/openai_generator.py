@@ -311,6 +311,8 @@ class OpenAIResponsesHTTPTransport:
         self._provider = provider
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from .feedback_diagnostics import TransportResponse, transport_metadata
+        metadata = transport_metadata()
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = Request(
             self._endpoint,
@@ -324,6 +326,7 @@ class OpenAIResponsesHTTPTransport:
         )
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
+                metadata = transport_metadata(getattr(response, 'headers', None), getattr(response, 'status', None), self._api_key)
                 result = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             error_code: str | None = None
@@ -338,21 +341,36 @@ class OpenAIResponsesHTTPTransport:
                 pass
             finally:
                 exc.close()
-            raise ModelHTTPError(exc.code, error_code) from exc
+            error = ModelHTTPError(exc.code, error_code)
+            error.transport_metadata = transport_metadata(exc.headers, exc.code, self._api_key)
+            raise error from exc
         except URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise ModelTimeoutError(f"{self._provider} API timed out") from exc
-            raise ModelConnectionError(
-                f"Unable to connect to the {self._provider} API"
-            ) from exc
+                error = ModelTimeoutError(f"{self._provider} API timed out")
+            else:
+                error = ModelConnectionError(f"Unable to connect to the {self._provider} API")
+            error.transport_metadata = metadata
+            raise error from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise ModelTimeoutError(f"{self._provider} API timed out") from exc
+            error = ModelTimeoutError(f"{self._provider} API timed out")
+            error.transport_metadata = metadata
+            raise error from exc
         except (OSError, HTTPException) as exc:
-            raise ModelConnectionError(f"The {self._provider} API connection was interrupted") from exc
+            error = ModelConnectionError(f"The {self._provider} API connection was interrupted")
+            error.transport_metadata = metadata
+            raise error from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ModelOutputError(f"{self._provider} API returned invalid JSON") from exc
+            error = ModelOutputError(f"{self._provider} API returned invalid JSON")
+            error.feedback_reason = 'invalid_response_json'
+            error.transport_metadata = metadata
+            raise error from exc
         if not isinstance(result, dict):
-            raise ModelOutputError(f"{self._provider} API returned an unexpected payload")
+            error = ModelOutputError(f"{self._provider} API returned an unexpected payload")
+            error.feedback_reason = 'invalid_response_shape'
+            error.transport_metadata = metadata
+            raise error
+        result = TransportResponse(result)
+        result.transport_metadata = metadata
         return result
 
 

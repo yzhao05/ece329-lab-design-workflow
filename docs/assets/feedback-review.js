@@ -150,7 +150,7 @@
       const card = node('article',''); card.className='experience-card';
       card.append(node('h2',ticketLabels[item.status] || item.status), sourceNode('p',item.message),
         node('p',`${item.id} · ${item.design_id} · ${item.attempts}/${item.max_attempts ?? 3}`));
-      if (item.error) card.append(node('p',item.error));
+      if (item.error && !item.last_analysis?.diagnostic) card.append(node('p',item.error));
       card.append(usageSummary(item.usage));
       const detailBody = node('div','');
       let fetching=false, loaded=false;

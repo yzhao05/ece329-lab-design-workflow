@@ -138,7 +138,7 @@ function uiHarness() {
   context.CustomEvent=class { constructor(type, options) { this.type=type;this.detail=options.detail; } };
   win.dispatchEvent=event=>{for(const listener of win.listeners[event.type]||[])listener(event);return true;};
   vm.createContext(context);
-  for (const name of ["feedback-client", "feedback-ui"]) vm.runInContext(fs.readFileSync(path.join(root, `docs/assets/${name}.js`), "utf8"), context);
+  for (const name of ["feedback-diagnostics", "feedback-client", "feedback-ui"]) vm.runInContext(fs.readFileSync(path.join(root, `docs/assets/${name}.js`), "utf8"), context);
   return { context, els, win, timers, calls, finish: value => resolveSubmit(value) };
 }
 

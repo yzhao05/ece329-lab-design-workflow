@@ -170,15 +170,18 @@ class UsageTransport:
         detail = model_details(payload['model'], payload.get('reasoning', {}).get('effort', 'low'), apply_preset=False)
         call = {'model_id': detail['api_model'], 'selected_model': payload['model'], 'provider': detail['provider'],
                 'schema': payload.get('text', {}).get('format', {}).get('name'),
+                'reasoning_effort': detail['reasoning'], 'max_output_tokens': payload.get('max_output_tokens'),
                 'input_tokens': None, 'output_tokens': None, 'cached_input_tokens': None}
         call['agent'] = agent_role(call['schema'])
         start = perf_counter()
         try:
             response = self.transport.create(payload)
+            call.update(getattr(response, 'transport_metadata', {}))
             read_usage(response, call)
             return response
         except Exception as exc:
             call['error_type'] = type(exc).__name__
+            call.update(getattr(exc, 'transport_metadata', {}))
             raise
         finally:
             call['latency_ms'] = round((perf_counter() - start) * 1000, 2)

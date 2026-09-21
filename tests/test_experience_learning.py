@@ -65,6 +65,8 @@ def test_two_bounded_calls_and_failed_checks_cannot_learn(pipeline, failed):
     assert not p.service.run_once()
     assert len(requests) == 2
     assert 'event_chain' in requests[0]['input'][0]['content'][0]['text']
+    for request in requests:
+        assert 'action_id' in request['instructions'] and 'answer_fields' in request['instructions']
     assert p.repo.tickets(p.session.design_id)[0]['status'] == ('no_learning' if failed else 'candidate')
     with p.repo.connection() as db:
         saved = json.loads(db.execute('SELECT payload FROM feedback_tickets').fetchone()[0])

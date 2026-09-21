@@ -144,7 +144,8 @@ def test_output_failures_explain_why_without_leaking_content(pipeline, kind, rea
     p.service.extractor = ModelExperienceExtractor(SimpleNamespace(model='test',transport=SimpleNamespace(create=create)), {})
     ticket = submit(p)[2];p.service.run_once()
     row = p.repo.feedback_detail(ticket['id'])
-    assert row['last_analysis']['reason'] == reason and row['last_analysis']['phase'] == 'draft'
+    phase = {'schema': 'validate_draft', 'reference': 'validate_evidence'}.get(kind, 'parse_draft')
+    assert row['last_analysis']['reason'] == reason and row['last_analysis']['phase'] == phase
     assert row['attempts'] == 1 and row['status'] == 'failed'
     assert 'private' not in json.dumps(row)
 
@@ -178,7 +179,7 @@ def test_check_phase_validation_failure_is_not_reported_as_a_draft_failure(pipel
     p.service.extractor = ModelExperienceExtractor(SimpleNamespace(model='test',transport=SimpleNamespace(create=create)), {})
     ticket = submit(p)[2];p.service.run_once()
     last = p.repo.feedback_detail(ticket['id'])['last_analysis']
-    assert last['phase'] == 'check' and last['reason'] == 'schema_validation' and len(calls) == 2
+    assert last['phase'] == 'validate_check' and last['reason'] == 'schema_validation' and len(calls) == 2
 
 
 def test_deepseek_length_finish_reports_output_limit(pipeline):

@@ -105,7 +105,10 @@
         related.textContent = `关联经验：${experienceLabels[ticket.experience.status] || ticket.experience.status}`;
         item.append(related);
       }
-      if (ticket.error) {
+      if (ticket.last_analysis) {
+        const diagnostic=document.createElement('div');item.append(diagnostic);
+        window.ECE329Diagnostics.mount(diagnostic,ticket.last_analysis);
+      } else if (ticket.error) {
         const error = document.createElement("p");
         error.textContent = ticket.error;
         item.append(error);

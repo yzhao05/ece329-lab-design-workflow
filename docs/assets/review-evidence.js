@@ -58,6 +58,8 @@
     REQUEST_DESIGN_REVIEW:['请求检查设计','Request design review'], COMPARE_DESIGN_OPTIONS:['比较设计方案','Compare design options'],
     MANAGE_DESIGN_VERSION:['管理设计版本','Manage design versions'], RETURN_TO_PREVIOUS_POINT:['返回之前事项','Return to a previous point'],
     NEW_TOPIC:['提出新主题','Introduce a new topic'], SET_INTERACTION_STATE:['切换模式','Switch interaction mode'],
+    PENDING:['待处理','Pending'], ANSWERED:['已回答','Answered'], CONFIRMED:['已确认','Confirmed'],
+    CANCELLED:['已取消','Cancelled'], RESOLVED:['已解决','Resolved'],
   };
   const name = value => value == null || value === '' ? missing() : own(labels,value) ? t(...labels[value]) : String(value);
   function valueText(value) {
@@ -86,7 +88,7 @@
     return valid;
   }
   function fold(host, title, open, onToggle) {
-    const details=node('details');details.open=open;
+    const details=node('details');details.className='evidence-fold';details.open=open;
     const summary=node('summary'), button=node('button');button.type='button';button.className='ghost-button evidence-toggle';
     summary.append(node('span',title),button);const body=node('div');body.className='evidence-body';details.append(summary,body);
     const sync=()=>{button.textContent=details.open?t('收起','Collapse'):t('展开','Expand');button.setAttribute('aria-expanded',String(details.open));onToggle(details.open);};
@@ -117,44 +119,112 @@
     if (!own(state,'pending_excerpt')) return undefined;
     try {return JSON.parse(state.pending_excerpt);} catch {return undefined;}
   }
-  function stateDescription(state) {
-    if (!state) return undefined;
-    const result={};
-    for(const key of ['revision','stage','completed_stages','completion_error']) if(own(state,key))result[key]=state[key];
-    if(own(result,'stage'))result.stage=name(result.stage);
-    if(Array.isArray(result.completed_stages))result.completed_stages=result.completed_stages.map(name);
-    result.pending_action=pending(state);
-    if(state.confirmation_excerpt) {
-      try {result.confirmation=JSON.parse(state.confirmation_excerpt);}
-      catch {result.confirmation=t('确认状态摘录不完整；请核对原始 JSON','Confirmation excerpt is incomplete; inspect the raw JSON');}
+  // Compare structured values, never remove repeated substrings from evidence.
+  function same(a,b) {
+    if(a===b)return true;
+    if(Array.isArray(a)&&Array.isArray(b))return a.length===b.length&&a.every((v,i)=>same(v,b[i]));
+    if(!isRecord(a)||!isRecord(b))return false;
+    const keys=Object.keys(a);return keys.length===Object.keys(b).length&&keys.every(k=>own(b,k)&&same(a[k],b[k]));
+  }
+  function changes(a,b,path='') {
+    if(same(a,b))return [];
+    if(isRecord(a)&&isRecord(b))return [...new Set([...Object.keys(a),...Object.keys(b)])].sort().flatMap(k=>changes(a[k],b[k],path?`${path}.${k}`:k));
+    return [{path,before:a,after:b}];
+  }
+  function confirmation(state) {
+    if(own(state,'confirmation'))return state.confirmation;
+    try{return JSON.parse(state.confirmation_excerpt);}catch{return undefined;}
+  }
+  function stateValues(state) {
+    return {...obj(state),pending_action:pending(state),confirmation:confirmation(state),pending_excerpt:undefined,confirmation_excerpt:undefined};
+  }
+  function businessState(state) {
+    const p=pending(state), result={};
+    if(typeof state?.stage==='string')result.stage=state.stage;
+    if(Array.isArray(state?.completed_stages))result.completed_stages=state.completed_stages;
+    if(p===null)result.pending_action=null;
+    else if(isRecord(p)&&!state.pending_excerpt_truncated) {
+      // Only runtime metadata is excluded. Proposal fields, even fields called
+      // revision/time, are left intact. The action ID is a meaningful difference.
+      const metadata=['created_at_revision','updated_at_revision','created_at','updated_at','timestamp'];
+      result.pending_action=Object.fromEntries(Object.entries(p).filter(([key])=>!metadata.includes(key)));
     }
+    const c=confirmation(state);
+    if(isRecord(c)&&own(c,'topic_lock'))result.topic_lock=c.topic_lock;
     return result;
   }
-  function renderState(host, snapshot, target) {
-    const s=section(host,'当时的流程状态','Workflow state at the reported turn');
-    const before=obj(target?.state_before),after=obj(target?.state_after),p=pending(before),q=pending(after);
-    field(s,'当时在做什么','What was pending',p===null?t('记录显示没有待办','No pending action in the record'):p?name(p.type):undefined);
-    if (p) field(s,'当时的具体问题','Recorded pending question',p.question);
-    field(s,'用户说了什么','What the user said',target && recorded(target,'user')?target.user:undefined);
-    const intent=obj(target?.resolved_intent);
-    field(s,'系统如何理解（记录值）','System interpretation (recorded)',intent.intent?name(intent.intent):undefined);
-    if (Object.keys(intent).length) field(s,'意图解析明细','Intent details',intent);
-    let change;
-    if(before.stage && after.stage) change=before.stage===after.stage?t('阶段未变化','Stage unchanged'):`${name(before.stage)} → ${name(after.stage)}`;
-    field(s,'实际阶段变化','Actual stage change',change);
-    field(s,'回复正文状态','Reply body status',target ? recorded(target,'assistant') && target.assistant !== '' ? t('已记录非空回复正文，见上方对话','A non-empty reply body is recorded; see the conversation above') : bodyText(target) : undefined);
-    field(s,'处理后的待办','Pending action after the turn',q===null?t('记录显示没有待办','No pending action in the record'):q);
-    if(p && q && JSON.stringify(p)===JSON.stringify(q)) s.append(node('p',t('前后记录中的待办相同。','The recorded pending action is unchanged.')));
-    field(s,'阻塞信息／完成检查返回值','Blocking information / completion-check result',after.completion_error);
-    s.append(node('p',t('仅展示记录的检查信息；未记录具体缺项时，不推测缺项数量或原因。','Only recorded check results are shown. Missing fields or causes are not inferred.')));
-    field(s,'问题发生前的状态','State before the reported turn',stateDescription(target?.state_before));
-    field(s,'问题发生后的状态','State after the reported turn',stateDescription(target?.state_after));
-    if(before.pending_excerpt_truncated || after.pending_excerpt_truncated) s.append(node('p',t('待办状态摘录已截断。','Pending-state excerpt was truncated.')));
-    const current=section(s,'反馈提交时的状态（不是问题发生时）','State at feedback submission (not at the reported turn)');
-    field(current,'当前状态快照','Submission snapshot',stateDescription(snapshot.current_state));
-    if(snapshot.field_excerpt_truncated) current.append(node('p',t('提交时设计字段摘录已截断。','Design field excerpt at submission was truncated.')));
+  function diffDetails(host, rows) {
+    if(!rows.length){host.append(node('p',t('在此比较范围内没有变化。','No changes within this comparison scope.')));return;}
+    for(const row of rows) {
+      const block=node('div');block.className='evidence-difference';block.append(node('h5',row.path));
+      const key=row.path.split('.').at(-1),display=value=>['stage','type','status','intent'].includes(key)&&typeof value==='string'?name(value):value;
+      field(block,'之前','Before',display(row.before));field(block,'之后','After',display(row.after));host.append(block);
+    }
   }
-  function readable(host, record) {
+  function renderState(host, snapshot, target, view) {
+    const s=section(host,'简短事件说明与变化对比','Event summary and changes');s.className+=' evidence-event-summary';
+    const before=obj(target?.state_before),after=obj(target?.state_after),p=pending(before),q=pending(after),intent=obj(target?.resolved_intent);
+    const sentences=[t('当时的待办：','Pending at the time: ')+(p===null?t('无待办','No pending action'):isRecord(p)?name(p.type):missing())];
+    sentences.push(target&&recorded(target,'user')?t('用户输入见“问题轮”','See the reported-turn bubble for the user input'):t('用户输入未记录','User input not recorded'));
+    sentences.push(t('系统识别为：','System interpretation: ')+name(intent.intent));
+    if(intent.advance_requested===true)sentences.push(t('记录了推进请求','An advancement request was recorded'));
+    else if(intent.advance_requested===false)sentences.push(t('推进请求标记为否','The advancement-request flag is false'));
+    s.append(node('p',sentences.join(t('；','; '))+t('。','.')));
+    const lines=node('ul');lines.className='evidence-state-changes';const add=text=>lines.append(node('li',text));
+    if(own(before,'revision')&&own(after,'revision')&&!same(before.revision,after.revision))add(t('设计版本：','Design revision: ')+`${valueText(before.revision)} → ${valueText(after.revision)}`);
+    const unchanged=[];
+    if(before.stage&&after.stage) {
+      if(before.stage===after.stage)unchanged.push(t('阶段','Stage'));
+      else add(t('阶段：','Stage: ')+`${name(before.stage)} → ${name(after.stage)}`);
+    }else add(t('前后阶段信息未记录完整，无法判断阶段是否推进。','Before/after stages are incomplete; stage advancement cannot be determined.'));
+    for(const [key,zh,en] of [['question','确认问题','Confirmation question'],['proposal','方案内容','Proposal content']]) {
+      if(isRecord(p)&&isRecord(q)&&!before.pending_excerpt_truncated&&!after.pending_excerpt_truncated&&own(p,key)&&own(q,key)) {
+        if(same(p[key],q[key]))unchanged.push(t(zh,en));
+        else add(t(zh+'已变化；具体差异见折叠详情。',en+' changed; inspect the collapsed details.'));
+      }
+    }
+    if(unchanged.length)add(unchanged.join(t('、',', '))+t('未变化',' unchanged')+(before.stage===after.stage&&before.stage?` (${name(after.stage)})`:'')+t('。','.'));
+    if(isRecord(p)&&isRecord(q)) {
+      if(p.action_id&&q.action_id)add(p.action_id!==q.action_id?t('待办标识已更换；不能视为同一个待办。','The pending-action ID changed; these are not the same action.'):t('待办标识未变化。','The pending-action ID is unchanged.'));
+      else add(t('待办标识未记录完整，无法判断是否为同一个待办。','Pending-action IDs are incomplete; action identity cannot be determined.'));
+      if(q.status)add(t('处理后待办状态：','Pending status after the turn: ')+(p.status&&p.status!==q.status?`${name(p.status)} → `:'')+name(q.status));
+    }else if(p===null&&isRecord(q))add(t('处理后新增了待办。','A pending action was added.'));
+    else if(isRecord(p)&&q===null)add(t('处理后已无待办。','No pending action remains after the turn.'));
+    else if(q===undefined)add(t('处理后的待办未记录或摘录不完整。','The post-turn pending action is not recorded or its excerpt is incomplete.'));
+    const delta=changes(stateValues(before),stateValues(after));
+    const meaningful=delta.filter(row=>!['revision','stage','completion_error','pending_excerpt_truncated'].includes(row.path)&&!/^pending_action\.(action_id|status|question|proposal)(\.|$)/.test(row.path));
+    if(meaningful.length)add(t('另有状态字段变化，见技术详情。','Additional state fields changed; see technical details.'));
+    add(target?recorded(target,'assistant')&&target.assistant!==''?t('回复正文已记录，见问题轮。','Reply body recorded; see the reported turn.'):bodyText(target):t('问题轮回复正文未记录。','The reported-turn reply body is not recorded.'));
+    s.append(lines);
+    const error=after.completion_error;
+    if(error!=null&&error!=='') {
+      // Quote only a short check result. Full result remains in the details/JSON.
+      const brief=typeof error==='string'?error.slice(0,200):t('已记录结构化返回值，见详情','A structured result is recorded; see details');
+      s.append(node('p',t('完成检查返回：','Completion check returned: ')+brief+(typeof error==='string'&&error.length>200?'…':'')));
+    }else s.append(node('p',own(after,'completion_error')?t('完成检查未返回阻塞信息。','The completion check returned no blocking information.'):t('完成检查结果未记录。','Completion-check result not recorded.')));
+    if(Array.isArray(after.missing_fields)||isRecord(error)&&Array.isArray(error.missing_fields)) {
+      field(s,'检查明确记录的缺项','Explicitly recorded missing fields',after.missing_fields ?? error.missing_fields);
+    }else s.append(node('p',t('未记录结构化的具体缺项；不能从待回答字段列表推断缺项。','No structured missing-field list is recorded; answer fields are not evidence of missing fields.')));
+    s.append(node('p',t('具体原因尚不能仅凭这些状态记录确定；Agent 分析另列。','These state records alone do not establish a cause; Agent analysis is listed separately.')));
+    if(before.pending_excerpt_truncated||after.pending_excerpt_truncated)s.append(node('p',t('待办状态摘录已截断，不能确认未展示部分是否相同。','Pending-state excerpts are truncated; equality of omitted content cannot be established.')));
+    const details=fold(s,t('技术详情与完整检查结果','Technical changes and full check result'),view.technicalOpen,open=>view.technicalOpen=open);
+    details.parentElement?.setAttribute('data-evidence-detail','technical');
+    diffDetails(details,delta.filter(row=>!/^completion_error(\.|$)/.test(row.path)));
+    field(details,'意图解析明细','Intent details',target?.resolved_intent);
+    field(details,'完整完成检查返回值','Full completion-check result',error);
+    details.append(node('p',t('这里只列变化字段；两份完整状态、未变化的字段映射和对话原文保留在原始 JSON 中。','Only changed fields are listed here. Full snapshots, unchanged field mappings and conversation evidence remain in raw JSON.')));
+    const current=fold(s,t('反馈提交时的状态（单独比较）','State at feedback submission (separate comparison)'),view.submissionOpen,open=>view.submissionOpen=open);
+    current.parentElement?.setAttribute('data-evidence-detail','submission');
+    const end=businessState(after),submitted=businessState(obj(snapshot.current_state)),businessDiff=changes(end,submitted);
+    const required=['stage','completed_stages','pending_action','topic_lock'];
+    const comparable=required.every(key=>own(end,key)&&own(submitted,key));
+    current.append(node('p',!businessDiff.length&&comparable?t('提交时状态与问题轮结束状态一致（限下述比较范围）。','Submission state matches the end of the reported turn within the scope below.'):!businessDiff.length?t('可比字段未发现变化，但信息不完整，不能确认整体一致。','Comparable fields have not changed, but incomplete records prevent a full equality claim.'):t('提交时状态与问题轮结束状态有差异或记录完整度不同，见下方。','Submission and post-turn states differ, or have different record completeness; see below.')));
+    current.append(node('p',t('比较范围：阶段、已完成阶段、待办业务字段（包括标识、状态、问题、方案、回答字段及映射）、主题确认状态。忽略设计版本、待办创建/更新版本和时间；不比较本轮检查结果及字段来源日志。未记录或截断的部分不视为相同。','Scope: stage, completed stages, pending-action business fields (including ID, status, question, proposal, answer fields and bindings), and topic confirmation. Design revisions, action-creation/update revisions and timestamps are ignored; turn-specific check results and provenance logs are outside this comparison. Missing or truncated data is not treated as equal.')));
+    if(businessDiff.length)diffDetails(current,businessDiff);
+    if(!comparable)current.append(node('p',t('部分比较字段未记录或摘录不完整。','Some comparison fields are missing or incomplete.')));
+    if(snapshot.field_excerpt_truncated)current.append(node('p',t('提交时设计字段摘录已截断。','Design field excerpt at submission was truncated.')));
+  }
+  function readable(host, record, view) {
     const payload=obj(record.evidence),snapshot=obj(payload.evidence || payload),analysis=obj(payload.extraction_analysis),diagnosis=obj(analysis.diagnosis);
     if(snapshot.evidence_migration) {
       host.append(node('p',t('历史证据已自动升级。仅补充可核对的历史记录；经验内容和人工审阅保持原样，未重新调用模型。','Historical evidence was upgraded automatically using verifiable saved history. Experience content and human reviews were preserved; no model was called.')));
@@ -164,9 +234,10 @@
     field(feedback,'原始反馈','Original feedback',payload.message ?? record.message);
     field(feedback,'问题类型','Issue category',name(payload.category ?? record.category));
     field(feedback,'用户明确填写的期望行为','Expected behavior explicitly recorded from the user',payload.expected_behavior);
-    field(feedback,'Agent 归纳的期望行为（需核对原文）','Agent interpretation of expected behavior (verify against the original)',diagnosis.expected_behavior);
+    const target=list(snapshot.event_chain).filter(isRecord).find(row=>row.position==='reported') || (isRecord(snapshot.reported_turn)?snapshot.reported_turn:null);
+    renderState(host,snapshot,target,view);
     const chat=section(host,'问题前后对话','Conversation around the reported turn');
-    const chain=recordList(chat,snapshot.event_chain),target=chain.find(row=>row.position==='reported') || (isRecord(snapshot.reported_turn)?snapshot.reported_turn:null);
+    const chain=recordList(chat,snapshot.event_chain);
     for(const position of ['before','reported','after']) {
       const row=chain.find(item=>item.position===position) || (position==='reported'?target:null);
       if(row)renderTurn(chat,row,position);else field(chat,...(labels[position]),undefined);
@@ -177,9 +248,9 @@
     }
     if(snapshot.evidence_schema_version!==2 || snapshot.evidence_migration) chat.append(node('p',t('旧记录未能核对的截断信息和历史状态仍为未知。没有原始记录佐证的空摘录，不能证明原始回复为空。','Unverified legacy truncation and historical states remain unknown. An empty excerpt without source evidence does not prove the original reply was empty.')));
     if(snapshot.history_limitations) chat.append(node('p',t('历史状态缺失时显示“未记录”。摘录可能不完整，缺少相邻对话不能证明成功或失败。','Missing historical states are shown as not recorded. Excerpts may be incomplete; missing neighboring turns do not prove success or failure.')));
-    renderState(host,snapshot,target);
     const results=section(host,'经验层的分析结果','Experience-layer analysis');
     results.append(node('p',t('以下是 Agent 的分析，不是独立确认的原始事实。','The following is Agent analysis, not independently verified source facts.')));
+    field(results,'Agent 归纳的期望行为（需核对原文）','Agent interpretation of expected behavior (verify against the original)',diagnosis.expected_behavior);
     for(const [key,zh,en] of [['facts','归纳的事实（Agent）','Summarized facts (Agent)'],['hypotheses','原因假设','Cause hypotheses'],['applicability','适用条件','Applicability'],['exceptions','例外','Exceptions'],['unknowns','待核实事项','Unverified items']])field(results,zh,en,diagnosis[key]);
     const candidate=payload.extraction_candidate || record.content;
     if(candidate)for(const [key,zh,en] of [['summary','经验摘要','Experience summary'],['trigger','经验触发条件','Experience trigger'],['recommendation','处理建议','Recommendation'],['verification','建议的验证方法（不是已完成验证）','Proposed verification (not completed validation)']])field(results,zh,en,candidate[key]);
@@ -190,17 +261,19 @@
     attempts.append(node('p',t('这是反馈提交后的提炼过程，不是原对话故障的发生过程。','These attempts occurred after feedback submission; they are not the original conversation failure timeline.')));
     const rows=recordList(attempts,payload.analysis_attempts);
     if(!rows.length)attempts.append(node('p',missing()));
-    const ul=node('ul');for(const row of rows) {
-      const li=node('li',`${t('第','Attempt ')} ${valueText(row.attempt)}${t(' 次','')}: ${name(row.provider)} / ${valueText(row.model)} · ${name(row.phase)} · ${name(row.status)}`);
-      if(row.code || row.reason) li.append(node('p',[row.code,row.reason].filter(Boolean).map(name).join(' · ')));
-      if(row.http_status)li.append(node('p',`HTTP ${valueText(row.http_status)}`));ul.append(li);
-    }attempts.append(ul);
+    for(const [index,row] of rows.entries()) {
+      const item=node('div');attempts.append(item);
+      view.attemptFolds??=new Map();
+      const key=`${index}:${row.attempt??''}`;
+      if(!view.attemptFolds.has(key))view.attemptFolds.set(key,{open:false});
+      window.ECE329Diagnostics.mount(item,row,view.attemptFolds.get(key));
+    }
   }
   function render(host) {
     const state=views.get(host);if(!state)return;
     host.replaceChildren();
     const read=fold(host,t('对话与状态说明','Conversation and state'),state.readOpen,open=>state.readOpen=open);
-    readable(read,state.record);
+    readable(read,state.record,state);
     const raw=fold(host,t('原始 JSON 记录','Raw JSON record'),state.rawOpen,open=>state.rawOpen=open);
     const images=[];
     const compact=JSON.stringify(state.record,function(key,value){
@@ -222,6 +295,6 @@
     actions.append(copy,download);raw.append(actions,status,node('pre',compact));
     if(images.length){const gallery=node('div');gallery.className='feedback-image-gallery';for(const [i,image] of images.entries()){const figure=node('figure'),img=node('img');img.src=image.url;img.alt=image.role==='problem'?t('问题对话截图','Reported-turn screenshot'):image.role==='before'?t('前文截图','Previous-context screenshot'):image.role==='after'?t('后文截图','Following-context screenshot'):t('证据图片 ','Evidence image ')+(i+1);figure.append(img,node('figcaption',img.alt));gallery.append(figure);}read.append(gallery);}
   }
-  window.ECE329ReviewEvidence={mount(host,record){host.className='review-evidence';host.setAttribute('data-i18n-ignore','');views.set(host,{record,readOpen:true,rawOpen:false});render(host);}};
+  window.ECE329ReviewEvidence={mount(host,record){host.className='review-evidence';host.setAttribute('data-i18n-ignore','');views.set(host,{record,readOpen:true,rawOpen:false,technicalOpen:false,submissionOpen:false});render(host);}};
   window.addEventListener('ece329:language-changed',()=>{for(const host of document.querySelectorAll('.review-evidence'))render(host);});
 })();

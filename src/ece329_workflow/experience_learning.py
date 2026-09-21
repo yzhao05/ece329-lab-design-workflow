@@ -35,24 +35,9 @@ def check_schema():
     })
 
 
-def validate_shape(value, schema, *, limit=1000):
-    kind = schema['type']
-    if kind == 'object':
-        if not isinstance(value, dict) or set(value) != set(schema['properties']):
-            raise ValueError('Invalid experience analysis fields')
-        for key, spec in schema['properties'].items():
-            validate_shape(value[key], spec, limit=limit)
-    elif kind == 'array':
-        if not isinstance(value, list) or len(value) > 6:
-            raise ValueError('Invalid experience analysis array')
-        for item in value:
-            validate_shape(item, schema['items'], limit=limit)
-    elif kind == 'boolean':
-        if type(value) is not bool:
-            raise ValueError('Invalid experience check')
-    elif not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise ValueError('Invalid experience analysis text')
-    return deepcopy(value)
+def validate_shape(value, schema, *, limit=1000, path='diagnosis'):
+    from .feedback_diagnostics import validate
+    return validate(value, schema, path, limit)
 
 
 def validate_review_note(note):
