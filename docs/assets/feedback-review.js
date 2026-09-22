@@ -231,6 +231,16 @@
       card.className = "experience-card";
       const summary=node('h2',item.content.summary);summary.setAttribute('data-i18n-translate','');
       card.append(summary, node("p", `${item.id} · ${experienceLabels[item.status] || item.status} · 版本 ${item.version}`));
+      const exportActions=node('div','');exportActions.className='experience-actions';
+      const exportButton=node('button','导出经验与上下文（JSON）');
+      exportButton.type='button';exportButton.className='ghost-button';
+      exportButton.addEventListener('click',()=>{
+        if(version!==generation || reviewing || loading)return;
+        try {window.ECE329ReviewEvidence.download(item,true);}
+        catch {el.Status.textContent='导出失败，请重试。';window.ECE329I18n?.refresh();}
+      });
+      exportActions.append(exportButton);card.append(exportActions,
+        node('p','导出当前已加载版本的经验、关联反馈、已记录上下文、截图及审阅记录；保留原文，不包含未提交的草稿。'));
       card.append(usageSummary(item.usage));
       const scope = node('select', '');
       for (const [value, label] of [['session','本次设计'],['project','本课程项目'],['global','通用经验']]) {

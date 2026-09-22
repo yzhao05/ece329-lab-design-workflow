@@ -433,6 +433,70 @@ test('raw JSON retains all fields and images when copied; displayed JSON omits b
   assert.deepEqual(JSON.parse(copied),h.item);
 });
 
+function captureDownloads(h) {
+  const files=[],cleanup=[],revoked=[];
+  h.context.Blob=Blob;
+  h.context.URL={createObjectURL:blob=>{files.push({blob});return `blob:test-${files.length}`;},revokeObjectURL:url=>revoked.push(url)};
+  h.context.document.body=new Element('body');
+  const create=h.context.document.createElement;
+  h.context.document.createElement=tag=>{
+    const el=create(tag);
+    if(tag==='a') {
+      el.click=()=>{files.at(-1).filename=el.download;};
+      el.remove=()=>{h.context.document.body.children=h.context.document.body.children.filter(x=>x!==el);};
+    }
+    return el;
+  };
+  h.context.setTimeout=(fn,ms)=>ms===1000?cleanup.push(fn):setTimeout(fn,ms);
+  return {files,cleanup,revoked};
+}
+
+for(const status of ['candidate','active','stopped','rejected','disabled','deleted'])
+for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT'])
+test(`experience export includes original context for ${status} / ${mode} without saving drafts`,async()=>{
+  const h=harness({status});const d=captureDownloads(h);
+  h.item.evidence=evidenceFixture();h.item.evidence.mode=mode;
+  h.item.reviews=[{version:1,note:'原始意见',content:{previous:{summary:'旧版本'}}}];
+  h.item.validations=[{report:{status:'passed'}}];h.item.evaluations=[{report:{status:'not_tested'}}];
+  h.item.usage={total_tokens:123};h.item.extra={unknown_field:42};
+  await h.els.reviewLogin.fire('submit');await flush();
+  h.find('content-').value='invalid JSON draft';h.find('note-').value='尚未提交的意见';
+  const button=h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='导出经验与上下文（JSON）');
+  assert.ok(button && !button.disabled);
+  for(const language of ['en','zh']) {
+    h.context.window.ECE329I18n={language};h.context.window.listeners['ece329:language-changed']();
+    await button.fire('click');
+    const file=d.files.at(-1);
+    assert.equal(file.filename,`ece329-experience-${h.item.id}-v1.json`);
+    assert.deepEqual(JSON.parse(await file.blob.text()),h.item);
+    assert.ok(!(await file.blob.text()).includes('test-only')); // Credential is not in the export.
+    assert.equal(h.find('content-').value,'invalid JSON draft');
+    assert.equal(h.find('note-').value,'尚未提交的意见');
+  }
+  assert.equal(h.calls.length,1); // No save, model request or extra backend call.
+  assert.equal(h.context.document.body.children.length,0);
+  d.cleanup.forEach(fn=>fn());assert.equal(d.revoked.length,2);
+});
+
+test('record replacement and logout invalidate old export buttons',async()=>{
+  const h=harness();const d=captureDownloads(h);
+  await h.els.reviewLogin.fire('submit');await flush();
+  const old=h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='导出经验与上下文（JSON）');
+  h.item.id='b'.repeat(32);await h.els.reviewLogin.fire('submit');await flush();
+  await old.fire('click');assert.equal(d.files.length,0);
+  const current=h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='导出经验与上下文（JSON）');
+  await current.fire('click');assert.equal(JSON.parse(await d.files[0].blob.text()).id,'b'.repeat(32));
+  await h.els.reviewLogout.fire('click');await current.fire('click');assert.equal(d.files.length,1);
+});
+
+test('download failure preserves review edits and shows a recoverable message',async()=>{
+  const h=harness();captureDownloads(h);
+  h.context.URL.createObjectURL=()=>{throw Error('unavailable');};
+  await h.els.reviewLogin.fire('submit');await flush();h.find('note-').value='保留草稿';
+  await h.els.reviewCards.querySelectorAll('button').find(b=>b.textContent==='导出经验与上下文（JSON）').fire('click');
+  assert.equal(h.els.reviewStatus.textContent,'导出失败，请重试。');assert.equal(h.find('note-').value,'保留草稿');
+});
+
 for(const language of ['zh','en']) test(`malformed legacy evidence does not block review or lose raw records: ${language}`,async()=>{
   const h=harness();h.context.window.ECE329I18n={language};
   h.item.evidence=evidenceFixture();

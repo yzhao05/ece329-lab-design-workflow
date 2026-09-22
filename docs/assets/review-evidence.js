@@ -10,6 +10,16 @@
   const t = (zh, en) => window.ECE329I18n?.language === 'en' ? en : zh;
   const missing = () => t('未记录', 'Not recorded');
   const node = (tag, text = '') => { const n = document.createElement(tag); n.textContent = text; return n; };
+  function downloadRecord(record, experience = false) {
+    const id=String(record.id || 'record').replace(/[^\w-]/g,'_');
+    const version=String(record.version ?? 'unknown').replace(/[^\w-]/g,'_');
+    const url=URL.createObjectURL(new Blob([JSON.stringify(record,null,2)],{type:'application/json;charset=utf-8'}));
+    const a=node('a');
+    try {
+      a.href=url;a.download=experience?`ece329-experience-${id}-v${version}.json`:`ece329-evidence-${id}.json`;
+      document.body.append(a);a.click();
+    } finally {a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  }
   const labels = {
     answered_pending:['已回答仍被追问','Repeated question'], cross_stage_edit:['跨阶段修改','Cross-stage edit'],
     meta_question:['流程外问题','Workflow question'], missed_requests:['遗漏请求','Missed requests'],
@@ -294,12 +304,12 @@
       catch {status.textContent=t('无法复制，请使用下载 JSON。','Copy unavailable. Use Download JSON.');}
     });
     download.addEventListener('click',()=>{
-      const url=URL.createObjectURL(new Blob([JSON.stringify(state.record,null,2)],{type:'application/json;charset=utf-8'}));
-      const a=node('a');a.href=url;a.download=`ece329-evidence-${String(state.record.id || 'record').replace(/[^\w-]/g,'_')}.json`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      try {downloadRecord(state.record);}
+      catch {status.textContent=t('导出失败，请重试。','Export failed. Please try again.');}
     });
     actions.append(copy,download);raw.append(actions,status,node('pre',compact));
     if(images.length){const gallery=node('div');gallery.className='feedback-image-gallery';for(const [i,image] of images.entries()){const figure=node('figure'),img=node('img');img.src=image.url;img.alt=image.role==='problem'?t('问题对话截图','Reported-turn screenshot'):image.role==='before'?t('前文截图','Previous-context screenshot'):image.role==='after'?t('后文截图','Following-context screenshot'):t('证据图片 ','Evidence image ')+(i+1);figure.append(img,node('figcaption',img.alt));gallery.append(figure);}read.append(gallery);}
   }
-  window.ECE329ReviewEvidence={mount(host,record){host.className='review-evidence';host.setAttribute('data-i18n-ignore','');views.set(host,{record,readOpen:true,rawOpen:false,technicalOpen:false,submissionOpen:false});render(host);}};
+  window.ECE329ReviewEvidence={download:downloadRecord,mount(host,record){host.className='review-evidence';host.setAttribute('data-i18n-ignore','');views.set(host,{record,readOpen:true,rawOpen:false,technicalOpen:false,submissionOpen:false});render(host);}};
   window.addEventListener('ece329:language-changed',()=>{for(const host of document.querySelectorAll('.review-evidence'))render(host);});
 })();
