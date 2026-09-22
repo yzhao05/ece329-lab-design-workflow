@@ -94,6 +94,7 @@ def read_usage(response, call):
 
 
 def agent_role(schema):
+    if schema == 'experience_semantic_evaluation': return 'experience_semantic_evaluator'
     if not schema:
         return 'unknown_agent'
     if schema == 'feedback_experience_check':
@@ -238,7 +239,7 @@ class UsageStore:
         result = self._summarize_runs(rows)
         # Authoring costs belong to the feedback, but cannot fill gaps in its
         # historical extraction-attempt accounting.
-        extraction_count = sum(json.loads(row['record']).get('purpose') != 'rule_revision' for row in rows)
+        extraction_count = sum(json.loads(row['record']).get('purpose') not in ('rule_revision','rule_semantic_eval') for row in rows)
         ticket = db.execute('SELECT attempts FROM feedback_tickets WHERE id=?', (ticket_id,)).fetchone()
         self._completeness(result, ticket is not None and extraction_count >= ticket['attempts'])
         return result

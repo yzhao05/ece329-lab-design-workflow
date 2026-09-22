@@ -49,6 +49,9 @@ def test_real_turn_captures_states_in_both_modes(pipeline, mode):
     packet = p.engine.get_prompt_packet(session.design_id, '继续')
     assert 'feedback_state_before' not in json.dumps(packet)
     assert 'feedback_state_after' not in json.dumps(packet)
+    assert 'experience_replay_' not in json.dumps(packet)
+    assert 'experience_replay_before' in row
+    assert 'experience_replay_intent' in row
 
 
 @pytest.mark.parametrize('failed', [None, 'evidence_supported', 'positive_case_passes', 'negative_case_passes'])

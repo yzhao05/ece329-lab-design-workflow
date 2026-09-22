@@ -56,6 +56,7 @@ jobs:
           node --check docs/assets/feedback-client.js
           node --check docs/assets/feedback-ui.js
           node --check docs/assets/feedback-review.js
+          node --check docs/assets/experience-authoring.js
           node --check docs/assets/review-evidence.js
           node --check docs/assets/usage-ui.js
           node --check docs/assets/insight-folds.js
@@ -65,6 +66,7 @@ jobs:
           node --test tests/frontend/usage.test.cjs
           node --test tests/frontend/insight-folds.test.cjs
           node --test tests/frontend/model-selection.test.cjs
+          node --test tests/frontend/experience-authoring.test.cjs
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

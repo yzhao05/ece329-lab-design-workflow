@@ -7,7 +7,7 @@ from copy import deepcopy
 from .models import DesignSession, InteractionState, Stage, WorkflowStatus
 from .experience_rules import digest, ASSERTIONS
 
-VERIFIER_VERSION = 2
+VERIFIER_VERSION = 4
 
 
 def semantic(message, kind):
@@ -93,21 +93,43 @@ def compare(session, message, intent, rule, expected, *, kind='isolated_simulate
     executed = any(r['code']=='candidate_declined' for r in after['events'])
     passed = bool(verified and verified['code']=='execution_verified') if expected else not executed
     passed = passed and not before['error'] and not after['error']
-    return {'mode':session.interaction_state.value, 'message':message, 'expected_applicable':expected,
+    return {'mode':session.interaction_state.value, 'initial_stage':session.current_stage.value,
+            'message':message, 'expected_applicable':expected, 'actually_executed':executed,
             'passed':passed, 'kind':kind, 'baseline':before, 'with_rule':after,
             'changed':digest(before['state']) != digest(after['state']) or before['reply'] != after['reply']}
 
 
+def coverage(content, cases):
+    declared = [(mode,stage) for mode in content['modes'] for stage in content['stages']]
+    rows=[]
+    for mode,stage in declared:
+        matches=[c for c in cases if c['mode']==mode and c['initial_stage']==stage]
+        positives=[c for c in matches if c['expected_applicable']]
+        negatives=[c for c in matches if not c['expected_applicable']]
+        rows.append({'mode':mode,'stage':stage,'positive_executed':sum(c['actually_executed'] for c in positives),
+                     'negative_checked':len(negatives), 'positive_passed':sum(c['passed'] for c in positives),
+                     'negative_passed':sum(not c['actually_executed'] and c['passed'] for c in negatives)})
+    uncovered=[r for r in rows if r['positive_executed']<2 or r['negative_checked']<8]
+    return {'declared':{'modes':content['modes'],'stages':content['stages']},
+            'tested':{'modes':sorted({c['mode'] for c in cases}), 'stages':sorted({c['initial_stage'] for c in cases})},
+            'requirements':{'positive_per_scope':2,'negative_per_scope':8}, 'by_scope':rows,
+            'positive_executed':sum(r['positive_executed'] for r in rows),
+            'negative_checked':sum(r['negative_checked'] for r in rows),
+            'uncovered':uncovered, 'sufficient':bool(rows) and not uncovered}
+
+
 def verify(content, experience_id, version, evidence=None):
     from .experience_rules import validate_contract
+    from .experience_actions import fixture_conditions, matches_conditions, effective_conditions
     validate_contract(content['execution'])
+    def make_fixture(mode): return fixture_conditions(fixture(mode),content['execution'])
     rule = {'id':'EXP-'+experience_id, 'version':version, 'rule':content, 'execution':content['execution'], 'scope':'global'}
     examples = [
         ('不要修改，保留当前设计并继续','positive'), ('do not modify anything, go ahead','positive'),
         ('继续','bare'), ('go ahead','bare'), ('接受之前的修改','accept'), ('accept the previous changes','accept'),
         ('不要改其他内容，但把探针换成线圈','edit'), ('keep the rest but replace the probe','edit'),
         ('可能吧','ambiguous'), ('maybe','ambiguous')]
-    cases = [compare(fixture(mode), message, semantic(message, kind), rule, kind=='positive' and
+    cases = [compare(make_fixture(mode), message, semantic(message, kind), rule, kind=='positive' and
                      mode.value in content['modes'] and Stage.IDEA_BRAINSTORMING.value in content['stages'])
              for mode in InteractionState for message,kind in examples]
     # Every declared stage must exercise an applicable rule, not pass solely
@@ -115,18 +137,32 @@ def verify(content, experience_id, version, evidence=None):
     for mode in InteractionState:
         for stage in Stage:
             if stage is Stage.IDEA_BRAINSTORMING: continue
-            for message in ('不要修改，保留当前设计并继续','do not modify anything, go ahead'):
-                session=fixture(mode)
+            for message, case_kind in examples:
+                session=make_fixture(mode)
                 session.current_stage_index=list(Stage).index(stage)
                 session.model_context['dialogue_state']['pending_action'].update(subject=stage.value,stage=stage.value)
-                expected=mode.value in content['modes'] and stage.value in content['stages']
-                result=compare(session,message,semantic(message,'positive'),rule,expected)
+                expected=case_kind=='positive' and mode.value in content['modes'] and stage.value in content['stages']
+                result=compare(session,message,semantic(message,case_kind),rule,expected)
                 result.update(scenario='stage_coverage', initial_stage=stage.value)
                 cases.append(result)
+    conditions=content['execution'].get('conditions',{})
+    for mode in InteractionState:
+        if mode.value not in content['modes']: continue
+        for stage_name in content['stages']:
+            for restriction in ('min_repeat_count','pending_types'):
+                if not conditions.get(restriction): continue
+                session=make_fixture(mode);session.current_stage_index=list(Stage).index(Stage(stage_name))
+                pending=session.model_context['dialogue_state']['pending_action']
+                pending.update(subject=stage_name,stage=stage_name)
+                if restriction=='min_repeat_count': pending['repeat_count']=conditions[restriction]-1
+                else: pending['type']='OTHER_PENDING_TYPE'
+                message='do not modify anything, go ahead'
+                result=compare(session,message,semantic(message,'positive'),rule,False)
+                result['scenario']='condition_negative';cases.append(result)
     from .dialogue_acts import apply_stage_field_updates
     for mode in InteractionState:
         for message in ('不要修改，保留当前设计并继续','do not modify anything, go ahead'):
-            session = fixture(mode)
+            session = make_fixture(mode)
             if mode is InteractionState.EMVR_DIRECT:
                 session.design_context['emvr_design']={'field_state':{'experiment_brief':'改变电流并观察圆心磁场',
                     'research_object':'电流环','changed_quantities':['电流'],'observed_quantities':['圆心磁场']}}
@@ -151,11 +187,16 @@ def verify(content, experience_id, version, evidence=None):
         from .dialogue_state import current_pending_action
         expected = (keeps_current_design(replay['intent'].get('dialogue_acts'), replay['message']) and
                     bool((current_pending_action(session) or {}).get('candidate_answer')) and
+                    matches_conditions(content['execution'],current_pending_action(session) or {}) and
                     session.interaction_state.value in content['modes'] and session.current_stage.value in content['stages'])
         historical = {'status':'completed', 'kind':'isolated_recorded_response_replay',
                       'result':compare(session,replay['message'],replay['intent'],rule,expected,kind='isolated_recorded_response_replay')}
-    return {'verifier_version':VERIFIER_VERSION, 'status':'passed' if all(c['passed'] for c in cases) and
-            (historical['status']=='unavailable' or historical['result']['passed']) else 'failed',
+    counts=coverage(content,cases)
+    status=('insufficient_coverage' if not counts['sufficient'] else 'passed' if all(c['passed'] for c in cases) and
+            (historical['status']=='unavailable' or historical['result']['passed']) else 'failed')
+    return {'verifier_version':VERIFIER_VERSION, 'status':status, 'coverage':counts,
+            'effective_conditions':effective_conditions(content),
+            'layers':{'executor':status,'semantics':'not_tested','full_flow':'not_tested'},
             'kind':'isolated_simulated_replay', 'assertions':ASSERTIONS, 'cases':cases,
             'historical':historical, 'live_model_test':'not_run',
             'example_semantics':'fixture_responses_not_live_model_predictions',

@@ -157,6 +157,9 @@ class ExperienceStore(UsageStore):
                 CREATE TABLE IF NOT EXISTS experience_drafts (
                     id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, base_version INTEGER NOT NULL,
                     record TEXT NOT NULL, created REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS experience_evaluations (
+                    id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL, report TEXT NOT NULL, created REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS feedback_tickets (
                     id TEXT PRIMARY KEY, design_id TEXT NOT NULL, request_id TEXT NOT NULL,
                     request_hash TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL,
@@ -179,6 +182,10 @@ class ExperienceStore(UsageStore):
                     AFTER DELETE ON learned_experiences BEGIN
                     DELETE FROM experience_validations WHERE experience_id=OLD.id;
                     DELETE FROM experience_drafts WHERE experience_id=OLD.id;
+                    END;
+                CREATE TRIGGER IF NOT EXISTS experience_evaluations_deleted
+                    AFTER DELETE ON learned_experiences BEGIN
+                    DELETE FROM experience_evaluations WHERE experience_id=OLD.id;
                     END;
             ''')
             # Idempotent upgrade: preserve all content and historical decisions.
@@ -481,6 +488,8 @@ class ExperienceStore(UsageStore):
             rows = db.execute('SELECT e.*,t.payload AS evidence FROM learned_experiences e JOIN feedback_tickets t ON t.id=e.ticket_id WHERE (? IS NULL OR e.status=?) AND (? IS NULL OR e.id=?) ORDER BY e.updated DESC,e.rowid DESC LIMIT 50 OFFSET ?', (status, status, experience_id, experience_id, offset))
             result = [{**dict(r), 'content': json.loads(r['content']), 'evidence': json.loads(r['evidence'])} for r in rows]
             for item in result:
+                item['evaluations'] = [dict(r,report=json.loads(r['report'])) for r in db.execute(
+                    'SELECT * FROM experience_evaluations WHERE experience_id=? ORDER BY created DESC LIMIT 3',(item['id'],))]
                 item['validations'] = [dict(r, report=json.loads(r['report'])) for r in db.execute(
                     'SELECT * FROM experience_validations WHERE experience_id=? ORDER BY created DESC LIMIT 10', (item['id'],))]
                 item['usage'] = self._ticket_usage(db, item['ticket_id'])
@@ -495,7 +504,7 @@ class ExperienceStore(UsageStore):
             return identity
         return fingerprint([identity, scope, payload.get('project_id') if scope == 'project' else payload.get('scope_design_id')])
 
-    def review(self, experience_id, decision, version, note, content=None, scope=None, validation_id=None, draft_id=None):
+    def review(self, experience_id, decision, version, note, content=None, scope=None, validation_id=None, draft_id=None, confirmed_conditions=None):
         note = validate_review_note(note)
         if scope is not None and scope not in ('session', 'project', 'global'):
             raise ValueError('Invalid experience scope')
@@ -534,11 +543,17 @@ class ExperienceStore(UsageStore):
             validation = None
             if decision == 'approve' and value.get('execution'):
                 from .experience_replay import VERIFIER_VERSION
+                from .experience_actions import effective_conditions
+                if value['execution'].get('unmapped_conditions'):
+                    raise ValueError('unsupported_rule_condition: keep as advisory or implement the condition')
+                if confirmed_conditions != effective_conditions(value):
+                    raise ValueError('conditions_confirmation_required: review the actual executable conditions')
                 validation = db.execute('SELECT * FROM experience_validations WHERE id=? AND experience_id=?',
                                         (validation_id, experience_id)).fetchone()
                 binding = fingerprint({'content': value, 'scope': payload.get('scope', 'global')})
                 if (validation is None or validation['base_version'] != version or validation['content_hash'] != binding
                         or json.loads(validation['report']).get('status') != 'passed'
+                        or not json.loads(validation['report']).get('coverage',{}).get('sufficient')
                         or json.loads(validation['report']).get('verifier_version') != VERIFIER_VERSION):
                     raise ValueError('rule_validation_required: replay this exact draft and scope before approval')
             if draft_id:
@@ -556,6 +571,7 @@ class ExperienceStore(UsageStore):
                         encode({'previous': previous, 'current': {'rule': value, 'scope': payload.get('scope', 'global')},
                                 'project_id': payload['project_id'], 'scope_design_id': payload['scope_design_id'],
                                 'source': {'draft_id': draft_id, 'validation_id': validation_id,
+                                           'confirmed_conditions': confirmed_conditions,
                                            'validation_kind': 'isolated_simulated_replay' if validation else 'not_replayed'}}), time.time()))
             # Review changes the experience lifecycle, not the extraction outcome.
             db.execute('UPDATE feedback_tickets SET payload=? WHERE id=?', (encode(payload), row['ticket_id']))
@@ -567,7 +583,8 @@ class ExperienceStore(UsageStore):
                                    (rule['id'].removeprefix('EXP-'), rule['version'])).fetchone())
 
     def select_rules(self, session, message, categories=()):
-        from .experience_rules import settings, token_bound
+        from .experience_rules import settings
+        from .feedback import bounded_guidance
         from .dialogue_state import current_pending_action
         limits = settings()
         pending = current_pending_action(session) or {}
@@ -599,12 +616,11 @@ class ExperienceStore(UsageStore):
                 if value.get('execution'): packet['execution'] = value['execution']
                 ranked.append((score, packet))
         ranked.sort(key=lambda r: (-r[0], r[1]['id']))
-        selected, used = [], 0
-        for _, packet in ranked:
-            size = token_bound(packet)
-            reason = 'candidate_limit' if len(selected) >= limits['candidates'] else 'budget_excluded' if used + size > limits['token_budget'] else 'selected'
-            decisions.append({'rule_id': packet['id'], 'version': packet['version'], 'reason': reason, 'token_upper_bound': size})
-            if reason == 'selected': selected.append(packet); used += size
+        combined,budget_decisions=bounded_guidance([packet for _,packet in ranked],message,limits)
+        decisions.extend(budget_decisions)
+        # Curated rules remain prompt advice; only learned packets are returned
+        # for executable selection. Prompt assembly reinserts the same built-ins.
+        selected=[packet for packet in combined if 'rule' in packet]
         # Bound diagnostics too; counts retain reasons excluded from detail.
         counts = {reason: sum(d['reason'] == reason for d in decisions) for reason in {d['reason'] for d in decisions}}
         details = sorted(decisions, key=lambda d: d['reason'] != 'selected')[:120]

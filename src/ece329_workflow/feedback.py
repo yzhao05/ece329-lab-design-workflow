@@ -119,33 +119,56 @@ def validate_builder_projection(session: DesignSession, payload: dict) -> None:
         raise ValueError("Builder input differs from saved design: numerical_model_specifications")
 
 
-def guidance(session: DesignSession, message: str, *, limit: int = 3, max_chars: int = 650) -> dict:
-    if not session.model_context.get('model_config', {}).get('experience_enabled', True):
-        return {'version': RULE_VERSION, 'rules': [], 'authority': 'experience disabled; deterministic validation remains enabled'}
+def curated_guidance(message: str) -> list[dict]:
     selected = categories(message)
     if re.search(r"改为|改成|修改|替换|删除|补充|replace|change", message, re.I):
         selected.append("cross_stage_edit")
     if len(re.findall(r"[?？]", message)) > 1:
         selected.append("missed_requests")
+    return [{"id":rule[1], "instruction":rule[2]} for kind in dict.fromkeys(selected)
+            for rule in RULES if rule[0]==kind]
+
+
+def bounded_guidance(packets, message, limits):
+    """Reserve relevant built-ins, then admit whole learned rules in rank order.
+
+    Selection and prompt assembly share this budget so an omitted rule cannot
+    still enter the executor. Deduplicate by ID; never truncate a contract.
+    """
+    from .experience_rules import token_bound
+    rows,decisions,seen,used=[],[],set(),0
+    for packet in curated_guidance(message)+list(packets):
+        identity=packet['id']
+        if identity in seen: continue
+        seen.add(identity)
+        size=token_bound(packet)
+        reason=('candidate_limit' if len(rows)>=limits['candidates'] else
+                'budget_excluded' if used+size>limits['token_budget'] else 'selected')
+        decisions.append({'rule_id':identity,'version':packet.get('version'),
+                          'reason':reason,'token_upper_bound':size})
+        if reason=='selected': rows.append(deepcopy(packet));used+=size
+    return rows,decisions
+
+
+def guidance(session: DesignSession, message: str, *, limit: int = 3, max_chars: int = 650) -> dict:
+    if not session.model_context.get('model_config', {}).get('experience_enabled', True):
+        return {'version': RULE_VERSION, 'rules': [], 'authority': 'experience disabled; deterministic validation remains enabled'}
+    from .experience_rules import settings
+    try: limits=settings()
+    except ValueError: limits=settings({})  # Retrieval already reports invalid configuration.
     # Only reviewed rules enter prompts; raw candidates and reports never do.
-    rows = []
-    used = 0
     packets = session.turn_context.get('experience_rules', [])
     if any('rule' in packet for packet in packets):
-        # These packets already passed the bounded whole-rule selector. Do not
-        # run them through the legacy 650-character instruction budget.
-        return {'version': RULE_VERSION, 'rules': deepcopy(packets),
+        rows,_=bounded_guidance(packets,message,limits)
+        return {'version': RULE_VERSION, 'rules': rows,
                 'authority': 'advisory reviewed candidates; assess semantic applicability and explicit exceptions; only backend allowlisted actions may change workflow; user requirements and validated state take precedence'}
-    for learned in session.turn_context.get('experience_rules', []):
-        instruction = learned.get('instruction', '')
-        if instruction and used + len(instruction) <= max_chars and len(rows) < min(max(limit, 0), 5):
-            rows.append(deepcopy(learned))
-            used += len(instruction)
-    for kind in dict.fromkeys(selected):
-        rule = next((r for r in RULES if r[0] == kind), None)
-        if rule and used + len(rule[2]) <= max_chars and len(rows) < min(max(limit, 0), 5):
-            rows.append({"id": rule[1], "instruction": rule[2]})
-            used += len(rule[2])
+    limits['candidates']=min(limits['candidates'],min(max(limit,0),5))
+    bounded,_=bounded_guidance(packets,message,limits)
+    rows,used=[],0
+    for packet in bounded:
+        instruction=packet.get('instruction','')
+        if instruction and used+len(instruction)<=max_chars:
+            rows.append(packet);used+=len(instruction)
     return {"version": RULE_VERSION, "rules": rows, "authority": "advisory; current user requirements and validated state take precedence"}
 
 

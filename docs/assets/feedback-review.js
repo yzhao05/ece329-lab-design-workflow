@@ -107,7 +107,7 @@
     const token = maintainerToken();
     const controller = new AbortController();
     controllers.add(controller);
-    const timeout = setTimeout(() => controller.abort(), /\/(draft|replay)$/.test(path) ? 120000 : 30000);
+    const timeout = setTimeout(() => controller.abort(), /\/(draft|replay|evaluate)$/.test(path) ? 180000 : 30000);
     try {
       let response;
       try {
@@ -121,6 +121,9 @@
       if (!response.ok && typeof body.detail === 'string') {
         const detail=body.detail;
         if(detail.startsWith('rule_validation_required:'))body.detail='可执行规则需要对当前 JSON、范围和版本重新回放验证。';
+        if(detail.startsWith('conditions_confirmation_required:'))body.detail='请先核对并确认实际执行条件。';
+        if(detail==='evaluation_attempt_limit')body.detail='本来源版本的模型评测已达到三次上限。';
+        else if(detail.startsWith('required_missing_fields_question:'))body.detail='缺项询问是必要行为，不能关闭。请重新加载结构化设置。';
         else if(detail.startsWith('unsupported_rule_'))body.detail='规则包含尚未支持的动作或条件，需要代码维护。';
         else if(detail.startsWith('advisory_only:'))body.detail='当前是建议类经验，请先添加受支持的执行规则再回放。';
       }
@@ -345,7 +348,7 @@
         if(version!==generation)return;
         clearCards();window.ECE329RuleAuthoring?.execution(el.Cards,result.records,id=>{
           if(reviewing||loading)return;executionView=false;usageView=false;offset=0;load(true,id);
-        });
+        },result.statistics);
         el.Previous.disabled=offset===0;el.Next.disabled=result.records.length<50;
         el.Status.textContent='';return;
       }

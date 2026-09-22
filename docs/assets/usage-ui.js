@@ -2,7 +2,7 @@
 (() => {
   const english=()=>window.ECE329I18n?.language==='en';
   const stages={IDEA_BRAINSTORMING:['想法探索','Idea exploration'],COURSE_MAPPING_AND_DIRECTION:['课程映射','Course mapping'],LEARNING_OBJECTIVES:['学习目标','Learning objectives'],RESEARCH_QUESTION:['研究问题','Research question'],THEORETICAL_FRAMEWORK:['理论框架','Theoretical framework'],HYPOTHESIS:['假设','Hypothesis'],CONCEPTUAL_OR_VR_SETUP:['实验结构','Experiment setup'],VARIABLES_AND_CONDITIONS:['变量与条件','Variables and conditions'],CONCEPTUAL_PROCEDURE:['实验流程','Procedure'],EXPECTED_DATA_VISUALIZATION:['数据可视化','Visualization'],RESULT_INTERPRETATION:['结果解释','Interpretation'],DESIGN_VALUE_AND_LIMITATIONS:['价值与局限','Value and limitations'],STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:['最终总结','Final synthesis'],UNKNOWN:['阶段未记录','Stage not recorded'],UNATTRIBUTED_PROCESSING:['未分配的本地处理','Unattributed local processing']};
-  const agents={design_agent:['设计 Agent','Design agent'],intent_resolver:['意图解析 Agent','Intent resolver'],experience_extractor:['经验提炼 Agent','Experience extractor'],experience_checker:['经验检查 Agent','Experience checker'],translator:['翻译 Agent','Translator']};
+  const agents={design_agent:['设计 Agent','Design agent'],intent_resolver:['意图解析 Agent','Intent resolver'],experience_extractor:['经验提炼 Agent','Experience extractor'],experience_checker:['经验检查 Agent','Experience checker'],experience_semantic_evaluator:['经验语义评测','Experience semantic evaluation'],translator:['翻译 Agent','Translator']};
   const stageName=stage=>stages[stage]?.[english()?1:0] || stage || (english()?'Not recorded':'未记录');
   function identity(el, value) {
     el.setAttribute('data-i18n-ignore','');el.dataset.usageIdentity=JSON.stringify(value);

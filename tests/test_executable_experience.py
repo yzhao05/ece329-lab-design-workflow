@@ -77,7 +77,7 @@ def test_no_scope_only_fallback_for_unrelated_legacy_rules(pipeline):
 def test_conflicts_version_changes_and_same_state_do_not_loop():
     session=fixture(InteractionState.EMVR_DIRECT);message='Keep the saved design and proceed'
     r=packet();other=deepcopy(r);other['id']='EXP-'+'b'*32
-    other['execution']['examples'][0]['input']='different wording'
+    other['execution']['actions'][-1]['parameters']={'style':'task_only'}
     run=RuleRun(session,message);run.select([r,other],[])
     run.hook('after_intent',session,semantic(message,'positive'));run.hook('before_pending',session)
     assert run.blocked and session.model_context['dialogue_state']['pending_action']['candidate_answer']
@@ -163,7 +163,7 @@ def test_snapshot_never_uses_submission_state_and_omits_sensitive_context():
 
 def test_authoring_endpoints_require_admin_token(pipeline):
     p=pipeline;item=extract_one(p)
-    for action in ['draft','replay','restore']:
+    for action in ['draft','replay','restore','configure','evaluate']:
         assert call_api(p.api,'POST',f"/v1/feedback/experiences/{item['id']}/{action}",{'version':1})[0].startswith('401')
     assert call_api(p.api,'GET','/v1/feedback/executions')[0].startswith('401')
 
@@ -212,7 +212,7 @@ def test_historical_replay_uses_recorded_before_state_not_current_state():
     assert result['historical']['result']['with_rule']['state']['stage']=='IDEA_BRAINSTORMING'
     complete=[c for c in result['cases'] if c.get('scenario')=='complete_stage']
     assert len(complete)==4 and all(c['passed'] for c in complete)
-    assert len(result['cases'])==72
+    assert len(result['cases'])==264
     assert result['historical']['result']['kind']=='isolated_recorded_response_replay'
     assert all(e['kind']=='isolated_recorded_response_replay' for e in
         result['historical']['result']['with_rule']['events'] if 'kind' in e)

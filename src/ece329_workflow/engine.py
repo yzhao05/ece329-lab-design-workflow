@@ -4118,12 +4118,11 @@ class WorkflowEngine:
                 run.hook('after_intent', session, semantic)
                 run.hook('before_pending', session, semantic)
                 if run.blocked:
-                    keep_current = False
-                    semantic = resolved_intent(UserIntent.UNCLEAR, source='EXPERIENCE_ACTION_BLOCKED')
+                    run.record('fallback', 'base_workflow_preserved', intent=semantic.get('intent'))
             if keep_current:
                 # The current user explicitly declines uncommitted candidates.
                 # History retains their text; none is written into design fields.
-                pending = (current_pending_action(session) if run and run.applied else
+                pending = (current_pending_action(session) if run and run.applied and not run.blocked else
                            decline_candidate(session, pending))
                 semantic = resolved_intent(
                     UserIntent.ADVANCE_STAGE, confidence=0.99,

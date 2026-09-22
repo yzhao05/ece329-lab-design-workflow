@@ -102,6 +102,10 @@ def submit(p, **updates):
 
 
 def review(p, item, decision='approve', **updates):
+    value=updates.get('content',item['content'])
+    if decision=='approve' and value.get('execution'):
+        from ece329_workflow.experience_actions import effective_conditions
+        updates.setdefault('confirmed_conditions',effective_conditions(value))
     return call_api(p.api, 'POST', f"/v1/feedback/experiences/{item['id']}/review",
                     {'decision': decision, 'version': item['version'], 'note': review_note(item['content']), **updates}, request_headers=p.admin)
 

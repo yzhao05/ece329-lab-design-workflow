@@ -659,7 +659,8 @@ def build_prompt_packet(
         "completed_stage_outputs": session.stage_outputs,
         # Historical diagnostic snapshots are for feedback extraction only.
         "recent_history": [{key: value for key, value in row.items()
-                            if key not in {'feedback_state_before', 'feedback_state_after'}}
+                            if key not in {'feedback_state_before', 'feedback_state_after'}
+                            and not key.startswith('experience_replay_')}
                            for row in session.history[-6:]] if include_recent_history else [],
         "pending_action": pending_action,
         "resolved_intent": resolved_turn_intent,

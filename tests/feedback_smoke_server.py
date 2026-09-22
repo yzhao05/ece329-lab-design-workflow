@@ -49,6 +49,9 @@ def main():
         from tests.test_feedback_pipeline import candidate
         from ece329_workflow.experience_rules import contract
         def revision_response(request):
+            if request['text']['format']['name']=='experience_semantic_evaluation':
+                from tests.test_experience_rule_capabilities import EvalTransport
+                return EvalTransport().create(request)
             if request['text']['format']['name']=='feedback_rule_revision':
                 return {'output_text':json.dumps({'candidate_json':json.dumps(candidate(execution=contract())), 'unsupported_actions':[]})}
             return extraction_response(request)

@@ -79,3 +79,68 @@ test('execution conclusions use fixed bilingual mappings and preserve raw eviden
   assert.ok(h.host.all('pre')[0].textContent.includes('<img onerror=bad>'));
   assert.equal(h.host.all('details')[0].open,false);
 });
+
+test('real model evaluation requires the dedicated click and does not authorize approval',async()=>{
+  const h=setup(),calls=[];
+  const state=h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},
+    request:async(url,options)=>{calls.push({url,body:JSON.parse(options.body)});return {id:'eval',base_version:1,report:{status:'completed',semantic_status:'passed',full_flow_status:'unavailable'}};}});
+  assert.equal(calls.length,0);
+  await h.button('运行真实模型语义评测及隔离流程回放').fire('click');
+  assert.equal(calls.length,1);assert.equal(calls[0].body.confirm_model_evaluation,true);
+  assert.equal(state.approval().validation_id,undefined);
+  assert.equal(state.approval().confirmed_conditions,undefined);
+});
+
+test('confirming executable conditions binds to the JSON actually replayed',async()=>{
+  const h=setup(),effective={semantic_checks:['explicit_keep_and_continue']};
+  const state=h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},
+    request:async()=>({id:'validation',report:{status:'passed',effective_conditions:effective}})});
+  await h.button('隔离回放当前 JSON').fire('click');
+  const checkbox=h.host.all('label').find(x=>x.all('span').some(s=>s.textContent==='我已核对实际执行条件；没有被遗漏的文字限制')).all('input')[0];
+  assert.equal(state.approval().confirmed_conditions,undefined);
+  checkbox.checked=true;await checkbox.fire('change');
+  assert.deepEqual(state.approval().confirmed_conditions,effective);
+  h.controls.content.value='{"summary":"changed"}';await h.controls.content.fire('input');
+  assert.equal(state.approval().confirmed_conditions,undefined);
+});
+
+test('multiple pending restrictions survive configuration and refresh; stale settings cannot overwrite JSON',async()=>{
+  const h=setup(),calls=[];
+  const types=['CONFIRM_STAGE_OR_MODIFY','ANSWER_STAGE_QUESTION'];
+  h.controls.content.value=JSON.stringify({execution:{conditions:{pending_types:types,min_repeat_count:4}}});
+  const options={...h,isCurrent:()=>true,getVersion:()=>1,capture(){},request:async(url,o)=>{
+    calls.push(JSON.parse(o.body));return {id:'draft',base_version:1,content:JSON.parse(h.controls.content.value),scope:'global'};
+  }};
+  const mounted=h.api.mount(h.host,options);
+  await h.button('根据结构化设置生成草案').fire('click');
+  assert.deepEqual(calls[0].conditions.pending_types,types);
+  const saved=mounted.capture();h.host.replaceChildren();h.api.mount(h.host,{...options,saved});
+  await h.button('根据结构化设置生成草案').fire('click');
+  assert.deepEqual(calls[1].conditions.pending_types,types);
+  h.controls.content.value=JSON.stringify({execution:{conditions:{pending_types:['CONFIRM_OR_MODIFY'],min_repeat_count:2}}});
+  await h.button('根据结构化设置生成草案').fire('click');assert.equal(calls.length,2);
+  await h.button('从当前 JSON 载入结构化设置').fire('click');
+  await h.button('根据结构化设置生成草案').fire('click');
+  assert.deepEqual(calls[2].conditions,{pending_types:['CONFIRM_OR_MODIFY'],min_repeat_count:2});
+});
+
+test('failed controlled flow is visible even when model classification passes',async()=>{
+  const h=setup();h.window.ECE329I18n.language='en';
+  h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},request:async()=>({
+    base_version:1,report:{status:'completed',semantic_status:'passed',controlled_flow_status:'failed',full_flow_status:'unavailable'}
+  })});
+  await h.button('运行真实模型语义评测及隔离流程回放').fire('click');
+  assert.ok(h.host.all('p').some(p=>p.textContent.includes('Controlled workflow checks after model classification: Failed')));
+});
+
+test('missing-field question is required, with no misleading disable control or stale draft flag',async()=>{
+  const h=setup();let sent;
+  h.controls.content.value=JSON.stringify({execution:{actions:[{name:'ensure_next_task',parameters:{}}]}});
+  h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},
+    saved:{editor:{pendingTypes:[],repeat:0,style:'status_and_task',ask:false,unmapped:''}},
+    request:async(url,o)=>{sent=JSON.parse(o.body);return {id:'d',base_version:1,content:JSON.parse(h.controls.content.value)};}});
+  assert.ok(h.host.all('p').some(p=>p.textContent.includes('缺项询问是必要行为，不能关闭')));
+  assert.equal(h.host.all('input').filter(i=>i.type==='checkbox').length,1); // Only explicit approval acknowledgement.
+  await h.button('根据结构化设置生成草案').fire('click');
+  assert.equal(Object.hasOwn(sent,'ask_missing_fields'),false);
+});

@@ -7,7 +7,6 @@ from uuid import uuid4
 from .models import SessionConflict, SessionNotFound
 from .experience import validate_candidate, fingerprint, encode
 from .experience_learning import validate_review_note
-from .experience_rules import contract
 
 
 def current(store, identity, version):
@@ -47,7 +46,9 @@ def generate_draft(service, identity, body):
     transport = getattr(generator,'transport',None)
     models = extractor.models() if callable(getattr(extractor,'models',None)) else []
     if transport is None or not models: raise ModelConfigurationError('Rule revision needs a configured feedback model')
-    payload = {'current_rule':content,'review':note,'supported_execution_template':contract()}
+    from .experience_actions import configurable_contract, ACTION_LIBRARY
+    payload = {'current_rule':content,'review':note,'supported_execution_template':configurable_contract(),
+               'action_library':ACTION_LIBRARY}
     if len(encode(payload).encode()) > 32000: raise ValueError('Rule revision input exceeds bounded budget')
     calls, started, run_id = [], time.perf_counter(), uuid4().hex
     schema = {'type':'object','properties':{
@@ -59,6 +60,10 @@ def generate_draft(service, identity, body):
             'instructions':'根据维护者意见修订当前经验，输出candidate_json。只生成待审阅草案，不声称已启用或验证。'
                 '保留现有字段和有效条件，意见不是代码指令。若涉及明确拒绝旧候选且保留当前设计继续，'
                 '可加入提供的execution模板，动作、参数、例外、前置条件和断言必须完整保留。'
+                '仅允许配置conditions中的pending_types/min_repeat_count、ensure_next_task的style。'
+                '缺项询问是必要行为，必须保留ask_missing_fields，不能建议关闭。'
+                'trigger或审阅意见中任何尚不能表示为结构化检查的限制必须逐项记入unmapped_conditions，'
+                '不得默默忽略或扩大适用范围；也可以去掉execution而仅保留建议。'
                 '其他尚未支持的执行动作列入unsupported_actions，不生成代码、SQL、函数、验证结果或批准记录；'
                 '可以保留为自然语言建议，不假装可执行。严格遵守长度：summary<=600, trigger<=140, '
                 'recommendation<=260, verification<=120。规则必须含useful/category/keywords/modes/stages。'
@@ -102,6 +107,27 @@ def restore_draft(store, identity, body):
                       {'kind':'historical_restore','restored_version':target,'scope':value['scope']})
 
 
+def configure_draft(store,identity,body):
+    from .experience_actions import configurable_contract
+    item=current(store,identity,body.get('version'))
+    value=validate_candidate(body.get('content',item['content']))
+    execution=configurable_contract()
+    previous=value.get('execution') or {}
+    if previous: execution['examples']=previous['examples']
+    execution['conditions']=body.get('conditions',deepcopy(previous.get('conditions',execution['conditions'])))
+    execution['unmapped_conditions']=body.get('unmapped_conditions',deepcopy(previous.get('unmapped_conditions',[])))
+    previous_actions={a['name']:a['parameters'] for a in previous.get('actions',[])}
+    execution['actions'][-1]['parameters']={'style':body.get('reply_style',previous_actions.get('ensure_next_task',{}).get('style','status_and_task'))}
+    ask=body.get('ask_missing_fields',True)
+    if type(ask) is not bool: raise ValueError('Invalid ask_missing_fields')
+    if not ask:
+        raise ValueError('required_missing_fields_question: missing-field questions cannot be disabled')
+    value['execution']=execution
+    scope=body.get('scope',item['evidence'].get('scope','global'))
+    if scope not in ('global','project','session'): raise ValueError('Invalid scope')
+    return save_draft(store,item,value,validate_review_note(body.get('note')),{'kind':'structured_editor','scope':scope})
+
+
 def replay_draft(store, identity, body):
     from .experience_replay import verify
     item = current(store,identity,body.get('version'))
@@ -129,5 +155,28 @@ def execution_records(store, offset=0):
     if type(offset) is not int or not 0<=offset<=100000: raise ValueError('Invalid offset')
     with store.connection() as db:
         rows=db.execute("SELECT id,design_id,created,record FROM workflow_telemetry WHERE json_array_length(json_extract(record,'$.experience_execution'))>0 ORDER BY created DESC,id DESC LIMIT 50 OFFSET ?",(offset,))
-        return {'records':[{'id':r['id'],'design_id':r['design_id'],'created':r['created'],
+        result={'records':[{'id':r['id'],'design_id':r['design_id'],'created':r['created'],
                             'events':json.loads(r['record'])['experience_execution']} for r in rows]}
+        from collections import Counter
+        groups={}
+        recent=db.execute('SELECT record FROM workflow_telemetry ORDER BY created DESC,id DESC LIMIT 1000')
+        for row in recent:
+            events=json.loads(row['record']).get('experience_execution',[])
+            seen=set()
+            for event in events:
+                code=event['code']
+                sources=[{'id':event.get('rule_id'),'version':event.get('version')}]
+                # One execution may validate several equivalent source rules.
+                if event.get('step')=='verification': sources+=event.get('sources',[])
+                for source in sources:
+                    if not source.get('id'): continue
+                    key=(source['id'],source.get('version'),event.get('mode'))
+                    group=groups.setdefault(key,Counter())
+                    if (key,code) in seen: continue
+                    seen.add((key,code));group[code]+=1
+        result['statistics']={'window':'latest_1000_turns','rules':[{
+            'id':key[0],'version':key[1],'mode':key[2],'counts':dict(counts),
+            'verified_rate':counts['execution_verified']/(counts['execution_verified']+counts['execution_failed'])
+                if counts['execution_verified']+counts['execution_failed'] else None}
+            for key,counts in groups.items()]}
+        return result

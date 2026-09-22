@@ -20,6 +20,20 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def execution_identity(value):
+    """Compare effective actions only AFTER each rule's conditions match.
+
+    Applicability differences do not imply contradictory writes. The supported
+    contracts share their safety checks; ask_missing_fields is a required part
+    of ensure_next_task even when older JSON omits the explicit alias.
+    """
+    from .experience_actions import effective_actions
+    program=deepcopy({k:v for k,v in value.items() if k not in
+                     {'version','examples','unmapped_conditions','conditions','actions'}})
+    program['actions']=effective_actions(value)
+    return digest(program)
+
+
 def contract():
     """An unverified authoring template, never an automatic legacy migration."""
     return {'version': 1, 'intent': 'KEEP_CURRENT_AND_CONTINUE', 'exceptions': EXCEPTIONS[:],
@@ -36,6 +50,9 @@ def contract():
 
 
 def validate_contract(raw):
+    if isinstance(raw,dict) and type(raw.get('version')) is int and raw['version']==2:
+        from .experience_actions import validate_configurable
+        return validate_configurable(raw)
     template = contract()
     if not isinstance(raw, dict) or set(raw) != set(template):
         raise ValueError('unsupported_rule_contract: code maintenance required')
@@ -144,6 +161,8 @@ class RuleRun:
         from .dialogue_acts import keeps_current_design
         from .dialogue_state import current_pending_action
         if phase == 'after_intent':
+            if 'selection_complete' in self.seen:
+                self.record(phase,'execution_limit'); return
             self.seen.add('selection_complete')
             self.semantic_match = isinstance(intent, dict) and keeps_current_design(intent.get('dialogue_acts'), self.message)
             eligible = []
@@ -155,15 +174,19 @@ class RuleRun:
                     code = 'mode_mismatch'
                 elif session.current_stage.value not in rule['rule']['stages']:
                     code = 'stage_mismatch'
+                elif code == 'applicable':
+                    from .experience_actions import matches_conditions
+                    if not matches_conditions(rule['execution'], current_pending_action(session) or {}): code='condition_not_matched'
                 self.record('applicability', code, rule, model_claimed_adoption=None)
                 if code == 'applicable': eligible.append(rule)
-            # No ordering by update time or guessed priorities. Nonidentical
-            # contracts in the same write group are denied together.
-            if len({digest(r['execution']) for r in eligible}) > 1:
+            # Conditions were checked separately above. Compare normalized
+            # effects, not applicability thresholds or redundant legacy aliases.
+            if len({execution_identity(r['execution']) for r in eligible}) > 1:
                 self.blocked = True
                 for rule in eligible: self.record('conflict', 'conflict_blocked', rule)
             elif eligible:
                 self.applied = eligible[:1]
+                self.sources = [{'id':r['id'],'version':r['version']} for r in eligible]
                 for rule in eligible[1:]: self.record('conflict', 'equivalent_rule_coalesced', rule)
         elif phase == 'before_pending' and self.applied and not self.blocked:
             rule = self.applied[0]
@@ -172,10 +195,12 @@ class RuleRun:
                 self.record(phase, 'execution_limit', rule); return
             self.seen.add(key)
             # Recheck active version immediately before mutation.
-            if self.store and not self.store.rule_is_current(rule):
+            if self.store and not all(self.store.rule_is_current(source) for source in getattr(self,'sources',[rule])):
                 self.blocked = True; self.record(phase, 'version_or_status_changed', rule); return
             old = session.model_context.get('experience_execution_guard', {})
-            if old.get('key') == digest(key):
+            self.effect_state=digest((execution_identity(rule['execution']),self.start_hash))
+            legacy_keys={digest((s['id'],s['version'],self.start_hash)) for s in getattr(self,'sources',[rule])}
+            if old.get('key') in legacy_keys or self.effect_state in old.get('effect_states',[]):
                 self.blocked = True; self.record(phase, 'no_progress_blocked', rule); return
             decline_candidate(session, current_pending_action(session))
             self.record('action', 'candidate_declined', rule, action='decline_uncommitted_candidate', repairs=0)
@@ -214,37 +239,60 @@ class RuleRun:
         # keyword-based guess about which fields are missing.
         task = str(pending.get('question') or response.get('student_task') or '').strip()
         old_question = (self.before.model_context.get('dialogue_state', {}).get('pending_action') or {}).get('question')
-        if not moved and (not task or task == old_question):
+        if not moved and (self.ready is False or not task or task == old_question):
             task = self.next_question(session)
             pending = current_pending_action(session) or {}
-        body = str(response.get('assistant_message') or '')
-        stale_question = bool(old_question and old_question != task and old_question in body)
-        if task and (task not in body or stale_question) and self.repairs < 1:
-            # Replace only the exact obsolete pending question in this new
-            # reply. Original history and source evidence remain untouched.
-            if stale_question:
-                body = body.replace(old_question, task)
-            response['assistant_message'] = (body if task in body else body.rstrip() + '\n\n' + task).strip()
+        # A substring check cannot establish that a free-form reply contains no
+        # contradictory requests. Render this controlled repair from state.
+        valid_task = bool(task and pending.get('question') == task and not pending.get('candidate_answer')
+                          and (moved or task != old_question))
+        english = session.model_context.get('response_language') == 'en'
+        prefix = ('The declined changes were not applied. Your saved design is preserved.' if english else
+                  '已结束被拒绝的候选修改，保留当前已保存设计。')
+        replacement = prefix + ('\n\n' + task if valid_task else '')
+        from .experience_actions import effective_actions
+        actions={a['name']:a['parameters'] for a in effective_actions(rule['execution'])}
+        if actions.get('ensure_next_task',{}).get('style')=='task_only' and valid_task:
+            replacement=task
+        if 'ask_missing_fields' in actions and self.ready is False and valid_task:
+            self.record('action','missing_fields_asked',rule,action='ask_missing_fields',source='stage_validator_and_pending')
+        if session.status.value == 'complete':
+            replacement += '\n\n' + ('The workflow is complete.' if english else '设计流程已完成。')
+        if (valid_task or session.status.value == 'complete') and self.repairs < 1:
+            response['assistant_message'] = replacement
             response['student_task'] = task
             self.repairs += 1
             self.record('action', 'next_task_added', rule, action='ensure_next_task', repairs=self.repairs)
+        reply_evidence = {'pending_id':pending.get('action_id'), 'task':task,
+                          'source':'validated_pending' if valid_task else 'unverified',
+                          'completed_actions':['decline_uncommitted_candidate'],
+                          'stage_complete':self.ready, 'rendered_from_state':self.repairs == 1}
+        response.setdefault('stage_payload', {})['experience_reply'] = reply_evidence
         projection = session.design_context.get('design_state', {}).get('pending_action') or {}
         checks = {'candidate_ended': not pending.get('candidate_answer') and not projection.get('candidate_answer'),
                   'saved_design_preserved': _preserved(self.before.design_context, session.design_context),
                   'history_preserved': session.history[:len(self.before.history)] == self.before.history,
                   'completion_checked': self.ready is not None,
-                  'concrete_next_task': bool(task and task in response.get('assistant_message', '')) or session.status.value == 'complete',
+                  'concrete_next_task': valid_task or session.status.value == 'complete',
+                  'reply_consistent': self.repairs == 1 and response.get('assistant_message') == replacement,
                   'no_stale_question': (moved or bool(task and task != old_question)) and not (
                       old_question and old_question != task and old_question in response.get('assistant_message', ''))}
         if moved and not self.advance_checked: checks['completion_checked'] = False
+        if moved and self.advance_checked:
+            self.record('action','advanced_after_checks',rule,action='advance_if_complete')
         progress = self.start_hash != digest(business_state(session))
         passed = all(checks.values()) and progress
         self.record('state_change', 'business_state_changed' if progress else 'no_progress', rule,
                     before_hash=self.start_hash, after_hash=digest(business_state(session)), advanced=moved)
         self.record('verification', 'execution_verified' if passed else 'execution_failed', rule,
-                    assertions=checks, repairs=self.repairs, kind='online_execution')
-        session.model_context['experience_execution_guard'] = {'key': digest((rule['id'], rule['version'], self.start_hash)),
-                                                             'passed': passed}
+                    assertions=checks, repairs=self.repairs, kind='online_execution', sources=getattr(self,'sources',[]))
+        # Keep a bounded history of effective actions + business states. A new
+        # primary ID or a different retrieval order cannot restart the same repair.
+        effect_state=digest((execution_identity(rule['execution']),self.start_hash))
+        previous=session.model_context.get('experience_execution_guard',{}).get('effect_states',[])
+        session.model_context['experience_execution_guard'] = {
+            'key':digest((rule['id'],rule['version'],self.start_hash)), 'passed':passed,
+            'effect_states':[h for h in previous if h!=effect_state][-15:]+[effect_state]}
         if isinstance(response.get('stage_payload'), dict):
             from .design_state import design_state_snapshot
             response['stage_payload']['design_state'] = design_state_snapshot(session)

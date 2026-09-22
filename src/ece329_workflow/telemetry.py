@@ -8,6 +8,36 @@ from .usage import PriceBook, read_usage, summarize, agent_role
 CURRENT_TRACE = ContextVar('workflow_trace', default=None)
 
 
+def injected_rule_ids(payload, candidates):
+    """Match whole selected rules in the actual top-level guidance block.
+
+    An ID in a user quote, history, diagnostics or a partial rule is not an
+    injection. Support the JSON intent input and CONTEXT_JSON stage envelope.
+    """
+    raw=payload.get('input',[])
+    texts=[raw] if isinstance(raw,str) else [
+        part.get('text','') for item in raw if isinstance(item,dict)
+        for part in (item.get('content',[]) if isinstance(item.get('content'),list) else [])
+        if isinstance(part,dict) and part.get('type')=='input_text'] if isinstance(raw,list) else []
+    supplied=[]
+    for text in texts:
+        if not isinstance(text,str): continue
+        try:
+            context=json.loads(text)
+        except (ValueError,TypeError):
+            _,marker,text=text.rpartition('CONTEXT_JSON:\n')
+            if not marker: continue
+            try: context=json.loads(text)
+            except (ValueError,TypeError): continue
+        if not isinstance(context,dict): continue
+        block=context.get('feedback_guidance')
+        if not isinstance(block,dict): continue
+        rows=block.get('rules',[])
+        if isinstance(rows,list): supplied.extend(row for row in rows if isinstance(row,dict))
+    return list(dict.fromkeys(r['id'] for r in candidates if any(
+        all(key in actual and actual[key]==value for key,value in r.items()) for actual in supplied)))
+
+
 class TurnTrace:
     def __init__(self, session, request):
         self.started = perf_counter()
@@ -53,12 +83,11 @@ class ObservedTransport:
         start = perf_counter()
         # Count only rules actually present in this request after prompt budgets
         # and recovery payload construction; never store the serialized prompt.
-        serialized = json.dumps(payload, ensure_ascii=False)
         row = {'stage': self.session.current_stage.value, 'model_profile': self.route['profile'],
                'model_id': details['api_model'], 'selected_model': payload.get('model'),
                'provider': details['provider'], 'reasoning': details['reasoning'],
                'schema': payload.get('text', {}).get('format', {}).get('name'),
-               'experience_rule_ids': [r['id'] for r in self.session.turn_context.get('experience_rules', []) if r['id'] in serialized],
+               'experience_rule_ids': injected_rule_ids(payload,self.session.turn_context.get('experience_rules', [])),
                'input_tokens': None, 'output_tokens': None, 'error_type': None}
         row['max_output_tokens'] = payload.get('max_output_tokens')
         row['agent'] = agent_role(row['schema'])

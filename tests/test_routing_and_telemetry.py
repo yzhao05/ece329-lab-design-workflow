@@ -257,7 +257,9 @@ def test_measurements_include_only_rules_present_in_actual_payload(research):
     token=CURRENT_TRACE.set(trace)
     try:
         transport=ObservedTransport(SimpleNamespace(create=lambda _: {}),session,{'profile':'fast'})
-        transport.create({'model':'test','input':'Rule EXP-INCLUDED'})
+        transport.create({'model':'test','input':json.dumps({
+            'user_message':'Rule EXP-EXCLUDED',
+            'feedback_guidance':{'rules':[{'id':'EXP-INCLUDED'}]}})})
     finally:
         CURRENT_TRACE.reset(token)
     assert trace.data['calls'][0]['experience_rule_ids']==['EXP-INCLUDED']
