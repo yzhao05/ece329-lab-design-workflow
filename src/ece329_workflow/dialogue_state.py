@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .execution_diagnostics import (observe_validation, observe_candidate, observe_context, observe_recovery, observe_fields, record as execution_record)
+
 import json
 import re
 import uuid
@@ -787,6 +789,7 @@ def current_pending_action(session: DesignSession) -> dict[str, Any] | None:
     return deepcopy(pending) if isinstance(pending, dict) else None
 
 
+@observe_candidate
 def record_pending_clarification(
     session: DesignSession,
     candidate_answer: str = "",
@@ -860,6 +863,7 @@ def record_pending_clarification(
     return deepcopy(pending)
 
 
+@observe_candidate
 def record_scene_direction_confirmation(
     session: DesignSession,
     candidate_answer: str,
@@ -944,6 +948,7 @@ def record_scene_direction_confirmation(
     return deepcopy(pending)
 
 
+@observe_recovery
 def recover_repeated_pending_answer(
     resolved: dict[str, Any],
     pending_action: dict[str, Any] | None,
@@ -959,12 +964,17 @@ def recover_repeated_pending_answer(
     field when no exact open-question contract exists.
     """
 
+    def blocked(code):
+        execution_record('recovery_decision', 'blocked', method='recover_repeated_pending_answer',
+                         code=code, pending_id=(pending_action or {}).get('action_id') if isinstance(pending_action, dict) else None)
+        return None
+
     if (
         not isinstance(resolved, dict)
         or not isinstance(pending_action, dict)
         or pending_action.get("type") not in OPEN_QUESTION_PENDING_TYPES
     ):
-        return None
+        return blocked("invalid_context")
     resolved_kind = str(resolved.get("intent") or "")
     repeat_recovery = resolved_kind == UserIntent.UNCLEAR.value
     contextual_followup = resolved_kind in {
@@ -972,11 +982,11 @@ def recover_repeated_pending_answer(
         UserIntent.ADVANCE_STAGE.value,
     }
     if not repeat_recovery and not contextual_followup:
-        return None
+        return blocked("intent_not_recoverable")
     candidate = str(pending_action.get("candidate_answer") or "").strip()
     current = user_message.strip()
     if not candidate or not current:
-        return None
+        return blocked("no_candidate_or_message")
     candidate_is_authorized = (
         pending_action.get("candidate_binding_authorized") is True
     )
@@ -992,7 +1002,7 @@ def recover_repeated_pending_answer(
         # belongs in one narrow field; those turns must be decomposed by the
         # semantic action parser. Guided single-field prompts can recover from
         # an outage by comparing the complete repeated answer below.
-        return None
+        return blocked("candidate_binding_not_authorized")
 
     def comparable(value: str) -> str:
         return re.sub(
@@ -1011,14 +1021,14 @@ def recover_repeated_pending_answer(
             and left == right
         )
         if min(len(left), len(right)) < 8 and not short_exact_builder_answer:
-            return None
+            return blocked("answer_too_short")
         similarity = (
             1.0
             if left in right or right in left
             else SequenceMatcher(None, left, right, autojunk=False).ratio()
         )
         if similarity < 0.82:
-            return None
+            return blocked("answer_not_similar")
     else:
         # ACCEPT/ADVANCE is supplied by the contextual semantic resolver, not
         # inferred from words here.  On an exact guided single-field question
@@ -1029,7 +1039,7 @@ def recover_repeated_pending_answer(
     subject = str(pending_action.get("subject") or "").strip()
     exact_field = recoverable_pending_field(pending_action)
     if not subject or exact_field != subject:
-        return None
+        return blocked("no_exact_single_field_target")
     act = {
         "type": "ANSWER_PENDING_QUESTION",
         "target": subject,
@@ -1723,6 +1733,7 @@ def _normalize_pending_action(
     return normalized
 
 
+@observe_candidate
 def save_pending_action(
     session: DesignSession,
     stage: Stage,
@@ -2325,6 +2336,7 @@ def resolved_intent(
     }
 
 
+@observe_validation
 def validate_resolved_intent(
     raw: dict[str, Any],
     pending_action: dict[str, Any] | None,
@@ -2615,6 +2627,9 @@ def validate_resolved_intent(
         # proposed action is invalid—or the model returned no executable
         # action—do not execute a contradictory legacy outer intent or copy
         # the complete student message into the current field.
+        execution_record('action_validation', 'blocked', validator='validate_resolved_intent',
+                         code='no_executable_actions', field_path='dialogue_acts',
+                         rule='authoritative_actions_required')
         intent = UserIntent.UNCLEAR.value
         raw = {
             **raw,
@@ -2678,6 +2693,9 @@ def validate_resolved_intent(
         UserIntent.MANAGE_DESIGN_VERSION.value,
         }
     ):
+        execution_record('action_validation', 'blocked', validator='validate_resolved_intent',
+                         code='intent_not_allowed', field_path='intent',
+                         rejected_intent=intent, allowed_intents=sorted(allowed))
         intent = UserIntent.UNCLEAR.value
     try:
         confidence = float(raw.get("confidence", 0.0))
@@ -2690,6 +2708,9 @@ def validate_resolved_intent(
         )
     low_confidence_intent = ""
     if confidence < 0.55:
+        execution_record('action_validation', 'blocked', validator='validate_resolved_intent',
+                         code='low_confidence', field_path='confidence',
+                         actual=confidence, minimum=0.55, rejected_intent=intent)
         low_confidence_intent = intent
         intent = UserIntent.UNCLEAR.value
     semantic_updates = (
@@ -3910,6 +3931,7 @@ def accept_pending_comparisons_on_advance(session: DesignSession) -> None:
     set_baseline_comparisons(session, comparisons)
 
 
+@observe_fields
 def apply_semantic_design_updates(
     session: DesignSession,
     resolved: dict[str, Any],
@@ -4223,6 +4245,7 @@ def apply_semantic_design_updates(
             set_pending_action_snapshot(session, None)
 
 
+@observe_candidate
 def apply_resolved_intent(
     session: DesignSession,
     resolved: dict[str, Any],
@@ -4332,6 +4355,12 @@ def clarification_output(
     pending_action: dict[str, Any] | None,
     interaction_state: InteractionState = InteractionState.GUIDED_DESIGN,
 ) -> StepOutput:
+    execution_record("reply", "success", source="program_template", template_id="clarification_output",
+                     pending_id=(pending_action or {}).get("action_id"),
+                     pending_type=(pending_action or {}).get("type"),
+                     candidate_present=bool((pending_action or {}).get("candidate_answer")),
+                     binding_authorized=(pending_action or {}).get("candidate_binding_authorized"),
+                     repeat_count=(pending_action or {}).get("repeat_count"))
     emvr_mode = interaction_state is InteractionState.EMVR_DIRECT
     if pending_action:
         if pending_action.get("type") == "ANSWER_IDEA_FACET":
@@ -4568,6 +4597,7 @@ def clarification_output(
     )
 
 
+@observe_context
 def serialize_intent_input(
     session: DesignSession,
     user_message: str,

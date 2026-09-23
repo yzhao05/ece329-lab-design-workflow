@@ -104,6 +104,11 @@ def evidence_was_truncated(evidence):
         if isinstance(turn, dict):
             if turn.get('truncated_fields'):
                 return True
+            execution = turn.get('execution_diagnostic')
+            if isinstance(execution, dict) and (execution.get('truncated') is True
+                    or execution.get('model_input_truncated') is True
+                    or execution.get('model_input_omitted_events', 0)):
+                return True
             states.extend([turn.get('state_before'), turn.get('state_after')])
     return bool(evidence.get('field_excerpt_truncated')) or any(
         state.get('pending_excerpt_truncated') is True for state in states if isinstance(state, dict))

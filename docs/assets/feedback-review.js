@@ -156,7 +156,7 @@
   }
   function renderUsage(result) {
     clearCards();
-    el.Cards.append(node('p','费用是按后端配置单价计算的 USD 估算，实际扣费以服务商账单为准。活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。'));
+    el.Cards.append(node('p','活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。'));
     for(const item of result.designs) {
       const card=node('article','');card.className='experience-card';
       card.append(node('h2',item.design_id),node('p',`${new Date(item.created*1000).toISOString()} · ${item.mode}`));

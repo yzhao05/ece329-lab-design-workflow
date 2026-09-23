@@ -152,6 +152,9 @@ class WorkflowAPI:
                 self._require_design_token(environ, design_id)
                 offset = int(parse_qs(environ.get('QUERY_STRING', '')).get('offset', ['0'])[0])
                 records = self.engine.telemetry_records(design_id, offset)
+                # Execution evidence is maintainer-only, even for design owners.
+                records = [{key: value for key, value in row.items()
+                            if key != 'execution_diagnostic'} for row in records]
                 return self._respond(start_response, HTTPStatus.OK, {'records': records, 'next_offset': offset + 100 if len(records) == 100 else None})
             relevant_match = re.fullmatch(r'/v1/designs/([^/]+)/experiences/relevant', path)
             if relevant_match and method == 'GET':

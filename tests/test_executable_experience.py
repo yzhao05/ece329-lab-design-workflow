@@ -74,8 +74,9 @@ def test_no_scope_only_fallback_for_unrelated_legacy_rules(pipeline):
     assert rows==[] and any(d['reason']=='not_relevant' for d in decisions)
 
 
-def test_conflicts_version_changes_and_same_state_do_not_loop():
-    session=fixture(InteractionState.EMVR_DIRECT);message='Keep the saved design and proceed'
+@pytest.mark.parametrize('mode', list(InteractionState))
+def test_conflicts_version_changes_and_same_state_do_not_loop(mode):
+    session=fixture(mode);message='Keep the saved design and proceed'
     r=packet();other=deepcopy(r);other['id']='EXP-'+'b'*32
     other['execution']['actions'][-1]['parameters']={'style':'task_only'}
     run=RuleRun(session,message);run.select([r,other],[])

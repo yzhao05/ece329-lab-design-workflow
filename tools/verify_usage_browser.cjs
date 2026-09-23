@@ -37,7 +37,7 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||'')) throw new Error('Local fixture
     await review.locator('.experience-card').filter({hasText:ids[0]}).waitFor();
     assert.ok(await review.locator('.experience-card').count()>=2);
     assert.match(await review.locator('#reviewCards').innerText(),/输入 token：[1-9]/);
-    assert.match(await review.locator('#reviewCards').innerText(),/估算费用（USD）：\$0\./);
+    assert.doesNotMatch(await review.locator('#reviewCards').innerText(),/估算费用|Estimated cost|USD/);
     assert.match(await review.locator('#reviewCards').innerText(),/当前停留阶段：/);
     await review.locator('.usage-breakdown > summary').first().click();
     assert.match(await review.locator('.usage-breakdown').first().innerText(),/API: openai.*gpt-5.4-mini/);
@@ -47,6 +47,7 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||'')) throw new Error('Local fixture
     await review.locator('#languageToggle').click();
     await review.locator('#reviewUsage').filter({hasText:'Design usage records'}).waitFor();
     assert.match(await review.locator('.usage-summary').first().innerText(),/Input tokens/);
+    assert.doesNotMatch(await review.locator('#reviewCards').innerText(),/Estimated cost|USD|估算费用/);
     await review.locator('#reviewFilter').selectOption('candidate');await review.locator('#reviewLogin button[type=submit]').click();
     await review.locator('.experience-card').first().waitFor();
     assert.match(await review.locator('.usage-summary').first().innerText(),/Input tokens: 2000/);
@@ -56,6 +57,6 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||'')) throw new Error('Local fixture
     await page.locator('#languageToggle').click();
     assert.match(await page.locator('.reply-time').last().innerText(),/用时/);
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,checks:'both modes; reply timing; idle exclusion; reload; admin usage/cost; mobile; English; logout',screenshots:out}));
+    console.log(JSON.stringify({passed:true,checks:'both modes; reply timing; idle exclusion; reload; admin tokens without cost estimates; mobile; English; logout',screenshots:out}));
   } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

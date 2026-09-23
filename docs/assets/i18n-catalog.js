@@ -93,7 +93,7 @@ window.ECE329_LOCALES = {
   "尚无用量记录":"Usage not recorded",
   "暂无设计用量记录。":"No design usage records yet.",
   "此设计开始时尚未启用完整计量，仅展示已记录部分。":"Tracking was not enabled when this design started. Only recorded usage is shown.",
-  "费用是按后端配置单价计算的 USD 估算，实际扣费以服务商账单为准。活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。":"Costs are USD estimates using configured rates; actual charges follow the provider invoice. Active time excludes user idle time and queueing; totals include dialogue, experience extraction and design-related translation.",
+  "活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。":"Active time excludes user idle time and queueing; totals include dialogue, experience extraction and design-related translation.",
   "更换分析 API":"Change analysis API",
   "所选记录当前不可重试，请重新选择。":"The selected record can no longer be retried. Please select another record.",
   "当前后端尚不支持切换分析 API，请更新后端并刷新状态。":"This backend does not support switching the analysis API yet. Update the backend and refresh the status.",

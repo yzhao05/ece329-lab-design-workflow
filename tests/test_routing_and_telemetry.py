@@ -101,6 +101,11 @@ def test_real_usage_telemetry_no_duplicates_and_feedback_join(research):
     assert research.engine.process_turn(research.session.design_id,request)==response
     rows=research.engine.telemetry_records(research.session.design_id)
     assert len(rows)==1 and rows[0]['id']==response['telemetry_id']
+    assert rows[0]['execution_diagnostic']['correlation']['revision'] == response['revision']
+    status, _, public = call_api(research.api, 'GET',
+        f'/v1/designs/{research.session.design_id}/telemetry', request_headers=research.auth)
+    assert status.startswith('200')
+    assert 'execution_diagnostic' not in json.dumps(public)
     assert rows[0]['input_tokens']==101*len(rows[0]['calls'])
     assert rows[0]['output_tokens']==23*len(rows[0]['calls'])
     assert rows[0]['latency_ms']>=0 and all(s['validator_pass'] for s in rows[0]['stages'])

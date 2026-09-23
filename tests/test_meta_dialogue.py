@@ -53,7 +53,14 @@ def test_meta_questions_preserve_design_stage_and_pending_even_with_stale_button
                                        'selected_option_id': 'old-continue'})
     stored = e.store.get(s.design_id)
     assert before.design_context == stored.design_context
-    assert before.model_context == stored.model_context
+    # Read-only concerns workflow data; the new private execution audit is
+    # expected to record this turn without altering any other context key.
+    assert before.model_context == {key: value for key, value in stored.model_context.items()
+                                    if key != 'execution_diagnostics'}
+    diagnostic = stored.model_context['execution_diagnostics']
+    assert len(diagnostic) == 1
+    assert diagnostic[0]['correlation']['revision'] == result['revision']
+    assert diagnostic[0]['advance']['status'] == 'not_advanced'
     assert before.stage_outputs == stored.stage_outputs
     assert before.current_stage == stored.current_stage
     assert before.completed_stages == stored.completed_stages
@@ -176,7 +183,10 @@ def test_meta_question_preserves_recorded_export_failure():
     e.store.save(s)
     result = e.process_turn(s.design_id, {'message':'为什么卡在这里？你现在在问什么问题？'})
     assert '完整实验流程' in result['assistant_message']
-    assert e.store.get(s.design_id).model_context == before
+    stored = e.store.get(s.design_id)
+    assert {key: value for key, value in stored.model_context.items()
+            if key != 'execution_diagnostics'} == before
+    assert len(stored.model_context['execution_diagnostics']) == 1
 
 
 def test_default_approval_still_completes_after_meta_question():

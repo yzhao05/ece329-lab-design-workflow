@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .execution_diagnostics import observe_completion, observe_candidate, capture as capture_execution
+
 import hashlib
 import hmac
 import json
@@ -267,6 +269,7 @@ def _cache_turn_response(
             session.history[-1]['experience_replay_before'] = deepcopy(getattr(trace, 'experience_replay_before', None))
             run = CURRENT_RULE_RUN.get()
             session.history[-1]['experience_replay_intent'] = deepcopy(getattr(run, 'source_intent', None))
+            capture_execution(session, response)
     if not request.turn_id:
         return
     cache = session.model_context.setdefault("turn_idempotency", [])
@@ -4563,6 +4566,8 @@ class WorkflowEngine:
                 return result
             except Exception as exc:
                 error = exc
+                logging.getLogger(__name__).warning('Dialogue execution failed: trace=%s design=%s error_type=%s',
+                    trace.data['id'], design_id, type(exc).__name__)
                 if (run := CURRENT_RULE_RUN.get()) is not None:
                     run.record('verification', 'backend_failure', error_type=type(exc).__name__)
                 raise
@@ -7397,6 +7402,7 @@ class WorkflowEngine:
                 raise ValueError("Guided output may contain at most one student question")
 
     @staticmethod
+    @observe_completion
     def _validate_completion(session: DesignSession, stage: Stage) -> None:
         if session.interaction_state is InteractionState.EMVR_DIRECT:
             if stage is Stage.IDEA_BRAINSTORMING:
@@ -7519,6 +7525,7 @@ class WorkflowEngine:
                 )
 
     @staticmethod
+    @observe_candidate
     def _advance(session: DesignSession, handled_stage: Stage) -> None:
         from .experience_rules import CURRENT_RULE_RUN
         if (run := CURRENT_RULE_RUN.get()) is not None:

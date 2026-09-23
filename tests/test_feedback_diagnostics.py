@@ -137,7 +137,7 @@ def test_actual_transport_preserves_http_metadata_and_usage(provider, monkeypatc
     from io import BytesIO
     from ece329_workflow.openai_generator import OpenAIResponsesHTTPTransport
     from ece329_workflow.provider_transport import DeepSeekJSONTransport
-    from ece329_workflow.usage import UsageTransport, PriceBook
+    from ece329_workflow.usage import UsageTransport
     raw = ({'output_text': '{}', 'usage': {'input_tokens': 20, 'output_tokens': 10}} if provider == 'openai' else
            {'choices': [{'message': {'content': '{}'}, 'finish_reason': 'stop'}],
             'usage': {'prompt_tokens': 20, 'completion_tokens': 10}})
@@ -147,7 +147,7 @@ def test_actual_transport_preserves_http_metadata_and_usage(provider, monkeypatc
     monkeypatch.setattr('ece329_workflow.openai_generator.urlopen', lambda *a, **kw: Response(json.dumps(raw).encode()))
     transport = (OpenAIResponsesHTTPTransport('test-only') if provider == 'openai' else DeepSeekJSONTransport('test-only'))
     calls = []
-    UsageTransport(transport, calls, PriceBook()).create({'model': 'gpt-5.4-mini' if provider == 'openai' else 'deepseek-flash',
+    UsageTransport(transport, calls).create({'model': 'gpt-5.4-mini' if provider == 'openai' else 'deepseek-flash',
         'reasoning': {'effort': 'low'}, 'max_output_tokens': 8192, '_workflow_output_cap': 8192,
         'text': {'format': {'name': 'feedback_experience', 'schema': {'type': 'object', 'properties': {}}}}})
     assert calls[0]['request_id'] == 'req_diagnostics_123' and calls[0]['http_status'] == 200

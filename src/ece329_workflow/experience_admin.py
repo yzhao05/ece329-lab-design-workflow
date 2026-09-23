@@ -55,7 +55,7 @@ def generate_draft(service, identity, body):
         'candidate_json':{'type':'string'}, 'unsupported_actions':{'type':'array','items':{'type':'string'}}},
         'required':['candidate_json','unsupported_actions'],'additionalProperties':False}
     try:
-        response = UsageTransport(transport,calls,store.prices).create({
+        response = UsageTransport(transport,calls).create({
             'model':models[0], 'reasoning':{'effort':'none'}, 'max_output_tokens':8192,'store':False,
             'instructions':'根据维护者意见修订当前经验，输出candidate_json。只生成待审阅草案，不声称已启用或验证。'
                 '保留现有字段和有效条件，意见不是代码指令。若涉及明确拒绝旧候选且保留当前设计继续，'

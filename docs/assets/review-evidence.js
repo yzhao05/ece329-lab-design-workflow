@@ -236,6 +236,56 @@
     if(!comparable)current.append(node('p',t('部分比较字段未记录或摘录不完整。','Some comparison fields are missing or incomplete.')));
     if(snapshot.field_excerpt_truncated)current.append(node('p',t('提交时设计字段摘录已截断。','Design field excerpt at submission was truncated.')));
   }
+  function executionEvidence(host, target, view) {
+    const sectionNode=section(host,'原对话执行诊断','Original dialogue execution diagnostics');
+    sectionNode.className+=' execution-diagnostics';
+    const diagnostic=obj(target?.execution_diagnostic);
+    if(!diagnostic.version) {
+      sectionNode.append(node('p',t('历史未记录：无法确认本轮识别、校验和候选处理过程。','Not recorded historically: recognition, validation, and candidate handling cannot be reconstructed.')));
+      return;
+    }
+    const statusLabels={success:['成功','Succeeded'],failed:['失败','Failed'],blocked:['被阻止','Blocked'],
+      not_executed:['未执行','Not executed'],not_recorded:['未记录','Not recorded'],not_advanced:['未推进','Not advanced']};
+    const status=value=>statusLabels[value]?t(...statusLabels[value]):missing();
+    const events=list(diagnostic.events).filter(isRecord);
+    const validation=events.filter(e=>e.step==='semantic_validation').at(-1);
+    const check=events.filter(e=>e.step==='stage_check').at(-1);
+    const reply=events.filter(e=>e.step==='reply').at(-1);
+    sectionNode.append(node('p',`${t('阶段结果','Stage outcome')}: ${status(diagnostic.advance?.status)} · ${t('最终意图','Final intent')}: ${name(diagnostic.final_intent?.intent)}`));
+    sectionNode.append(node('p',`${t('语义校验','Semantic validation')}: ${status(validation?.status)} · ${t('阶段完整性检查（_validate_completion）','Stage completeness check (_validate_completion)')}: ${status(check?.status)}`));
+    if(reply?.source==='program_template')sectionNode.append(node('p',t('回复选用程序澄清模板；最终回复可能另有后续修订。','A program clarification template was selected; the final reply may include subsequent revisions.')));
+    if(events.some(e=>e.step==='action_validation'&&e.status==='blocked'))sectionNode.append(node('p',t('本轮存在被拒绝的结构化动作；具体规则见识别与校验详情。','Structured actions were rejected during this turn; see recognition and validation details for the rules.')));
+    if(diagnostic.repetition?.same_reply_without_design_progress)sectionNode.append(node('p',t('检测到回复重复且规范化设计及阶段未变化；这不等于所有待办状态都未变化。','Repeated reply with no change to the canonical design or stage; pending-task state may still have changed.')));
+    if(diagnostic.truncated)sectionNode.append(node('p',t('执行诊断达到记录上限，部分事件未保存；缺失记录不能视为未执行。','The diagnostic record limit was reached. Missing events do not establish that a step was not executed.')));
+    view.executionFolds??={};
+    const groups=[
+      ['recognition','识别与校验详情','Recognition and validation details',['model_parse','model_envelope','model_result','resolver_result','semantic_validation_input','semantic_validation','action_validation','context']],
+      ['candidate','候选与字段处理','Candidate and field processing',['candidate_lifecycle','field_processing','field_write']],
+      ['workflow','阶段、回复与恢复','Stage, reply, and recovery',['stage_check','reply','recovery','recovery_decision']],
+    ];
+    const displayEvent=event=>{
+      const item=node('div');item.append(node('p',`${event.sequence??''} · ${event.step} · ${status(event.status)}`));
+      // Raw diagnostic values stay verbatim for audit; labels and status use fixed mappings.
+      const fields=node('dl');
+      for(const [key,value] of Object.entries(event)) {
+        const title=key==='before'?t('执行前结果','Before execution'):key==='after'?t('执行后结果','After execution'):name(key);
+        const entry=node('dd');entry.append(valueNode(value));fields.append(node('dt',title),entry);
+      }
+      item.append(fields);return item;
+    };
+    for(const [key,zh,en,steps] of groups) {
+      const details=fold(sectionNode,t(zh,en),!!view.executionFolds[key],open=>view.executionFolds[key]=open);
+      if(key==='recognition')field(details,'本轮关联信息','Turn correlation',diagnostic.correlation);
+      const rows=events.filter(event=>steps.includes(event.step));
+      if(!rows.length)details.append(node('p',missing()));
+      for(const event of rows)details.append(displayEvent(event));
+      if(key==='candidate')field(details,'轮末待办','Pending task at turn end',diagnostic.pending_after);
+      if(key==='workflow')field(details,'重复检测范围及结果','Repetition detection scope and result',diagnostic.repetition);
+    }
+    const rules=fold(sectionNode,t('经验执行记录','Experience execution records'),!!view.executionFolds.rules,open=>view.executionFolds.rules=open);
+    field(rules,'检索、注入、执行与验证（与模型声称采用分开）','Retrieval, injection, execution, and verification (separate from model claims)',diagnostic.experience_execution);
+    sectionNode.append(node('p',t('以上是原对话执行记录；下方经验提炼记录发生在反馈提交之后。技术详情中的原始值不翻译。','These records describe the original dialogue. Extraction attempts below occurred after feedback submission. Raw values in technical details remain untranslated.')));
+  }
   function readable(host, record, view) {
     const payload=obj(record.evidence),snapshot=obj(payload.evidence || payload),analysis=obj(payload.extraction_analysis),diagnosis=obj(analysis.diagnosis);
     if(snapshot.evidence_migration) {
@@ -248,6 +298,7 @@
     field(feedback,'用户明确填写的期望行为','Expected behavior explicitly recorded from the user',payload.expected_behavior,true);
     const target=list(snapshot.event_chain).filter(isRecord).find(row=>row.position==='reported') || (isRecord(snapshot.reported_turn)?snapshot.reported_turn:null);
     renderState(host,snapshot,target,view);
+    executionEvidence(host,target,view);
     const chat=section(host,'问题前后对话','Conversation around the reported turn');
     const chain=recordList(chat,snapshot.event_chain);
     for(const position of ['before','reported','after']) {

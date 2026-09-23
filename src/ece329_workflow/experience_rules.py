@@ -6,6 +6,7 @@ import json
 import os
 
 from .models import StageCompletionError
+from .execution_diagnostics import observe_candidate
 
 CURRENT_RULE_RUN = ContextVar('experience_rule_run', default=None)
 HOOKS = ['after_intent', 'before_pending', 'before_advance', 'before_reply']
@@ -96,6 +97,7 @@ def replace_pending(session, pending):
     state['carried_context'] = build_carried_context(session)
 
 
+@observe_candidate
 def decline_candidate(session, pending):
     if not isinstance(pending, dict):
         return pending

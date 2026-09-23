@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .execution_diagnostics import observe_model_parse
+
 import json
 import logging
 import math
@@ -1063,6 +1065,7 @@ def _source_backed_unresolved_acts(user_message: str, acts: Any) -> list[dict[st
     return cleaned
 
 
+@observe_model_parse
 def _parse_intent_response(
     response: dict[str, Any],
 ) -> tuple[dict[str, Any], Any, dict[str, Any]]:
@@ -1072,6 +1075,9 @@ def _parse_intent_response(
         raise ModelOutputError("Intent model output was invalid") from exc
     if not isinstance(raw, dict):
         raise ModelOutputError("Intent model output must be an object")
+    from .execution_diagnostics import record, intent_view
+    record('model_envelope', 'success', result=intent_view(raw),
+           encoded_actions_present=isinstance(raw.get('dialogue_acts_json'), str))
     # Decode the authoritative action list first. The other encoded fields are
     # compatibility summaries for older integrations; a malformed summary must
     # never discard valid field-level actions and send the whole turn into the

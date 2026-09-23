@@ -36,13 +36,10 @@
     el.dataset.usage=JSON.stringify(usage || null);
     if(!usage || !usage.run_count) {el.textContent=english()?'Usage not recorded':'尚无用量记录';return;}
     const count=(key)=>usage[key] == null ? `${english()?'Incomplete; known':'不完整，已知'} ${usage['known_'+key] ?? 0}`:String(usage[key]);
-    const money=usage.estimated_cost_usd == null
-      ? `${english()?'Incomplete; known estimate':'不完整，已知估算'} $${Number(usage.known_cost_usd||0).toFixed(8)}`
-      : `$${Number(usage.estimated_cost_usd).toFixed(8)}`;
     const timeLabel=usage.time_basis==='api'?(english()?'API time':'API 用时'):usage.time_basis==='local'?(english()?'Local processing':'本地处理用时'):(english()?'Active time':'活跃时长');
     el.textContent=english()
-      ? `Input tokens: ${count('input_tokens')} · Output tokens: ${count('output_tokens')} · Estimated cost (USD): ${money} · ${timeLabel}: ${duration(usage.active_ms)} · API calls: ${usage.call_count}`
-      : `输入 token：${count('input_tokens')} · 输出 token：${count('output_tokens')} · 估算费用（USD）：${money} · ${timeLabel}：${duration(usage.active_ms)} · API 调用：${usage.call_count}`;
+      ? `Input tokens: ${count('input_tokens')} · Output tokens: ${count('output_tokens')} · ${timeLabel}: ${duration(usage.active_ms)} · API calls: ${usage.call_count}`
+      : `输入 token：${count('input_tokens')} · 输出 token：${count('output_tokens')} · ${timeLabel}：${duration(usage.active_ms)} · API 调用：${usage.call_count}`;
   }
   window.ECE329Usage={duration,timing,summary,identity,stopState};
   window.addEventListener('ece329:language-changed',()=>{

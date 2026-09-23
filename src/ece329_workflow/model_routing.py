@@ -195,6 +195,12 @@ class RoutedGenerator:
                         event['validator_pass'] = False if str(info.get('last_fallback_reason', '')).endswith('output_rejected') else None
                     else:
                         event['validator_pass'] = True
+                from .execution_diagnostics import record, intent_view
+                if name == 'resolve_intent':
+                    record('resolver_result', 'success', resolver=type(chosen).__name__, result=intent_view(result))
+                else:
+                    record('reply', 'success', source='generator', generator=type(chosen).__name__,
+                           fallback_used=event['fallback_used'], pending_id=(session.model_context.get('dialogue_state', {}).get('pending_action') or {}).get('action_id'))
                 return result
             except Exception as exc:
                 # A transport outage is not a rejected design. Do not use it

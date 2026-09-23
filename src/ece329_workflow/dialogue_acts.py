@@ -233,9 +233,21 @@ def normalize_dialogue_acts(
     accepted: list[dict[str, Any]] = []
     unresolved: list[dict[str, str]] = []
     seen_ids: set[str] = set()
-    for item in raw[:16]:
+    def reject(detail):
+        from .execution_diagnostics import record
+        record('action_validation', 'blocked', validator='normalize_dialogue_acts',
+               code='invalid_dialogue_action', field_path=f'dialogue_acts[{index}]',
+               rejected_action={k: item.get(k) for k in ('type', 'target', 'operation', 'confidence')} if isinstance(item, dict) else None,
+               rule=detail.get('reason'))
+        unresolved.append(detail)
+
+    if len(raw) > 16:
+        from .execution_diagnostics import record
+        record('action_validation', 'blocked', validator='normalize_dialogue_acts',
+               code='action_limit', field_path='dialogue_acts', limit=16, actual=len(raw))
+    for index, item in enumerate(raw[:16]):
         if not isinstance(item, dict):
-            unresolved.append({"content": _text(item), "reason": "动作格式不完整"})
+            reject({"content": _text(item), "reason": "动作格式不完整"})
             continue
         act_type = str(item.get("type") or "").upper()
         target = str(item.get("target") or "").strip()
@@ -246,7 +258,7 @@ def normalize_dialogue_acts(
         except (TypeError, ValueError):
             confidence = 0.0
         if act_type not in DIALOGUE_ACT_TYPES or confidence < 0.55:
-            unresolved.append(
+            reject(
                 {"content": _text(content), "reason": "动作类型或置信度不足"}
             )
             continue
@@ -264,7 +276,7 @@ def normalize_dialogue_acts(
                 or target not in valid_answer_targets
                 or not _text(content)
             ):
-                unresolved.append(
+                reject(
                     {"content": _text(content), "reason": "未能绑定到当前待明确内容"}
                 )
                 continue
@@ -275,12 +287,12 @@ def normalize_dialogue_acts(
                 "REPLACE",
                 "CLEAR",
             }:
-                unresolved.append(
+                reject(
                     {"content": _text(content), "reason": "设计字段或操作无效"}
                 )
                 continue
             if operation != "CLEAR" and not _text(content):
-                unresolved.append({"content": "", "reason": f"{target}缺少修改内容"})
+                reject({"content": "", "reason": f"{target}缺少修改内容"})
                 continue
         elif act_type == "MODIFY_STAGE_FIELD":
             if target not in STAGE_ACT_FIELDS or operation not in {
@@ -288,7 +300,7 @@ def normalize_dialogue_acts(
                 "REPLACE",
                 "CLEAR",
             }:
-                unresolved.append(
+                reject(
                     {"content": _text(content), "reason": "阶段字段或操作无效"}
                 )
                 continue
@@ -298,12 +310,12 @@ def normalize_dialogue_acts(
                 "REPLACE",
                 "CLEAR",
             }:
-                unresolved.append(
+                reject(
                     {"content": _text(content), "reason": "EMVR字段或操作无效"}
                 )
                 continue
             if operation != "CLEAR" and not _text(content):
-                unresolved.append({"content": "", "reason": f"{target}缺少修改内容"})
+                reject({"content": "", "reason": f"{target}缺少修改内容"})
                 continue
         elif act_type == "MODIFY_COMPARISON":
             content = _normalize_comparison_contract(
@@ -311,17 +323,17 @@ def normalize_dialogue_acts(
                 operation=operation,
             )
             if content is None:
-                unresolved.append(
+                reject(
                     {"content": _text(content), "reason": "基础比较修改缺少结构"}
                 )
                 continue
         elif act_type in {"ASK_COURSE_QUESTION", "UNRESOLVED"}:
             if not _text(content):
-                unresolved.append({"content": "", "reason": "动作缺少内容"})
+                reject({"content": "", "reason": "动作缺少内容"})
                 continue
         elif act_type == "CORRECT_ASSISTANT":
             if not _text(content):
-                unresolved.append({"content": "", "reason": "纠错动作缺少内容"})
+                reject({"content": "", "reason": "纠错动作缺少内容"})
                 continue
         elif act_type == "VERSION_CONTROL":
             if not isinstance(content, dict) or str(content.get("action") or "").upper() not in {
@@ -330,12 +342,12 @@ def normalize_dialogue_acts(
                 "RESTORE",
                 "COMPARE",
             }:
-                unresolved.append({"content": _text(content), "reason": "版本操作缺少结构"})
+                reject({"content": _text(content), "reason": "版本操作缺少结构"})
                 continue
             operation = "EXECUTE"
         elif act_type == "COMPARE_OPTIONS":
             if not isinstance(content, (list, dict)) or not _text(content):
-                unresolved.append({"content": _text(content), "reason": "缺少待比较方案"})
+                reject({"content": _text(content), "reason": "缺少待比较方案"})
                 continue
             operation = "EXECUTE"
         elif act_type == "REQUEST_QUALITY_REVIEW":
@@ -343,7 +355,7 @@ def normalize_dialogue_acts(
         elif act_type == "CONTROL":
             target = target.upper()
             if target not in CONTROL_TARGETS:
-                unresolved.append(
+                reject(
                     {"content": _text(content), "reason": "会话控制动作无效"}
                 )
                 continue
@@ -355,14 +367,14 @@ def normalize_dialogue_acts(
         elif act_type in EMVR_FORMULA_ACTION_TYPES:
             content = normalize_formula_flow_action(act_type, content)
             if content is None:
-                unresolved.append(
+                reject(
                     {"content": _text(item.get("content")), "reason": "EMVR公式入口动作缺少有效结构"}
                 )
                 continue
             operation = "EXECUTE"
         elif act_type in {"NEW_TOPIC_CONTENT", "NEW_TOPIC"}:
             if not _text(content):
-                unresolved.append({"content": "", "reason": "新实验方向缺少具体内容"})
+                reject({"content": "", "reason": "新实验方向缺少具体内容"})
                 continue
             operation = "EXECUTE"
         elif act_type in {"REQUEST_REFERENCE", "REQUEST_SUMMARY"}:
@@ -403,7 +415,7 @@ def normalize_dialogue_acts(
             normalized["semantic_key"] = semantic_key
         accepted.append(normalized)
         if act_type == "UNRESOLVED":
-            unresolved.append(
+            reject(
                 {"content": _text(content), "reason": "需要进一步确认"}
             )
     return accepted, unresolved
@@ -812,6 +824,12 @@ def apply_stage_field_updates(
 ) -> list[str]:
     """Idempotently commit later-stage fields without copying the whole turn."""
 
+    from .execution_diagnostics import record
+    def field_event(status, code, field=None, operation=None, **details):
+        record('field_write', status, handler='apply_stage_field_updates', code=code,
+               field_path=field, operation=operation, provenance=provenance,
+               execution_revision=session.revision, **details)
+
     if not isinstance(updates, list):
         return []
     state = session.design_context.setdefault("stage_design_state", {})
@@ -854,6 +872,7 @@ def apply_stage_field_updates(
             "REPLACE",
             "CLEAR",
         }:
+            field_event("blocked", "invalid_field_or_operation", field, operation)
             continue
         # The approved implementation is a complete document, not a short
         # conversational field. Truncating it silently discarded its tail.
@@ -861,6 +880,7 @@ def apply_stage_field_updates(
         if field == "procedure_steps" and operation != "CLEAR" and isinstance(item.get("value"), list):
             value = "\n".join(_text(step) for step in item["value"] if _text(step))
         if operation != "CLEAR" and not value:
+            field_event("blocked", "empty_value", field, operation)
             continue
         update_id = str(item.get("update_id") or "").strip() or _act_identity(
             "MODIFY_STAGE_FIELD",
@@ -891,6 +911,7 @@ def apply_stage_field_updates(
                 )
             )
             if already_matches_current_state:
+                field_event("success", "already_saved", field, operation, changed=False)
                 continue
         previous = "" if field in emvr_explicitly_cleared else current_value
         was_explicitly_cleared = field in explicitly_cleared
@@ -930,6 +951,7 @@ def apply_stage_field_updates(
             next_value = f"{previous}；补充：{value}"
             explicitly_cleared.discard(field)
             emvr_explicitly_cleared.discard(field)
+        field_event("success", "applied_to_memory", field, operation, changed=next_value != previous)
         known_ids.add(update_id)
         applied_ids.append(update_id)
         clear_marker_changed = was_explicitly_cleared != (

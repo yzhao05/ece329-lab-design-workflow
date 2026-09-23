@@ -3,7 +3,7 @@ from contextvars import ContextVar
 from time import perf_counter, time
 from uuid import uuid4
 import json
-from .usage import PriceBook, read_usage, summarize, agent_role
+from .usage import read_usage, summarize, agent_role
 
 CURRENT_TRACE = ContextVar('workflow_trace', default=None)
 
@@ -41,12 +41,22 @@ def injected_rule_ids(payload, candidates):
 class TurnTrace:
     def __init__(self, session, request):
         self.started = perf_counter()
-        self.prices = PriceBook()
         self.data = {'id': uuid4().hex, 'design_id': session.design_id, 'turn_id': request.turn_id,
                      'created': time(), 'mode': session.interaction_state.value,
-                     'initial_stage': session.current_stage.value, 'calls': [], 'stages': []}
+                     'initial_stage_index': session.current_stage_index,
+                     'initial_workflow_status': session.status.value,
+                     'initial_stage': session.current_stage.value, 'initial_revision': session.revision, 'calls': [], 'stages': []}
 
     def finish(self, result=None, error=None):
+        from .feedback_diagnostics import release_version
+        diagnostic = self.data.setdefault('execution_diagnostic', {'version': 1, 'events': [], 'truncated': False})
+        diagnostic.setdefault('correlation', {'request_id': self.data['id'], 'turn_id': self.data['turn_id'],
+            'design_id': self.data['design_id'], 'mode': self.data['mode'], 'stage': self.data['initial_stage'],
+            'initial_revision': self.data['initial_revision'], 'revision': result.get('revision') if result else None,
+            'release': release_version()})
+        diagnostic['turn_status'] = 'failed' if error else 'success'
+        if error:
+            diagnostic['error_type'] = type(error).__name__
         calls = self.data['calls']
         self.data.update(latency_ms=round((perf_counter() - self.started) * 1000, 2),
                          status='failed' if error else 'completed', error_type=type(error).__name__ if error else None,
@@ -81,6 +91,8 @@ class ObservedTransport:
             if trace:
                 trace.data['output_budget_limit'] = self.budget.limit
         start = perf_counter()
+        from .execution_diagnostics import observe_submitted_context
+        observe_submitted_context(payload)
         # Count only rules actually present in this request after prompt budgets
         # and recovery payload construction; never store the serialized prompt.
         row = {'stage': self.session.current_stage.value, 'model_profile': self.route['profile'],
@@ -110,5 +122,4 @@ class ObservedTransport:
                     trace.data['output_budget_charged'] = self.budget.charged
             row['latency_ms'] = round((perf_counter() - start) * 1000, 2)
             if trace is not None:
-                trace.prices.apply(row)
                 trace.data['calls'].append(row)

@@ -1,11 +1,7 @@
-"""Measured usage and configurable cost estimates; never guess missing usage/prices."""
-from copy import deepcopy
+"""Measured provider token usage and active processing time; never guess missing usage."""
 from contextlib import contextmanager
 from contextvars import ContextVar
-from decimal import Decimal
 import json
-import math
-import os
 import logging
 import sqlite3
 import re
@@ -20,7 +16,7 @@ def measure_translation(store, design_id, mode='unknown', stage='UNKNOWN'):
     calls = []
     record = {'id': uuid4().hex, 'design_id': design_id, 'created': time(), 'mode': mode,
               'stage': stage, 'stage_basis': 'translation_request', 'calls': calls}
-    token = CURRENT_USAGE.set((calls, store.prices))
+    token = CURRENT_USAGE.set((calls,))
     started = perf_counter()
     try:
         yield
@@ -34,38 +30,6 @@ def measure_translation(store, design_id, mode='unknown', stage='UNKNOWN'):
                     store._record_usage(db, record, 'translation')
             except (sqlite3.Error, OSError):
                 logging.getLogger(__name__).warning('Translation usage persistence unavailable')
-
-
-class PriceBook:
-    def __init__(self, environ=None):
-        env = os.environ if environ is None else environ
-        try:
-            self.rates = json.loads(env.get('ECE329_MODEL_PRICING_JSON', '{}'))
-            if not isinstance(self.rates, dict):
-                raise ValueError()
-            for model, rates in self.rates.items():
-                if not model or not isinstance(rates, dict) or set(rates) != {'input', 'cached_input', 'output'}:
-                    raise ValueError()
-                if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in rates.values()):
-                    raise ValueError()
-        except (ValueError, TypeError):
-            raise ValueError('ECE329_MODEL_PRICING_JSON must map API model IDs to nonnegative USD rates per million tokens: input, cached_input, output') from None
-
-    def apply(self, call):
-        provider = call.get('provider', 'unknown')
-        key = f"{provider}/{call['model_id']}"
-        rates = self.rates.get(key, self.rates.get(call['model_id']))
-        call['pricing_key'] = key if key in self.rates else call['model_id'] if rates is not None else None
-        call['price_rates_usd_per_million'] = deepcopy(rates)
-        call['estimated_cost_usd'] = None
-        counts = [call.get(key) for key in ('input_tokens', 'cached_input_tokens', 'output_tokens')]
-        if rates is None or any(value is None for value in counts):
-            return
-        incoming, cached, outgoing = counts
-        cost = (Decimal(incoming - cached) * Decimal(str(rates['input']))
-                + Decimal(cached) * Decimal(str(rates['cached_input']))
-                + Decimal(outgoing) * Decimal(str(rates['output']))) / Decimal(1000000)
-        call['estimated_cost_usd'] = float(cost)
 
 
 def read_usage(response, call):
@@ -147,7 +111,7 @@ def breakdown(records):
 
 
 def summarize(calls, active_ms=0):
-    result = {'call_count': len(calls), 'active_ms': round(active_ms, 2), 'currency': 'USD'}
+    result = {'call_count': len(calls), 'active_ms': round(active_ms, 2)}
     for key in ('input_tokens', 'output_tokens', 'cached_input_tokens'):
         values = [call.get(key) for call in calls]
         result['known_' + key] = sum(v for v in values if v is not None)
@@ -155,16 +119,13 @@ def summarize(calls, active_ms=0):
     result['total_tokens'] = (result['input_tokens'] + result['output_tokens']
                               if result['input_tokens'] is not None and result['output_tokens'] is not None else None)
     result['missing_usage_calls'] = sum(c.get('input_tokens') is None or c.get('output_tokens') is None for c in calls)
-    result['unpriced_calls'] = sum(c.get('estimated_cost_usd') is None for c in calls)
-    result['known_cost_usd'] = float(sum((Decimal(str(c['estimated_cost_usd'])) for c in calls if c.get('estimated_cost_usd') is not None), Decimal(0)))
-    result['estimated_cost_usd'] = result['known_cost_usd'] if not result['unpriced_calls'] else None
     return result
 
 
 class UsageTransport:
     """Feedback calls are measured before output validation, including rejected JSON."""
-    def __init__(self, transport, calls, prices):
-        self.transport, self.calls, self.prices = transport, calls, prices
+    def __init__(self, transport, calls):
+        self.transport, self.calls = transport, calls
 
     def create(self, payload):
         from .model_selection import model_details
@@ -186,7 +147,6 @@ class UsageTransport:
             raise
         finally:
             call['latency_ms'] = round((perf_counter() - start) * 1000, 2)
-            self.prices.apply(call)
             self.calls.append(call)
 
 
@@ -237,7 +197,7 @@ class UsageStore:
     def _ticket_usage(self, db, ticket_id):
         rows = list(db.execute('SELECT record FROM usage_runs WHERE ticket_id=?', (ticket_id,)))
         result = self._summarize_runs(rows)
-        # Authoring costs belong to the feedback, but cannot fill gaps in its
+        # Authoring usage belongs to the feedback, but cannot fill gaps in its
         # historical extraction-attempt accounting.
         extraction_count = sum(json.loads(row['record']).get('purpose') not in ('rule_revision','rule_semantic_eval') for row in rows)
         ticket = db.execute('SELECT attempts FROM feedback_tickets WHERE id=?', (ticket_id,)).fetchone()
@@ -248,7 +208,7 @@ class UsageStore:
     def _completeness(stats, complete):
         stats['complete'] = bool(complete)
         if not complete:
-            for key in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'total_tokens', 'estimated_cost_usd'):
+            for key in ('input_tokens', 'output_tokens', 'cached_input_tokens', 'total_tokens'):
                 stats[key] = None
 
     def design_usage(self, design_id, through=None):

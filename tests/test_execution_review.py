@@ -7,7 +7,6 @@ from ece329_workflow.model_routing import ModelRouter, RoutedGenerator
 from ece329_workflow.models import DesignSession, InteractionState, Stage
 from ece329_workflow.openai_generator import OpenAIStageGenerator, ModelOutputError
 from ece329_workflow.telemetry import ObservedTransport, CURRENT_TRACE
-from ece329_workflow.usage import PriceBook
 from ece329_workflow.localization import validate_translation_references
 
 
@@ -17,7 +16,7 @@ def test_bad_optional_usage_keeps_valid_reply_and_conservative_budget(usage):
     response = {'output_text':'{"valid": true}', 'usage':usage}
     session = SimpleNamespace(current_stage=Stage.HYPOTHESIS, turn_context={})
     budget = TurnBudget({'turn_output_tokens':1000,'max_model_calls':2})
-    trace = SimpleNamespace(data={'calls':[]}, prices=PriceBook({}))
+    trace = SimpleNamespace(data={'calls':[]})
     token = CURRENT_TRACE.set(trace)
     try:
         transport = ObservedTransport(SimpleNamespace(create=lambda _:response), session,

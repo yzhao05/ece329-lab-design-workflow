@@ -422,6 +422,12 @@ def apply_design_updates(
 ) -> list[str]:
     """Validate and idempotently commit semantic field updates."""
 
+    from .execution_diagnostics import record
+    def field_event(status, code, field=None, operation=None, **details):
+        record('field_write', status, handler='apply_design_updates', code=code,
+               field_path=field, operation=operation, provenance=provenance,
+               execution_revision=session.revision, **details)
+
     if not isinstance(updates, list):
         return []
     state = ensure_design_state(session)
@@ -454,12 +460,14 @@ def apply_design_updates(
             "REPLACE",
             "CLEAR",
         }:
+            field_event("blocked", "invalid_field_or_operation", field, operation)
             continue
         value = "" if operation == "CLEAR" else _strip_repeated_field_heading(
             field,
             _text(raw.get("value")),
         )[:4000]
         if operation != "CLEAR" and not value:
+            field_event("blocked", "empty_value", field, operation)
             continue
         update_id = str(raw.get("update_id") or "").strip() or _update_identity(
             action_id,
@@ -468,6 +476,7 @@ def apply_design_updates(
             value,
         )
         if update_id in known_ids:
+            field_event("success", "duplicate_update_skipped", field, operation, changed=False)
             continue
         previous = _text(state.get(field))
         signature = str(raw.get("semantic_key") or "").strip().casefold()
@@ -489,6 +498,7 @@ def apply_design_updates(
             next_value = ""
         else:
             next_value = value
+        field_event("success", "applied_to_memory", field, operation, changed=next_value != previous)
         known_ids.add(update_id)
         applied_ids.append(update_id)
         if next_value != previous:

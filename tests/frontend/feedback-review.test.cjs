@@ -94,7 +94,7 @@ test('usage button uses the maintainer route, pagination and logout isolation',a
   assert.equal(h.calls[0].options.headers['X-ECE329-Feedback-Admin-Token'],'test-only');
   assert.equal(h.els.reviewNext.disabled,false);
   const text=h.els.reviewCards.querySelectorAll('p').map(el=>el.textContent).join(' ');
-  assert.match(text,/2000/);assert.match(text,/0.00500000/);assert.match(text,/1分 1秒/);
+  assert.match(text,/2000/);assert.doesNotMatch(text,/0\.00500000|USD|估算费用/);assert.match(text,/1分 1秒/);
   await h.els.reviewNext.fire('click');await flush();
   assert.ok(h.calls[1].url.endsWith('/usage?offset=50'));
   await h.els.reviewLogout.fire('click');
@@ -586,4 +586,43 @@ for(const translations of [[42],{length:1,0:'Fake array'},[''],['仍是中文'],
   h.context.fetch=async()=>{calls++;return {ok:true,json:async()=>({translations})};};
   await assert.rejects(h.context.window.requestDisplayTranslation(['分析正文'],'en'),/Incomplete translation/);
   assert.equal(calls,1);
+});
+
+for(const mode of ['GUIDED_DESIGN','EMVR_DIRECT'])test(`execution evidence is separate, folded and bilingual: ${mode}`,async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();
+  const target=h.item.evidence.evidence.event_chain.find(row=>row.position==='reported');
+  target.execution_diagnostic={version:1,correlation:{request_id:'request-x',revision:2,mode},
+    final_intent:{intent:'UNCLEAR'},advance:{status:'not_advanced'},events:[
+      {step:'semantic_validation',status:'blocked',before:{intent:'ANSWER_CURRENT_QUESTION'},after:{intent:'UNCLEAR'}},
+      {step:'action_validation',status:'blocked',field_path:'dialogue_acts[0]',rule:'<img src=x onerror=alert(1)>'},
+      {step:'stage_check',status:'not_executed'},
+      {step:'reply',status:'success',source:'program_template',template_id:'clarification_output'}],
+    pending_after:{action_id:'pending-x'},experience_execution:[]};
+  await h.els.reviewLogin.fire('submit');await flush();
+  const details=h.els.reviewCards.querySelectorAll('details');
+  const technical=details.find(el=>treeText(el.children[0]).includes('识别与校验详情'));
+  assert.equal(technical.open,false);
+  const readText=treeText(details[0]);
+  assert.match(readText,/原对话执行诊断/);assert.match(readText,/阶段结果: 未推进/);
+  assert.match(readText,/程序澄清模板/);assert.match(readText,/这是反馈提交后的提炼过程/);
+  assert.match(readText,/<img src=x onerror=alert\(1\)>/);
+  assert.ok(!technical.querySelectorAll('img').length);
+  const opinion=h.find('note-');opinion.value='keep this draft';
+  await technical.querySelectorAll('button')[0].fire('click');
+  h.context.window.ECE329I18n={language:'en'};h.context.window.listeners['ece329:language-changed']();
+  const english=h.els.reviewCards.querySelectorAll('details');
+  assert.match(treeText(english[0]),/Original dialogue execution diagnostics/);
+  assert.match(treeText(english[0]),/Stage outcome: Not advanced/);
+  assert.equal(english.find(el=>treeText(el.children[0]).includes('Recognition and validation details')).open,true);
+  assert.equal(h.find('note-').value,'keep this draft');
+  h.context.window.ECE329I18n.language='zh';h.context.window.listeners['ece329:language-changed']();
+  assert.match(treeText(h.els.reviewCards.querySelectorAll('details')[0]),/原对话执行诊断/);
+});
+
+test('legacy execution evidence is explicitly unknown, not a failed model inference',async()=>{
+  const h=harness();h.item.evidence=evidenceFixture();
+  await h.els.reviewLogin.fire('submit');await flush();
+  const text=treeText(h.els.reviewCards.querySelectorAll('details')[0]);
+  assert.match(text,/历史未记录：无法确认本轮识别/);
+  assert.doesNotMatch(text,/回复选用程序澄清模板/);
 });

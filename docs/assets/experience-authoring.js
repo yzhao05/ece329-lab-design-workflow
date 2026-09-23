@@ -116,7 +116,7 @@
       summary.textContent=`${t(['执行器测试','Executor tests'])}: ${t(names[v?.status]||names.not_tested)}; ${t(['语义评测','Semantic evaluation'])}: ${t(names[e?.semantic_status]||names.not_tested)}; ${t(['完整流程回放','Full workflow replay'])}: ${t(names[e?.full_flow_status]||names.not_tested)}`;
       if(e)summary.textContent+=`\n${t(['模型判断后的受控流程检查','Controlled workflow checks after model classification'])}: ${t(names[e.controlled_flow_status]||names.not_tested)}`;
       if(v?.coverage)summary.textContent+=`\n${t(['正例执行 / 反例检查 / 未覆盖范围','Executed positives / checked negatives / uncovered scopes'])}: ${v.coverage.positive_executed} / ${v.coverage.negative_checked} / ${v.coverage.uncovered.length}`;
-      if(e?.usage)summary.textContent+=`\n${t(['模型评测用量','Model evaluation usage'])}: ${e.usage.total_tokens??t(['未记录','Not recorded'])} tokens; USD ${e.usage.estimated_cost_usd??t(['未记录','Not recorded'])}`;
+      if(e?.usage)summary.textContent+=`\n${t(['模型评测用量','Model evaluation usage'])}: ${e.usage.total_tokens??t(['未记录','Not recorded'])} tokens`;
       if(e)summary.textContent+=`\n${t(['评测次数','Evaluation attempts'])}: ${e.attempt} / ${e.max_runs}`;
       if(e?.status==='failed')summary.textContent+=`\n${t(['模型评测请求或校验失败，请展开详情；未自动重试。','Evaluation request or validation failed; expand details. No automatic retry.'])}`;
     };

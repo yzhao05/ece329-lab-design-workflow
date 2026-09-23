@@ -1,10 +1,10 @@
-"""Billing uses actual provider usage, immutable prices and bounded operations."""
+"""Accounting uses actual provider tokens and active time, without fee estimates."""
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from ece329_workflow.usage import PriceBook, read_usage, summarize
+from ece329_workflow.usage import read_usage, summarize
 from ece329_workflow.usage import breakdown
 from ece329_workflow.experience import ExperienceStore, ModelExperienceExtractor
 from ece329_workflow.models import InteractionState
@@ -12,9 +12,6 @@ from tests.test_routing_and_telemetry import research
 from tests.test_feedback_pipeline import pipeline, submit, extraction_response
 from tests.test_model_selection import QUESTION
 from tests.test_security_and_store import call_api, workspace_temp_path
-
-
-RATES = {'input': 2, 'cached_input': 0.5, 'output': 8}
 
 
 @pytest.mark.parametrize('reported_mode', list(InteractionState))
@@ -33,19 +30,13 @@ def test_feedback_usage_belongs_to_reported_mode_not_submission_mode(pipeline, r
     assert not p.service.run_once()
 
 
-def test_provider_specific_usage_prices_and_reasoning_tokens_are_not_mixed():
-    prices = PriceBook({'ECE329_MODEL_PRICING_JSON': json.dumps({
-        'openai/shared-model': RATES, 'deepseek/shared-model': {'input':1,'cached_input':0.1,'output':2}})})
+def test_provider_specific_usage_and_reasoning_tokens_are_not_mixed():
     openai = {'provider':'openai','model_id':'shared-model'}
     deepseek = {'provider':'deepseek','model_id':'shared-model'}
     read_usage({'model':'shared-snapshot','usage':{'input_tokens':1000,'output_tokens':100,
         'input_tokens_details':{'cached_tokens':200},'output_tokens_details':{'reasoning_tokens':30}}},openai)
     read_usage({'model':'shared-model','usage':{'prompt_tokens':1000,'completion_tokens':100,
         'prompt_cache_hit_tokens':200,'completion_tokens_details':{'reasoning_tokens':30}}},deepseek)
-    prices.apply(openai);prices.apply(deepseek)
-    assert openai['estimated_cost_usd'] == pytest.approx(0.0025)
-    assert deepseek['estimated_cost_usd'] == pytest.approx(0.00102)
-    assert deepseek['pricing_key'] == 'deepseek/shared-model'
     assert openai['reported_model'] == 'shared-snapshot'
     assert deepseek['reasoning_tokens'] == 30
     assert summarize([openai,deepseek])['total_tokens'] == 2200  # Reasoning is already included.
@@ -56,7 +47,7 @@ def test_cross_stage_calls_split_without_counting_local_work_twice():
     calls = []
     for stage, model, ms, role in [('IDEA_BRAINSTORMING','gpt-5.4-mini',200,'intent_resolver'),
         ('RESEARCH_QUESTION','gpt-5.5',500,'design_agent')]:
-        calls.append({**priced_call(model), 'stage':stage,'provider':'openai','latency_ms':ms,'agent':role})
+        calls.append({**measured_call(model), 'stage':stage,'provider':'openai','latency_ms':ms,'agent':role})
     rows, stages = breakdown([{'id':'r1','initial_stage':'IDEA_BRAINSTORMING','calls':calls,'latency_ms':1000}])
     assert len(rows) == 2 and {r['model_id'] for r in rows} == {'gpt-5.4-mini','gpt-5.5'}
     assert sum(r['usage']['input_tokens'] for r in stages) == 2000
@@ -91,32 +82,22 @@ def test_current_stage_comes_from_saved_design_not_feedback_or_translation(pipel
     assert p.repo.feedback_detail(ticket['id'])['status'] == 'candidate'
 
 
-def priced_call(model='test'):
+def measured_call(model='test'):
     call = {'model_id': model}
     read_usage({'usage': {'input_tokens': 1000, 'output_tokens': 100,
                          'input_tokens_details': {'cached_tokens': 200}}}, call)
-    PriceBook({'ECE329_MODEL_PRICING_JSON': json.dumps({model: RATES})}).apply(call)
     return call
 
 
-def test_cached_tokens_are_not_double_charged_and_unknowns_are_not_free():
-    call = priced_call()
-    assert call['estimated_cost_usd'] == pytest.approx(0.0025)
+def test_cached_tokens_are_not_double_counted_and_missing_usage_stays_unknown():
+    call = measured_call()
     assert summarize([call])['total_tokens'] == 1100
     unknown = {'model_id': 'unknown'}
-    read_usage({}, unknown); PriceBook({}).apply(unknown)
+    read_usage({}, unknown)
     total = summarize([call, unknown])
     assert total['input_tokens'] is None and total['known_input_tokens'] == 1000
-    assert total['estimated_cost_usd'] is None and total['known_cost_usd'] == pytest.approx(0.0025)
-    assert total['unpriced_calls'] == total['missing_usage_calls'] == 1
-
-
-@pytest.mark.parametrize('raw', ['[]', 'bad', '{"x":{"input":-1,"cached_input":0,"output":1}}',
-                               '{"x":{"input":true,"cached_input":0,"output":1}}',
-                               '{"x":{"input":NaN,"cached_input":0,"output":1}}'])
-def test_invalid_rates_are_rejected(raw):
-    with pytest.raises(ValueError, match='ECE329_MODEL_PRICING_JSON'):
-        PriceBook({'ECE329_MODEL_PRICING_JSON': raw})
+    assert total['missing_usage_calls'] == 1
+    assert total['cached_input_tokens'] is None and total['known_cached_input_tokens'] == 200
 
 
 @pytest.mark.parametrize('mode', list(InteractionState))
@@ -133,7 +114,6 @@ def test_reply_timing_excludes_idle_and_cached_replays_do_not_charge(research, m
         response['usage'] = {'input_tokens': 1000, 'output_tokens': 100, 'input_tokens_details': {'cached_tokens': 200}}
         return response
     p.transport.create = create
-    monkeypatch.setenv('ECE329_MODEL_PRICING_JSON', json.dumps({'gpt-5.4-mini': RATES}))
     request = {'message': QUESTION, 'turn_id': 'usage-turn-001', 'model': 'gpt-5.4-mini'}
     first = p.engine.process_turn(p.session.design_id, request)
     count = len(p.transport.requests)
@@ -148,7 +128,8 @@ def test_reply_timing_excludes_idle_and_cached_replays_do_not_charge(research, m
     assert len(snapshot['reply_timings']) == 2
     stats = p.repo.usage_inbox()['designs'][0]['usage']
     assert stats['input_tokens'] == len(p.transport.requests) * 1000
-    assert stats['estimated_cost_usd'] == pytest.approx(len(p.transport.requests) * 0.0025)
+    assert stats['output_tokens'] == len(p.transport.requests) * 100
+    assert_no_fees(stats)
 
 
 def test_feedback_invalid_json_and_manual_retry_both_count(pipeline):
@@ -159,7 +140,6 @@ def test_feedback_invalid_json_and_manual_retry_both_count(pipeline):
         response = {'output_text': 'invalid'} if len(calls) == 1 else extraction_response(body)
         response['usage'] = {'input_tokens':1000,'output_tokens':100,'input_tokens_details':{'cached_tokens':200}}
         return response
-    p.repo.prices = PriceBook({'ECE329_MODEL_PRICING_JSON': json.dumps({'test': RATES})})
     p.service.extractor = ModelExperienceExtractor(SimpleNamespace(model='test',transport=SimpleNamespace(create=create)), {})
     ticket = submit(p)[2];p.service.run_once()
     first = p.repo.feedback_detail(ticket['id'])
@@ -167,7 +147,8 @@ def test_feedback_invalid_json_and_manual_retry_both_count(pipeline):
     p.service.retry(p.session.design_id,ticket['id'],{});p.service.run_once()
     final = p.repo.feedback_detail(ticket['id'])
     assert final['status'] == 'candidate' and final['usage']['run_count'] == 2
-    assert final['usage']['call_count'] == 3 and final['usage']['estimated_cost_usd'] == pytest.approx(0.0075)
+    assert final['usage']['call_count'] == 3 and final['usage']['total_tokens'] == 3300
+    assert_no_fees(final['usage'])
     assert p.repo.experiences()[0]['usage'] == final['usage']
     stats = p.repo.usage_inbox()['designs'][0]['usage']
     assert stats['dialogue']['active_ms'] == 0 and stats['feedback']['call_count'] == 3
@@ -179,13 +160,14 @@ def test_usage_ledger_survives_restart_and_deduplicates_records():
     repo = ExperienceStore(path)
     repo.register_usage_design('design-a','EMVR_DIRECT')
     record = {'id':'run-one','design_id':'design-a','created':1,'mode':'EMVR_DIRECT',
-              'calls':[priced_call()], 'latency_ms':1234,'revision':1}
+              'calls':[measured_call()], 'latency_ms':1234,'revision':1}
     repo.record_telemetry(record);repo.record_telemetry(record);repo.close()
     restored = ExperienceStore(path)
     stats = restored.usage_inbox()['designs'][0]
     assert stats['complete'] == 1 and stats['usage']['call_count'] == 1
     assert stats['usage']['active_ms'] == 1234
-    assert stats['usage']['estimated_cost_usd'] == pytest.approx(0.0025)
+    assert stats['usage']['total_tokens'] == 1100
+    assert_no_fees(stats['usage'])
     restored.delete_design('design-a')
     assert restored.usage_inbox()['total'] == 0
     restored.close()
@@ -226,7 +208,8 @@ def test_legacy_feedback_with_missing_attempt_usage_remains_incomplete(pipeline)
     job = p.repo.claim()
     p.repo.finish(job,error='old unmetered failure')
     stats = p.repo.feedback_detail(ticket['id'])['usage']
-    assert stats['complete'] is False and stats['estimated_cost_usd'] is None
+    assert stats['complete'] is False and stats['total_tokens'] is None
+    assert_no_fees(stats)
 
 
 def test_deleted_design_cannot_be_resurrected_by_late_usage():
@@ -240,7 +223,7 @@ def test_deleted_design_cannot_be_resurrected_by_late_usage():
     repo = ExperienceStore(path)
     repo.register_usage_design(session.design_id, session.interaction_state.value)
     with measure_translation(repo, session.design_id):
-        CURRENT_USAGE.get()[0].append(priced_call())
+        CURRENT_USAGE.get()[0].append(measured_call())
         sessions.delete(session.design_id)
     assert repo.usage_inbox()['total'] == 0
     with repo.connection() as db:
@@ -264,3 +247,45 @@ def test_new_design_is_registered_without_charging_idempotent_creation(pipeline,
     assert view['current_state']['stage'] == response['current_stage']
     assert view['current_state']['status'] == 'active'
     assert view['usage']['last_dialogue']['stage'] == response['current_stage']
+
+
+FEE_FIELDS = {'estimated_cost_usd', 'known_cost_usd', 'unpriced_calls', 'currency',
+              'pricing_key', 'price_rates_usd_per_million'}
+
+
+def assert_no_fees(value):
+    if isinstance(value, dict):
+        assert not FEE_FIELDS.intersection(value)
+        for item in value.values():
+            assert_no_fees(item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_no_fees(item)
+
+
+def test_legacy_pricing_fields_are_ignored_by_usage_summaries(monkeypatch):
+    # Old deployment settings and persisted pricing must not affect token accounting.
+    monkeypatch.setenv('ECE329_MODEL_PRICING_JSON', 'invalid obsolete configuration')
+    repo = ExperienceStore()
+    try:
+        repo.register_usage_design('legacy', 'GUIDED_DESIGN')
+        call = {**measured_call(), 'estimated_cost_usd': 0.0025,
+                'pricing_key': 'test', 'price_rates_usd_per_million': {'input': 2}}
+        repo.record_telemetry({'id': 'legacy-run', 'design_id': 'legacy', 'created': 1,
+                              'calls': [call], 'latency_ms': 100})
+        stats = repo.usage_inbox()['designs'][0]['usage']
+        assert stats['total_tokens'] == 1100
+        assert stats['active_ms'] == 100
+        assert_no_fees(stats)
+    finally:
+        repo.close()
+
+
+def test_new_measured_call_has_no_pricing_fields():
+    from ece329_workflow.usage import UsageTransport
+    calls = []
+    transport = SimpleNamespace(create=lambda payload: {'usage': {'input_tokens': 10, 'output_tokens': 5}})
+    UsageTransport(transport, calls).create({'model': 'deepseek-flash'})
+    assert calls[0]['input_tokens'] == 10 and calls[0]['output_tokens'] == 5
+    assert calls[0]['provider'] == 'deepseek'
+    assert_no_fees(calls)
