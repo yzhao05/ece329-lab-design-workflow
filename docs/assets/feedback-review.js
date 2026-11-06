@@ -125,7 +125,7 @@
         if(detail==='evaluation_attempt_limit')body.detail='本来源版本的模型评测已达到三次上限。';
         else if(detail==='harness_attempt_limit')body.detail='本来源版本的 Harness 任务已达到三次上限。';
         else if(detail==='harness_busy')body.detail='已有 Harness 任务正在运行，请稍后加载记录。';
-        else if(detail.startsWith('harness_sdk_missing:'))body.detail='后端未安装指定版本的 Harness，请安装项目的 harness 可选依赖。';
+        else if(detail.startsWith('harness_sdk_missing:'))body.detail='后端 Harness 依赖缺失、版本不匹配或运行文件不可用，请重新安装项目的 harness 可选依赖。';
         else if(detail.startsWith('required_missing_fields_question:'))body.detail='缺项询问是必要行为，不能关闭。请重新加载结构化设置。';
         else if(detail.startsWith('unsupported_rule_'))body.detail='规则包含尚未支持的动作或条件，需要代码维护。';
         else if(detail.startsWith('advisory_only:'))body.detail='当前是建议类经验，请先添加受支持的执行规则再回放。';

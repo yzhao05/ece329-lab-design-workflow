@@ -44,8 +44,14 @@ def bounded_transport(transport, seconds):
 
 def available():
     try:
-        return version('deepseek-harness-sdk') == SDK_VERSION
-    except PackageNotFoundError:
+        if any(version(name) != SDK_VERSION for name in ('deepseek-harness-sdk', 'deepseek-harness-runtime-bin')):
+            return False
+        from deepseek_harness_runtime import resolve_bundled_launch_args
+        # Inspect the installed native runtime without starting it or downloading
+        # anything. Match the worker, which does not inherit DSH_RUNTIME_MODE.
+        resolve_bundled_launch_args('exe')
+        return True
+    except (PackageNotFoundError, ImportError, OSError, ValueError):
         return False
 
 

@@ -10,7 +10,7 @@ window.ECE329_LOCALES = {
   "Harness 未生成可用草案，原经验保持不变；请展开验证详情。": "Harness did not produce a usable draft. The original experience is unchanged; expand validation details.",
   "本来源版本的 Harness 任务已达到三次上限。": "This source version has reached its limit of three Harness runs.",
   "已有 Harness 任务正在运行，请稍后加载记录。": "A Harness task is already running. Load records again later.",
-  "后端未安装指定版本的 Harness，请安装项目的 harness 可选依赖。": "The backend lacks the required Harness version. Install the project harness optional dependency.",
+  "后端 Harness 依赖缺失、版本不匹配或运行文件不可用，请重新安装项目的 harness 可选依赖。": "Harness dependencies are missing, versions do not match, or runtime files are unavailable. Reinstall the project's harness optional dependency.",
   "Harness 诊断并生成修订草案：读取脱敏证据、生成草案并检查隔离回放；不自动批准，也不代表真实模型语义评测通过。受模型调用、token、时间和版本次数上限限制。": "Diagnose and draft a revision with Harness: read redacted evidence, generate a draft and check isolated replay. It does not approve the rule or certify real-model semantic accuracy. Model calls, tokens, time and runs per version are bounded.",
 
   "使用说明：审阅流程与按钮指南": "How to use: review workflow and button guide",

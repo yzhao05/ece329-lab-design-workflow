@@ -96,6 +96,8 @@ def _review(engine, session, document, *, kind, language='zh', source=None):
             'local_validation': 'passed', 'model_findings': 'unverified', 'layout_validation': 'not_tested'}}
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
+        if not store._design_exists(db, session.design_id):
+            return {'status': 'skipped_deleted_design'}
         old = db.execute('SELECT record FROM artifact_harness_reviews WHERE cache_key=?', (key,)).fetchone()
         if old:
             cached = json.loads(old['record'])

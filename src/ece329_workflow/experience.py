@@ -237,6 +237,8 @@ class ExperienceStore(UsageStore):
 
     def record_telemetry(self, record):
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self._design_exists(db, record['design_id']): return
             db.execute('INSERT OR IGNORE INTO workflow_telemetry VALUES(?,?,?,?)',
                        (record['id'], record['design_id'], record['created'], encode(record)))
             self._record_usage(db, record)

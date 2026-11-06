@@ -175,13 +175,21 @@ class UsageStore:
 
     def register_usage_design(self, design_id, mode):
         with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self._design_exists(db, design_id): return
             db.execute('INSERT OR IGNORE INTO usage_designs VALUES(?,?,?,1)', (design_id, time(), mode))
+
+    @staticmethod
+    def _design_exists(db, design_id):
+        # Standalone/in-memory experience stores have no session table. In the
+        # durable shared database, check existence in the same write transaction
+        # as the insertion so late workers cannot restore deleted records.
+        return (not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='design_sessions'").fetchone()
+                or db.execute('SELECT 1 FROM design_sessions WHERE design_id=?', (design_id,)).fetchone() is not None)
 
     def _record_usage(self, db, record, kind='dialogue', ticket_id=None):
         # Do not resurrect deleted/TTL-expired designs when a worker returns late.
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='design_sessions'").fetchone():
-            if not db.execute('SELECT 1 FROM design_sessions WHERE design_id=?', (record['design_id'],)).fetchone():
-                return
+        if not self._design_exists(db, record['design_id']): return
         db.execute('INSERT OR IGNORE INTO usage_designs VALUES(?,?,?,0)',
                    (record['design_id'], record['created'], record.get('mode', 'unknown')))
         db.execute('INSERT OR IGNORE INTO usage_runs VALUES(?,?,?,?,?,?)',
@@ -209,8 +217,21 @@ class UsageStore:
         # historical extraction-attempt accounting.
         extraction_count = sum(json.loads(row['record']).get('purpose') not in ('rule_revision','rule_semantic_eval','rule_harness') for row in rows)
         ticket = db.execute('SELECT attempts FROM feedback_tickets WHERE id=?', (ticket_id,)).fetchone()
-        self._completeness(result, ticket is not None and extraction_count >= ticket['attempts'])
+        self._completeness(result, ticket is not None and extraction_count >= ticket['attempts']
+                           and not self._unmetered_harness_run(db, ticket_id=ticket_id))
         return result
+
+    @staticmethod
+    def _unmetered_harness_run(db, *, ticket_id=None, design_id=None, through=None):
+        # A completed draft is not proof that its token usage was persisted.
+        # Also covers interrupted runs and older partially saved records.
+        return db.execute('''SELECT 1 FROM experience_harness_runs h
+            JOIN learned_experiences e ON e.id=h.experience_id
+            JOIN feedback_tickets t ON t.id=e.ticket_id
+            LEFT JOIN usage_runs u ON u.id=h.id AND (? IS NULL OR u.created<=?)
+            WHERE u.id IS NULL AND (? IS NULL OR t.id=?) AND (? IS NULL OR t.design_id=?)
+                AND (? IS NULL OR h.created<=?) LIMIT 1''',
+            (through, through, ticket_id, ticket_id, design_id, design_id, through, through)).fetchone() is not None
 
     @staticmethod
     def _completeness(stats, complete):
@@ -221,6 +242,7 @@ class UsageStore:
 
     def design_usage(self, design_id, through=None):
         with self.connection() as db:
+            db.execute('BEGIN')
             return self._design_usage(db, design_id, through)
 
     def _design_usage(self, db, design_id, through=None):
@@ -244,8 +266,12 @@ class UsageStore:
                 if time() - artifact['created'] > 90: detail['status'] = 'interrupted'
             result['artifact_reviews'].append(detail)
         design = db.execute('SELECT complete FROM usage_designs WHERE design_id=?', (design_id,)).fetchone()
+        unmetered_harness = self._unmetered_harness_run(db, design_id=design_id, through=through)
         for stats in (result, result['dialogue'], result['feedback'], result['translation']):
-            self._completeness(stats, design is not None and design['complete'] and (stats is not result or not interrupted_usage))
+            includes_harness = stats is result or stats is result['feedback']
+            self._completeness(stats, design is not None and design['complete']
+                               and (stats is not result or not interrupted_usage)
+                               and not (includes_harness and unmetered_harness))
         result['replies'] = [{'id': record['id'], 'revision': record.get('revision'), 'reply_ms': record['latency_ms']}
                              for row in rows if row['kind'] == 'dialogue' for record in [json.loads(row['record'])]]
         last = next((json.loads(row['record']) for row in reversed(rows) if row['kind'] == 'dialogue'), None)

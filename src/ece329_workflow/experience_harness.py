@@ -183,21 +183,18 @@ def generate(service, identity, body, runtime_factory=Runtime):
     finally:
         elapsed = round((time.monotonic()-started)*1000, 2)
         report['usage'] = summarize(calls, elapsed)
-        try:
-            with store.connection() as db:
-                db.execute('UPDATE experience_harness_runs SET record=?,lease_until=0 WHERE id=?', (encode(report), run_id))
-        except Exception:
-            logging.getLogger(__name__).exception('Harness record save failed run=%s experience=%s', run_id, identity)
-            raise
         ev = item['evidence'].get('evidence', {})
         try:
             with store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('UPDATE experience_harness_runs SET record=?,lease_until=0 WHERE id=?', (encode(report), run_id))
                 row = db.execute('SELECT design_id FROM feedback_tickets WHERE id=?', (item['ticket_id'],)).fetchone()
-            if row:
-                store.record_feedback_usage({'id':run_id, 'design_id':row['design_id'], 'created':time.time(),
-                    'mode':ev.get('reported_mode') or ev.get('mode','unknown'), 'stage':ev.get('stage','UNKNOWN'),
-                    'stage_basis':'feedback_target', 'calls':calls, 'latency_ms':elapsed,
-                    'purpose':'rule_harness', 'usage':report['usage']}, item['ticket_id'])
+                if row:
+                    store._record_usage(db, {'id':run_id, 'design_id':row['design_id'], 'created':time.time(),
+                        'mode':ev.get('reported_mode') or ev.get('mode','unknown'), 'stage':ev.get('stage','UNKNOWN'),
+                        'stage_basis':'feedback_target', 'calls':calls, 'latency_ms':elapsed,
+                        'purpose':'rule_harness', 'usage':report['usage']}, 'feedback', item['ticket_id'])
         except Exception:
-            logging.getLogger(__name__).exception('Harness usage save failed run=%s experience=%s', run_id, identity)
+            logging.getLogger(__name__).exception('Harness result/usage transaction failed run=%s experience=%s', run_id, identity)
+            raise
     return report

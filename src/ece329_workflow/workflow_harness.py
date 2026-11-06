@@ -68,8 +68,9 @@ class WorkflowHarnessTransport:
             # Do not let the DeepSeek adapter inflate that reservation.
             from .model_selection import model_provider
             if model_provider(template['model']) == 'deepseek':
-                template['_workflow_output_cap'] = min(template.get('_workflow_output_cap', 12000),
-                                                          template.get('max_output_tokens', 12000))
+                requested_limit = template.get('max_output_tokens', 12000)
+                template['_workflow_output_cap'] = min(template.get('_workflow_output_cap', requested_limit),
+                                                          requested_limit)
             runtime = self.runtime_factory(self.transport, template['model'],
                 template['text']['format']['schema'], None, request_template=template,
                 timeout=60, max_calls=1)

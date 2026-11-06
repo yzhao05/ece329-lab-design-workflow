@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 import os
+import sqlite3
 from types import SimpleNamespace
 import pytest
 
@@ -165,6 +166,44 @@ def test_factory_failure_is_recorded_without_stuck_lease(pipeline):
     assert result['status']=='failed' and 'secret runtime error' not in json.dumps(result)
     with p.repo.connection() as db:
         assert db.execute('SELECT lease_until FROM experience_harness_runs').fetchone()[0]==0
+
+
+def test_harness_result_and_usage_commit_atomically(pipeline, monkeypatch):
+    p = pipeline
+    item, body = setup(p)
+    runner = fake([response()])
+    original = p.repo._record_usage
+    def fail_usage(db, record, kind='dialogue', ticket_id=None):
+        if record.get('purpose') == 'rule_harness': raise sqlite3.OperationalError('test write failure')
+        return original(db, record, kind, ticket_id)
+    monkeypatch.setattr(p.repo, '_record_usage', fail_usage)
+    with pytest.raises(sqlite3.OperationalError): generate(p.service, item['id'], body, runner)
+    with p.repo.connection() as db:
+        saved = db.execute('SELECT record FROM experience_harness_runs').fetchone()
+        assert json.loads(saved['record'])['status'] == 'running'
+    assert generate(p.service, item['id'], body, runner)['status'] == 'running'
+    assert runner.requests == 1
+
+
+def test_missing_harness_usage_is_not_reported_as_complete(pipeline):
+    p = pipeline
+    item, body = setup(p)
+    # Make extraction coverage complete independently of authoring coverage.
+    with p.repo.connection() as db:
+        db.execute('UPDATE feedback_tickets SET attempts=0 WHERE id=?', (item['ticket_id'],))
+    p.repo.register_usage_design(p.session.design_id, p.session.interaction_state.value)
+    with p.repo.connection() as db:
+        db.execute('UPDATE usage_designs SET complete=1 WHERE design_id=?', (p.session.design_id,))
+    run = generate(p.service, item['id'], body, fake([response()]))
+    assert p.repo.design_usage(p.session.design_id)['complete']
+    with p.repo.connection() as db:
+        db.execute('DELETE FROM usage_runs WHERE id=?', (run['run_id'],))
+    assert not p.repo.feedback_detail(item['ticket_id'])['usage']['complete']
+    usage = p.repo.design_usage(p.session.design_id)
+    assert not usage['complete'] and usage['total_tokens'] is None
+    assert not usage['feedback']['complete']
+    assert usage['dialogue']['complete']
+    assert p.repo.design_usage(p.session.design_id, through=0)['complete']
 
 
 @pytest.mark.parametrize('model',['deepseek-flash','gpt-5.4-mini'])
