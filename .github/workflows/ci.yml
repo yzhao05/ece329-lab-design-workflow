@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install project
-        run: python -m pip install -e ".[test]"
+        run: python -m pip install -e ".[test,harness]"
 
       - name: Run tests and static checks
         env:
@@ -51,6 +51,13 @@ jobs:
           node --test tests/frontend/insight-folds.test.cjs
           node --test tests/frontend/model-selection.test.cjs
           node --test tests/frontend/experience-authoring.test.cjs
+
+      - name: Smoke test native Harness with simulated providers
+        timeout-minutes: 5
+        env:
+          ECE329_GENERATOR: rule
+          ECE329_TEST_HARNESS_RUNTIME: "1"
+        run: python -m pytest -q tests/test_workflow_harness.py tests/test_experience_harness.py -k real_sdk
 
   container:
     runs-on: ubuntu-latest

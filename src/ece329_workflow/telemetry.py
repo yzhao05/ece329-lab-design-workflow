@@ -113,6 +113,8 @@ class ObservedTransport:
             read_usage(response, row)
             return response
         except Exception as exc:
+            if getattr(exc, '_workflow_usage_response', None) is not None:
+                read_usage(exc._workflow_usage_response, row)
             row['error_type'] = type(exc).__name__
             raise
         finally:

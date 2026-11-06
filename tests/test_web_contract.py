@@ -386,7 +386,10 @@ class WebFrontendContractTests(unittest.TestCase):
 
     def test_ci_checks_python_frontend_and_container(self) -> None:
         self.assertIn("python -m pytest", self.ci_workflow)
-        self.assertIn('[test]', self.ci_workflow)
+        self.assertRegex(self.ci_workflow, r'pip install[^\n]*\.\[[^\]\n]*\btest\b[^\]\n]*\]')
+        self.assertRegex(self.ci_workflow, r'pip install[^\n]*\.\[[^\]\n]*\bharness\b[^\]\n]*\]')
+        self.assertIn('ECE329_TEST_HARNESS_RUNTIME: "1"', self.ci_workflow)
+        self.assertIn('tests/test_workflow_harness.py tests/test_experience_harness.py -k real_sdk', self.ci_workflow)
         self.assertIn("node --check docs/assets/app.js", self.ci_workflow)
         self.assertIn("docker build", self.ci_workflow)
 

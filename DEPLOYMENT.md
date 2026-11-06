@@ -53,8 +53,9 @@ ECE329_SESSION_TTL_DAYS=30
 ECE329_ENABLE_PROMPT_DEBUG=false
 ```
 
-This block contains every environment variable used by the normal production
-path. `ECE329_PROMPT_DEBUG_TOKEN` is intentionally absent: add it only when
+This block is the baseline production configuration. See the provider and
+Harness sections below and `.env.example` for additional settings.
+`ECE329_PROMPT_DEBUG_TOKEN` is intentionally absent: add it only when
 temporarily setting `ECE329_ENABLE_PROMPT_DEBUG=true`, and remove it again when
 debugging ends. Render supplies `PORT` automatically, so do not add a manual
 `PORT` value unless you deliberately want to override Render's default.
@@ -140,3 +141,20 @@ A Git push by itself only updates GitHub. The backend must deploy the new commit
 Check the `deploy-backend` job and then Render's successful deployment status. A hook acceptance only means the deploy was requested, not completed. Once the new backend starts, reload the maintainer record and look for “历史证据已自动升级”. For a server-side audit, inspect the migration table with your existing database administration tools. Do not expose a public migration endpoint or run migration against a fresh CI database as a substitute for upgrading production.
 
 Render deployment hooks: https://render.com/docs/deploy-hooks
+
+
+## Maintainer Harness pilot
+
+The Docker build installs `.[production,harness]`, pinning the official SDK and matching runtime to `0.2.1rc2`. Rebuild the backend image and publish the updated `docs/` frontend together. Non-container installations should run `python -m pip install -e ".[production,harness]"` and restart their WSGI server. No new API key or environment variable is required: the pilot uses the existing feedback model configuration.
+
+Keep the existing persistent SQLite database; startup creates `experience_harness_runs` without rewriting approved experience. The SDK needs a writable temporary directory and permission to launch its bundled local subprocess and bind a loopback port. It uses a fresh home/workspace per invocation. It does not need a separately installed Node.js or pnpm for this fixed built-in profile.
+
+The pilot is synchronous and bounded to 120 seconds plus process cleanup. The container worker timeout is 180 seconds; configure external reverse proxies accordingly. Multi-instance operation requires a shared admission mechanism; the current SQLite admission limit applies only to instances sharing that database. Model-provider outage, invalid SDK configuration or missing dependency produces a recorded failure without silent fallback or auto-approval.
+
+To remove the pilot, stop active runs, deploy the pre-Harness application and restore its dependency environment. Do not overwrite the current database with the pre-change backup unless you intend to discard subsequent user activity. The added table is additive and can remain unused by the prior application.
+
+### Workflow Harness rollout
+
+Online production transports now enable `dialogue,stage,translation,artifact` by default. Set `ECE329_HARNESS_ENABLED=false` for an application-level rollback, or select a subset using `ECE329_HARNESS_TASKS`. The existing provider/model settings and per-turn output budget remain in force. Each existing call has one SDK run, one upstream call and a 60-second runtime bound; existing host recovery logic remains authoritative. Known local limitations bypass the SDK without an additional paid request and are recorded. Runtime failures do not trigger an extra direct request.
+
+Startup also creates `artifact_harness_reviews`; keep the existing persistent database. Report and EMVR Builder reviews are read-only and cached by exact version/content/language/model. Cached failures do not silently retry on repeated downloads. The maintainer usage page exposes review results and actual tokens; no estimated costs are added. Report review cannot prove visual layout or Unity compilation. Deploy frontend assets with the backend. Native SDK checks use simulated upstream responses; a real-provider acceptance test is still needed before claiming model quality.

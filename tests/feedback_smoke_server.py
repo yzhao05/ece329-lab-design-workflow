@@ -49,6 +49,11 @@ def main():
         from tests.test_feedback_pipeline import candidate
         from ece329_workflow.experience_rules import contract
         def revision_response(request):
+            if request['text']['format']['name']=='feedback_harness_revision':
+                return {'output_text':json.dumps({'candidate_json':json.dumps(candidate(execution=contract(),stages=['IDEA_BRAINSTORMING'])),
+                    'observations':[{'evidence_ref':'user_feedback','description':'The user reports repeated questioning.'}],
+                    'hypotheses':['The cause needs verification.'],'unknowns':['Historical state may be incomplete.'],
+                    'unsupported_actions':[]})}
             if request['text']['format']['name']=='experience_semantic_evaluation':
                 from tests.test_experience_rule_capabilities import EvalTransport
                 return EvalTransport().create(request)

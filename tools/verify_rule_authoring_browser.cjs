@@ -4,6 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const base=process.argv[2];
+const harness=process.argv.includes('--harness');
 if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL required');
 (async()=>{
   const browser=await chromium.launch({headless:true,executablePath:process.env.ECE329_SMOKE_BROWSER});
@@ -14,7 +15,7 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
     assert.equal(created.status(),201);const design=await created.json();
     const submitted=await context.request.post(`${base}/v1/designs/${design.design_id}/feedback`,{
       headers:{Authorization:`Bearer ${design.design_access_token}`},
-      data:{message:'不要修改保留当前设计并继续，却仍询问旧修改',category:'cross_stage_edit',request_id:'browser-rule-feedback-1'}});
+      data:{message:'不要修改保留当前设计并继续，却仍询问旧修改',category:'cross_stage_edit',request_id:'browser-rule-feedback-1',scope:'session'}});
     assert.equal(submitted.status(),201);
     const headers={'X-ECE329-Feedback-Admin-Token':'smoke-maintainer'};
     let item;
@@ -24,13 +25,21 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
       if(!item)await page.waitForTimeout(200);
     }
     assert.ok(item);
+    await page.route('**/v1/feedback/experiences?*',async route=>{
+      const response=await route.fetch(),body=await response.json();
+      body.experiences=body.experiences.filter(x=>x.id===item.id);
+      await route.fulfill({response,json:body});
+    });
     await page.goto(`${base}/feedback-review.html`);
     await page.locator('#reviewToken').fill('smoke-maintainer');await page.locator('#reviewFilter').selectOption('candidate');
     await page.locator('#reviewLogin button[type=submit]').click();
     const editor=page.locator(`#content-${item.id}`),note=page.locator(`#note-${item.id}`);
     await editor.waitFor();await note.fill('明确拒绝旧修改时，保留当前设计并继续；必须检查缺项。');
-    await page.getByRole('button',{name:'根据审阅意见生成修订草案',exact:true}).click();
-    await page.getByText('已生成草案；当前生效版本未改变。',{exact:true}).waitFor();
+    const originalJson=await editor.inputValue();
+    await page.getByRole('button',{name:harness?'Harness 诊断并生成修订草案':'根据审阅意见生成修订草案',exact:true}).click();
+    await page.getByText('已生成草案；当前生效版本未改变。',{exact:true}).waitFor({timeout:120000});
+    assert.equal(await editor.inputValue(),originalJson);
+    if(harness)assert.ok((await page.locator('.rule-authoring').innerText()).includes('Harness 回放不等于真实模型语义评测'));
     const current=JSON.parse(await editor.inputValue());current.summary='人工并发编辑';await editor.fill(JSON.stringify(current));
     await page.getByRole('button',{name:'将草案填入 JSON',exact:true}).click();
     assert.equal(JSON.parse(await editor.inputValue()).summary,'人工并发编辑');
@@ -71,6 +80,6 @@ if(!/^http:\/\/127\.0\.0\.1:\d+$/.test(base||''))throw Error('Local fixture URL 
     const out=path.resolve(__dirname,'../.test-tmp/rule-authoring-browser');fs.mkdirSync(out,{recursive:true});
     await page.screenshot({path:path.join(out,'mobile.png'),fullPage:true});
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({passed:true,experience:item.id,checks:'draft conflict, explicit apply, refresh, bilingual labels, exact-version replay/approval, narrow layout'}));
+    console.log(JSON.stringify({passed:true,harness,experience:item.id,checks:'draft conflict, explicit apply, refresh, bilingual labels, exact-version replay/approval, narrow layout'}));
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -7,10 +7,74 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: http://127.0.0.1:8080 http://localhost:8080; object-src 'none'; base-uri 'self'; form-action 'self'">
   <title>反馈经验审阅 · ECE329</title>
   <link rel="stylesheet" href="assets/styles.css?v=20260921-english-display">
-  <link rel="stylesheet" href="assets/feedback.css?v=20260922-dialogue-execution">
+  <link rel="stylesheet" href="assets/feedback.css?v=20260924-review-help">
 </head>
 <body>
   <main class="feedback-review">
+    <details class="review-help">
+      <summary>使用说明：审阅流程与按钮指南</summary>
+      <div class="review-help-content">
+        <p>本指南适用于 Guided 和 EMVR 的反馈与经验。点击本标题展开或收起；各证据区域可独立展开。</p>
+        <h2>建议审阅流程</h2>
+        <ol>
+          <li>输入维护者令牌，选择“全部反馈”或经验状态，点击“加载记录”。先查看原始反馈、问题前后对话和当时的流程状态。</li>
+          <li>区分原对话事实、Agent 分析和反馈提交后的提炼诊断；缺失或未验证的信息不能当作确定结论。</li>
+          <li>核对经验的适用范围、模式、阶段、触发条件和例外，填写人工审阅意见；需要修改时同步编辑经验 JSON，或生成修订草案后核对差异。</li>
+          <li>建议类经验提供指导；可执行规则还需核对实际执行条件并完成当前版本的隔离回放。修改规则或范围后重新验证，不能沿用旧结果。</li>
+          <li>确认后点击对应的启用按钮；不采用时填写原因并点击“停止经验”。启用从下一轮检索生效，随后用“经验执行记录”核对是否适用、执行及验证通过。</li>
+        </ol>
+        <h2>页面与证据按钮</h2>
+        <dl>
+          <dt>加载记录；上一页／下一页</dt>
+          <dd>按选定状态加载或刷新列表，或切换记录页。更换筛选条件后需点击“加载记录”。反馈处理状态与经验启用状态是两套独立状态。</dd>
+          <dt>设计用量记录；经验执行记录</dt>
+          <dd>前者查看各设计的 token、活跃时长及模型信息；后者查看检索、注入、适用判断、动作与验证，并可进入关联规则查看或停止。</dd>
+          <dd>报告及 Builder 的 Harness 审查见“设计用量记录”；对话的 Harness 调用与后端校验见“经验执行记录”。部分审查会列出覆盖范围，生成完成不代表检查或审批通过。</dd>
+          <dt>查看分析结果与对话证据；查看关联经验</dt>
+          <dd>展开反馈证据，或进入该反馈生成的经验。对话与状态说明便于阅读，原始 JSON 用于核对完整可用字段；原对话执行诊断与经验提炼诊断分别查看。</dd>
+          <dt>展开／收起；复制 JSON／下载 JSON</dt>
+          <dd>独立控制对应详情区域；复制或下载该区域的原始记录。原始 JSON 不随显示语言改变，也不包含尚未保存的人工编辑。</dd>
+          <dt>导出经验与上下文（JSON）</dt>
+          <dd>待审阅、已启用和已停止经验均可导出；包含已保存的经验、关联反馈、可用上下文和审阅记录，不包含未保存草稿。</dd>
+          <dt>重试分析</dt>
+          <dd>对允许重试的失败反馈再次提炼经验，可能调用模型；仍受总共十次分析尝试上限限制。重试提炼不代表修复了原对话。</dd>
+          <dt>返回设计工作台；English／中文；Retry translation</dt>
+          <dd>返回工作台；切换显示语言；在翻译失败时手动重试。显示翻译不会修改原始证据、经验 JSON 或人工填写的内容。</dd>
+          <dt>清除令牌</dt>
+          <dd>清除当前页面的令牌、记录和审阅草稿。令牌不会保存在浏览器存储中；操作前请处理未保存的修改。</dd>
+        </dl>
+        <h2>人工审阅与启用</h2>
+        <p>三个输入框依次记录原不当内容、人工修改后的正确内容、处理意见。前两项由维护者成对填写，可涉及多个字段；无需修改时两项均留空。处理意见必填，例如“总结没问题，批准加入经验层。”；最终操作以实际点击的按钮为准。</p>
+        <p>填写修正意见不会自动改写经验 JSON。请同步修改经验内容，或使用修订草案流程。适用范围控制本次设计、本课程项目或通用经验；modes、stages 等字段仍需与实际用途一致。</p>
+        <dl>
+          <dt>启用经验；批准修订并启用；重新启用</dt>
+          <dd>分别用于待审阅、已启用和已停止记录。提交当前 JSON、范围和审阅意见，通过校验后保存并启用新版本；可执行规则还需满足验证及条件确认要求。</dd>
+          <dt>停止经验</dt>
+          <dd>填写停止原因后使经验不再参与后续检索，保留内容和历史记录；以后可修改并重新启用。停止不会撤销已发生的设计修改。</dd>
+          <dt>已核对新版本，继续使用草稿</dt>
+          <dd>记录被其他审阅者更新时，先核对新版本和证据，再确认继续编辑保留的草稿；此按钮本身不批准、不启用。</dd>
+        </dl>
+        <h2>规则草案、配置与验证按钮</h2>
+        <p>Harness 诊断并生成修订草案：读取脱敏证据、生成草案并检查隔离回放；不自动批准，也不代表真实模型语义评测通过。受模型调用、token、时间和版本次数上限限制。</p>
+        <dl>
+          <dt>根据审阅意见生成修订草案</dt>
+          <dd>根据当前经验和三项人工意见调用模型生成草案，展示修改前后差异。核对并编辑草案后再填入 JSON；生成不等于批准，不改变当前生效版本。</dd>
+          <dt>从当前 JSON 载入结构化设置；根据结构化设置生成草案</dt>
+          <dd>先将 JSON 中的条件载入配置表单，再按调整后的待办类型、重复次数等设置生成草案。未支持的动作或未转换的文字限制不能被忽略，需要代码维护或保留为建议类经验。</dd>
+          <dt>将草案填入 JSON；确认用草案替换当前 JSON</dt>
+          <dd>前者将核对后的草案放入主编辑器，仍未保存或批准。若与手动修改冲突，先合并，或明确选择后者覆盖当前 JSON；填写后需重新验证。</dd>
+          <dt>隔离回放当前 JSON</dt>
+          <dd>检查当前规则的执行器行为、正反例及范围覆盖，不修改真实设计。模拟回放通过不代表真实模型识别通过；历史快照不足时会标明无法完整回放。</dd>
+          <dt>运行真实模型语义评测及隔离流程回放</dt>
+          <dd>明确点击后才调用真实模型，可能产生 API 费用。每个来源版本最多三次，每次最多一个请求、8192 输出 token，不自动重试；执行器、语义及完整流程结果分别查看。</dd>
+          <dt>从历史版本生成恢复草案</dt>
+          <dd>选择历史版本生成待核对草案，填入 JSON 后重新验证和批准；不会直接恢复生效，也不会撤销已发生的用户设计修改。</dd>
+        </dl>
+        <p>批准前勾选实际执行条件确认项，核对没有遗漏文字限制。“已批准”“已注入”“模型声称采用”和“程序验证通过”不是同一结果；以各环节的记录为准。</p>
+        <h2>草稿与数据保留</h2>
+        <p>当前页面内点击“加载记录”、展开收起或切换语言会保留审阅草稿。浏览器刷新、关闭页面、离开本页或清除令牌后不能保证保留，请先完成审阅或自行保存草稿。导出按钮只导出已保存记录。</p>
+      </div>
+    </details>
     <a href="./">返回设计工作台</a>
     <button id="languageToggle" class="ghost-button" type="button" data-i18n-ignore>English</button>
     <button id="translationRetry" class="ghost-button" type="button" hidden>Retry translation</button>
@@ -29,12 +93,12 @@
     <div class="experience-actions"><button id="reviewPrevious" type="button" class="ghost-button" disabled>上一页</button><button id="reviewNext" type="button" class="ghost-button" disabled>下一页</button></div>
   </main>
   <script src="assets/config.js?v=20260824-unified-semantics"></script>
-  <script src="assets/i18n-catalog.js?v=20260922-token-usage"></script>
+  <script src="assets/i18n-catalog.js?v=20261106-harness-audit"></script>
   <script src="assets/i18n.js?v=20260921-bilingual-review"></script>
-  <script src="assets/usage-ui.js?v=20260922-token-usage"></script>
+  <script src="assets/usage-ui.js?v=20261106-harness-audit"></script>
   <script src="assets/feedback-diagnostics.js?v=20260921-check-budget"></script>
   <script src="assets/review-evidence.js?v=20260922-dialogue-execution"></script>
-  <script src="assets/experience-authoring.js?v=20260922-token-usage"></script>
-  <script src="assets/feedback-review.js?v=20260922-token-usage"></script>
+  <script src="assets/experience-authoring.js?v=20261106-harness-audit"></script>
+  <script src="assets/feedback-review.js?v=20261106-harness-audit"></script>
 </body>
 </html>

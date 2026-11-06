@@ -20,6 +20,17 @@
 .feedback-dialog p, .feedback-review p { line-height: 1.6; }
 .feedback-review { max-width: 960px; margin: 30px auto; padding: 0 20px; color: #142d42; }
 .feedback-review h1 { font-size: 1.6rem; }
+.review-help { margin:0 0 24px; border:1px solid #b5d9d4; border-radius:12px; background:#f2faf8; overflow-wrap:anywhere; }
+.review-help > summary { padding:16px; cursor:pointer; font-weight:600; line-height:1.5; }
+.review-help > summary::marker { color:#12817e; }
+.review-help > summary:focus-visible { outline:3px solid #12817e; outline-offset:3px; border-radius:12px; }
+.review-help[open] > summary { border-bottom:1px solid #b5d9d4; }
+.review-help-content { padding:0 20px 16px; line-height:1.7; min-width:0; }
+.review-help-content h2 { margin:24px 0 12px; font-size:1.1rem; }
+.review-help-content ol { padding-left:24px; }
+.review-help-content li { margin:10px 0; }
+.review-help-content dt { margin-top:16px; font-weight:600; }
+.review-help-content dd { margin:4px 0 12px; }
 .feedback-review .feedback-form { max-width: 620px; }
 .experience-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 .experience-card label { display: block; margin: 10px 0; }

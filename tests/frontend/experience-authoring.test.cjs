@@ -23,6 +23,48 @@ function setup(){
   return {host,window,controls,item,status,listeners,api:window.ECE329RuleAuthoring,
     button:text=>host.all('button').find(b=>b.textContent===text)};
 }
+
+test('refresh reconciles completed Harness run while preserving manual draft and JSON',async()=>{
+  const h=setup();
+  h.item.harness_runs=[{run_id:'run1',status:'completed',draft:{id:'d',base_version:1,scope:'global',before:{},content:{summary:'server'}}}];
+  const state=h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},request:async()=>{throw Error('unexpected request');},
+    saved:{text:'manual draft',harness:{run_id:'run1',status:'running'},harnessRequest:{id:'pending'}}});
+  assert.equal(state.capture().harness.status,'completed');
+  assert.equal(state.capture().text,'manual draft');
+  assert.equal(h.controls.content.value,'{"summary":"original"}');
+  await h.button('载入已保存的 Harness 草案').fire('click');
+  assert.match(state.capture().text,/server/);
+  assert.equal(h.controls.content.value,'{"summary":"original"}');
+});
+
+test('Harness explicitly requests a bounded draft and cannot approve or overwrite edits',async()=>{
+  const h=setup();let finish,body;
+  const state=h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},request:async(url,o)=>{
+    assert.match(url,/\/harness$/);body=JSON.parse(o.body);return new Promise(r=>finish=r);
+  }});
+  const work=h.button('Harness 诊断并生成修订草案').fire('click');
+  assert.equal(body.confirm_harness,true);assert.ok(body.request_id.length>=16);
+  h.controls.content.value='{"summary":"manual"}';
+  finish({status:'completed',replay:{status:'passed'},draft:{id:'draft-h',base_version:1,scope:'global',content:{summary:'draft'},source:{kind:'harness_revision'}}});
+  await work;
+  assert.equal(h.controls.content.value,'{"summary":"manual"}');
+  assert.equal(state.approval().validation_id,undefined);
+  await h.button('将草案填入 JSON').fire('click');
+  assert.equal(h.button('确认用草案替换当前 JSON').hidden,false);
+  assert.equal(state.capture().harness.status,'completed');
+});
+
+test('Harness network retry preserves its request ID and failure never erases the editor',async()=>{
+  const h=setup(),ids=[];
+  h.api.mount(h.host,{...h,isCurrent:()=>true,getVersion:()=>1,capture(){},request:async(url,o)=>{
+    ids.push(JSON.parse(o.body).request_id);
+    if(ids.length===1)throw Error('network');
+    return {status:'failed',code:'harness_run_failed'};
+  }});
+  await h.button('Harness 诊断并生成修订草案').fire('click');
+  await h.button('Harness 诊断并生成修订草案').fire('click');
+  assert.equal(ids[0],ids[1]);assert.equal(h.controls.content.value,'{"summary":"original"}');
+});
 test('draft generation cannot overwrite concurrent JSON edits or approve automatically',async()=>{
   const h=setup();let finish,calls=[];
   const state=h.api.mount(h.host,{...h,request:(url,o)=>{calls.push(url);return new Promise(r=>finish=r);},isCurrent:()=>true,getVersion:()=>1,capture(){}});

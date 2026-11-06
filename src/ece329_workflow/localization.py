@@ -227,6 +227,8 @@ class DisplayTranslator:
 
 
 def english_pdf(engine, translator, design_id, builder=False):
+    from contextlib import nullcontext
+    from .usage import measure_translation
     from .models import WorkflowStatus, StageCompletionError, InteractionState
     from .reporting import render_emvr_report_pdf, build_emvr_task_report, validate_emvr_report_completeness
     from .builder_input import build_builder_gate1_input, validate_builder_gate1_input, _builder_sections, render_builder_review_pdf
@@ -234,12 +236,24 @@ def english_pdf(engine, translator, design_id, builder=False):
     if session.status is not WorkflowStatus.COMPLETE or session.interaction_state is not InteractionState.EMVR_DIRECT:
         raise StageCompletionError('Complete the EMVR design before exporting a PDF.')
     model = session.model_context.get('selected_model')
+    def translated(value):
+        store = getattr(engine, 'experience_store', None)
+        measured = measure_translation(store, design_id, session.interaction_state.value, session.current_stage.value) if store is not None else nullcontext()
+        # Review runs are metered separately; do not count their elapsed time
+        # again as translation time. The same boundary covers cached translations.
+        with measured:
+            return translator.english_tree(value, model)
     if builder:
         data = build_builder_gate1_input(session)  # Validate the canonical approved input first.
         validate_builder_gate1_input(data)
-        metadata, sections, notes = translator.english_tree(
-            [data['document'], _builder_sections(data), data['handoff_notes']], model)
-        return render_builder_review_pdf(metadata, sections, notes, language='en')
+        source = [data['document'], _builder_sections(data), data['handoff_notes']]
+        metadata, sections, notes = translated(source)
+        body = render_builder_review_pdf(metadata, sections, notes, language='en')
+        engine.review_artifact(session, [metadata, sections, notes], kind='builder', language='en', source=source)
+        return body
     validate_emvr_report_completeness(session)
-    report = translator.english_tree(build_emvr_task_report(session), model)
-    return render_emvr_report_pdf(session, language='en', presentation=report)
+    source = build_emvr_task_report(session)
+    report = translated(source)
+    body = render_emvr_report_pdf(session, language='en', presentation=report)
+    engine.review_artifact(session, report, kind='report', language='en', source=source)
+    return body

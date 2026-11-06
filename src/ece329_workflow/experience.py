@@ -156,6 +156,13 @@ class ExperienceStore(UsageStore):
         with self.connection() as db:
             self.init_usage(db)
             db.executescript('''
+                CREATE TABLE IF NOT EXISTS experience_harness_runs (
+                    id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+                    request_id TEXT NOT NULL, input_hash TEXT NOT NULL, record TEXT NOT NULL,
+                    created REAL NOT NULL, lease_until REAL NOT NULL,
+                    UNIQUE(experience_id,request_id));
+                CREATE TABLE IF NOT EXISTS artifact_harness_reviews (
+                    cache_key TEXT PRIMARY KEY, design_id TEXT NOT NULL, record TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS experience_validations (
                     id TEXT PRIMARY KEY, experience_id TEXT NOT NULL, base_version INTEGER NOT NULL,
                     content_hash TEXT NOT NULL, report TEXT NOT NULL, created REAL NOT NULL);
@@ -192,6 +199,10 @@ class ExperienceStore(UsageStore):
                     AFTER DELETE ON learned_experiences BEGIN
                     DELETE FROM experience_evaluations WHERE experience_id=OLD.id;
                     END;
+                CREATE TRIGGER IF NOT EXISTS experience_harness_deleted
+                    AFTER DELETE ON learned_experiences BEGIN
+                    DELETE FROM experience_harness_runs WHERE experience_id=OLD.id;
+                    END;
             ''')
             # Idempotent upgrade: preserve all content and historical decisions.
             # Bump versions so an already-open legacy review cannot overwrite it.
@@ -200,6 +211,9 @@ class ExperienceStore(UsageStore):
             db.execute("""UPDATE feedback_tickets SET status='candidate'
                 WHERE status IN ('active','rejected','disabled','deleted','stopped')""")
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='design_sessions'").fetchone():
+                db.executescript('''CREATE TRIGGER IF NOT EXISTS artifact_harness_source_deleted
+                    AFTER DELETE ON design_sessions BEGIN
+                    DELETE FROM artifact_harness_reviews WHERE design_id=OLD.design_id; END;''')
                 db.executescript('''CREATE TRIGGER IF NOT EXISTS feedback_source_deleted
                     AFTER DELETE ON design_sessions BEGIN
                     DELETE FROM experience_reviews WHERE experience_id IN
@@ -493,6 +507,9 @@ class ExperienceStore(UsageStore):
             rows = db.execute('SELECT e.*,t.payload AS evidence FROM learned_experiences e JOIN feedback_tickets t ON t.id=e.ticket_id WHERE (? IS NULL OR e.status=?) AND (? IS NULL OR e.id=?) ORDER BY e.updated DESC,e.rowid DESC LIMIT 50 OFFSET ?', (status, status, experience_id, experience_id, offset))
             result = [{**dict(r), 'content': json.loads(r['content']), 'evidence': json.loads(r['evidence'])} for r in rows]
             for item in result:
+                item['harness_runs'] = [dict(json.loads(r['record']), **(
+                    {'status':'failed','code':'harness_interrupted'} if 0 < r['lease_until'] < time.time() else {})) for r in db.execute(
+                    'SELECT record,lease_until FROM experience_harness_runs WHERE experience_id=? ORDER BY created DESC LIMIT 3', (item['id'],))]
                 item['evaluations'] = [dict(r,report=json.loads(r['report'])) for r in db.execute(
                     'SELECT * FROM experience_evaluations WHERE experience_id=? ORDER BY created DESC LIMIT 3',(item['id'],))]
                 item['validations'] = [dict(r, report=json.loads(r['report'])) for r in db.execute(
@@ -753,7 +770,8 @@ class ModelExperienceExtractor:
             return []
         allowed = getattr(generator, 'allowed_models', None)
         candidates = allowed if allowed is not None else [primary]
-        providers = getattr(transport, 'providers', None)
+        from .provider_transport import provider_transport
+        providers = getattr(provider_transport(transport), 'providers', None)
         available = []
         for model in dict.fromkeys(candidates):
             if not model:
@@ -784,6 +802,8 @@ class ModelExperienceExtractor:
     def lease_seconds(self):
         generator = getattr(self.generator, 'primary', self.generator)
         transport = getattr(generator, 'transport', None)
+        from .provider_transport import provider_transport
+        transport = provider_transport(transport) if transport is not None else None
         transports = getattr(transport, 'providers', {}).values() or [transport]
         timeouts = [getattr(getattr(t, 'http', t), '_timeout_seconds', 90) for t in transports if t is not None]
         # A draft and a critic can both take the full configured timeout.

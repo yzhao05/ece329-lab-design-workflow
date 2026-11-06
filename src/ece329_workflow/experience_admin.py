@@ -154,9 +154,14 @@ def replay_draft(store, identity, body):
 def execution_records(store, offset=0):
     if type(offset) is not int or not 0<=offset<=100000: raise ValueError('Invalid offset')
     with store.connection() as db:
-        rows=db.execute("SELECT id,design_id,created,record FROM workflow_telemetry WHERE json_array_length(json_extract(record,'$.experience_execution'))>0 ORDER BY created DESC,id DESC LIMIT 50 OFFSET ?",(offset,))
+        rows=db.execute("SELECT id,design_id,created,record FROM workflow_telemetry WHERE json_array_length(json_extract(record,'$.experience_execution'))>0 OR json_array_length(json_extract(record,'$.harness'))>0 ORDER BY created DESC,id DESC LIMIT 50 OFFSET ?",(offset,))
         result={'records':[{'id':r['id'],'design_id':r['design_id'],'created':r['created'],
-                            'events':json.loads(r['record'])['experience_execution']} for r in rows]}
+                            'events':json.loads(r['record']).get('experience_execution', []),
+                            'harness':json.loads(r['record']).get('harness', []),
+                            'host_checks':{'stage_generation':json.loads(r['record']).get('stages', []),
+                                'execution_diagnostic':json.loads(r['record']).get('execution_diagnostic'),
+                                'diagnostic_status':'recorded' if 'execution_diagnostic' in json.loads(r['record']) else 'historical_not_recorded'}
+                            } for r in rows]}
         from collections import Counter
         groups={}
         recent=db.execute('SELECT record FROM workflow_telemetry ORDER BY created DESC,id DESC LIMIT 1000')

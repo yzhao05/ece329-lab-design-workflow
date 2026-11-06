@@ -5253,6 +5253,7 @@ def generator_from_environment(
         env.get("OPENAI_FINAL_MAX_OUTPUT_TOKENS", "5000"),
         "OPENAI_FINAL_MAX_OUTPUT_TOKENS",
     )
+    production_transport = transport is None
     if transport is None:
         deepseek_transport = None
         if deepseek_key:
@@ -5264,6 +5265,8 @@ def generator_from_environment(
                 _positive_float(env.get('DEEPSEEK_TIMEOUT_SECONDS', '90'), 'DEEPSEEK_TIMEOUT_SECONDS'), deepseek_budget)
         transport = ProviderResponsesTransport(
             OpenAIResponsesHTTPTransport(api_key, timeout) if api_key else None, deepseek_transport)
+    from .workflow_harness import configure as configure_harness
+    transport = configure_harness(transport, env, production=production_transport)
     primary = OpenAIStageGenerator(
         transport=transport,
         model=model,

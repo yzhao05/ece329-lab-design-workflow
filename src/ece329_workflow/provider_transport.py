@@ -115,6 +115,21 @@ class DeepSeekJSONTransport:
         return result
 
 
+def provider_transport(transport):
+    """Inspect provider configuration through instrumentation/runtime wrappers.
+
+    This is read-only. Callers must keep using the original wrapped transport
+    for requests, otherwise they would bypass budgets, usage and Harness.
+    """
+    seen = set()
+    while transport is not None and id(transport) not in seen:
+        seen.add(id(transport))
+        wrapped = getattr(transport, 'transport', None)
+        if wrapped is None: return transport
+        transport = wrapped
+    raise ModelConfigurationError('Transport wrappers form a cycle')
+
+
 class ProviderResponsesTransport:
     """Dispatch every call, including feedback extraction, by the selected ID."""
     def __init__(self, openai=None, deepseek=None):

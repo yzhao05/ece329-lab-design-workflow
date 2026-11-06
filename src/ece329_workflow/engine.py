@@ -6992,7 +6992,14 @@ class WorkflowEngine:
         session = self.store.get(design_id)
         if session.status is not WorkflowStatus.COMPLETE:
             raise StageCompletionError("EMVR设计完成后才会生成PDF总结。")
-        return render_emvr_report_pdf(session)
+        body = render_emvr_report_pdf(session)
+        from .reporting import build_emvr_task_report
+        self.review_artifact(session, build_emvr_task_report(session), kind='report')
+        return body
+
+    def review_artifact(self, session, document, *, kind, language='zh', source=None):
+        from .artifact_harness import review
+        return review(self, session, document, kind=kind, language=language, source=source)
 
     def render_builder_input_pdf(self, design_id: str) -> bytes:
         session = self.store.get(design_id)
@@ -7000,7 +7007,9 @@ class WorkflowEngine:
             raise StageCompletionError("Builder Gate 1输入PDF只适用于EMVR设计。")
         if session.status is not WorkflowStatus.COMPLETE:
             raise StageCompletionError("EMVR设计完成后才会生成Builder Gate 1输入PDF。")
-        return render_builder_gate1_input_pdf(session)
+        body = render_builder_gate1_input_pdf(session)
+        self.review_artifact(session, build_builder_gate1_input(session), kind='builder')
+        return body
 
     def delete_design(self, design_id: str) -> None:
         self.store.delete(design_id)

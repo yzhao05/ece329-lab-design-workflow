@@ -38,6 +38,11 @@
     for(const record of records) {
       const card=node('article');card.className='experience-card';
       card.append(node('h3',`${record.design_id} · ${new Date(record.created*1000).toISOString()}`));
+      if(record.harness?.length) {
+        const completed=record.harness.filter(x=>x.status==='completed').length;
+        card.append(node('p',`Harness ${t(['完成调用','completed calls'])}: ${completed}/${record.harness.length}. ${t(['生成完成不代表阶段检查通过；跳过或失败原因见详情。','Generation completion does not mean stage validation passed; see details for bypass or failure reasons.'])}`));
+        const harness=node('details');harness.append(node('summary',t(['Harness 与后端校验详情','Harness and host validation details'])),node('pre',JSON.stringify({harness:record.harness,host_checks:record.host_checks},null,2)));card.append(harness);
+      }
       const conclusions=record.events.filter(r=>['verification','conflict'].includes(r.step));
       card.append(node('p',conclusions.length?conclusions.map(r=>`${r.rule_id} v${r.version}: ${t(labels[r.code]||['未识别记录类型','Unrecognized record type'])}`).join('\n'):
         t(['本轮未执行可验证的规则动作','No verifiable rule action was executed in this turn'])));
@@ -52,6 +57,12 @@
   }
   function mount(host,{item,controls,request,isCurrent,getVersion,saved,capture,status}) {
     const state=JSON.parse(JSON.stringify(saved||{}));
+    // A refresh may finish a previously running request. Reconcile only that
+    // request's server result; never replace the maintainer's editable draft.
+    if(state.harness?.status==='running'&&state.harness.run_id) {
+      const completed=item.harness_runs?.find(run=>run.run_id===state.harness.run_id&&run.status!=='running');
+      if(completed){state.harness=completed;state.harnessRequest=null;}
+    }
     const panel=node('section');panel.className='rule-authoring';
     const draft=node('textarea');draft.rows=12;draft.value=state.text||'';draft.setAttribute('aria-label','Rule revision draft JSON');draft.setAttribute('data-i18n-ignore','');
     const detail=node('details');detail.open=state.open===true;
@@ -59,7 +70,7 @@
     const before=node('pre'),after=node('pre'),changed=node('pre'),source=node('pre');
     for(const el of [before,after,changed,source])el.setAttribute('data-i18n-ignore','');
     const notice=node('p');notice.setAttribute('role','status');
-    const report=node('details');report.append(node('summary','回放验证详情（非真实模型测试）'));
+    const report=node('details');report.append(node('summary','验证与 Harness 诊断详情'));
     const reportBody=node('pre');reportBody.setAttribute('data-i18n-ignore','');report.append(reportBody);
     const summary=node('p');summary.setAttribute('data-i18n-ignore','');
     const conditionPreview=node('p');conditionPreview.setAttribute('data-i18n-ignore','');
@@ -102,7 +113,8 @@
       source.textContent=state.source?JSON.stringify(state.source,null,2):'';
       try{const a=JSON.parse(state.baseline||'{}'),b=JSON.parse(draft.value||'{}');changed.textContent=JSON.stringify(Object.fromEntries([...new Set([...Object.keys(a),...Object.keys(b)])].filter(k=>JSON.stringify(a[k])!==JSON.stringify(b[k])).map(k=>[k,{before:a[k],after:b[k]}])),null,2);}catch{changed.textContent='';}
       const evalResult=state.evaluation||item.evaluations?.[0];
-      reportBody.textContent=JSON.stringify({executor:state.validation?.report||null,model_evaluation:evalResult||null},null,2);
+      const harnessResult=state.harness||item.harness_runs?.[0];
+      reportBody.textContent=JSON.stringify({executor:state.validation?.report||null,model_evaluation:evalResult||null,harness:harnessResult||null},null,2);
       const names={passed:['通过','Passed'],failed:['未通过','Failed'],not_tested:['未测试','Not tested'],not_applicable:['不适用','Not applicable'],unavailable:['无法完整回放','Full replay unavailable'],insufficient_coverage:['覆盖不足','Insufficient coverage']};
       const approvedId=item.reviews?.find(r=>r.version===item.version)?.content?.source?.validation_id;
       const approvedValidation=item.validations?.find(v=>v.id===approvedId);
@@ -114,6 +126,11 @@
         if(x)conditionPreview.textContent+='\n'+t(['阶段不完整时必须询问具体缺项；旧规则也适用。','An incomplete stage must ask for specific missing information; this also applies to legacy rules.']);
       }catch{conditionPreview.textContent=t(['请先修正 JSON。','Correct the JSON first.']);}
       summary.textContent=`${t(['执行器测试','Executor tests'])}: ${t(names[v?.status]||names.not_tested)}; ${t(['语义评测','Semantic evaluation'])}: ${t(names[e?.semantic_status]||names.not_tested)}; ${t(['完整流程回放','Full workflow replay'])}: ${t(names[e?.full_flow_status]||names.not_tested)}`;
+      if(harnessResult) {
+        const statuses={running:['处理中','Running'],completed:['草案已生成，尚未批准','Draft generated, not approved'],failed:['未完成；请展开详情查看原因','Incomplete; expand details for the reason']};
+        summary.textContent+=`\nHarness: ${t(statuses[harnessResult.status]||['状态未记录','Status not recorded'])}; ${t(['隔离执行器回放','Isolated executor replay'])}: ${t(names[harnessResult.replay?.status]||names.not_tested)}`;
+        summary.textContent+='\n'+t(['Harness 回放不等于真实模型语义评测；批准前请对最终 JSON 重新回放。','Harness replay is not live semantic evaluation; replay the final JSON before approval.']);
+      }
       if(e)summary.textContent+=`\n${t(['模型判断后的受控流程检查','Controlled workflow checks after model classification'])}: ${t(names[e.controlled_flow_status]||names.not_tested)}`;
       if(v?.coverage)summary.textContent+=`\n${t(['正例执行 / 反例检查 / 未覆盖范围','Executed positives / checked negatives / uncovered scopes'])}: ${v.coverage.positive_executed} / ${v.coverage.negative_checked} / ${v.coverage.uncovered.length}`;
       if(e?.usage)summary.textContent+=`\n${t(['模型评测用量','Model evaluation usage'])}: ${e.usage.total_tokens??t(['未记录','Not recorded'])} tokens`;
@@ -129,9 +146,23 @@
       busy=true;
       const baseline=controls.content.value;
       const testedScope=controls.scope.value;
+      if(action==='harness') {
+        const binding=JSON.stringify([baseline,testedScope,note(),getVersion()]);
+        if(!state.harnessRequest||state.harnessRequest.binding!==binding) state.harnessRequest={binding,id:'harness-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2)};
+        extra={...extra,request_id:state.harnessRequest.id,confirm_harness:true};capture();
+      }
       try {
-        const result=await request(`/${item.id}/${action}`,{method:'POST',body:JSON.stringify({version:getVersion(),content:JSON.parse(baseline),scope:controls.scope.value,note:note(),...extra})});
+        let result=await request(`/${item.id}/${action}`,{method:'POST',body:JSON.stringify({version:getVersion(),content:JSON.parse(baseline),scope:controls.scope.value,note:note(),...extra})});
         if(!isCurrent())return;
+        if(action==='harness') {
+          state.harness=result;
+          if(result.status!=='running')state.harnessRequest=null;
+          if(result.status!=='completed'||!result.draft){
+            notice.textContent=result.status==='running'?'Harness 任务仍在处理，请稍后加载记录。':'Harness 未生成可用草案，原经验保持不变；请展开验证详情。';
+            draw();capture();window.ECE329I18n?.refresh();return;
+          }
+          result=result.draft;
+        }
         if(action==='evaluate') {
           state.evaluation=result;state.evaluatedText=baseline;notice.textContent='模型评测已记录；执行器、语义与完整回放结果分别展示。';
         } else if(action==='replay') {
@@ -169,7 +200,20 @@
       conditions:{pending_types:readEditor().pendingTypes,min_repeat_count:Number(repeat.value)},
       reply_style:style.value,unmapped_conditions:unmapped.value.split('\n').map(s=>s.trim()).filter(Boolean)})),
       node('p','结束候选、重新检查阶段、合规推进、校对回复为必要动作；关闭任意已回答待办及补答遗漏问题暂需代码维护。'));
-    panel.append(button('根据审阅意见生成修订草案',()=>call('draft')),config,detail,
+    panel.append(button('Harness 诊断并生成修订草案',()=>call('harness')),
+                 button('载入已保存的 Harness 草案',()=>{
+                   const savedDraft=(state.harness||item.harness_runs?.[0])?.draft;
+                   if(!savedDraft){notice.textContent='尚无已保存的 Harness 草案。';window.ECE329I18n?.refresh();return;}
+                   if(savedDraft.base_version!==getVersion()){notice.textContent='记录版本已更新，草稿已保留。请核对新证据后再提交。';window.ECE329I18n?.refresh();return;}
+                   state.baseline=JSON.stringify(savedDraft.before,null,2);state.baselineScope=savedDraft.scope;
+                   state.sourceVersion=savedDraft.base_version;state.draftId=savedDraft.id;
+                   state.restoreScope=savedDraft.scope;state.source=savedDraft.source;
+                   state.validation=null;state.conditionsConfirmedText=null;confirmed.checked=false;
+                   draft.value=JSON.stringify(savedDraft.content,null,2);state.text=draft.value;detail.open=true;
+                   notice.textContent='已生成草案；当前生效版本未改变。';draw();capture();window.ECE329I18n?.refresh();
+                 }),
+                 node('p','Harness 会调用模型并检查隔离回放：每个来源版本最多 3 次，每次最多 2 个模型请求、每个请求 8192 输出 token，总时限 120 秒。只保存草案，不自动启用。'),
+                 button('根据审阅意见生成修订草案',()=>call('draft')),config,detail,
                  button('隔离回放当前 JSON',()=>call('replay')),versions,
                  button('从历史版本生成恢复草案',()=>call('restore',{restore_version:Number(versions.value)})),notice,report,
                  summary,conditionPreview,confirmation,

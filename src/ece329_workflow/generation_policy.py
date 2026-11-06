@@ -37,7 +37,9 @@ class GenerationPolicy:
             # These are our workflow budgets, not a claim about provider limits.
             if model_provider(model) == 'deepseek':
                 size = 12000 if model == 'deepseek-v4-pro' else 8192
-                adapter = getattr(primary.transport, 'providers', {}).get('deepseek', primary.transport)
+                from .provider_transport import provider_transport
+                transport = provider_transport(primary.transport)
+                adapter = getattr(transport, 'providers', {}).get('deepseek', transport)
                 size = max(size, getattr(adapter, 'max_output_tokens', 8192))
                 provider_cap = 384000
             else:

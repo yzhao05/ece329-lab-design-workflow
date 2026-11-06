@@ -2,8 +2,15 @@
 (() => {
   const english=()=>window.ECE329I18n?.language==='en';
   const stages={IDEA_BRAINSTORMING:['想法探索','Idea exploration'],COURSE_MAPPING_AND_DIRECTION:['课程映射','Course mapping'],LEARNING_OBJECTIVES:['学习目标','Learning objectives'],RESEARCH_QUESTION:['研究问题','Research question'],THEORETICAL_FRAMEWORK:['理论框架','Theoretical framework'],HYPOTHESIS:['假设','Hypothesis'],CONCEPTUAL_OR_VR_SETUP:['实验结构','Experiment setup'],VARIABLES_AND_CONDITIONS:['变量与条件','Variables and conditions'],CONCEPTUAL_PROCEDURE:['实验流程','Procedure'],EXPECTED_DATA_VISUALIZATION:['数据可视化','Visualization'],RESULT_INTERPRETATION:['结果解释','Interpretation'],DESIGN_VALUE_AND_LIMITATIONS:['价值与局限','Value and limitations'],STUDENT_SYNTHESIS_OR_EMVR_OUTPUT:['最终总结','Final synthesis'],UNKNOWN:['阶段未记录','Stage not recorded'],UNATTRIBUTED_PROCESSING:['未分配的本地处理','Unattributed local processing']};
-  const agents={design_agent:['设计 Agent','Design agent'],intent_resolver:['意图解析 Agent','Intent resolver'],experience_extractor:['经验提炼 Agent','Experience extractor'],experience_checker:['经验检查 Agent','Experience checker'],experience_semantic_evaluator:['经验语义评测','Experience semantic evaluation'],translator:['翻译 Agent','Translator']};
+  const agents={experience_harness:['经验 Harness','Experience Harness'],design_agent:['设计 Agent','Design agent'],intent_resolver:['意图解析 Agent','Intent resolver'],experience_extractor:['经验提炼 Agent','Experience extractor'],experience_checker:['经验检查 Agent','Experience checker'],experience_semantic_evaluator:['经验语义评测','Experience semantic evaluation'],translator:['翻译 Agent','Translator']};
+  agents.report_harness=['报告 Harness','Report Harness'];agents.builder_harness=['Builder Harness','Builder Harness'];
   const stageName=stage=>stages[stage]?.[english()?1:0] || stage || (english()?'Not recorded':'未记录');
+  function artifact(el,value) {
+    el.setAttribute('data-i18n-ignore','');el.dataset.harnessArtifact=JSON.stringify(value);
+    const status={reviewed:['已审查，结论待核实','Reviewed; findings unverified'],reviewed_partial:['部分审查，范围见详情','Partially reviewed; see coverage'],failed:['审查失败','Review failed'],
+      interrupted:['审查中断','Review interrupted'],skipped_input_budget:['超过输入预算，未审查','Input budget exceeded; not reviewed']};
+    el.textContent=`${value.kind==='builder'?'Builder Harness':(english()?'Report Harness':'报告 Harness')} · ${value.language} · ${english()?'Revision':'版本'} ${value.revision??'—'} · ${(status[value.status]||['未完成','Incomplete'])[english()?1:0]}${value.execution?.status==='bypassed'?(english()?' · SDK bypassed; existing model path':' · SDK 已跳过，使用原模型路径'):''} · ${english()?'Details':'详情'}`;
+  }
   function identity(el, value) {
     el.setAttribute('data-i18n-ignore','');el.dataset.usageIdentity=JSON.stringify(value);
     if(value.agent) {
@@ -41,11 +48,12 @@
       ? `Input tokens: ${count('input_tokens')} · Output tokens: ${count('output_tokens')} · ${timeLabel}: ${duration(usage.active_ms)} · API calls: ${usage.call_count}`
       : `输入 token：${count('input_tokens')} · 输出 token：${count('output_tokens')} · ${timeLabel}：${duration(usage.active_ms)} · API 调用：${usage.call_count}`;
   }
-  window.ECE329Usage={duration,timing,summary,identity,stopState};
+  window.ECE329Usage={duration,timing,summary,identity,stopState,artifact};
   window.addEventListener('ece329:language-changed',()=>{
     document.querySelectorAll('[data-duration]').forEach(el=>{const data=JSON.parse(el.dataset.duration);timing(el,data.ms,data.total);});
     document.querySelectorAll('[data-usage]').forEach(el=>summary(el,JSON.parse(el.dataset.usage)));
     document.querySelectorAll('[data-usage-identity]').forEach(el=>identity(el,JSON.parse(el.dataset.usageIdentity)));
     document.querySelectorAll('[data-usage-stop]').forEach(el=>stopState(el,JSON.parse(el.dataset.usageStop)));
+    document.querySelectorAll('[data-harness-artifact]').forEach(el=>artifact(el,JSON.parse(el.dataset.harnessArtifact)));
   });
 })();

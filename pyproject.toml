@@ -13,6 +13,7 @@ authors = [{name = "ZJUI ECE329 Workflow Team"}]
 dependencies = ["reportlab>=4.2,<5", "pillow>=10,<13", "jsonschema>=4.23,<5"]
 
 [project.optional-dependencies]
+harness = ["deepseek-harness-sdk==0.2.1rc2"]
 production = ["gunicorn>=23"]
 test = ["pytest>=8,<10", "pdfplumber>=0.11,<1"]
 

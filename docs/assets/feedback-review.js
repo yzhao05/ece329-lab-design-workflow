@@ -107,7 +107,7 @@
     const token = maintainerToken();
     const controller = new AbortController();
     controllers.add(controller);
-    const timeout = setTimeout(() => controller.abort(), /\/(draft|replay|evaluate)$/.test(path) ? 180000 : 30000);
+    const timeout = setTimeout(() => controller.abort(), /\/(draft|replay|evaluate|harness)$/.test(path) ? 180000 : 30000);
     try {
       let response;
       try {
@@ -123,6 +123,9 @@
         if(detail.startsWith('rule_validation_required:'))body.detail='可执行规则需要对当前 JSON、范围和版本重新回放验证。';
         if(detail.startsWith('conditions_confirmation_required:'))body.detail='请先核对并确认实际执行条件。';
         if(detail==='evaluation_attempt_limit')body.detail='本来源版本的模型评测已达到三次上限。';
+        else if(detail==='harness_attempt_limit')body.detail='本来源版本的 Harness 任务已达到三次上限。';
+        else if(detail==='harness_busy')body.detail='已有 Harness 任务正在运行，请稍后加载记录。';
+        else if(detail.startsWith('harness_sdk_missing:'))body.detail='后端未安装指定版本的 Harness，请安装项目的 harness 可选依赖。';
         else if(detail.startsWith('required_missing_fields_question:'))body.detail='缺项询问是必要行为，不能关闭。请重新加载结构化设置。';
         else if(detail.startsWith('unsupported_rule_'))body.detail='规则包含尚未支持的动作或条件，需要代码维护。';
         else if(detail.startsWith('advisory_only:'))body.detail='当前是建议类经验，请先添加受支持的执行规则再回放。';
@@ -156,7 +159,7 @@
   }
   function renderUsage(result) {
     clearCards();
-    el.Cards.append(node('p','活跃时长不含用户等待及排队时间；合计包括对话、经验提炼和设计关联翻译。'));
+    el.Cards.append(node('p','活跃时长不含用户等待及排队时间；合计包括对话、经验提炼、设计关联翻译和报告审查。'));
     for(const item of result.designs) {
       const card=node('article','');card.className='experience-card';
       card.append(node('h2',item.design_id),node('p',`${new Date(item.created*1000).toISOString()} · ${item.mode}`));
@@ -165,6 +168,12 @@
       card.append(node('h3','合计'),usageSummary(item.usage),node('h3','设计对话'),usageSummary(item.usage.dialogue),
         node('h3','经验提炼'),usageSummary(item.usage.feedback),node('h3','设计关联翻译'),usageSummary(item.usage.translation));
       card.append(usageBreakdown(item.usage));
+      for(const review of item.usage.artifact_reviews||[]) {
+        const detail=node('details',''),title=node('summary',''),body=node('pre','');
+        window.ECE329Usage?.artifact(title,review);
+        body.setAttribute('data-i18n-ignore','');body.textContent=JSON.stringify(review,null,2);
+        detail.append(title,body);card.append(detail);
+      }
       el.Cards.append(card);
     }
     if(!result.designs.length) el.Cards.append(node('p','暂无设计用量记录。'));

@@ -13,7 +13,7 @@ RUN addgroup --system app && adduser --system --ingroup app app \
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
-RUN pip install --no-cache-dir ".[production]"
+RUN pip install --no-cache-dir ".[production,harness]"
 
 USER app
 VOLUME ["/data"]
@@ -22,4 +22,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD python -c "import os, urllib.request; port=os.getenv('PORT', '8080'); urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=3)"
 
-CMD ["sh", "-c", "exec gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:${PORT:-8080} ece329_workflow.api:application"]
+CMD ["sh", "-c", "exec gunicorn --workers 1 --threads 4 --timeout 180 --bind 0.0.0.0:${PORT:-8080} ece329_workflow.api:application"]

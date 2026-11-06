@@ -315,8 +315,7 @@ class WorkflowAPI:
                 self._require_design_token(environ, design_id)
                 language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
                 from .localization import validate_language, english_pdf
-                with self._translation_usage(design_id):
-                    body = english_pdf(self.engine, self.translator, design_id) if validate_language(language) == 'en' else self.engine.render_report_pdf(design_id)
+                body = english_pdf(self.engine, self.translator, design_id) if validate_language(language) == 'en' else self.engine.render_report_pdf(design_id)
                 safe_name = f"ece329-emvr-{design_id}-{language}.pdf"
                 return self._respond_bytes(
                     start_response,
@@ -336,8 +335,7 @@ class WorkflowAPI:
                 self._require_design_token(environ, design_id)
                 language = parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0]
                 from .localization import validate_language, english_pdf
-                with self._translation_usage(design_id):
-                    body = english_pdf(self.engine, self.translator, design_id, builder=True) if validate_language(language) == 'en' else self.engine.render_builder_input_pdf(design_id)
+                body = english_pdf(self.engine, self.translator, design_id, builder=True) if validate_language(language) == 'en' else self.engine.render_builder_input_pdf(design_id)
                 safe_name = f"ece329-emvr-builder-gate1-{design_id}-{language}.pdf"
                 return self._respond_bytes(
                     start_response,
@@ -367,11 +365,14 @@ class WorkflowAPI:
                         from .localization import validate_language
                         language = validate_language(parse_qs(environ.get('QUERY_STRING', '')).get('language', ['zh'])[0])
                         report = self.engine.build_guided_summary_report(design_id)
+                        source_report = deepcopy(report)
                         if language == 'en':
                             with self._translation_usage(design_id):
                                 report = self.translator.english_tree(report, session.model_context.get('selected_model'))
+                        pdf = render_design_report_pdf(report, language=language)
+                        self.engine.review_artifact(session, report, kind='report', language=language, source=source_report)
                         return self._respond_bytes(start_response, HTTPStatus.OK,
-                            render_design_report_pdf(report, language=language), [
+                            pdf, [
                                 ('Content-Type', 'application/pdf'),
                                 ('Content-Disposition', f'attachment; filename="ece329-guided-summary-{design_id}-{language}.pdf"')])
                     body = self.engine.render_guided_summary_text(design_id)
@@ -444,7 +445,7 @@ class WorkflowAPI:
                     self.feedback.retry(ticket['design_id'], ticket_id, self._read_json(environ))
                     return self._respond(start_response, HTTPStatus.ACCEPTED, {'id': ticket_id, 'status': 'queued'})
 
-            rule_admin = re.fullmatch(r'/v1/feedback/(?:experiences/([a-f0-9]{32})/(draft|replay|restore|configure|evaluate)|executions)', path)
+            rule_admin = re.fullmatch(r'/v1/feedback/(?:experiences/([a-f0-9]{32})/(draft|replay|restore|configure|evaluate|harness)|executions)', path)
             if rule_admin and method in {'POST','GET'}:
                 candidate = str(environ.get('HTTP_X_ECE329_FEEDBACK_ADMIN_TOKEN', ''))
                 if not self.settings.feedback_admin_token or not hmac.compare_digest(candidate.encode(), self.settings.feedback_admin_token.encode()):
@@ -457,9 +458,12 @@ class WorkflowAPI:
                 if method=='POST' and identity:
                     body=self._read_json(environ)
                     allowed={'version','content','note','scope','restore_version','conditions','unmapped_conditions','reply_style','ask_missing_fields','confirm_model_evaluation'}
+                    if action=='harness': allowed |= {'confirm_harness','request_id'}
                     if set(body)-allowed: raise ValueError('Unknown rule authoring field')
                     from .experience_evaluation import evaluate
-                    result=(evaluate(self.feedback,identity,body) if action=='evaluate' else
+                    from .experience_harness import generate as harness_draft
+                    result=(harness_draft(self.feedback,identity,body) if action=='harness' else
+                            evaluate(self.feedback,identity,body) if action=='evaluate' else
                             configure_draft(self.feedback.store,identity,body) if action=='configure' else
                             generate_draft(self.feedback,identity,body) if action=='draft' else
                             replay_draft(self.feedback.store,identity,body) if action=='replay' else

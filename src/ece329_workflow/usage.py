@@ -33,6 +33,9 @@ def measure_translation(store, design_id, mode='unknown', stage='UNKNOWN'):
 
 
 def read_usage(response, call):
+    if isinstance(response, dict) and isinstance(response.get('_workflow_harness'), dict):
+        call['harness'] = {key: response['_workflow_harness'][key] for key in ('task', 'status', 'reason', 'model_calls')
+                           if key in response['_workflow_harness']}
     usage = response.get('usage') if isinstance(response, dict) else None
     usage = usage if isinstance(usage, dict) else {}
     # Provider adapters may already normalize their envelope. Raw Chat usage
@@ -58,6 +61,9 @@ def read_usage(response, call):
 
 
 def agent_role(schema):
+    if schema == 'ece329_report_review': return 'report_harness'
+    if schema == 'ece329_builder_review': return 'builder_harness'
+    if schema == 'feedback_harness_revision': return 'experience_harness'
     if schema == 'experience_semantic_evaluation': return 'experience_semantic_evaluator'
     if not schema:
         return 'unknown_agent'
@@ -142,6 +148,8 @@ class UsageTransport:
             read_usage(response, call)
             return response
         except Exception as exc:
+            if getattr(exc, '_workflow_usage_response', None) is not None:
+                read_usage(exc._workflow_usage_response, call)
             call['error_type'] = type(exc).__name__
             call.update(getattr(exc, 'transport_metadata', {}))
             raise
@@ -199,7 +207,7 @@ class UsageStore:
         result = self._summarize_runs(rows)
         # Authoring usage belongs to the feedback, but cannot fill gaps in its
         # historical extraction-attempt accounting.
-        extraction_count = sum(json.loads(row['record']).get('purpose') not in ('rule_revision','rule_semantic_eval') for row in rows)
+        extraction_count = sum(json.loads(row['record']).get('purpose') not in ('rule_revision','rule_semantic_eval','rule_harness') for row in rows)
         ticket = db.execute('SELECT attempts FROM feedback_tickets WHERE id=?', (ticket_id,)).fetchone()
         self._completeness(result, ticket is not None and extraction_count >= ticket['attempts'])
         return result
@@ -222,9 +230,22 @@ class UsageStore:
         result['dialogue'] = self._summarize_runs([r for r in rows if r['kind'] == 'dialogue'])
         result['feedback'] = self._summarize_runs([r for r in rows if r['kind'] == 'feedback'])
         result['translation'] = self._summarize_runs([r for r in rows if r['kind'] == 'translation'])
+        artifact_records = [json.loads(row['record']) for row in db.execute(
+            "SELECT record FROM artifact_harness_reviews WHERE design_id=? AND (? IS NULL OR json_extract(record,'$.created')<=?) ORDER BY json_extract(record,'$.created') DESC LIMIT 10",
+            (design_id, through, through))]
+        result['artifact_reviews'] = []
+        interrupted_usage = db.execute(
+            "SELECT 1 FROM artifact_harness_reviews WHERE design_id=? AND (? IS NULL OR json_extract(record,'$.created')<=?) AND json_extract(record,'$.harness_review.status') IN ('running','interrupted') LIMIT 1",
+            (design_id, through, through)).fetchone() is not None
+        for artifact in artifact_records:
+            detail = {**artifact['harness_review'], 'revision': artifact.get('revision'), 'created': artifact['created']}
+            if detail['status'] == 'running':
+                interrupted_usage = True
+                if time() - artifact['created'] > 90: detail['status'] = 'interrupted'
+            result['artifact_reviews'].append(detail)
         design = db.execute('SELECT complete FROM usage_designs WHERE design_id=?', (design_id,)).fetchone()
         for stats in (result, result['dialogue'], result['feedback'], result['translation']):
-            self._completeness(stats, design is not None and design['complete'])
+            self._completeness(stats, design is not None and design['complete'] and (stats is not result or not interrupted_usage))
         result['replies'] = [{'id': record['id'], 'revision': record.get('revision'), 'reply_ms': record['latency_ms']}
                              for row in rows if row['kind'] == 'dialogue' for record in [json.loads(row['record'])]]
         last = next((json.loads(row['record']) for row in reversed(rows) if row['kind'] == 'dialogue'), None)
