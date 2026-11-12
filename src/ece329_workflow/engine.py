@@ -2229,6 +2229,7 @@ def _persist_guided_stage_draft(
         session.interaction_state is not InteractionState.GUIDED_DESIGN
         or stage is Stage.IDEA_BRAINSTORMING
         or payload.get("clarification_required") is True
+        or payload.get("reference_only") is True
     ):
         return
     persistent = {
@@ -2247,6 +2248,25 @@ def _persist_guided_stage_draft(
         draft = {}
         drafts[stage.value] = draft
     _deep_merge(draft, persistent)
+
+
+def _bind_reference_candidate(session, pending_action, reference_draft):
+    """Keep a field-bound suggestion pending until the user accepts it."""
+    if not isinstance(pending_action, dict):
+        return pending_action
+    updated = deepcopy(pending_action)
+    expected_field = recoverable_pending_field(updated)
+    if (expected_field and isinstance(reference_draft, dict)
+            and reference_draft.get("field") == expected_field
+            and isinstance(reference_draft.get("value"), str)
+            and reference_draft["value"].strip()):
+        updated.update(candidate_answer=reference_draft["value"].strip(),
+                       candidate_binding_authorized=True,
+                       candidate_source="PROFESSIONAL_REFERENCE",
+                       candidate_resolution=UserIntent.ANSWER_CURRENT_QUESTION.value)
+    dialogue_state(session)["pending_action"] = deepcopy(updated)
+    set_pending_action_snapshot(session, updated)
+    return updated
 
 
 def _persist_guided_student_summary(
@@ -3819,57 +3839,6 @@ class WorkflowEngine:
         message: str,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         pending = hydrate_pending_action_from_history(session)
-        if (session.interaction_state is InteractionState.EMVR_DIRECT
-                and '参考' in message and re.search(r'无关|不相关|不对应|问的是|补齐研究问题', message)
-                and not re.search(r'改为|改回|改成|替换|删除|新增|只保留|设为|就写', message)
-                and isinstance(pending, dict)):
-            return validate_resolved_intent(resolved_intent(
-                UserIntent.REQUEST_MORE_EXAMPLES, confidence=1.0, source='EMVR_REFERENCE_CORRECTION',
-                dialogue_acts=[{'type':'REQUEST_REFERENCE', 'target':recoverable_pending_field(pending),
-                               'content':message, 'confidence':1.0}], actions_authoritative=True), pending), pending
-        if session.interaction_state is InteractionState.EMVR_DIRECT and _compact_control_text(message) in {
-            '继续回答剩余问题', '回答剩余问题', '继续回答未完成的问题',
-        }:
-            start = session.model_context.get('design_history_start', 0)
-            start = start if isinstance(start, int) and start >= 0 else 0
-            for entry in reversed(session.history[start:]):
-                payload = entry.get('output', {}).get('stage_payload', {})
-                if payload.get('pending_student_questions'):
-                    return resolved_intent(UserIntent.ASK_COURSE_QUESTION, confidence=1.0, source='EMVR_QUESTION_CONTINUATION',
-                                           semantic_updates={'student_questions':deepcopy(payload['pending_student_questions'])}), pending
-                if payload.get('answered_student_questions') or entry.get('resolved_intent', {}).get('intent') == 'NEW_TOPIC':
-                    break
-        procedure_intent = _explicit_emvr_contract_request(session, message, pending)
-        if procedure_intent is not None:
-            return procedure_intent, pending
-        approved_defaults = _implementation_defaults_approval_intent(
-            session,
-            request,
-            message,
-            pending,
-        )
-        if approved_defaults is not None:
-            return approved_defaults, pending
-        if (
-            session.interaction_state is InteractionState.EMVR_DIRECT
-            and isinstance(pending, dict)
-            and pending.get("subject") == IMPLEMENTATION_DEFAULTS_FIELD
-            and re.search(r"总结|提炼|精简|简化", message)
-            and (section_match := re.search(r"第\s*([0-9]+|[一二三四五六七八九十])\s*条", message))
-        ):
-            # A request to restate a numbered, visible contract section is a
-            # presentation operation. It must not become an implementation
-            # replacement, approval, or a request for the user to rewrite it.
-            numeral = section_match.group(1)
-            section_number = int(numeral) if numeral.isdigit() else "一二三四五六七八九十".index(numeral) + 1
-            lines = format_implementation_defaults(build_implementation_defaults(session)).splitlines()
-            section = next((line for line in lines if line.startswith(f"{section_number}. ")), "")
-            if section:
-                return resolved_intent(
-                    UserIntent.UNCLEAR, confidence=1.0,
-                    source="IMPLEMENTATION_SECTION_PRESENTATION",
-                    resolved_value=section,
-                ), pending
         if (
             session.interaction_state is InteractionState.EMVR_DIRECT
             and isinstance(pending, dict)
@@ -3880,110 +3849,166 @@ class WorkflowEngine:
             # confirmations. Enrich the in-memory decision context so they use
             # the same normalization as newly created sessions.
             pending["interaction_state"] = InteractionState.EMVR_DIRECT.value
-        compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
-        if (
-            session.interaction_state is InteractionState.EMVR_DIRECT
-            and isinstance(pending, dict)
-            and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
-            and (compact_control in {
-                "给个参考",
-                "给我个参考",
-                "给我一个参考",
-                "请给我一个参考",
-                "请给个参考",
-                "给一份参考",
-                "请给一份参考",
-                "提供参考",
-                "请提供参考",
-                "给个例子",
-                "请给个例子",
-            } or re.fullmatch(
-                r'(?:请|麻烦)?(?:再)?(?:给我?|提供|来)(?:一?[个份条]|几[个份条])?'
-                r'(?:(?:完整|具体|详细|专业|可直接采用)的?)?(?:参考(?:方案|答案)?|例子|示例)(?:吧|好吗|可以吗|吗)?',
-                compact_control))
-        ):
-            # A pure reference request, including qualifiers such as 完整的,
-            # cannot be meaningful field content. Do not consume mixed edits.
-            # Resolve it locally so a temporary semantic-parser failure does
-            # not turn the help request into another clarification loop.
-            return (
-                validate_resolved_intent(
-                    resolved_intent(
-                        UserIntent.REQUEST_MORE_EXAMPLES,
-                        target=str(pending.get("subject") or "") or None,
-                        confidence=1.0,
-                        source="EMVR_EXPLICIT_REFERENCE_REQUEST",
-                        semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
-                    ),
-                    pending,
-                ),
+        from .harness_semantics import enabled as harness_understanding_enabled
+        harness_understanding = harness_understanding_enabled(self.generator)
+        if not harness_understanding:
+            if (session.interaction_state is InteractionState.EMVR_DIRECT
+                    and '参考' in message and re.search(r'无关|不相关|不对应|问的是|补齐研究问题', message)
+                    and not re.search(r'改为|改回|改成|替换|删除|新增|只保留|设为|就写', message)
+                    and isinstance(pending, dict)):
+                return validate_resolved_intent(resolved_intent(
+                    UserIntent.REQUEST_MORE_EXAMPLES, confidence=1.0, source='EMVR_REFERENCE_CORRECTION',
+                    dialogue_acts=[{'type':'REQUEST_REFERENCE', 'target':recoverable_pending_field(pending),
+                                   'content':message, 'confidence':1.0}], actions_authoritative=True), pending), pending
+            if session.interaction_state is InteractionState.EMVR_DIRECT and _compact_control_text(message) in {
+                '继续回答剩余问题', '回答剩余问题', '继续回答未完成的问题',
+            }:
+                start = session.model_context.get('design_history_start', 0)
+                start = start if isinstance(start, int) and start >= 0 else 0
+                for entry in reversed(session.history[start:]):
+                    payload = entry.get('output', {}).get('stage_payload', {})
+                    if payload.get('pending_student_questions'):
+                        return resolved_intent(UserIntent.ASK_COURSE_QUESTION, confidence=1.0, source='EMVR_QUESTION_CONTINUATION',
+                                               semantic_updates={'student_questions':deepcopy(payload['pending_student_questions'])}), pending
+                    if payload.get('answered_student_questions') or entry.get('resolved_intent', {}).get('intent') == 'NEW_TOPIC':
+                        break
+            procedure_intent = _explicit_emvr_contract_request(session, message, pending)
+            if procedure_intent is not None:
+                return procedure_intent, pending
+            approved_defaults = _implementation_defaults_approval_intent(
+                session,
+                request,
+                message,
                 pending,
             )
-        if (
-            session.interaction_state is InteractionState.EMVR_DIRECT
-            and isinstance(pending, dict)
-            and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
-            and compact_control
-            in {"不确定", "暂时不确定", "我不确定", "不知道", "暂时不知道", "我不知道", "不清楚"}
-        ):
-            # EMVR questions explicitly offer a professional reference.  An
-            # uncertainty response therefore requests that reference; it is
-            # never the physical-mechanism or Unity-field value itself.
-            return (
-                validate_resolved_intent(
-                    resolved_intent(
-                        UserIntent.REQUEST_MORE_EXAMPLES,
-                        confidence=1.0,
-                        source="EMVR_UNCERTAINTY_REFERENCE_REQUEST",
-                        semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+            if approved_defaults is not None:
+                return approved_defaults, pending
+            if (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and isinstance(pending, dict)
+                and pending.get("subject") == IMPLEMENTATION_DEFAULTS_FIELD
+                and re.search(r"总结|提炼|精简|简化", message)
+                and (section_match := re.search(r"第\s*([0-9]+|[一二三四五六七八九十])\s*条", message))
+            ):
+                # A request to restate a numbered, visible contract section is a
+                # presentation operation. It must not become an implementation
+                # replacement, approval, or a request for the user to rewrite it.
+                numeral = section_match.group(1)
+                section_number = int(numeral) if numeral.isdigit() else "一二三四五六七八九十".index(numeral) + 1
+                lines = format_implementation_defaults(build_implementation_defaults(session)).splitlines()
+                section = next((line for line in lines if line.startswith(f"{section_number}. ")), "")
+                if section:
+                    return resolved_intent(
+                        UserIntent.UNCLEAR, confidence=1.0,
+                        source="IMPLEMENTATION_SECTION_PRESENTATION",
+                        resolved_value=section,
+                    ), pending
+            compact_control = re.sub(r"[\s，,。；;！!？?]+", "", message)
+            if (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and isinstance(pending, dict)
+                and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+                and (compact_control in {
+                    "给个参考",
+                    "给我个参考",
+                    "给我一个参考",
+                    "请给我一个参考",
+                    "请给个参考",
+                    "给一份参考",
+                    "请给一份参考",
+                    "提供参考",
+                    "请提供参考",
+                    "给个例子",
+                    "请给个例子",
+                } or re.fullmatch(
+                    r'(?:请|麻烦)?(?:再)?(?:给我?|提供|来)(?:一?[个份条]|几[个份条])?'
+                    r'(?:(?:完整|具体|详细|专业|可直接采用)的?)?(?:参考(?:方案|答案)?|例子|示例)(?:吧|好吗|可以吗|吗)?',
+                    compact_control))
+            ):
+                # A pure reference request, including qualifiers such as 完整的,
+                # cannot be meaningful field content. Do not consume mixed edits.
+                # Resolve it locally so a temporary semantic-parser failure does
+                # not turn the help request into another clarification loop.
+                return (
+                    validate_resolved_intent(
+                        resolved_intent(
+                            UserIntent.REQUEST_MORE_EXAMPLES,
+                            target=str(pending.get("subject") or "") or None,
+                            confidence=1.0,
+                            source="EMVR_EXPLICIT_REFERENCE_REQUEST",
+                            semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+                        ),
+                        pending,
                     ),
                     pending,
-                ),
-                pending,
-            )
-        if (
-            session.interaction_state is InteractionState.EMVR_DIRECT
-            and _is_explicit_emvr_confirmation(compact_control)
-            and isinstance(pending, dict)
-            and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
-            and str(pending.get("candidate_answer") or "").strip()
-            and pending.get("candidate_binding_authorized") is True
-            and (
-                pending.get("candidate_source") == "PROFESSIONAL_REFERENCE"
-                or recoverable_pending_field(pending) in BUILDER_REQUIREMENT_FIELDS
-            )
-        ):
-            # A Builder contract is already bound to one exact requirement;
-            # a professional draft was visibly presented for confirmation.
-            # “继续” can safely accept either before readiness chooses the
-            # next question, without weakening other EMVR write protections.
-            return (
-                validate_resolved_intent(
-                    resolved_intent(
-                        UserIntent.ADVANCE_STAGE,
-                        confidence=1.0,
-                        source="EMVR_REFERENCE_CANDIDATE_CONTINUE",
-                        semantic_updates={"control_actions": ["ADVANCE"]},
+                )
+            if (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and isinstance(pending, dict)
+                and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+                and compact_control
+                in {"不确定", "暂时不确定", "我不确定", "不知道", "暂时不知道", "我不知道", "不清楚"}
+            ):
+                # EMVR questions explicitly offer a professional reference.  An
+                # uncertainty response therefore requests that reference; it is
+                # never the physical-mechanism or Unity-field value itself.
+                return (
+                    validate_resolved_intent(
+                        resolved_intent(
+                            UserIntent.REQUEST_MORE_EXAMPLES,
+                            confidence=1.0,
+                            source="EMVR_UNCERTAINTY_REFERENCE_REQUEST",
+                            semantic_updates={"control_actions": ["REQUEST_REFERENCE"]},
+                        ),
+                        pending,
                     ),
                     pending,
-                ),
+                )
+            if (
+                session.interaction_state is InteractionState.EMVR_DIRECT
+                and _is_explicit_emvr_confirmation(compact_control)
+                and isinstance(pending, dict)
+                and pending.get("type") == "ANSWER_EMVR_STAGE_QUESTION"
+                and str(pending.get("candidate_answer") or "").strip()
+                and pending.get("candidate_binding_authorized") is True
+                and (
+                    pending.get("candidate_source") == "PROFESSIONAL_REFERENCE"
+                    or recoverable_pending_field(pending) in BUILDER_REQUIREMENT_FIELDS
+                )
+            ):
+                # A Builder contract is already bound to one exact requirement;
+                # a professional draft was visibly presented for confirmation.
+                # “继续” can safely accept either before readiness chooses the
+                # next question, without weakening other EMVR write protections.
+                return (
+                    validate_resolved_intent(
+                        resolved_intent(
+                            UserIntent.ADVANCE_STAGE,
+                            confidence=1.0,
+                            source="EMVR_REFERENCE_CANDIDATE_CONTINUE",
+                            semantic_updates={"control_actions": ["ADVANCE"]},
+                        ),
+                        pending,
+                    ),
+                    pending,
+                )
+            recovered_candidate = _recover_confirmed_unbound_emvr_candidate(
+                session,
+                message,
                 pending,
             )
-        recovered_candidate = _recover_confirmed_unbound_emvr_candidate(
-            session,
-            message,
-            pending,
-        )
-        if recovered_candidate is not None:
-            return recovered_candidate, pending
+            if recovered_candidate is not None:
+                return recovered_candidate, pending
         direct = deterministic_intent(
-            message,
+            "" if harness_understanding else message,
             pending,
             selected_option_id=request.selected_option_id,
             # A completion flag can accompany real text in API/UI requests.
             # Parse that text when possible; the flag still authorizes later
             # navigation, after the user-request gate has examined the turn.
             complete_stage=(
+                request.complete_stage and not message.strip()
+                if harness_understanding else
                 request.complete_stage
                 and (
                     not callable(getattr(self.generator, "resolve_intent", None))
@@ -4026,32 +4051,33 @@ class WorkflowEngine:
                 for scene in latest_stage_one_scenes(session.history)
                 if isinstance(scene, dict)
             ]
-            carried_context["current_course_evidence"] = {
-                "lecture_concepts": [
-                    {
-                        "id": item.get("id"),
-                        "title": item.get("title"),
-                        "concepts": item.get("concepts", []),
-                    }
-                    for item in KNOWLEDGE.match_concepts(message, limit=4)
-                ],
-                "supplemental_concepts": [
-                    {
-                        "id": item.get("supplemental_concept_id"),
-                        "title": item.get("title"),
-                        "concepts": item.get("concepts", []),
-                    }
-                    for item in KNOWLEDGE.match_supplemental_concepts(
-                        message,
-                        limit=4,
-                    )
-                ],
-                "scope_summary": (
-                    "ECE329 covers electrostatics, electric potential and materials; "
-                    "magnetostatics and induction; Maxwell equations, electromagnetic "
-                    "waves, polarization, interfaces, conductors, and transmission lines."
-                ),
-            }
+            if not harness_understanding:
+                carried_context["current_course_evidence"] = {
+                    "lecture_concepts": [
+                        {
+                            "id": item.get("id"),
+                            "title": item.get("title"),
+                            "concepts": item.get("concepts", []),
+                        }
+                        for item in KNOWLEDGE.match_concepts(message, limit=4)
+                    ],
+                    "supplemental_concepts": [
+                        {
+                            "id": item.get("supplemental_concept_id"),
+                            "title": item.get("title"),
+                            "concepts": item.get("concepts", []),
+                        }
+                        for item in KNOWLEDGE.match_supplemental_concepts(
+                            message,
+                            limit=4,
+                        )
+                    ],
+                    "scope_summary": (
+                        "ECE329 covers electrostatics, electric potential and materials; "
+                        "magnetostatics and induction; Maxwell equations, electromagnetic "
+                        "waves, polarization, interfaces, conductors, and transmission lines."
+                    ),
+                }
             if (
                 self._emvr_formula_first_enabled()
                 and
@@ -4062,7 +4088,8 @@ class WorkflowEngine:
                 carried_context["emvr_formula_flow"] = public_formula_flow_state(
                     session
                 )
-                carried_context["topic_domain_evidence"] = KNOWLEDGE.topic_domain_evidence(message)
+                if not harness_understanding:
+                    carried_context["topic_domain_evidence"] = KNOWLEDGE.topic_domain_evidence(message)
                 carried_context["formula_profile_catalog"] = [
                     {
                         "profile_id": profile.get("profile_id"),
@@ -4134,6 +4161,10 @@ class WorkflowEngine:
                     actions_authoritative=True,
                 )
             validated = validate_resolved_intent(semantic, pending)
+            if harness_understanding:
+                # Do not reinterpret a model decision using local phrase lists,
+                # single-field fallbacks or a second semantic recovery chain.
+                return validated, pending
             validated = _reconcile_explicit_emvr_edits(session, message, pending, validated)
             recovered = recover_repeated_pending_answer(
                 validated,
@@ -4559,6 +4590,8 @@ class WorkflowEngine:
             rule_token = CURRENT_RULE_RUN.set(RuleRun(session, request.message, trace, self.experience_store))
             trace.data['model_config'] = deepcopy(config)
             token = CURRENT_TRACE.set(trace)
+            from .harness_semantics import SELECTION
+            knowledge_token = SELECTION.set(None)
             result = None
             error = None
             try:
@@ -4575,6 +4608,7 @@ class WorkflowEngine:
                 record = trace.finish(result, error)
                 CURRENT_TRACE.reset(token)
                 CURRENT_RULE_RUN.reset(rule_token)
+                SELECTION.reset(knowledge_token)
                 try:
                     if self.experience_store is not None:
                         self.experience_store.record_telemetry(record)
@@ -4795,7 +4829,8 @@ class WorkflowEngine:
                 request,
                 message,
             )
-        if input_kind != UNREASONABLE_REQUEST:
+        from .harness_semantics import enabled as harness_understanding_enabled
+        if input_kind != UNREASONABLE_REQUEST and not harness_understanding_enabled(self.generator):
             reconcile_meta_requests(turn_intent, message)
         _prioritize_user_content_before_transition(
             turn_intent, message, session.interaction_state,
@@ -5132,6 +5167,16 @@ class WorkflowEngine:
         ]
         apply_resolved_intent(session, turn_intent, pending_action, message)
         intent_name = str(turn_intent.get("intent") or UserIntent.UNCLEAR.value)
+        if (session.interaction_state is InteractionState.GUIDED_DESIGN
+                and intent_name == UserIntent.ACCEPT_PREVIOUS_PROPOSAL.value
+                and isinstance(pending_action, dict)
+                and pending_action.get("status") == "ACCEPTED"
+                and pending_action.get("type") == "CONFIRM_OR_MODIFY"
+                and pending_action.get("subject") == session.current_stage.value
+                and isinstance(pending_action.get("proposal"), dict)):
+            # Read-only references are retained in the pending proposal, not
+            # as the saved stage artifact. Promote only after actual acceptance.
+            _persist_guided_stage_draft(session, session.current_stage, pending_action["proposal"])
         if (
             isinstance(pending_action, dict)
             and str(pending_action.get("subject") or "")
@@ -5684,6 +5729,44 @@ class WorkflowEngine:
             )
             session.turn_context = {}
             completion_error = None
+        elif (
+            harness_understanding_enabled(self.generator)
+            and (intent_name == UserIntent.REQUEST_MORE_EXAMPLES.value
+                 or "REQUEST_REFERENCE" in control_actions)
+            and not (session.interaction_state is InteractionState.GUIDED_DESIGN
+                     and handled_stage is Stage.IDEA_BRAINSTORMING
+                     and semantic_updates.get("scene_batch_authorized") is True)
+        ):
+            # Ordinary advice is a read-only service in both modes. Do not
+            # require a new scene/stage artifact or replace the answer with a
+            # fixed facet scaffold after the joint resolver understood it.
+            reference_context = deepcopy(turn_context)
+            reference_context["response_task"] = "REFERENCE"
+            reference_intent = reference_context["resolved_intent"]
+            reference_intent["intent"] = UserIntent.REQUEST_MORE_EXAMPLES.value
+            reference_updates = reference_intent.setdefault("semantic_updates", {})
+            reference_updates["student_questions"] = []
+            reference_updates["control_actions"] = ["REQUEST_REFERENCE"]
+            session.turn_context = reference_context
+            try:
+                output = self.generator.generate(session, message)
+            finally:
+                session.turn_context = {}
+            # Suggestions cannot smuggle stage artifacts into later persistence
+            # hooks. Adoption uses the existing reviewed reference_draft path.
+            output.stage_payload = {
+                key: value for key, value in output.stage_payload.items()
+                if key in {"course_references", "formula_references", "reference_examples",
+                           "reference_draft", "reference_scaffold", "reference_basis", "request_rejected"}
+            }
+            output.student_task = None
+            output.visualization = None
+            output.stage_payload["reference_only"] = True
+            output.stage_payload["preserve_pending_action"] = True
+            pending_action = _bind_reference_candidate(
+                session, pending_action, output.stage_payload.get("reference_draft"))
+            completed_response_types.add("REQUEST_REFERENCE")
+            completion_error = None
         elif idea_facet_reference_turn:
             output = build_facet_reference_output(session)
             completed_response_types.add("REQUEST_REFERENCE")
@@ -5911,27 +5994,8 @@ class WorkflowEngine:
                     output = _emvr_reference_output(session)
             output.stage_payload["reference_only"] = True
             output.stage_payload["preserve_pending_action"] = True
-            if isinstance(pending_action, dict):
-                reference_draft = output.stage_payload.get("reference_draft")
-                expected_field = recoverable_pending_field(pending_action)
-                if (
-                    isinstance(reference_draft, dict)
-                    and str(reference_draft.get("field") or "") == expected_field
-                    and str(reference_draft.get("value") or "").strip()
-                ):
-                    pending_action = deepcopy(pending_action)
-                    pending_action["candidate_answer"] = str(
-                        reference_draft["value"]
-                    ).strip()
-                    pending_action["candidate_binding_authorized"] = True
-                    pending_action["candidate_source"] = "PROFESSIONAL_REFERENCE"
-                    pending_action["candidate_resolution"] = (
-                        UserIntent.ANSWER_CURRENT_QUESTION.value
-                    )
-                dialogue_state(session)["pending_action"] = deepcopy(
-                    pending_action
-                )
-                set_pending_action_snapshot(session, pending_action)
+            pending_action = _bind_reference_candidate(
+                session, pending_action, output.stage_payload.get("reference_draft"))
             completion_error = None
             if output.stage_payload.get("request_rejected") is not True:
                 completed_response_types.add("REQUEST_REFERENCE")
@@ -6574,8 +6638,9 @@ class WorkflowEngine:
         _normalize_final_source_references(session, handled_stage, output)
         session.revision += 1
         output_dict = output.to_dict()
-        if not (session.interaction_state is InteractionState.EMVR_DIRECT
-                and any(output.stage_payload.get(key) for key in ("presentation_only", "reference_only", "clarification_required"))
+        if not ((output.stage_payload.get("reference_only") is True
+                 or (session.interaction_state is InteractionState.EMVR_DIRECT
+                     and any(output.stage_payload.get(key) for key in ("presentation_only", "clarification_required"))))
                 and handled_stage.value in session.stage_outputs):
             # Conversation assistance is not a replacement for the last
             # authored stage artifact. Current field edits still project into it.

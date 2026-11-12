@@ -73,7 +73,7 @@ def agent_role(schema):
         return 'experience_extractor'
     if schema == 'ece329_display_translation':
         return 'translator'
-    if schema and any(word in schema for word in ('intent', 'dialogue_acts')):
+    if schema and any(word in schema for word in ('intent', 'dialogue_acts', 'harness_understanding')):
         return 'intent_resolver'
     return 'design_agent'
 

@@ -2707,7 +2707,10 @@ def validate_resolved_intent(
             default=confidence,
         )
     low_confidence_intent = ""
-    if confidence < 0.55:
+    read_only_request = bool(dialogue_acts) and all(act.get('type') in {
+        'REQUEST_REFERENCE', 'ASK_COURSE_QUESTION', 'REQUEST_SUMMARY', 'REQUEST_QUALITY_REVIEW'
+    } for act in dialogue_acts)
+    if confidence < 0.55 and not read_only_request:
         execution_record('action_validation', 'blocked', validator='validate_resolved_intent',
                          code='low_confidence', field_path='confidence',
                          actual=confidence, minimum=0.55, rejected_intent=intent)
@@ -3328,8 +3331,8 @@ def _normalize_semantic_updates(raw: Any) -> dict[str, Any]:
         # distinction instead of inferring it from message length or words.
         "stage_one_scene_response": stage_one_scene_response,
         # Replacing the visible batch is a consequential control action.  The
-        # broad intent result cannot authorize it on its own; an independent
-        # semantic review must set this flag.
+        # generic reference intent cannot authorize it on its own. The legacy
+        # scene review or Harness's explicit scene decision sets this flag.
         "scene_batch_authorized": raw.get("scene_batch_authorized") is True,
         # A locked direction may be replaced only when the semantic resolver
         # confirms that the student explicitly abandoned or replaced it.

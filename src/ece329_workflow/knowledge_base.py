@@ -8,6 +8,8 @@ from copy import deepcopy
 from importlib.resources import files
 from typing import Any
 
+from .harness_semantics import SELECTION, selected
+
 
 class LectureKnowledgeBase:
     def __init__(self) -> None:
@@ -107,6 +109,8 @@ class LectureKnowledgeBase:
         return [self.source_reference, *[dict(source) for source in self.supplemental_sources]]
 
     def match_concepts(self, text: str, limit: int = 3) -> list[dict[str, Any]]:
+        result = selected('concept_ids', self.lectures, 'id', limit)
+        if result is not None: return result
         normalized = text.casefold()
         scored: list[tuple[int, dict[str, Any]]] = []
         for lecture in self.lectures:
@@ -173,6 +177,8 @@ class LectureKnowledgeBase:
         text: str,
         limit: int = 3,
     ) -> list[dict[str, Any]]:
+        result = selected('supplemental_ids', self.supplemental_concepts, 'supplemental_concept_id', limit)
+        if result is not None: return result
         normalized = text.casefold()
         scored: list[tuple[int, dict[str, Any]]] = []
         for concept in self.supplemental_concepts:
@@ -197,6 +203,9 @@ class LectureKnowledgeBase:
         Overlapping labels use the longest span; explicit rejected topics do
         not become positive evidence. Multiple positive blocks stay ambiguous.
         """
+        selection = SELECTION.get()
+        if selection is not None:
+            return {'domains': list(selection['domains']), 'rejected_domains': [], 'matched': bool(selection['domains'])}
         normalized = text.casefold()
         matches = []
         for block in self.concept_data["overview"]["course_blocks"]:
@@ -227,6 +236,9 @@ class LectureKnowledgeBase:
         ranked lecture/supplemental knowledge index and its stable metadata;
         it does not maintain a second topic-word routing table in code.
         """
+        selection = SELECTION.get()
+        if selection is not None:
+            return selection['domains'][0] if len(selection['domains']) == 1 else None
 
         topic_evidence = self.topic_domain_evidence(text)
         if topic_evidence["matched"]:
@@ -580,6 +592,8 @@ class LectureKnowledgeBase:
         *,
         course_domain: str | None = None,
     ) -> list[dict[str, Any]]:
+        result = selected('scene_ids', self.exploration_points, 'catalog_scene_id')
+        if result is not None: return result
         normalized_domain = str(course_domain or "").strip().casefold()
         if normalized_domain not in {
             "electrostatics",
@@ -650,6 +664,11 @@ class LectureKnowledgeBase:
         if limit <= 0:
             return []
         excluded = {str(item) for item in (exclude_option_ids or set()) if str(item)}
+        chosen = selected('scene_ids', self.exploration_points, 'catalog_scene_id')
+        if chosen is not None:
+            # Do not replace a model's empty/short selection with unrelated
+            # keyword or random fallback scenes. Selection is not acceptance.
+            return [point for point in chosen if point['option_id'] not in excluded][:limit]
         normalized_domain = str(course_domain or "").strip().casefold()
         if normalized_domain not in {
             "electrostatics",
@@ -720,29 +739,33 @@ class LectureKnowledgeBase:
     ) -> list[dict[str, Any]]:
         """Return course-cataloged basic case bundles whose trigger groups match."""
 
-        normalized = text.casefold()
-        scored: list[tuple[int, dict[str, Any]]] = []
-        for comparison in self.baseline_comparisons:
-            trigger_groups = comparison.get("trigger_groups", [])
-            if not isinstance(trigger_groups, list) or not trigger_groups:
-                continue
-            matched_terms: list[str] = []
-            matched = True
-            for group in trigger_groups:
-                terms = group if isinstance(group, list) else []
-                group_matches = [
-                    str(term)
-                    for term in terms
-                    if self._term_matches(str(term).casefold(), normalized)
-                ]
-                if not group_matches:
-                    matched = False
-                    break
-                matched_terms.extend(group_matches)
-            if matched:
-                score = sum(max(1, len(term)) for term in matched_terms)
-                scored.append((score, comparison))
-        scored.sort(key=lambda item: (-item[0], item[1]["comparison_id"]))
+        chosen = selected('comparison_ids', self.baseline_comparisons, 'comparison_id', limit)
+        if chosen is not None:
+            scored = [(0, item) for item in chosen]
+        else:
+            normalized = text.casefold()
+            scored: list[tuple[int, dict[str, Any]]] = []
+            for comparison in self.baseline_comparisons:
+                trigger_groups = comparison.get("trigger_groups", [])
+                if not isinstance(trigger_groups, list) or not trigger_groups:
+                    continue
+                matched_terms: list[str] = []
+                matched = True
+                for group in trigger_groups:
+                    terms = group if isinstance(group, list) else []
+                    group_matches = [
+                        str(term)
+                        for term in terms
+                        if self._term_matches(str(term).casefold(), normalized)
+                    ]
+                    if not group_matches:
+                        matched = False
+                        break
+                    matched_terms.extend(group_matches)
+                if matched:
+                    score = sum(max(1, len(term)) for term in matched_terms)
+                    scored.append((score, comparison))
+            scored.sort(key=lambda item: (-item[0], item[1]["comparison_id"]))
         return [
             {
                 "comparison_id": item["comparison_id"],
@@ -924,6 +947,8 @@ class LectureKnowledgeBase:
         ]
 
     def formula_references(self, text: str, limit: int = 8) -> list[dict[str, Any]]:
+        result = selected('formula_ids', self.formulas, 'id', limit)
+        if result is not None: return result
         concept_ids = {item["id"] for item in self.match_concepts(text, limit=5)}
         if not concept_ids:
             for supplemental in self.match_supplemental_concepts(text, limit=1):
@@ -951,6 +976,8 @@ class LectureKnowledgeBase:
         actually has formulas keeps this decision grounded in the existing
         semantic course matcher rather than in a new vocabulary of topics.
         """
+        result = selected('formula_ids', self.formulas, 'id', limit)
+        if result is not None: return result
 
         concept_ids = [
             str(item.get("id") or "")
@@ -1040,6 +1067,9 @@ class LectureKnowledgeBase:
         The lookup reuses the established lecture concept matcher. It does not
         infer design roles from isolated keywords or persist any formula choice.
         """
+        result = selected('profile_ids', self.formula_design_profiles, 'profile_id', limit)
+        if result is not None:
+            return [self._materialize_formula_design_profile(item) for item in result]
 
         if limit <= 0:
             return []

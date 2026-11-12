@@ -199,7 +199,7 @@ def test_guided_pdf_hook_preserves_feedback_gate(pipeline):
 @pytest.mark.parametrize('message', ['电场的叠加如何计算？', 'How do I calculate field superposition?'])
 @pytest.mark.parametrize('runtime_factory', [LocalRuntime, pytest.param(Runtime, id='real_sdk',
     marks=pytest.mark.skipif(os.getenv('ECE329_TEST_HARNESS_RUNTIME') != '1', reason='Opt-in real SDK with simulated model'))])
-def test_actual_turn_recovers_invalid_intent_with_same_budget_and_idempotency(mode, message, runtime_factory):
+def test_actual_turn_uses_harness_understanding_with_same_budget_and_idempotency(mode, message, runtime_factory):
     from tests.test_model_selection import ModelTransport, make_engine, add_session
     class FixtureProvider(ModelTransport):
         def create(self, request):
@@ -210,6 +210,11 @@ def test_actual_turn_recovers_invalid_intent_with_same_budget_and_idempotency(mo
                 # SDK appends a runtime-directory note after the task JSON.
                 task, _ = json.JSONDecoder().raw_decode(request['input'][-1]['content'])
                 if isinstance(task, dict) and 'input' in task: request['input'] = task['input']
+            if request['text']['format']['name'] == 'ece329_harness_understanding':
+                from tests.test_harness_semantics import answer
+                self.requests.append(deepcopy(request))
+                output = answer(message, intent='ASK_COURSE_QUESTION', action='ASK_COURSE_QUESTION')
+                return {'output_text': json.dumps(output, ensure_ascii=False)}
             return super().create(request)
     base, original_provider = make_engine(transport=ModelTransport(broken_intent=True))
     provider = FixtureProvider(broken_intent=True)
@@ -218,15 +223,21 @@ def test_actual_turn_recovers_invalid_intent_with_same_budget_and_idempotency(mo
     request = {'message': message, 'turn_id': 'harness-turn-00001'}
     baseline = base.process_turn(left.design_id, request)
     result = wrapped.process_turn(right.design_id, request)
-    assert len(provider.requests) == len(original_provider.requests)
-    assert any(r['text']['format']['name'] == 'ece329_compact_dialogue_acts' for r in provider.requests)
-    assert result['assistant_message'] == baseline['assistant_message']
-    assert wrapped.store.get(right.design_id).design_context == base.store.get(left.design_id).design_context
+    assert len(provider.requests) <= len(original_provider.requests)
+    assert sum(r['text']['format']['name'] == 'ece329_harness_understanding' for r in provider.requests) == 1
+    assert not any(r['text']['format']['name'] == 'ece329_compact_dialogue_acts' for r in provider.requests)
+    # The legacy fixture deliberately loses the English source span and adds
+    # a clarification. The new path must answer without that stale demand.
+    assert result['assistant_message'] == '分别计算各电荷的电场矢量，再作矢量求和。'
+    from ece329_workflow.experience_rules import _preserved
+    assert _preserved(right.design_context, wrapped.store.get(right.design_id).design_context)
     trace = list(wrapped._telemetry.values())[-1]
     assert trace['harness'] and all(e['status'] == 'completed' for e in trace['harness'])
     count = len(provider.requests)
     wrapped.process_turn(right.design_id, request)
     assert len(provider.requests) == count
+    from ece329_workflow.harness_semantics import SELECTION
+    assert SELECTION.get() is None
 
 
 @pytest.mark.skipif(os.getenv('ECE329_TEST_HARNESS_RUNTIME') != '1', reason='Real local SDK, simulated upstream only')

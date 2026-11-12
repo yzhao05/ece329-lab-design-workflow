@@ -635,6 +635,17 @@ def build_prompt_packet(
             seed_key=f"{sample_seed}:redirect",
         )
     )
+    from .harness_semantics import SELECTION, selected
+    if SELECTION.get() is not None:
+        def merge_records(bound, retrieved, identity):
+            return list({item[identity]: item for item in [*retrieved, *bound]}.values())
+        # Keep confirmed graph bindings, but do not discard model-selected
+        # evidence merely because it did not arrive through a profile lookup.
+        concepts = merge_records(concepts, KNOWLEDGE.concept_references_for_ids(
+            SELECTION.get()['concept_ids']), 'concept_id')
+        formulas = merge_records(formulas, selected('formula_ids', KNOWLEDGE.formulas, 'id'), 'id')
+        formula_design_profiles = merge_records(formula_design_profiles,
+            KNOWLEDGE.formula_design_references(retrieval_text, limit=len(KNOWLEDGE.formula_design_profiles)), 'profile_id')
     pending_action = deepcopy(
         session.turn_context.get("pending_action")
         or hydrate_pending_action_from_history(session)

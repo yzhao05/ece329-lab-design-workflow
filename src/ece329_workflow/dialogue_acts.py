@@ -257,7 +257,8 @@ def normalize_dialogue_acts(
             confidence = float(item.get("confidence", 1.0))
         except (TypeError, ValueError):
             confidence = 0.0
-        if act_type not in DIALOGUE_ACT_TYPES or confidence < 0.55:
+        read_only_request = act_type in {'REQUEST_REFERENCE', 'ASK_COURSE_QUESTION', 'REQUEST_SUMMARY', 'REQUEST_QUALITY_REVIEW'}
+        if act_type not in DIALOGUE_ACT_TYPES or (confidence < 0.55 and not read_only_request):
             reject(
                 {"content": _text(content), "reason": "动作类型或置信度不足"}
             )

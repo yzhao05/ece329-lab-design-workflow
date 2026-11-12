@@ -242,7 +242,7 @@ def observe_submitted_context(payload):
     if trace is None:
         return
     schema = payload.get('text', {}).get('format', {}).get('name', '')
-    if 'intent' not in str(schema):
+    if 'intent' not in str(schema) and schema != 'ece329_harness_understanding':
         return
     inputs = payload.get('input', [])
     texts = [inputs] if isinstance(inputs, str) else []

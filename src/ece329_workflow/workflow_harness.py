@@ -13,6 +13,7 @@ from .openai_generator import ModelServiceError, ModelOutputError, _extract_outp
 
 TASKS = frozenset({'dialogue', 'stage', 'translation', 'artifact'})
 DIALOGUE_SCHEMAS = frozenset({
+    'ece329_harness_understanding',
     'ece329_context_intent', 'ece329_compact_dialogue_acts',
     'ece329_emvr_open_answer_recovery', 'ece329_emvr_formula_phase_recovery',
     'ece329_guided_design_turn_recovery', 'ece329_pending_reference_decision',

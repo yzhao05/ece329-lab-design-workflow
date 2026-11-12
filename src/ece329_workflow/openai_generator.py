@@ -3657,6 +3657,17 @@ class OpenAIStageGenerator:
             "max_output_tokens": self.intent_max_output_tokens,
             "store": False,
         }
+        from .harness_semantics import enabled as harness_understanding_enabled, resolve as resolve_harness
+        if harness_understanding_enabled(self):
+            try:
+                result = resolve_harness(self, payload, session, user_message, pending_action)
+            except ModelServiceError:
+                with self._metrics_lock:
+                    self._intent_api_failures += 1
+                raise
+            with self._metrics_lock:
+                self._intent_api_successes += 1
+            return result
         try:
             response = self.transport.create(payload)
         except ModelServiceError:
@@ -5091,6 +5102,17 @@ class FallbackStageGenerator:
             with self._metrics_lock:
                 self._fallback_calls += 1
                 self._last_fallback_reason = fallback_reason
+            from .harness_semantics import enabled as harness_understanding_enabled
+            if harness_understanding_enabled(self.primary):
+                # A model-owned semantic route must not silently reactivate
+                # text-length/phrase-based field binding after a service error.
+                from .execution_diagnostics import record
+                record('recovery', 'blocked', method='harness_understanding',
+                       stop_reason=fallback_reason, retry_limit=0)
+                return resolved_intent(
+                    'UNCLEAR', confidence=0.0,
+                    source='HARNESS_SEMANTIC_UNAVAILABLE',
+                )
             return degraded_context_intent(
                 session,
                 user_message,
